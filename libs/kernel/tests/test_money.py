@@ -180,20 +180,29 @@ def test_construction_takes_only_a_decimal_amount(payload: str) -> None:
         build(Money)
 
 
+def construct_in(payload: str) -> None:
+    operator.methodcaller("__call__", Decimal(1), json.loads(payload))(Money)
+
+
+def read_in(payload: str) -> None:
+    operator.methodcaller("of", "1", json.loads(payload))(Money)
+
+
+def zero_in(payload: str) -> None:
+    operator.methodcaller("zero", json.loads(payload))(Money)
+
+
 @pytest.mark.parametrize(
     "payload",
     ['"USD"', '"GBP"', "null", "1", "true"],
     ids=["currency-as-text", "unknown-code", "null", "number", "true"],
 )
-def test_a_currency_must_be_a_currency_on_every_way_in(payload: str) -> None:
-    entry_points = [
-        operator.methodcaller("__call__", Decimal(1), json.loads(payload)),
-        operator.methodcaller("of", "1", json.loads(payload)),
-        operator.methodcaller("zero", json.loads(payload)),
-    ]
-    for entry_point in entry_points:
-        with pytest.raises(InvalidCurrencyError, match="not one of DOP, USD, EUR"):
-            entry_point(Money)
+@pytest.mark.parametrize("entry_point", [construct_in, read_in, zero_in], ids=["constructor", "of", "zero"])
+def test_a_currency_must_be_a_currency_on_every_way_in(
+    entry_point: Callable[[str], None], payload: str
+) -> None:
+    with pytest.raises(InvalidCurrencyError, match="not one of DOP, USD, EUR"):
+        entry_point(payload)
 
 
 def test_a_wrong_currency_is_a_short_client_error() -> None:

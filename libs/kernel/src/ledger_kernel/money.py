@@ -24,7 +24,7 @@ from enum import StrEnum
 from typing import ClassVar, Final, final
 lazy from collections.abc import Callable, Mapping
 
-from ledger_kernel.errors import InvalidInputError, excerpt
+from ledger_kernel.errors import InvalidInputError, described, excerpt
 
 MAX_INTEGER_DIGITS: Final = 18
 MAX_SCALE: Final = 24
@@ -95,23 +95,18 @@ class CurrencyMismatchError(InvalidInputError):
         super().__init__(f"cannot combine {left} with {right}")
 
 
-def _described(value: object) -> str:
-    """The value led by its type, which survives ``excerpt``: ``float: 12.5`` is not the text ``'12.5'``."""
-    return f"{type(value).__name__}: {value}"
-
-
 def _require_type(value: object, accepted: frozenset[type[object]]) -> None:
     """Refuse a value whose exact runtime type is not accepted (a ``bool`` or a ``float`` among them).
 
     Annotations are not enforced where input crosses a boundary: ``json.loads`` hands over whatever was sent.
     """
     if type(value) not in accepted:
-        raise InvalidAmountError(AmountProblem.WRONG_TYPE, _described(value))
+        raise InvalidAmountError(AmountProblem.WRONG_TYPE, described(value))
 
 
 def _require_currency(value: object) -> None:
     if type(value) is not Currency:
-        raise InvalidCurrencyError(_described(value))
+        raise InvalidCurrencyError(described(value))
 
 
 def _is_money(value: object) -> bool:

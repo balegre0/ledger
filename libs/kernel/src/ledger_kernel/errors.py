@@ -5,11 +5,27 @@ status, gRPC status, retry or not); its ``code`` is stable and machine-readable,
 on it; its message is for humans and may change. Messages are built inside each error class.
 """
 
+import reprlib
 from enum import StrEnum
 from typing import ClassVar, Final
 
 _EXCERPT: Final = 40
 _MIN_LIMIT: Final = 1
+_PEEK: Final = 4
+_BOUNDED: Final = reprlib.Repr(
+    maxlevel=1,
+    maxstring=_EXCERPT,
+    maxlong=_EXCERPT,
+    maxother=_EXCERPT,
+    maxlist=_PEEK,
+    maxtuple=_PEEK,
+    maxdict=_PEEK,
+    maxset=_PEEK,
+    maxfrozenset=_PEEK,
+    maxdeque=_PEEK,
+    maxarray=_PEEK,
+)
+"""``repr`` with a fixed ceiling: a few items of one level, each cut, whatever the value."""
 
 
 class ErrorKind(StrEnum):
@@ -82,10 +98,25 @@ class InvalidExcerptLimitError(LedgerError):
         super().__init__(f"an excerpt limit must be at least {_MIN_LIMIT}, not {limit}")
 
 
+def _cut(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
 def excerpt(text: str, limit: int = _EXCERPT) -> str:
     """``text`` quoted for an error message, cut at ``limit`` characters so input is never echoed whole."""
     if limit < _MIN_LIMIT:
         raise InvalidExcerptLimitError(limit)
-    if len(text) <= limit:
-        return repr(text)
-    return repr(text[:limit] + "...")
+    return repr(_cut(text, limit))
+
+
+def described(value: object) -> str:
+    """``value`` led by its type, for an error about a value that is not of the type it needed.
+
+    Annotations are not enforced where input crosses a boundary (``json.loads`` hands over whatever was
+    sent), so such an error must say what arrived: ``int: 101850043`` is not the text ``101850043``. The type
+    comes first so that it survives ``excerpt``. Describing never fails and never grows with the value: a text
+    is cut like an excerpt, anything else is shown by ``reprlib`` with a fixed ceiling (a number too big to
+    print is described, not raised).
+    """
+    shown = _cut(value, _EXCERPT) if isinstance(value, str) else _BOUNDED.repr(value)
+    return f"{type(value).__name__}: {shown}"

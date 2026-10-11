@@ -11,6 +11,7 @@ from ledger_kernel.errors import (
     LedgerError,
     NotFoundError,
     UnavailableError,
+    described,
     excerpt,
 )
 
@@ -73,3 +74,59 @@ def test_a_limit_below_one_is_a_programming_error(text: str, limit: int) -> None
         excerpt(text, limit=limit)
     assert (caught.value.kind, caught.value.code) == (ErrorKind.INTERNAL, "invalid_excerpt_limit")
     assert not isinstance(caught.value, InvalidInputError)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (12.5, "float: 12.5"),
+        (7, "int: 7"),
+        (True, "bool: True"),
+        (None, "NoneType: None"),
+        ("abc", "str: abc"),
+        ("", "str: "),
+        ([1, "a"], "list: [1, 'a']"),
+        ({"a": 1}, "dict: {'a': 1}"),
+        (ErrorKind.INVALID, "ErrorKind: invalid"),
+    ],
+    ids=["float", "integer", "boolean", "none", "text", "empty-text", "list", "dict", "str-enum"],
+)
+def test_a_value_is_described_led_by_its_type(value: object, expected: str) -> None:
+    assert described(value) == expected
+
+
+def test_a_number_is_not_mistaken_for_the_text_of_its_digits() -> None:
+    assert described(101850043) == "int: 101850043"
+    assert described("101850043") == "str: 101850043"
+
+
+def test_the_type_survives_an_excerpt() -> None:
+    assert excerpt(described(12.5)) == "'float: 12.5'"
+    assert excerpt(described("x" * 10_000)) == "'str: " + "x" * 35 + "...'"
+
+
+def test_a_long_text_is_cut_like_an_excerpt() -> None:
+    assert described("x" * 40) == "str: " + "x" * 40
+    assert described("x" * 41) == "str: " + "x" * 40 + "..."
+    assert described("x" * 1_000_000) == "str: " + "x" * 40 + "..."
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "x" * 1_000_000,
+        10**5000,
+        list(range(1_000_000)),
+        {str(number) * 100: "y" * 1_000 for number in range(100)},
+        [[["z" * 1_000] * 100] * 100] * 100,
+        b"b" * 1_000_000,
+    ],
+    ids=["text", "integer-past-the-str-limit", "list", "dict", "nested", "bytes"],
+)
+def test_a_description_is_bounded_whatever_the_value(value: object) -> None:
+    assert len(described(value)) < 400
+
+
+def test_an_integer_too_big_to_print_is_described_not_raised() -> None:
+    # `str(10**5000)` raises ValueError: the description of a value must never fail on the value.
+    assert described(10**5000).startswith("int: ")
