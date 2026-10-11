@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package ledger.common.v1;
+
+// An exact amount of money.
+message Money {
+  // A plain decimal ("1250.50", "-3"): never a float.
+  string amount = 1;
+  // ISO 4217 code, e.g. "DOP".
+  string currency = 2;
+}
