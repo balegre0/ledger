@@ -4,9 +4,11 @@ The payload is a protobuf message; ``type`` is its full name (``ledger.events.in
 so a consumer knows what it received before decoding. ``Nats-Msg-Id`` is the event id: JetStream drops a
 duplicate published within its de-duplication window.
 
-An ``Envelope`` that exists is a readable one: whichever way it was made (``wrap``, ``from_headers``, the
-constructor or ``dataclasses.replace``), its invariants hold, and a violation names the header that would
-carry the field.
+An ``Envelope`` that exists can be published and read back: whichever way it was made (``wrap``,
+``from_headers``, the constructor or ``dataclasses.replace``), its invariants hold, and a violation names the
+header that would carry the field. Every header value it produces is visible ASCII without spaces (``type``
+and ``source`` are checked, the rest is formatted from typed values), so none can inject a header, break
+the NATS header framing or be altered by header parsing.
 """
 
 import re
@@ -27,6 +29,8 @@ lazy from ledger_kernel.clock import Clock
 
 SPEC_VERSION: Final = "1.0"
 CONTENT_TYPE: Final = "application/protobuf"
+MAX_ATTRIBUTE_LENGTH: Final = 128
+"""The longest ``type`` or ``source``: they are echoed, indexed and logged, so they stay short."""
 _SPECVERSION_HEADER: Final = "ce-specversion"
 _ID_HEADER: Final = "ce-id"
 _TYPE_HEADER: Final = "ce-type"
@@ -39,6 +43,11 @@ _CONTENT_TYPE_HEADER: Final = "content-type"
 _MESSAGE_ID_HEADER: Final = "Nats-Msg-Id"
 _DATA_FIELD: Final = "data"
 """How an error names the payload, which travels as the message body, not in a header."""
+_IDENTIFIER: Final = r"[A-Za-z_][A-Za-z0-9_]*"
+_FULL_NAME: Final = re.compile(rf"{_IDENTIFIER}(?:\.{_IDENTIFIER})+", re.ASCII)
+"""A protobuf full name: a package of at least one segment, then the message name."""
+_TOKEN: Final = re.compile(r"[!-~]+", re.ASCII)
+"""Visible ASCII, no space."""
 _TRACEPARENT: Final = re.compile(r"00-(?!0{32}-)[0-9a-f]{32}-(?!0{16}-)[0-9a-f]{16}-[0-9a-f]{2}", re.ASCII)
 """W3C trace context, version 00: lowercase hex, and neither the trace id nor the parent id all zeros."""
 
@@ -68,6 +77,12 @@ def _required(headers: Mapping[str, str], name: str) -> str:
     return value
 
 
+def _require_exactly(headers: Mapping[str, str], name: str, expected: str) -> None:
+    value = _required(headers, name)
+    if value != expected:
+        raise MalformedEventError(name, value)
+
+
 def _id(headers: Mapping[str, str], name: str) -> UUID:
     value = _required(headers, name)
     try:
@@ -91,6 +106,11 @@ def _tenant(headers: Mapping[str, str]) -> Tenant | None:
     return Tenant(organization, CompanyId(_id(headers, _COMPANY_HEADER)))
 
 
+def _is_attribute(pattern: re.Pattern[str], value: str) -> bool:
+    """Whether ``value`` has the form ``pattern`` and fits in ``MAX_ATTRIBUTE_LENGTH`` (checked first)."""
+    return len(value) <= MAX_ATTRIBUTE_LENGTH and pattern.fullmatch(value) is not None
+
+
 def _is_traceparent(value: str) -> bool:
     return _TRACEPARENT.fullmatch(value) is not None
 
@@ -100,8 +120,10 @@ def _is_traceparent(value: str) -> bool:
 class Envelope:
     """One event: who emitted it, about whom, when, and the serialized payload.
 
-    ``time`` is an aware ``datetime``; ``type`` and ``source`` are not empty; ``traceparent`` is a valid W3C
-    trace context or ``None``. Anything else is a ``MalformedEventError``.
+    ``type`` is a protobuf full name (ASCII, at least one dot); ``source`` is visible ASCII without spaces;
+    both are at most ``MAX_ATTRIBUTE_LENGTH`` long. ``time`` is an aware ``datetime``; ``traceparent`` is a
+    valid W3C trace context or ``None``. Anything else is a ``MalformedEventError``. A message declared
+    without a package has no such full name and cannot be wrapped.
     """
 
     id: UUID
@@ -113,10 +135,10 @@ class Envelope:
     traceparent: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.type:
-            raise MalformedEventError(_TYPE_HEADER)
-        if not self.source:
-            raise MalformedEventError(_SOURCE_HEADER)
+        if not _is_attribute(_FULL_NAME, self.type):
+            raise MalformedEventError(_TYPE_HEADER, self.type)
+        if not _is_attribute(_TOKEN, self.source):
+            raise MalformedEventError(_SOURCE_HEADER, self.source)
         if self.time.utcoffset() is None:
             raise MalformedEventError(_TIME_HEADER, self.time.isoformat())
         if self.traceparent is not None and not _is_traceparent(self.traceparent):
@@ -173,9 +195,8 @@ class Envelope:
 
         An unusable ``traceparent`` is only dropped: losing a trace link must not lose the event.
         """
-        version = _required(headers, _SPECVERSION_HEADER)
-        if version != SPEC_VERSION:
-            raise MalformedEventError(_SPECVERSION_HEADER, version)
+        _require_exactly(headers, _SPECVERSION_HEADER, SPEC_VERSION)
+        _require_exactly(headers, _CONTENT_TYPE_HEADER, CONTENT_TYPE)
         traceparent = headers.get(_TRACEPARENT_HEADER)
         return cls(
             id=_id(headers, _ID_HEADER),

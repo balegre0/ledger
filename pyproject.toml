@@ -51,6 +51,9 @@ deps-kernel = { cmd = "deptry libs/kernel/src --config libs/kernel/pyproject.tom
 deps-contracts = { cmd = "deptry libs/contracts/src --config libs/contracts/pyproject.toml" }
 deps = { sequence = ["deps-kernel", "deps-contracts"], help = "Unused / missing / transitive dependencies, per package" }
 spell = { cmd = "typos", help = "Spell check" }
+# Poe expands the `**` glob to absolute paths, and protoc only accepts a file that lies under a --proto_path
+# spelled the same way: hence the absolute --proto_path. The *_out directories take no such comparison and
+# stay relative to the project root, where poe runs every task. CI regenerates and diffs the committed code.
 proto = { cmd = "python -m grpc_tools.protoc --proto_path=${POE_ROOT}/libs/contracts/proto --python_out=libs/contracts/src --mypy_out=libs/contracts/src --grpc_python_out=libs/contracts/src --mypy_grpc_out=libs/contracts/src libs/contracts/proto/ledger/**/*.proto", help = "Regenerate the code of every .proto" }
 proto-lint = { cmd = "docker run --rm --volume ${POE_ROOT}/libs/contracts:/workspace --workdir /workspace bufbuild/buf:1.73.0 lint", help = "buf lint" }
 test = { cmd = "pytest", help = "Tests with coverage" }
