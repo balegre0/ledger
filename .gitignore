@@ -1,0 +1,15 @@
+__pycache__/
+*.py[oc]
+build/
+dist/
+*.egg-info
+.venv
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.import_linter_cache/
+.hypothesis/
+.coverage
+htmlcov/
+.tilt-dev/
+.env

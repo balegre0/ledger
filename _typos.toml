@@ -1,0 +1,10 @@
+[files]
+extend-exclude = ["uv.lock", "libs/contracts/src/ledger/"]
+
+[default]
+# Ruff rule codes (the plan quotes `CPY001`) are identifiers, not words.
+extend-ignore-identifiers-re = ["^CPY[0-9]{3}$"]
+
+[default.extend-words]
+# Spanish: a DGII e-invoice status ("Aceptado Condicional"), not an English typo.
+condicional = "condicional"
