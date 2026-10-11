@@ -9,6 +9,7 @@ from enum import StrEnum
 from typing import ClassVar, Final
 
 _EXCERPT: Final = 40
+_MIN_LIMIT: Final = 1
 
 
 class ErrorKind(StrEnum):
@@ -67,8 +68,24 @@ class UnavailableError(LedgerError):
     code: ClassVar[str] = "unavailable"
 
 
+class InvalidExcerptLimitError(LedgerError):
+    """A caller asked for an excerpt shorter than one character: a bug in our code, never the client's input.
+
+    It stays an ``INTERNAL`` error on purpose. ``InvalidInputError`` means "the request can never succeed
+    as sent" and crosses a boundary as a client error; this is a defect to fix and must surface as a server
+    error.
+    """
+
+    code: ClassVar[str] = "invalid_excerpt_limit"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"an excerpt limit must be at least {_MIN_LIMIT}, not {limit}")
+
+
 def excerpt(text: str, limit: int = _EXCERPT) -> str:
     """``text`` quoted for an error message, cut at ``limit`` characters so input is never echoed whole."""
+    if limit < _MIN_LIMIT:
+        raise InvalidExcerptLimitError(limit)
     if len(text) <= limit:
         return repr(text)
     return repr(text[:limit] + "...")

@@ -1,10 +1,9 @@
 """Identifiers: UUIDv7 for every entity, a distinct type per entity, and the tenant."""
 
 import re
-import uuid
 from dataclasses import dataclass
 from typing import ClassVar, Final, NewType, final
-from uuid import UUID
+from uuid import UUID, uuid7
 
 from ledger_kernel.errors import InvalidInputError, excerpt
 
@@ -38,7 +37,7 @@ class Tenant:
 
 def new_id() -> UUID:
     """A new identifier: UUIDv7, so ids sort by creation time and index well."""
-    return uuid.uuid7()
+    return uuid7()
 
 
 def parse_id(text: str) -> UUID:

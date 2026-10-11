@@ -45,7 +45,24 @@ deps-kernel = { cmd = "deptry libs/kernel/src --config libs/kernel/pyproject.tom
 deps = { sequence = ["deps-kernel"], help = "Unused / missing / transitive dependencies, per package" }
 spell = { cmd = "typos", help = "Spell check" }
 test = { cmd = "pytest", help = "Tests with coverage" }
-check = { sequence = ["format-check", "lint", "types", "arch", "deps", "spell", "test"], help = "Everything CI runs" }
+check = { sequence = ["format-check", "lint", "suppressions", "types", "arch", "deps", "spell", "test"], help = "Everything CI runs" }
+
+# Zero suppressions: no Python file outside the generated protobuf code may switch a check off. The pattern
+# covers ruff (`noqa`, `ruff:`, `isort:`), basedpyright / pyright (`type: ignore`, `pyright:`), mypy (`mypy:`)
+# and coverage (`pragma: no cover` / `no branch`), in any case. `git grep` exits 1 when nothing matches, so the
+# task passes on exactly 1: a match (0) or a git failure (128) fails it. Untracked files are searched too,
+# so a new file is checked before its first `git add`. Runs the same on Windows and Linux: no shell, no script.
+[tool.poe.tasks.suppressions]
+help = "Zero suppressions: no noqa, type: ignore, tool directive or coverage pragma in Python files"
+imports = ["subprocess"]
+assert = true
+expr = '''
+subprocess.run([
+    "git", "grep", "--untracked", "--exclude-standard", "--line-number", "--ignore-case", "--extended-regexp",
+    "-e", "#[[:space:]]*(noqa|type:[[:space:]]*ignore|(based)?pyright:|mypy:|ruff:|isort:|pragma:?[[:space:]]*no[[:space:]]*(cover|branch))",
+    "--", "*.py", "*.pyi", ":(exclude)libs/contracts/src/ledger",
+]).returncode == 1
+'''
 
 # ── Ruff ────────────────────────────────────────────────────────────────────────
 [tool.ruff]
@@ -154,6 +171,8 @@ core = "ctrace"
 
 [tool.coverage.report]
 fail_under = 100
+exclude_lines = []     # no "pragma: no cover": every line counts
+partial_branches = []  # no "pragma: no branch": every branch counts
 
 # ── Architecture contracts (import-linter) ──────────────────────────────────────
 [tool.importlinter]
