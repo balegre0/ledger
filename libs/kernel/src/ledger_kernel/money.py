@@ -3,6 +3,9 @@
 Amounts stay below 10^18 with at most 24 decimal places (a 12-place price times a 12-place quantity).
 Arithmetic is exact: a result that would need rounding or leave that range is an ``InvalidAmountError``.
 Rounding to the currency's minor unit happens only when asked, with ``rounded()``.
+
+Every operation runs in an explicit decimal context, never the ambient one, so no caller can change a result
+(or turn a decimal signal into a raw ``decimal`` exception) by configuring the ``decimal`` module.
 """
 
 import re
@@ -26,9 +29,14 @@ from ledger_kernel.errors import InvalidInputError, excerpt
 MAX_INTEGER_DIGITS: Final = 18
 MAX_SCALE: Final = 24
 _TEXT: Final = re.compile(rf"-?[0-9]{{1,{MAX_INTEGER_DIGITS}}}(?:\.[0-9]{{1,{MAX_SCALE}}})?", re.ASCII)
-_EXACT: Final = Context(
-    prec=60, rounding=ROUND_HALF_UP, traps=[InvalidOperation, Inexact, Overflow, DivisionByZero]
-)
+_PRECISION: Final = 60
+_FAILURES: Final[tuple[type[DecimalException], ...]] = (InvalidOperation, Overflow, DivisionByZero)
+_EXACT: Final = Context(prec=_PRECISION, rounding=ROUND_HALF_UP, traps=[*_FAILURES, Inexact])
+"""Arithmetic: any result that would need rounding is a failure."""
+_ROUNDING: Final = Context(prec=_PRECISION, rounding=ROUND_HALF_UP, traps=list(_FAILURES))
+"""Rounding to the minor unit: losing digits is the point, so ``Inexact`` is not a failure."""
+_AMOUNT_TYPES: Final[frozenset[type[object]]] = frozenset({str, int, Decimal})
+_FACTOR_TYPES: Final[frozenset[type[object]]] = frozenset({int, Decimal})
 
 
 class Currency(StrEnum):
@@ -74,7 +82,24 @@ class CurrencyMismatchError(InvalidInputError):
         super().__init__(f"cannot combine {left} with {right}")
 
 
-def _checked(amount: Decimal) -> Decimal:
+def _require_type(value: object, accepted: frozenset[type[object]]) -> None:
+    """Refuse a value whose exact runtime type is not accepted (a ``bool`` or a ``float`` among them).
+
+    Annotations are not enforced where input crosses a boundary: ``json.loads`` hands over whatever was sent.
+    """
+    if type(value) not in accepted:
+        raise InvalidAmountError(AmountProblem.NOT_DECIMAL, str(value))
+
+
+def _is_money(value: object) -> bool:
+    """Whether ``value`` is money. A predicate on ``object``, so the checkers cannot narrow the operands.
+
+    The operators must answer ``NotImplemented`` to anything else, and Python then raises the ``TypeError``.
+    """
+    return isinstance(value, Money)
+
+
+def _require_representable(amount: Decimal) -> None:
     if not amount.is_finite():
         raise InvalidAmountError(AmountProblem.NOT_FINITE, str(amount))
     if amount and amount.adjusted() >= MAX_INTEGER_DIGITS:
@@ -82,10 +107,10 @@ def _checked(amount: Decimal) -> Decimal:
     exponent = amount.as_tuple().exponent
     if isinstance(exponent, int) and exponent < -MAX_SCALE:
         raise InvalidAmountError(AmountProblem.TOO_PRECISE, str(amount))
-    return amount
 
 
-def _exact(operation: Callable[[Decimal, Decimal], Decimal], left: Decimal, right: Decimal) -> Decimal:
+def _operate(operation: Callable[[Decimal, Decimal], Decimal], left: Decimal, right: Decimal) -> Decimal:
+    """Run a decimal operation; any decimal failure becomes an ``InvalidAmountError``."""
     try:
         return operation(left, right)
     except DecimalException as error:
@@ -95,13 +120,18 @@ def _exact(operation: Callable[[Decimal, Decimal], Decimal], left: Decimal, righ
 @final
 @dataclass(frozen=True, slots=True)
 class Money:
-    """An exact amount in one currency."""
+    """An exact amount in one currency.
+
+    Equality and hashing are by value, so ``1.0`` and ``1.00`` are the same amount. The limits (below 10^18,
+    at most 24 decimal places) apply to the representation: ``1.`` followed by 25 zeros is refused although
+    its value would fit.
+    """
 
     amount: Decimal
     currency: Currency
 
     def __post_init__(self) -> None:
-        _checked(self.amount)
+        _require_representable(self.amount)
 
     @classmethod
     def of(cls, amount: str | int | Decimal, currency: Currency) -> Money:
@@ -109,12 +139,9 @@ class Money:
 
         Text must be a plain decimal (``"1250.50"``, ``"-3"``): no exponent, plus sign, spaces or separators.
         """
-        if isinstance(amount, bool):
-            raise InvalidAmountError(AmountProblem.NOT_DECIMAL, str(amount))
-        if isinstance(amount, str):
-            if _TEXT.fullmatch(amount) is None:
-                raise InvalidAmountError(AmountProblem.NOT_DECIMAL, amount)
-            return cls(Decimal(amount), currency)
+        _require_type(amount, _AMOUNT_TYPES)
+        if isinstance(amount, str) and _TEXT.fullmatch(amount) is None:
+            raise InvalidAmountError(AmountProblem.NOT_DECIMAL, amount)
         return cls(Decimal(amount), currency)
 
     @classmethod
@@ -124,30 +151,43 @@ class Money:
 
     def rounded(self) -> Money:
         """To the currency's minor unit, half away from zero (0.005 → 0.01, -0.005 → -0.01)."""
-        return Money(self.amount.quantize(_MINOR_UNIT[self.currency], rounding=ROUND_HALF_UP), self.currency)
+        return Money(_operate(_ROUNDING.quantize, self.amount, _MINOR_UNIT[self.currency]), self.currency)
 
     def __add__(self, other: Money) -> Money:
-        return Money(_exact(_EXACT.add, self.amount, self._same(other)), self.currency)
+        if not _is_money(other):
+            return NotImplemented
+        return Money(_operate(_EXACT.add, self.amount, self._same(other)), self.currency)
 
     def __sub__(self, other: Money) -> Money:
-        return Money(_exact(_EXACT.subtract, self.amount, self._same(other)), self.currency)
+        if not _is_money(other):
+            return NotImplemented
+        return Money(_operate(_EXACT.subtract, self.amount, self._same(other)), self.currency)
 
     def __neg__(self) -> Money:
-        return Money(-self.amount, self.currency)
+        return Money(self.amount.copy_negate(), self.currency)
 
     def __mul__(self, factor: Decimal | int) -> Money:
-        return Money(_exact(_EXACT.multiply, self.amount, Decimal(factor)), self.currency)
+        _require_type(factor, _FACTOR_TYPES)
+        return Money(_operate(_EXACT.multiply, self.amount, Decimal(factor)), self.currency)
 
     def __lt__(self, other: Money) -> bool:
+        if not _is_money(other):
+            return NotImplemented
         return self.amount < self._same(other)
 
     def __le__(self, other: Money) -> bool:
+        if not _is_money(other):
+            return NotImplemented
         return self.amount <= self._same(other)
 
     def __gt__(self, other: Money) -> bool:
+        if not _is_money(other):
+            return NotImplemented
         return self.amount > self._same(other)
 
     def __ge__(self, other: Money) -> bool:
+        if not _is_money(other):
+            return NotImplemented
         return self.amount >= self._same(other)
 
     def _same(self, other: Money) -> Decimal:

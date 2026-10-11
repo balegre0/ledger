@@ -47,11 +47,20 @@ spell = { cmd = "typos", help = "Spell check" }
 test = { cmd = "pytest", help = "Tests with coverage" }
 check = { sequence = ["format-check", "lint", "suppressions", "types", "arch", "deps", "spell", "test"], help = "Everything CI runs" }
 
-# Zero suppressions: no Python file outside the generated protobuf code may switch a check off. The pattern
-# covers ruff (`noqa`, `ruff:`, `isort:`), basedpyright / pyright (`type: ignore`, `pyright:`), mypy (`mypy:`)
-# and coverage (`pragma: no cover` / `no branch`), in any case. `git grep` exits 1 when nothing matches, so the
-# task passes on exactly 1: a match (0) or a git failure (128) fails it. Untracked files are searched too,
-# so a new file is checked before its first `git add`. Runs the same on Windows and Linux: no shell, no script.
+# Zero suppressions: no Python file outside the generated protobuf code may switch a check off.
+# `git grep` runs once with one `-e` pattern per banned form (patterns are OR-ed, matched in any case), in
+# this order:
+#   1. `# noqa`                              ruff, one line
+#   2. `# type: ignore`                      mypy and (base)pyright, one line
+#   3. `# pyright:` / `# basedpyright:`      ignore, basic, strict, rule switches
+#   4. `# flake8:` `# isort:` `# mypy:` `# ruff:`
+#                                            whole-file forms (`# flake8: noqa`, `# ruff: noqa`,
+#                                            `# mypy: ignore-errors`, `# isort: skip_file`) and ruff's
+#                                            `# ruff: disable[...]` ranges
+#   5. `# pragma: no cover` / `no branch`    coverage (also switched off in [tool.coverage.report])
+# `git grep` exits 1 when nothing matches, so the task passes on exactly 1: a match (0) or a git failure (128)
+# fails it. Untracked files are searched too, so a new file is checked before its first `git add`. Runs the
+# same on Windows and Linux: no shell, no script. Prose that mentions a form without the `#` is not a match.
 [tool.poe.tasks.suppressions]
 help = "Zero suppressions: no noqa, type: ignore, tool directive or coverage pragma in Python files"
 imports = ["subprocess"]
@@ -59,7 +68,11 @@ assert = true
 expr = '''
 subprocess.run([
     "git", "grep", "--untracked", "--exclude-standard", "--line-number", "--ignore-case", "--extended-regexp",
-    "-e", "#[[:space:]]*(noqa|type:[[:space:]]*ignore|(based)?pyright:|mypy:|ruff:|isort:|pragma:?[[:space:]]*no[[:space:]]*(cover|branch))",
+    "-e", "#[[:space:]]*noqa",
+    "-e", "#[[:space:]]*type:[[:space:]]*ignore",
+    "-e", "#[[:space:]]*(based)?pyright:",
+    "-e", "#[[:space:]]*(flake8|isort|mypy|ruff):",
+    "-e", "#[[:space:]]*pragma:?[[:space:]]*no[[:space:]]*(cover|branch)",
     "--", "*.py", "*.pyi", ":(exclude)libs/contracts/src/ledger",
 ]).returncode == 1
 '''
