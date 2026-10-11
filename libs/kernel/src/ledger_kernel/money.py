@@ -37,6 +37,7 @@ _ROUNDING: Final = Context(prec=_PRECISION, rounding=ROUND_HALF_UP, traps=list(_
 """Rounding to the minor unit: losing digits is the point, so ``Inexact`` is not a failure."""
 _AMOUNT_TYPES: Final[frozenset[type[object]]] = frozenset({str, int, Decimal})
 _FACTOR_TYPES: Final[frozenset[type[object]]] = frozenset({int, Decimal})
+_DECIMAL_TYPES: Final[frozenset[type[object]]] = frozenset({Decimal})
 
 
 class Currency(StrEnum):
@@ -58,6 +59,9 @@ class AmountProblem(StrEnum):
     """Why a value is not an acceptable amount."""
 
     NOT_DECIMAL = "is not a plain decimal number"
+    """The text is malformed."""
+    WRONG_TYPE = "has an unsupported type"
+    """The value is not text, a number or a Decimal at all, or not of a type this operation takes."""
     NOT_FINITE = "is not a finite number"
     TOO_LARGE = f"is not below 10^{MAX_INTEGER_DIGITS}"
     TOO_PRECISE = f"has more than {MAX_SCALE} decimal places"
@@ -73,6 +77,15 @@ class InvalidAmountError(InvalidInputError):
         super().__init__(f"the amount {excerpt(value)} {problem}")
 
 
+class InvalidCurrencyError(InvalidInputError):
+    """A value that is not one of the supported currencies."""
+
+    code: ClassVar[str] = "invalid_currency"
+
+    def __init__(self, value: str) -> None:
+        super().__init__(f"the currency {excerpt(value)} is not one of {', '.join(Currency)}")
+
+
 class CurrencyMismatchError(InvalidInputError):
     """Two amounts in different currencies were combined."""
 
@@ -82,13 +95,23 @@ class CurrencyMismatchError(InvalidInputError):
         super().__init__(f"cannot combine {left} with {right}")
 
 
+def _described(value: object) -> str:
+    """The value led by its type, which survives ``excerpt``: ``float: 12.5`` is not the text ``'12.5'``."""
+    return f"{type(value).__name__}: {value}"
+
+
 def _require_type(value: object, accepted: frozenset[type[object]]) -> None:
     """Refuse a value whose exact runtime type is not accepted (a ``bool`` or a ``float`` among them).
 
     Annotations are not enforced where input crosses a boundary: ``json.loads`` hands over whatever was sent.
     """
     if type(value) not in accepted:
-        raise InvalidAmountError(AmountProblem.NOT_DECIMAL, str(value))
+        raise InvalidAmountError(AmountProblem.WRONG_TYPE, _described(value))
+
+
+def _require_currency(value: object) -> None:
+    if type(value) is not Currency:
+        raise InvalidCurrencyError(_described(value))
 
 
 def _is_money(value: object) -> bool:
@@ -125,13 +148,21 @@ class Money:
     Equality and hashing are by value, so ``1.0`` and ``1.00`` are the same amount. The limits (below 10^18,
     at most 24 decimal places) apply to the representation: ``1.`` followed by 25 zeros is refused although
     its value would fit.
+
+    Whichever way a ``Money`` is made (``of``, ``zero``, arithmetic or the constructor) it holds a ``Decimal``
+    and a ``Currency`` exactly, and zero is never signed: ``-0.00`` becomes ``0.00``, keeping its scale.
     """
 
     amount: Decimal
     currency: Currency
 
     def __post_init__(self) -> None:
+        _require_type(self.amount, _DECIMAL_TYPES)
+        _require_currency(self.currency)
         _require_representable(self.amount)
+        if self.amount.is_zero():
+            # Frozen, so `object.__setattr__`: a signed zero would print as "-0.00" in a tax document.
+            object.__setattr__(self, "amount", self.amount.copy_abs())
 
     @classmethod
     def of(cls, amount: str | int | Decimal, currency: Currency) -> Money:

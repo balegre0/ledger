@@ -8,7 +8,14 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from ledger_kernel.money import Currency, CurrencyMismatchError, InvalidAmountError, Money
+from ledger_kernel.errors import ErrorKind
+from ledger_kernel.money import (
+    Currency,
+    CurrencyMismatchError,
+    InvalidAmountError,
+    InvalidCurrencyError,
+    Money,
+)
 
 # The widest amount there is: 18 integer digits and 24 places, 42 significant digits.
 WIDEST: Final = "123456789012345678.123456789012345678901234"
@@ -36,6 +43,38 @@ def test_minus_zero_reads_as_zero() -> None:
     assert dop("-0") == Money.zero(Currency.DOP)
     assert dop("-0.00") == dop("0")
     assert hash(dop("-0")) == hash(Money.zero(Currency.DOP))
+    assert not dop("-0").amount.is_signed()
+    assert str(dop("-0").amount) == "0"
+
+
+@pytest.mark.parametrize(
+    ("zero", "text"),
+    [
+        (-Money.zero(Currency.DOP), "0"),
+        (Money.zero(Currency.DOP) * -1, "0"),
+        (dop("0") * Decimal("-0.50"), "0.00"),
+        (dop("-0"), "0"),
+        (dop("-0.00"), "0.00"),
+        (dop("-0.004").rounded(), "0.00"),
+        (-dop("0.00"), "0.00"),
+        (Money(Decimal("-0.00"), Currency.DOP), "0.00"),
+    ],
+    ids=[
+        "negated-zero",
+        "zero-times-minus-one",
+        "zero-times-negative-decimal",
+        "read-minus-zero",
+        "read-minus-zero-with-scale",
+        "negative-rounded-to-zero",
+        "negated-zero-with-scale",
+        "constructed-minus-zero",
+    ],
+)
+def test_zero_is_never_signed_and_keeps_its_scale(zero: Money, text: str) -> None:
+    assert str(zero.amount) == text
+    assert zero.amount.as_tuple() == Decimal(text).as_tuple()
+    assert not zero.amount.is_signed()
+    assert zero == Money.zero(Currency.DOP)
 
 
 def test_equality_and_hashing_are_by_value_across_scales() -> None:
@@ -66,7 +105,7 @@ def test_equality_and_hashing_are_by_value_across_scales() -> None:
     ],
 )
 def test_text_that_is_not_a_plain_decimal_is_refused(text: str) -> None:
-    with pytest.raises(InvalidAmountError, match="amount"):
+    with pytest.raises(InvalidAmountError, match="is not a plain decimal number"):
         dop(text)
 
 
@@ -95,7 +134,7 @@ def test_values_out_of_range_are_refused(value: Decimal | int) -> None:
 
 
 def test_a_boolean_is_not_an_amount() -> None:
-    with pytest.raises(InvalidAmountError):
+    with pytest.raises(InvalidAmountError, match="unsupported type"):
         Money.of(amount=True, currency=Currency.DOP)
 
 
@@ -107,7 +146,7 @@ def test_a_boolean_is_not_an_amount() -> None:
 def test_only_text_integers_and_decimals_are_amounts(payload: str) -> None:
     # `methodcaller` takes untyped arguments, like a real boundary: `json.loads` hands over whatever was sent.
     read = operator.methodcaller("of", json.loads(payload), Currency.DOP)
-    with pytest.raises(InvalidAmountError, match="plain decimal"):
+    with pytest.raises(InvalidAmountError, match="unsupported type"):
         read(Money)
 
 
@@ -118,8 +157,51 @@ def test_only_text_integers_and_decimals_are_amounts(payload: str) -> None:
 )
 def test_only_integers_and_decimals_scale_an_amount(payload: str) -> None:
     scale = operator.methodcaller("__mul__", json.loads(payload))
-    with pytest.raises(InvalidAmountError, match="plain decimal"):
+    with pytest.raises(InvalidAmountError, match="unsupported type"):
         scale(dop("3"))
+
+
+def test_a_wrong_type_is_named_and_not_blamed_on_the_text() -> None:
+    read = operator.methodcaller("of", json.loads("12.5"), Currency.DOP)
+    with pytest.raises(InvalidAmountError) as caught:
+        read(Money)
+    assert str(caught.value) == "the amount 'float: 12.5' has an unsupported type"
+    assert caught.value.code == "invalid_amount"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ["1.5", '"1"', "1", "true", "null", "[1]"],
+    ids=["float", "text", "integer", "true", "null", "list"],
+)
+def test_construction_takes_only_a_decimal_amount(payload: str) -> None:
+    build = operator.methodcaller("__call__", json.loads(payload), Currency.DOP)
+    with pytest.raises(InvalidAmountError, match="unsupported type"):
+        build(Money)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ['"USD"', '"GBP"', "null", "1", "true"],
+    ids=["currency-as-text", "unknown-code", "null", "number", "true"],
+)
+def test_a_currency_must_be_a_currency_on_every_way_in(payload: str) -> None:
+    entry_points = [
+        operator.methodcaller("__call__", Decimal(1), json.loads(payload)),
+        operator.methodcaller("of", "1", json.loads(payload)),
+        operator.methodcaller("zero", json.loads(payload)),
+    ]
+    for entry_point in entry_points:
+        with pytest.raises(InvalidCurrencyError, match="not one of DOP, USD, EUR"):
+            entry_point(Money)
+
+
+def test_a_wrong_currency_is_a_short_client_error() -> None:
+    build = operator.methodcaller("__call__", Decimal(1), "X" * 10_000)
+    with pytest.raises(InvalidCurrencyError) as caught:
+        build(Money)
+    assert (caught.value.kind, caught.value.code) == (ErrorKind.INVALID, "invalid_currency")
+    assert len(str(caught.value)) < 120
 
 
 def test_arithmetic_is_exact() -> None:
