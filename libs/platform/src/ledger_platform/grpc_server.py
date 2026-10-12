@@ -40,6 +40,7 @@ _STATUS: Final[Mapping[ErrorKind, grpc.StatusCode]] = {
     ErrorKind.INVALID: grpc.StatusCode.INVALID_ARGUMENT,
     ErrorKind.NOT_FOUND: grpc.StatusCode.NOT_FOUND,
     ErrorKind.CONFLICT: grpc.StatusCode.FAILED_PRECONDITION,
+    ErrorKind.UNAUTHENTICATED: grpc.StatusCode.UNAUTHENTICATED,
     ErrorKind.FORBIDDEN: grpc.StatusCode.PERMISSION_DENIED,
     ErrorKind.UNAVAILABLE: grpc.StatusCode.UNAVAILABLE,
     ErrorKind.INTERNAL: grpc.StatusCode.INTERNAL,

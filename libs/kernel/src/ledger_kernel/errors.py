@@ -36,6 +36,8 @@ class ErrorKind(StrEnum):
     NOT_FOUND = "not_found"
     CONFLICT = "conflict"
     """The current state forbids it: a duplicate, a wrong state, a stale version."""
+    UNAUTHENTICATED = "unauthenticated"
+    """The caller did not prove who it is: no credentials, or credentials that do not hold."""
     FORBIDDEN = "forbidden"
     UNAVAILABLE = "unavailable"
     """A dependency failed; the same request may succeed later."""
@@ -68,6 +70,13 @@ class ConflictError(LedgerError):
 
     kind: ClassVar[ErrorKind] = ErrorKind.CONFLICT
     code: ClassVar[str] = "conflict"
+
+
+class UnauthenticatedError(LedgerError):
+    """The caller is not known: it sent no credentials, or ones that cannot be trusted."""
+
+    kind: ClassVar[ErrorKind] = ErrorKind.UNAUTHENTICATED
+    code: ClassVar[str] = "unauthenticated"
 
 
 class ForbiddenError(LedgerError):

@@ -21,6 +21,7 @@ from ledger_kernel.errors import (
     InvalidInputError,
     LedgerError,
     NotFoundError,
+    UnauthenticatedError,
     UnavailableError,
 )
 from ledger_platform.grpc_server import (
@@ -53,6 +54,7 @@ ERRORS: Final[Mapping[ErrorKind, type[LedgerError]]] = {
     ErrorKind.INVALID: InvalidInputError,
     ErrorKind.NOT_FOUND: NotFoundError,
     ErrorKind.CONFLICT: ConflictError,
+    ErrorKind.UNAUTHENTICATED: UnauthenticatedError,
     ErrorKind.FORBIDDEN: ForbiddenError,
     ErrorKind.UNAVAILABLE: UnavailableError,
     ErrorKind.INTERNAL: LedgerError,
@@ -61,6 +63,7 @@ EXPECTED: Final[Mapping[ErrorKind, tuple[grpc.StatusCode, str]]] = {
     ErrorKind.INVALID: (grpc.StatusCode.INVALID_ARGUMENT, "invalid_input"),
     ErrorKind.NOT_FOUND: (grpc.StatusCode.NOT_FOUND, "not_found"),
     ErrorKind.CONFLICT: (grpc.StatusCode.FAILED_PRECONDITION, "conflict"),
+    ErrorKind.UNAUTHENTICATED: (grpc.StatusCode.UNAUTHENTICATED, "unauthenticated"),
     ErrorKind.FORBIDDEN: (grpc.StatusCode.PERMISSION_DENIED, "forbidden"),
     ErrorKind.UNAVAILABLE: (grpc.StatusCode.UNAVAILABLE, "unavailable"),
     ErrorKind.INTERNAL: (grpc.StatusCode.INTERNAL, "internal"),

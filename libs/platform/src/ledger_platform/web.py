@@ -57,7 +57,7 @@ _FAILED: Final = HTTPStatus.INTERNAL_SERVER_ERROR.value
 _STANDARD: Final = {status.value: status for status in HTTPStatus}
 _CODES: Final[Mapping[int, str]] = {
     HTTPStatus.BAD_REQUEST: "bad_request",
-    HTTPStatus.UNAUTHORIZED: "unauthorized",
+    HTTPStatus.UNAUTHORIZED: "unauthenticated",
     HTTPStatus.FORBIDDEN: "forbidden",
     HTTPStatus.NOT_FOUND: "not_found",
     HTTPStatus.METHOD_NOT_ALLOWED: "method_not_allowed",
@@ -77,17 +77,23 @@ _CODES: Final[Mapping[int, str]] = {
     HTTPStatus.GATEWAY_TIMEOUT: "gateway_timeout",
 }
 """The codes clients match on, written out: they must not follow the names CPython gives its statuses (3.13
-renamed 413, 414, 416 and 422). Where ``ErrorKind`` has a word for it (404, 403, 409, 422, 500, 503) the
+renamed 413, 414, 416 and 422). Where ``ErrorKind`` has a word for it (404, 401, 403, 409, 422, 500, 503) the
 code is that word, so a route's ``HTTPException`` and a ``LedgerError`` of the same meaning are one code."""
 _NOT_A_WORD: Final = re.compile(r"\W+")
 _STATUS: Final[Mapping[ErrorKind, HTTPStatus]] = {
     ErrorKind.INVALID: HTTPStatus.UNPROCESSABLE_CONTENT,
     ErrorKind.NOT_FOUND: HTTPStatus.NOT_FOUND,
     ErrorKind.CONFLICT: HTTPStatus.CONFLICT,
+    ErrorKind.UNAUTHENTICATED: HTTPStatus.UNAUTHORIZED,
     ErrorKind.FORBIDDEN: HTTPStatus.FORBIDDEN,
     ErrorKind.UNAVAILABLE: HTTPStatus.SERVICE_UNAVAILABLE,
     ErrorKind.INTERNAL: HTTPStatus.INTERNAL_SERVER_ERROR,
 }
+_CHALLENGE: Final = 'Bearer realm="ledger"'
+"""What a 401 tells a client to send (RFC 6750): a bearer token. The problem's code says what was wrong."""
+_REFUSED_CODE: Final = "invalid_token"
+"""The one code a challenge repeats (RFC 6750 section 3.1): a token was sent, and it cannot be trusted. A
+request without one gets the bare challenge, as the RFC asks."""
 _MAX_ISSUES: Final = 20
 """A request can break the schema a million times over; a client is told about this many."""
 _LOCATION_PART: Final = 40
@@ -359,6 +365,12 @@ def _problem(
     return JSONResponse(body, status_code=status, headers=headers, media_type=PROBLEM_JSON)
 
 
+def _challenge(code: str) -> Mapping[str, str]:
+    """The ``WWW-Authenticate`` header of a 401 whose problem has the code ``code``."""
+    error = f', error="{_REFUSED_CODE}"' if code == _REFUSED_CODE else ""
+    return {"WWW-Authenticate": _CHALLENGE + error}
+
+
 def _field_problems(error: RequestValidationError) -> dict[str, object]:
     """The first ``_MAX_ISSUES`` problems of a request: where, of which type, what to do, how many were cut.
 
@@ -409,7 +421,8 @@ def _answer_errors_as_problems(app: FastAPI, labels: _RouteLabels) -> None:
             # A defect of ours: the client gets what any bug gets, the log gets the code and the message.
             _report_defect(request, error, error.code, labels)
             return _problem(status, _INTERNAL)
-        return _problem(status, error.code, detail=str(error) or None)
+        challenge = _challenge(error.code) if error.kind is ErrorKind.UNAUTHENTICATED else None
+        return _problem(status, error.code, detail=str(error) or None, headers=challenge)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request: Request, error: RequestValidationError) -> JSONResponse:
