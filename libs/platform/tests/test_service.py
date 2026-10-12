@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import timedelta
 from functools import partial
 from math import inf, nan
+from time import monotonic
 from typing import Annotated, Final, Literal, Protocol, TypedDict, final, override
 from urllib.parse import urlsplit
 lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
@@ -27,6 +28,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from prometheus_client import CollectorRegistry
 from pydantic import SecretStr, TypeAdapter
 from sqlalchemy import Text, literal_column, select
+from sqlalchemy.pool import QueuePool
 from structlog.testing import capture_logs
 lazy from nats.aio.client import Client
 lazy from nats.js import JetStreamContext
@@ -282,6 +284,7 @@ class Proxy:
     def __init__(self, host: str, port: int) -> None:
         self._upstream = (host, port)
         self._holding = False
+        self._frozen = False
         self._writers: set[asyncio.StreamWriter] = set()
         self._listening: asyncio.Server | None = None
         self._listeners: list[asyncio.Server] = []
@@ -313,7 +316,7 @@ class Proxy:
             return
         upstream_reader, upstream_writer = await asyncio.open_connection(*self._upstream)
         self._writers |= {writer, upstream_writer}
-        await asyncio.gather(relay(reader, upstream_writer), relay(upstream_reader, writer))
+        await asyncio.gather(self._relay(reader, upstream_writer), self._relay(upstream_reader, writer))
 
     def cut(self) -> None:
         self._drop()
@@ -325,6 +328,10 @@ class Proxy:
         self._drop()
         self._holding = True
 
+    def freeze(self) -> None:
+        """Keep every connection open and relay nothing more, either way: a server that stopped answering."""
+        self._frozen = True
+
     async def restore(self) -> None:
         """Relay again, listening on the port it had (any free one, the first time)."""
         self._holding = False
@@ -332,6 +339,14 @@ class Proxy:
             self._listening = await asyncio.start_server(self.accept, "127.0.0.1", self.port)
             self._listeners.append(self._listening)
             self.port = ADDRESS.validate_python(self._listening.sockets[0].getsockname())[1]
+
+    async def _relay(self, source: asyncio.StreamReader, sink: asyncio.StreamWriter) -> None:
+        with contextlib.suppress(ConnectionError):
+            while chunk := await source.read(65536):
+                if not self._frozen:
+                    sink.write(chunk)
+                    await sink.drain()
+        sink.close()
 
     async def holds_nothing(self) -> bool:
         """Whether every connection it held has been closed by its client."""
@@ -352,14 +367,6 @@ class Proxy:
         finally:
             self.held -= 1
             writer.close()
-
-
-async def relay(source: asyncio.StreamReader, sink: asyncio.StreamWriter) -> None:
-    with contextlib.suppress(ConnectionError):
-        while chunk := await source.read(65536):
-            sink.write(chunk)
-            await sink.drain()
-    sink.close()
 
 
 @final
@@ -805,19 +812,58 @@ def test_a_publish_timeout_of_half_the_database_s_idle_limit_is_accepted() -> No
     assert ServiceLimits(database=database, publish_timeout=5.0).publish_timeout == 5.0
 
 
-@pytest.mark.parametrize("option", ["nats_connect_timeout", "worker_stop_grace"])
+WAITS: Final[dict[str, Callable[[float], ServiceLimits]]] = {
+    "nats_connect_timeout": lambda seconds: ServiceLimits(nats_connect_timeout=seconds),
+    "grpc_stop_grace": lambda seconds: ServiceLimits(grpc_stop_grace=seconds),
+    "worker_stop_grace": lambda seconds: ServiceLimits(worker_stop_grace=seconds),
+    "nats_drain_timeout": lambda seconds: ServiceLimits(nats_drain_timeout=seconds),
+    "span_flush_timeout": lambda seconds: ServiceLimits(span_flush_timeout=seconds),
+}
+
+
+@pytest.mark.parametrize("option", WAITS)
 @pytest.mark.parametrize("seconds", [0.0, -1.0, nan, inf])
 def test_a_wait_that_is_not_a_positive_number_of_seconds_is_refused(option: str, seconds: float) -> None:
-    waits = {"nats_connect_timeout": 60.0, "worker_stop_grace": 10.0} | {option: seconds}
     with pytest.raises(InvalidServiceOptionError, match=rf"^service option {option} must be a positive"):
-        ServiceLimits(
-            nats_connect_timeout=waits["nats_connect_timeout"], worker_stop_grace=waits["worker_stop_grace"]
-        )
+        WAITS[option](seconds)
 
 
-def test_the_waits_are_a_minute_for_nats_and_ten_seconds_for_a_worker_by_default() -> None:
+@pytest.mark.parametrize("pool_size", [0, -1])
+def test_a_pool_without_a_connection_is_refused_with_the_limits(pool_size: int) -> None:
+    with pytest.raises(InvalidServiceOptionError, match=r"^service option pool_size must be at least 1"):
+        ServiceLimits(pool_size=pool_size)
+
+
+async def test_the_pool_has_the_size_the_limits_say(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    del infrastructure
+    payments = Payments(configured(database_url, nats_url), limits=ServiceLimits(pool_size=3))
+    async with running(payments.service):
+        pool = payments.service.runtime().database.engine.pool
+        assert isinstance(pool, QueuePool)
+        assert pool.size() == 3
+
+
+def test_the_waits_have_their_defaults() -> None:
     limits = ServiceLimits()
-    assert (limits.nats_connect_timeout, limits.worker_stop_grace) == (60.0, 10.0)
+    assert limits.nats_connect_timeout == 60.0
+    assert (limits.grpc_stop_grace, limits.worker_stop_grace, limits.nats_drain_timeout) == (8.0, 8.0, 4.0)
+    assert limits.span_flush_timeout == 4.0
+
+
+def test_a_stop_takes_less_than_twenty_five_seconds_by_default() -> None:
+    """Kubernetes kills a pod ``terminationGracePeriodSeconds`` (30 by default) after asking it to stop: the
+    chassis's own stop fits with room for the ASGI server's, which comes first."""
+    limits = ServiceLimits()
+    assert limits.stop_budget == 24.0
+    parts = (
+        limits.grpc_stop_grace,
+        limits.worker_stop_grace,
+        limits.nats_drain_timeout,
+        limits.span_flush_timeout,
+    )
+    assert limits.stop_budget == sum(parts)
 
 
 async def test_what_the_outbox_refuses_of_its_publish_timeout_fails_the_start(
@@ -1122,3 +1168,56 @@ async def test_the_credentials_in_the_nats_url_never_reach_a_log(database_url: s
     assert [entry["event"] for entry in logs if entry["event"] == "nats.error"] != []
     assert "s3cret" not in "".join(repr(entry) for entry in logs)
     assert "s3cret" not in str(unreachable.value)
+
+
+async def test_a_nats_that_stopped_answering_is_drained_no_longer_than_its_limit(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    """Connected, as far as the client can tell, and silent: nats-py would wait for its flush (ten seconds)
+    and its drain (thirty) before it closed. The stop closes it once its limit is over."""
+    async with Proxy.to(nats_url) as proxy:
+        payments = Payments(configured(database_url, proxy.url), limits=ServiceLimits(nats_drain_timeout=0.3))
+        with capture_logs() as logs:
+            async with running(payments.service):
+                connection = payments.service.runtime().nats
+                await within(TIMEOUT, partial(bound, infrastructure, LEDGER))
+                proxy.freeze()
+                stopping = monotonic()
+            stopped_in = monotonic() - stopping
+    assert connection.is_closed
+    assert stopped_in < 3
+    assert {"event": "nats.drain_timed_out", "log_level": "warning", "timeout": 0.3} in logs
+
+
+async def test_a_stop_in_which_every_part_hangs_ends_within_the_sum_of_its_limits(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    """A gRPC call that never ends, a handler that ignores its cancellation, a NATS that stopped answering, a
+    collector that never answers: each part is given its limit, and the stop goes on."""
+    del infrastructure
+    limit = 0.3
+    limits = ServiceLimits(
+        grpc_stop_grace=limit, worker_stop_grace=limit, nats_drain_timeout=limit, span_flush_timeout=limit
+    )
+    async with Proxy.to(nats_url) as nats, Proxy.to(nats_url) as collector:
+        collector.hold()  # accepts, and never answers
+        stopping = Payments(
+            configured(database_url, nats.url, otlp_endpoint=f"http://127.0.0.1:{collector.port}"),
+            hold="stubbornly",
+            limits=limits,
+        )
+        async with running(stopping.service) as client:
+            await client.post("/payments")
+            async with asyncio.timeout(TIMEOUT):
+                await stopping.handling.wait()
+            in_flight = asyncio.create_task(call(running_port(stopping.service), "Slow"))
+            await stopping.slow_started.wait()
+            consumer = stopping.service.workers[1]
+            nats.freeze()
+            started = monotonic()
+        stopped_in = monotonic() - started
+        consumer.cancel()  # asked again, it stops
+        await asyncio.wait((consumer,))
+        with pytest.raises(grpc.aio.AioRpcError):
+            await in_flight
+    assert stopped_in < limits.stop_budget + 2  # the pool and the rest take milliseconds

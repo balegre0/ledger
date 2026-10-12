@@ -1,5 +1,6 @@
 import asyncio
-from time import perf_counter
+import threading
+from time import monotonic, perf_counter
 from typing import Final, final, override
 lazy from collections.abc import Sequence
 
@@ -446,3 +447,34 @@ def test_the_first_tracing_made_process_wide_stays_so_without_a_warning(
     assert isinstance(registered, TracerProvider)
     assert trace.get_tracer_provider() is registered
     assert [record for record in caplog.records if record.name.startswith("opentelemetry")] == []
+
+
+@final
+class HangingExporter(SpanExporter):
+    """A collector that never answers: every export waits until the test lets it go."""
+
+    def __init__(self) -> None:
+        self.released = threading.Event()
+
+    @override
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        del spans
+        self.released.wait()
+        return SpanExportResult.SUCCESS
+
+
+def test_a_flush_that_hangs_is_left_behind_after_its_time_limit() -> None:
+    """A collector that is gone must not keep the service from stopping: the stop goes on after the limit,
+    and the export finishes (or not) on a thread that never holds up the process's exit."""
+    exporter = HangingExporter()
+    tracing = Tracing.create(service_name="invoicing", exporter=exporter)
+    with tracing.tracer.start_as_current_span("pending"):
+        pass
+    started = monotonic()
+    try:
+        with capture_logs() as logs:
+            tracing.shutdown(timeout=0.2)
+        assert monotonic() - started < 2
+        assert logs == [{"event": "tracing.shutdown_timed_out", "log_level": "warning", "timeout": 0.2}]
+    finally:
+        exporter.released.set()

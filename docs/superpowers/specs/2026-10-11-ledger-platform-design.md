@@ -452,7 +452,10 @@ company can certify while another runs in production.
   consumer's configuration, by one of the error codes nats-server gives such a refusal; its subject or its
   ack policy would have to change; an option cannot work) is not started again; a stream that does not exist
   yet is not such a mistake: `/readyz` and `/livez` both fail, the orchestrator restarts the pod, and the
-  mistake shows as a crash loop. A stop gives all the workers one grace together.
+  mistake shows as a crash loop. A stop is bounded whatever hangs: the gRPC calls in flight, the
+  workers (all together), the NATS drain and the span flush each get a time limit (8, 8, 4 and 4 s by
+  default), so a stop takes at most their sum, 24 s; a pod's `terminationGracePeriodSeconds` must exceed
+  the ASGI server's own drain plus that sum (Kubernetes' default of 30 s leaves the HTTP drain 6 s).
 - **SLOs:** API availability 99.9 %; p95 `POST /v1/invoices` < 300 ms (excluding DGII); 99 % of
   documents reach a final DGII state within 5 minutes when DGII is up.
 - **Alerts:** SLO burn rate, new dead letters (a new advisory in `DEAD_LETTERS`, or that stream

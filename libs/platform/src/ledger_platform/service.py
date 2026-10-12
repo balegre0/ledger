@@ -40,16 +40,16 @@ lazy from opentelemetry.sdk.trace.export import SpanExporter
 
 from ledger_kernel.errors import LedgerError, UnavailableError, error_type, truncate
 from ledger_platform.consumer import Consumer, ConsumerMetrics, ConsumerRefusedError
-from ledger_platform.database import DEFAULT_LIMITS, Database
+from ledger_platform.database import DEFAULT_LIMITS, DEFAULT_POOL_SIZE, Database
 from ledger_platform.grpc_server import serve_grpc
 from ledger_platform.health import Health
 from ledger_platform.lifecycle import Lifecycle
 from ledger_platform.logs import Throttled, configure_logging
-from ledger_platform.options import InvalidOptionError, require_seconds
+from ledger_platform.options import InvalidOptionError, require_at_least, require_seconds
 from ledger_platform.outbox import DEFAULT_PUBLISH_TIMEOUT, Outbox
 from ledger_platform.streams import DEAD_LETTERS, ensure_stream
 from ledger_platform.supervision import Supervisor
-from ledger_platform.tracing import Tracing
+from ledger_platform.tracing import DEFAULT_SHUTDOWN_TIMEOUT, Tracing
 from ledger_platform.web import ApiInfo, Observability, create_app
 lazy from ledger_platform.consumer import ConsumerSpec
 lazy from ledger_platform.database import DatabaseLimits
@@ -70,11 +70,15 @@ JetStream's acknowledgements: the rest is the margin for the statements of the p
 DEFAULT_NATS_CONNECT_TIMEOUT: Final = 60.0
 """Seconds the first connection to NATS is retried before the start fails: long enough for NATS to start
 alongside the service, short enough that a wrong address shows as a crash loop."""
-DEFAULT_WORKER_STOP_GRACE: Final = 10.0
-NATS_ERRORS_LOGGED_EVERY: Final = 60.0
-"""Seconds between two log lines of the errors of a connection to NATS that stays unreachable."""
+DEFAULT_GRPC_STOP_GRACE: Final = 8.0
+"""Seconds the calls in flight are given to finish when the service stops."""
+DEFAULT_WORKER_STOP_GRACE: Final = 8.0
 """Seconds the workers are given to stop, all together, like the gRPC server's grace: a handler may be
 finishing a statement."""
+DEFAULT_NATS_DRAIN_TIMEOUT: Final = 4.0
+"""Seconds the connection to NATS is given to drain (what it buffered goes out) before it is closed."""
+NATS_ERRORS_LOGGED_EVERY: Final = 60.0
+"""Seconds between two log lines of the errors of a connection to NATS that stays unreachable."""
 _logger = structlog.stdlib.get_logger(__name__)
 
 
@@ -205,19 +209,41 @@ class ServiceLimits:
     (``_PUBLISH_SHARE_OF_IDLE``): PostgreSQL ends a session idle in its transaction for that long, and the
     pass needs the rest for its statements. That relation is checked here; the outbox checks its own rules for
     the timeout (positive, at most ``MAX_PUBLISH_TIMEOUT``) when the service starts.
+
+    A stop takes at most ``stop_budget`` seconds, whatever hangs: the gRPC grace, the workers' grace, the
+    NATS drain and the span flush, one after the other (closing the pool takes milliseconds). Kubernetes kills
+    a pod ``terminationGracePeriodSeconds`` after it asked it to stop (30 by default), and the ASGI server
+    drains its HTTP requests before the chassis's stop begins: that grace must exceed the server's own drain
+    plus ``stop_budget`` (24 seconds by default).
     """
 
     database: DatabaseLimits = DEFAULT_LIMITS
+    pool_size: int = DEFAULT_POOL_SIZE
+    """Connections the PostgreSQL pool keeps; as many again are opened for bursts."""
     publish_timeout: float = DEFAULT_PUBLISH_TIMEOUT
     """Seconds the relay waits for the acknowledgements of a batch."""
     nats_connect_timeout: float = DEFAULT_NATS_CONNECT_TIMEOUT
     """Seconds the first connection to NATS is retried before the start fails; reconnections are unlimited."""
+    grpc_stop_grace: float = DEFAULT_GRPC_STOP_GRACE
+    """Seconds the gRPC calls in flight are given to finish when the service stops; then they are cut."""
     worker_stop_grace: float = DEFAULT_WORKER_STOP_GRACE
     """Seconds the workers are given to stop, together; one that takes longer is logged and left behind."""
+    nats_drain_timeout: float = DEFAULT_NATS_DRAIN_TIMEOUT
+    """Seconds the connection to NATS is given to drain; then it is closed."""
+    span_flush_timeout: float = DEFAULT_SHUTDOWN_TIMEOUT
+    """Seconds the pending spans are given to reach the collector, and each export to it is given."""
 
     def __post_init__(self) -> None:
-        require_seconds(InvalidServiceOptionError, "nats_connect_timeout", self.nats_connect_timeout)
-        require_seconds(InvalidServiceOptionError, "worker_stop_grace", self.worker_stop_grace)
+        require_at_least(InvalidServiceOptionError, "pool_size", self.pool_size)
+        waits = {
+            "nats_connect_timeout": self.nats_connect_timeout,
+            "grpc_stop_grace": self.grpc_stop_grace,
+            "worker_stop_grace": self.worker_stop_grace,
+            "nats_drain_timeout": self.nats_drain_timeout,
+            "span_flush_timeout": self.span_flush_timeout,
+        }
+        for option, seconds in waits.items():
+            require_seconds(InvalidServiceOptionError, option, seconds)
         idle = self.database.idle_in_transaction_session_timeout.total_seconds()
         ceiling = idle * _PUBLISH_SHARE_OF_IDLE
         if not self.publish_timeout <= ceiling:  # NaN included
@@ -230,14 +256,26 @@ class ServiceLimits:
                 value=self.publish_timeout,
             )
 
+    @property
+    def stop_budget(self) -> float:
+        """The longest a stop takes, in seconds, whatever hangs (see the class)."""
+        return (
+            self.grpc_stop_grace + self.worker_stop_grace + self.nats_drain_timeout + self.span_flush_timeout
+        )
+
 
 _DEFAULT_LIMITS: Final = ServiceLimits()
 
 
-def _exporter(settings: ServiceSettings) -> SpanExporter | None:
-    """An OTLP/gRPC exporter to the collector the settings name; none when they name none."""
+def _exporter(settings: ServiceSettings, limits: ServiceLimits) -> SpanExporter | None:
+    """An OTLP/gRPC exporter to the collector the settings name; none when they name none.
+
+    Each export is held to the time limit of the flush at the stop.
+    """
     endpoint = settings.otlp_endpoint
-    return None if endpoint is None else OTLPSpanExporter(endpoint=endpoint)
+    return (
+        None if endpoint is None else OTLPSpanExporter(endpoint=endpoint, timeout=limits.span_flush_timeout)
+    )
 
 
 @final
@@ -289,18 +327,34 @@ async def _connect(client: Client, settings: ServiceSettings, limit: float) -> N
         raise NatsUnreachableError(limit) from error
 
 
-async def _disconnect(client: Client) -> None:
-    """Drain a live connection: what it has buffered goes out and its subscriptions end. Close any other.
+async def _disconnect(client: Client, limit: float) -> None:
+    """Drain a live connection within ``limit`` seconds, then close it; close any other at once.
+
+    Draining sends what the connection buffered and ends its subscriptions.
 
     Draining refuses a connection that is closed (someone closed it), reconnecting (NATS is unreachable) or
     still connecting (the start was cut short): closing stops the attempts, and leaves a closed one as it is.
-    The settings refuse a NATS URL the client could not parse, so ``connect`` has always begun by now.
+    The settings refuse a NATS URL the client could not parse, so ``connect`` has always begun by now. A
+    server that stopped answering would keep nats-py draining for forty seconds (its flush, then its drain
+    timeout): past ``limit`` the drain is logged as ``nats.drain_timed_out`` and the connection closed.
     """
+    draining: asyncio.Task[None] | None = None
     try:
         if client.is_connected:
-            await client.drain()
+            draining = asyncio.create_task(client.drain())
+            _, unfinished = await asyncio.wait((draining,), timeout=limit)
+            if unfinished:
+                _logger.warning("nats.drain_timed_out", timeout=limit)
     finally:
         await client.close()
+        if draining is not None:
+            await _finish(draining)
+
+
+async def _finish(draining: asyncio.Task[None]) -> None:
+    """Let a drain the close cut short end, and take how it ended, error or not: nobody else awaits it."""
+    draining.cancel()
+    await asyncio.gather(draining, return_exceptions=True)
 
 
 @final
@@ -339,7 +393,9 @@ class Service[S: ServiceSettings]:
         self._events: Events[S] = Events() if events is None else events
         self._limits = limits
         self._registry = CollectorRegistry()
-        self._tracing = Tracing.create(service_name=settings.service_name, exporter=_exporter(settings))
+        self._tracing = Tracing.create(
+            service_name=settings.service_name, exporter=_exporter(settings, limits)
+        )
         self._supervisor = Supervisor(registry=self._registry, permanent=_PERMANENT)
         self._runtime: Runtime[S] | None = None
         self._grpc_port: int | None = None
@@ -405,13 +461,14 @@ class Service[S: ServiceSettings]:
         database = await lifecycle.enter(
             Database.open(
                 settings.database_url.get_secret_value(),
+                pool_size=limits.pool_size,
                 application_name=settings.service_name,
                 limits=limits.database,
             )
         )
         connection = Client()
         # Closed in every case, so registered before it connects: an attempt cut short is closed too.
-        lifecycle.on_close(partial(_disconnect, connection))
+        lifecycle.on_close(partial(_disconnect, connection, limits.nats_drain_timeout))
         await _connect(connection, settings, limits.nats_connect_timeout)
         jetstream = JetStreamContext(connection)
         for stream in (DEAD_LETTERS, *self._events.streams):
@@ -443,7 +500,10 @@ class Service[S: ServiceSettings]:
         if services is not None:
             self._grpc_port = await lifecycle.enter(
                 serve_grpc(
-                    port=settings.grpc_port, register=partial(services, runtime), registry=self._registry
+                    port=settings.grpc_port,
+                    register=partial(services, runtime),
+                    registry=self._registry,
+                    grace=limits.grpc_stop_grace,
                 )
             )
         return runtime
@@ -453,7 +513,7 @@ class Service[S: ServiceSettings]:
         return self.runtime()
 
     async def _export_pending_spans(self) -> None:
-        await asyncio.to_thread(self._tracing.shutdown)
+        await asyncio.to_thread(self._tracing.shutdown, self._limits.span_flush_timeout)
 
     async def _database_answers(self) -> None:
         await self.runtime().database.ping()

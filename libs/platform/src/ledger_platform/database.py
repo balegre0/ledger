@@ -175,6 +175,8 @@ class DatabaseLimits:
 
 
 DEFAULT_LIMITS: Final = DatabaseLimits()
+DEFAULT_POOL_SIZE: Final = 10
+"""Connections a pool keeps, unless told otherwise; as many again are opened for bursts."""
 
 
 def _require_psycopg(url: URL) -> None:
@@ -358,7 +360,7 @@ class Database:
         cls,
         url: str,
         *,
-        pool_size: int = 10,
+        pool_size: int = DEFAULT_POOL_SIZE,
         application_name: str = "ledger",
         limits: DatabaseLimits = DEFAULT_LIMITS,
     ) -> AsyncGenerator[Database]:

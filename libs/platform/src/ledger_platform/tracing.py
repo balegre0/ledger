@@ -7,6 +7,7 @@ than that; every exporter is given the spans of others (a service's code, FastAP
 ``RedactingSpanExporter``.
 """
 
+import threading
 from contextlib import contextmanager
 from typing import Final, final, override
 lazy from collections.abc import Generator, Sequence
@@ -40,6 +41,8 @@ _REDACTED_SPAN_ATTRIBUTES: Final = frozenset({"url.path", "url.query", "url.full
 """What an instrumentation copies from a request as it came: the path, with the values of its parameters
 (``/taxpayers/00112345678``), and the query string, whatever a client chose to put in it, in the names of the
 current semantic conventions and of the older ones. The span's name and ``http.route`` keep the template."""
+DEFAULT_SHUTDOWN_TIMEOUT: Final = 4.0
+"""Seconds a shutdown waits for the pending spans to be exported before it leaves them behind."""
 _logger = structlog.stdlib.get_logger(__name__)
 
 
@@ -197,11 +200,13 @@ class Tracing:
                 span.add_event(_EXCEPTION, {_EXCEPTION_TYPE: error_type(error)})
                 raise
 
-    def shutdown(self) -> None:
-        """Export what is pending and stop.
+    def shutdown(self, timeout: float = DEFAULT_SHUTDOWN_TIMEOUT) -> None:
+        """Export what is pending and stop, giving up after ``timeout`` seconds.
 
-        Blocking: the batch worker flushes and the exporter stops before this returns, so asynchronous code
-        runs it with ``asyncio.to_thread``, never directly on the event loop.
+        Blocking: it waits for the batch worker to flush and the exporter to stop, so asynchronous code runs
+        it with ``asyncio.to_thread``, never directly on the event loop. The work runs on a daemon thread of
+        its own: one still running after ``timeout`` (a collector that does not answer) is logged as
+        ``tracing.shutdown_timed_out`` and left behind, and never holds up the process's exit.
 
         Only the first call does anything. An exporter that fails to flush or to stop (a collector that is
         gone) is logged and does not fail the shutdown: telemetry must not keep a service from stopping.
@@ -209,6 +214,13 @@ class Tracing:
         if self._stopped:
             return
         self._stopped = True
+        stopping = threading.Thread(target=self._stop_provider, name="tracing-shutdown", daemon=True)
+        stopping.start()
+        stopping.join(timeout)
+        if stopping.is_alive():
+            _logger.warning("tracing.shutdown_timed_out", timeout=timeout)
+
+    def _stop_provider(self) -> None:
         try:
             self._provider.shutdown()
         except Exception:
