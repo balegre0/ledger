@@ -127,3 +127,13 @@ def described(value: object) -> str:
     """
     shown = truncate(value, _EXCERPT) if isinstance(value, str) else _BOUNDED.repr(value)
     return f"{type(value).__name__}: {shown}"
+
+
+def error_type(error: BaseException) -> str:
+    """The qualified class name of ``error``, never what it says: what logs, metrics and spans name it by.
+
+    Spelled as OpenTelemetry spells ``exception.type``: the module and the qualified name, without the
+    ``builtins.`` of a built-in exception (``ValueError``, ``ledger_kernel.errors.InvalidInputError``).
+    """
+    kind = type(error)
+    return kind.__qualname__ if kind.__module__ == "builtins" else f"{kind.__module__}.{kind.__qualname__}"

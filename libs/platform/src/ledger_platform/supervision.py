@@ -21,11 +21,13 @@ import random
 from math import ceil, log2
 from time import monotonic
 from typing import Final, Never, final
-lazy from collections.abc import Awaitable, Callable, Coroutine
+lazy from collections.abc import Callable, Coroutine
 
 import structlog
 from prometheus_client import Counter
 lazy from prometheus_client import CollectorRegistry
+
+lazy from ledger_kernel.clock import MonotonicClock, Sleep
 
 FIRST_RESTART_DELAY: Final = 1.0
 """Seconds before a worker that failed starts again, after its first failure in a row."""
@@ -41,10 +43,6 @@ _logger = structlog.stdlib.get_logger(__name__)
 
 type Work = Callable[[], Coroutine[object, object, Never]]
 """Starts a run of a worker: a coroutine that never returns."""
-type Sleep = Callable[[float], Awaitable[None]]
-"""Waits that many seconds. A test passes its own."""
-type Clock = Callable[[], float]
-"""Monotonic seconds. A test passes its own."""
 type Draw = Callable[[], float]
 """A number drawn at random in ``[0, 1)``. A test passes its own."""
 
@@ -81,7 +79,7 @@ class Supervisor:
         registry: CollectorRegistry,
         permanent: tuple[type[Exception], ...],
         sleep: Sleep = asyncio.sleep,
-        clock: Clock = monotonic,
+        clock: MonotonicClock = monotonic,
         draw: Draw = random.random,
     ) -> None:
         self._permanent = permanent

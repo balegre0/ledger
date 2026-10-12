@@ -14,6 +14,7 @@ from ledger_kernel.errors import (
     NotFoundError,
     UnavailableError,
     described,
+    error_type,
     excerpt,
     truncate,
 )
@@ -163,3 +164,28 @@ def test_a_description_is_bounded_whatever_the_value(value: object) -> None:
 def test_an_integer_too_big_to_print_is_described_not_raised() -> None:
     # `str(10**5000)` raises ValueError: the description of a value must never fail on the value.
     assert described(10**5000).startswith("int: ")
+
+
+class OuterError(Exception):
+    class InnerError(Exception):
+        pass
+
+
+@pytest.mark.parametrize(
+    ("error", "spelled"),
+    [
+        (ValueError(), "ValueError"),
+        (TimeoutError(), "TimeoutError"),
+        (InvalidInputError(), "ledger_kernel.errors.InvalidInputError"),
+        (OuterError.InnerError(), f"{__name__}.OuterError.InnerError"),
+        (KeyboardInterrupt(), "KeyboardInterrupt"),
+    ],
+    ids=["builtin", "builtin-subclass-of-oserror", "kernel", "nested", "base-exception"],
+)
+def test_an_error_type_is_spelled_as_opentelemetry_spells_it(error: BaseException, spelled: str) -> None:
+    """Module and qualified name, without the ``builtins.`` of the built-in ones: one spelling everywhere."""
+    assert error_type(error) == spelled
+
+
+def test_an_error_type_never_says_what_the_error_says() -> None:
+    assert error_type(ValueError("card 4111111111111111")) == "ValueError"

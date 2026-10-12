@@ -28,7 +28,7 @@ from datetime import UTC, datetime
 from math import ceil, inf, log2
 from typing import ClassVar, Final, Never, final
 from uuid import UUID
-lazy from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+lazy from collections.abc import Iterator, Mapping, Sequence
 
 import structlog
 from prometheus_client import Counter, Gauge
@@ -52,10 +52,11 @@ lazy from nats.js import JetStreamContext
 lazy from prometheus_client import CollectorRegistry
 lazy from sqlalchemy import Update
 
-from ledger_kernel.errors import ErrorKind, LedgerError, excerpt
+from ledger_kernel.errors import ErrorKind, LedgerError, error_type, excerpt
 from ledger_platform.database import PlatformTable
 from ledger_platform.options import InvalidOptionError, require_at_least, require_seconds
 lazy from ledger_contracts.envelope import Envelope
+lazy from ledger_kernel.clock import Sleep
 lazy from ledger_platform.database import Database, UnitOfWork
 lazy from ledger_platform.tracing import Tracing
 
@@ -89,9 +90,6 @@ _SUBJECT: Final = re.compile(rf"{_LABEL}(?:\.{_LABEL})*", re.ASCII)
 """Labels of visible ASCII (no space, no ``.``, no wildcard ``*`` or ``>``) separated by single dots."""
 _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 _logger = structlog.stdlib.get_logger(__name__)
-
-type Sleep = Callable[[float], Awaitable[None]]
-"""Waits that many seconds. A test passes its own, so that no test waits."""
 
 
 class InvalidOutboxOptionError(InvalidOptionError):
@@ -180,12 +178,6 @@ def _wire_size(headers: Mapping[str, str], data: bytes) -> int:
     """
     lines = sum(len(name) + len(": ") + len(value) + len("\r\n") for name, value in headers.items())
     return len("NATS/1.0\r\n") + lines + len("\r\n") + len(data)
-
-
-def _type_name(error: BaseException) -> str:
-    """The qualified class name of ``error``."""
-    kind = type(error)
-    return f"{kind.__module__}.{kind.__qualname__}"
 
 
 def _delays(first: float) -> Iterator[float]:
@@ -391,7 +383,7 @@ class Outbox:
             raise PublishFailedError(
                 event_id=event.id,
                 subject=event.subject,
-                error_type=_type_name(reason),
+                error_type=error_type(reason),
                 acknowledged=len(acknowledged),
                 failed=len(failures),
             ) from reason

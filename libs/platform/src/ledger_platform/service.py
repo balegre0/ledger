@@ -37,7 +37,7 @@ lazy import grpc
 lazy from fastapi import APIRouter, FastAPI
 lazy from opentelemetry.sdk.trace.export import SpanExporter
 
-from ledger_kernel.errors import LedgerError, UnavailableError, truncate
+from ledger_kernel.errors import LedgerError, UnavailableError, error_type, truncate
 from ledger_platform.consumer import Consumer, ConsumerMetrics, ConsumerRefusedError
 from ledger_platform.database import DEFAULT_LIMITS, Database
 from ledger_platform.grpc_server import serve_grpc
@@ -247,7 +247,7 @@ class _ConnectionLog:
         self._client = client
 
     async def failed(self, error: Exception) -> None:
-        _logger.warning("nats.error", error=type(error).__name__, detail=truncate(str(error), _DETAIL_LIMIT))
+        _logger.warning("nats.error", error=error_type(error), detail=truncate(str(error), _DETAIL_LIMIT))
 
     async def disconnected(self) -> None:
         if not self._client.is_closed:  # closing it on purpose says nothing worth a warning

@@ -9,6 +9,7 @@ lazy from collections.abc import Awaitable, Callable
 import structlog
 
 from ledger_kernel.errors import LedgerError
+lazy from ledger_kernel.clock import MonotonicClock
 
 type Check = Callable[[], Awaitable[object]]
 """Returns when healthy, raises when not."""
@@ -81,7 +82,7 @@ class Health:
         *,
         timeout: float = 2.0,
         wedge_after: float | None = None,
-        clock: Callable[[], float] = monotonic,
+        clock: MonotonicClock = monotonic,
     ) -> None:
         self._checks: dict[str, Check] = {}
         self._timeout = timeout

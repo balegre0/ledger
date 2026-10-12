@@ -22,6 +22,8 @@ lazy from opentelemetry.sdk.trace.export import SpanExportResult
 lazy from opentelemetry.trace import Span, Tracer
 lazy from opentelemetry.util.types import Attributes
 
+from ledger_kernel.errors import error_type
+
 _PROPAGATOR: Final = TraceContextTextMapPropagator()
 _TRACEPARENT: Final = "traceparent"
 _MAX_TRACEPARENT_LENGTH: Final = 55
@@ -116,12 +118,6 @@ class RedactingSpanExporter(SpanExporter):
         return self._exporter.force_flush(timeout_millis)
 
 
-def _type_name(error: Exception) -> str:
-    """The qualified class name of ``error``, spelled as OpenTelemetry spells it (no ``builtins.``)."""
-    kind = type(error)
-    return kind.__qualname__ if kind.__module__ == "builtins" else f"{kind.__module__}.{kind.__qualname__}"
-
-
 def _carrier(traceparent: str | None) -> dict[str, str]:
     """``traceparent`` to extract from, or nothing to extract when it is absent or too long to be one."""
     if traceparent and len(traceparent) <= _MAX_TRACEPARENT_LENGTH:
@@ -198,7 +194,7 @@ class Tracing:
                 yield span
             except Exception as error:
                 span.set_status(Status(StatusCode.ERROR))
-                span.add_event(_EXCEPTION, {_EXCEPTION_TYPE: _type_name(error)})
+                span.add_event(_EXCEPTION, {_EXCEPTION_TYPE: error_type(error)})
                 raise
 
     def shutdown(self) -> None:
