@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 
 import pytest
 
@@ -41,6 +42,77 @@ async def test_checks_run_concurrently() -> None:
     health.add("first", meets_second)
     health.add("second", meets_first)
     assert await health.run() == {"first": True, "second": True}
+
+
+async def test_a_check_that_swallows_its_cancellation_is_unhealthy() -> None:
+    """The deadline cancels the check; one that carries on as if nothing happened has still missed it."""
+
+    async def gives_up_quietly() -> None:
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.sleep(10)
+
+    health = Health(timeout=0.05)
+    health.add("quiet", gives_up_quietly)
+    assert await health.run() == {"quiet": False}
+
+
+async def test_a_check_that_raises_cancelled_by_itself_is_unhealthy() -> None:
+    async def cancels_itself() -> None:
+        raise asyncio.CancelledError
+
+    health = Health()
+    health.add("odd", cancels_itself)
+    assert await health.run() == {"odd": False}
+
+
+async def test_a_check_that_ignores_cancellation_does_not_hold_up_the_probe() -> None:
+    release, finished = asyncio.Event(), asyncio.Event()
+    started: list[str] = []
+
+    async def stubborn() -> None:
+        started.append("stubborn")
+        while not release.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await release.wait()
+        finished.set()
+
+    health = Health(timeout=0.05)
+    health.add("stubborn", stubborn)
+    health.add("database", healthy)
+    try:
+        async with asyncio.timeout(2):
+            first = await health.run()
+            second = await health.run()
+        assert first == second == {"stubborn": False, "database": True}
+        assert started == ["stubborn"], "a check still running is not started again"
+    finally:
+        release.set()
+    await finished.wait()
+    await asyncio.sleep(0)
+    assert await health.run() == {"stubborn": True, "database": True}
+    assert started == ["stubborn", "stubborn"]
+
+
+async def test_cancelling_the_run_cancels_the_checks_and_propagates() -> None:
+    running, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def waits() -> None:
+        running.set()
+        try:
+            await asyncio.sleep(10)
+        finally:
+            cancelled.set()
+
+    health = Health()
+    health.add("slow", waits)
+    probe = asyncio.create_task(health.run())
+    await running.wait()
+    probe.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await probe
+    async with asyncio.timeout(2):
+        await cancelled.wait()
+    await asyncio.sleep(0)
 
 
 async def test_no_checks_is_healthy() -> None:

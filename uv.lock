@@ -534,6 +534,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "starlette" },
     { name = "structlog" },
 ]
 
@@ -552,6 +553,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.14.1" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.1.4" },
+    { name = "starlette", specifier = ">=1.7.0" },
     { name = "structlog", specifier = ">=26.1.0" },
 ]
 

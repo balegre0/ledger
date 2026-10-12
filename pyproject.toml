@@ -125,10 +125,6 @@ ignore = [
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
-[tool.ruff.lint.pylint]
-# Five suits positional calls. An entry point that wires a service by keyword (create_app) takes six.
-max-args = 6
-
 [tool.ruff.lint.flake8-type-checking]
 strict = true
 runtime-evaluated-base-classes = [
