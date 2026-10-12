@@ -13,6 +13,7 @@ dev = [
     "httpx>=0.28.1",
     "hypothesis>=6.168.5",
     "import-linter>=2.15",
+    "ledger-testing",
     "mypy>=2.4.0",
     "mypy-protobuf>=5.1.0",
     "poethepoet>=0.48.0",
@@ -38,6 +39,7 @@ members = ["libs/*"]
 ledger-kernel = { workspace = true }
 ledger-contracts = { workspace = true }
 ledger-platform = { workspace = true }
+ledger-testing = { workspace = true }
 
 # ── Tasks: `uv run poe <task>` ──────────────────────────────────────────────────
 [tool.poe.tasks]
@@ -48,14 +50,16 @@ pyright = { cmd = "basedpyright", help = "Type check #1: basedpyright, mode 'all
 mypy-kernel = { cmd = "mypy libs/kernel" }
 mypy-contracts = { cmd = "mypy libs/contracts" }
 mypy-platform = { cmd = "mypy libs/platform" }
+mypy-testing = { cmd = "mypy libs/testing" }
 mypy-workspace = { cmd = "mypy tests" }
-mypy = { sequence = ["mypy-kernel", "mypy-contracts", "mypy-platform", "mypy-workspace"], help = "Type check #2, one package at a time (each has its own tests), then the workspace's own tests" }
+mypy = { sequence = ["mypy-kernel", "mypy-contracts", "mypy-platform", "mypy-testing", "mypy-workspace"], help = "Type check #2, one package at a time (each has its own tests), then the workspace's own tests" }
 types = { sequence = ["pyright", "mypy"], help = "Both type checkers" }
 arch = { cmd = "lint-imports", help = "Architecture contracts (import-linter)" }
 deps-kernel = { cmd = "deptry libs/kernel/src --config libs/kernel/pyproject.toml" }
 deps-contracts = { cmd = "deptry libs/contracts/src --config libs/contracts/pyproject.toml" }
 deps-platform = { cmd = "deptry libs/platform/src --config libs/platform/pyproject.toml" }
-deps = { sequence = ["deps-kernel", "deps-contracts", "deps-platform"], help = "Unused / missing / transitive dependencies, per package" }
+deps-testing = { cmd = "deptry libs/testing/src --config libs/testing/pyproject.toml" }
+deps = { sequence = ["deps-kernel", "deps-contracts", "deps-platform", "deps-testing"], help = "Unused / missing / transitive dependencies, per package" }
 spell = { cmd = "typos", help = "Spell check" }
 # Poe expands the `**` glob to absolute paths, and protoc only accepts a file that lies under a --proto_path
 # spelled the same way: hence the absolute --proto_path. The *_out directories take no such comparison and
@@ -137,7 +141,7 @@ runtime-evaluated-base-classes = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger"]
+known-first-party = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing", "ledger"]
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -209,7 +213,7 @@ asyncio_default_fixture_loop_scope = "function"
 
 [tool.coverage.run]
 branch = true
-source_pkgs = ["ledger_kernel", "ledger_contracts", "ledger_platform"]
+source_pkgs = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing"]
 core = "ctrace"
 
 [tool.coverage.report]
@@ -219,14 +223,14 @@ partial_branches = []  # no "pragma: no branch": every branch counts
 
 # ── Architecture contracts (import-linter) ──────────────────────────────────────
 [tool.importlinter]
-root_packages = ["ledger_kernel", "ledger_contracts", "ledger_platform"]
+root_packages = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Production code never imports test tooling"
 type = "forbidden"
 source_modules = ["ledger_kernel", "ledger_contracts", "ledger_platform"]
-forbidden_modules = ["pytest", "hypothesis", "testcontainers", "httpx"]
+forbidden_modules = ["pytest", "hypothesis", "testcontainers", "httpx", "ledger_testing"]
 
 [[tool.importlinter.contracts]]
 name = "Packages point down: platform -> contracts -> kernel"

@@ -7,6 +7,7 @@ members = [
     "ledger-contracts",
     "ledger-kernel",
     "ledger-platform",
+    "ledger-testing",
     "ledger-workspace",
 ]
 
@@ -558,6 +559,23 @@ requires-dist = [
 ]
 
 [[package]]
+name = "ledger-testing"
+version = "0.1.0"
+source = { editable = "libs/testing" }
+dependencies = [
+    { name = "psycopg", extra = ["binary"] },
+    { name = "structlog" },
+    { name = "testcontainers" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.3.6" },
+    { name = "structlog", specifier = ">=26.1.0" },
+    { name = "testcontainers", specifier = ">=4.15.0" },
+]
+
+[[package]]
 name = "ledger-workspace"
 version = "0.0.0"
 source = { virtual = "." }
@@ -575,6 +593,7 @@ dev = [
     { name = "httpx" },
     { name = "hypothesis" },
     { name = "import-linter" },
+    { name = "ledger-testing" },
     { name = "mypy" },
     { name = "mypy-protobuf" },
     { name = "poethepoet" },
@@ -604,6 +623,7 @@ dev = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "hypothesis", specifier = ">=6.168.5" },
     { name = "import-linter", specifier = ">=2.15" },
+    { name = "ledger-testing", editable = "libs/testing" },
     { name = "mypy", specifier = ">=2.4.0" },
     { name = "mypy-protobuf", specifier = ">=5.1.0" },
     { name = "poethepoet", specifier = ">=0.48.0" },
