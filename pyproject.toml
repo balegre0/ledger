@@ -231,6 +231,22 @@ name = "Packages point down: platform -> contracts -> kernel"
 type = "layers"
 layers = ["ledger_platform", "ledger_contracts", "ledger_kernel"]
 
+# Inside the platform: the service assembles the adapters (HTTP, gRPC, consumers), which use messaging (the
+# outbox, streams), which uses the infrastructure, which uses the foundations. Modules of one layer never import
+# each other. Exhaustive: a new module must be given its layer here.
+[[tool.importlinter.contracts]]
+name = "Platform layers: service -> adapters -> messaging -> infrastructure -> foundations"
+type = "layers"
+containers = ["ledger_platform"]
+exhaustive = true
+layers = [
+    "service",
+    "web | grpc_server | consumer",
+    "outbox | streams",
+    "database | tracing | health | logs",
+    "settings | options | lifecycle",
+]
+
 [[tool.importlinter.contracts]]
 name = "Kernel is standard library only"
 type = "forbidden"

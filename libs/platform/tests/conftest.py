@@ -23,6 +23,7 @@ from ledger_platform.tracing import Tracing
 POSTGRES_IMAGE = "postgres:18.6"
 NATS_IMAGE = "nats:2.12.15"
 NATS_PORT = 4222
+SMALL_PAYLOAD_CONFIG = "/small-payload.conf"
 
 
 def use_the_plain_baseline() -> None:
@@ -83,14 +84,31 @@ async def database(database_url: str) -> AsyncGenerator[Database]:
             await connection.run_sync(PlatformTable.metadata.drop_all)
 
 
+def nats_server(*arguments: str) -> DockerContainer:
+    """A NATS server with JetStream, started with ``arguments`` too, ready once it says so."""
+    return (
+        DockerContainer(NATS_IMAGE)
+        .with_command(["-js", *arguments])
+        .with_exposed_ports(NATS_PORT)
+        .waiting_for(LogMessageWaitStrategy("Server is ready"))
+    )
+
+
 @pytest.fixture(scope="session")
 def nats_url() -> Iterator[str]:
     """A real NATS server with JetStream."""
-    server = (
-        DockerContainer(NATS_IMAGE)
-        .with_command("-js")
-        .with_exposed_ports(NATS_PORT)
-        .waiting_for(LogMessageWaitStrategy("Server is ready"))
+    with nats_server() as container:
+        yield f"nats://{container.get_container_host_ip()}:{container.get_exposed_port(NATS_PORT)}"
+
+
+@pytest.fixture(scope="session")
+def small_payload_nats_url() -> Iterator[str]:
+    """A real NATS server with JetStream whose messages are at most 64 KiB, headers included.
+
+    ``max_payload`` is set in a configuration file: the server takes no flag for it.
+    """
+    server = nats_server("--config", SMALL_PAYLOAD_CONFIG).with_copy_into_container(
+        b"max_payload: 65536\n", SMALL_PAYLOAD_CONFIG
     )
     with server as container:
         yield f"nats://{container.get_container_host_ip()}:{container.get_exposed_port(NATS_PORT)}"

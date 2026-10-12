@@ -36,7 +36,3 @@ build-backend = "uv_build"
 "opentelemetry-exporter-otlp-proto-grpc" = "opentelemetry"
 "prometheus-client" = "prometheus_client"
 "pydantic-settings" = "pydantic_settings"
-
-[tool.deptry.per_rule_ignores]
-# Scaffolding: a name leaves this list in the task whose module starts importing it.
-DEP002 = ["opentelemetry-exporter-otlp-proto-grpc"]

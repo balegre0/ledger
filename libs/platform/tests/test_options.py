@@ -16,6 +16,7 @@ from ledger_platform.options import (
     require_seconds,
 )
 from ledger_platform.outbox import InvalidOutboxOptionError
+from ledger_platform.service import InvalidServiceOptionError
 from ledger_platform.streams import InvalidStreamSpecError
 
 
@@ -43,6 +44,7 @@ def test_a_value_is_cut_short_and_never_echoed_whole() -> None:
         (InvalidStreamSpecError, "invalid_stream_spec", "stream"),
         (InvalidConsumerOptionError, "invalid_consumer_option", "consumer option"),
         (InvalidGrpcOptionError, "invalid_grpc_option", "gRPC option"),
+        (InvalidServiceOptionError, "invalid_service_option", "service option"),
     ],
 )
 def test_every_module_keeps_its_own_code_and_label(
