@@ -16,6 +16,7 @@ from nats.js import JetStreamContext
 from opentelemetry.sdk.trace import TracerProvider
 from prometheus_client import CollectorRegistry
 from sqlalchemy import DateTime, String, column, delete, func, select, text, type_coerce, update
+from sqlalchemy.event import listen, remove
 from structlog.testing import capture_logs
 lazy from nats.aio.client import Client
 
@@ -951,6 +952,28 @@ async def test_the_events_that_are_due_are_read_through_an_index(database: Datab
     assert definition.endswith("(((attempts > 0)), created_at, id, next_attempt_at)")
 
 
+async def test_the_zero_of_the_retried_test_is_sent_to_postgresql_as_a_literal(
+    database: Database, jetstream: JetStreamContext, outbox: Outbox
+) -> None:
+    """A bound zero would not match the expression of ``ix_outbox_due``: PostgreSQL would read every row."""
+    sent: list[str] = []
+
+    def record(*arguments: object) -> None:
+        """SQLAlchemy's ``before_cursor_execute``: connection, cursor, statement, parameters, ..."""
+        statement = arguments[2]
+        assert isinstance(statement, str)
+        sent.append(statement)
+
+    listen(database.engine.sync_engine, "before_cursor_execute", record)
+    try:
+        await outbox.relay_once(database, jetstream)
+    finally:
+        remove(database.engine.sync_engine, "before_cursor_execute", record)
+
+    (lock,) = (statement for statement in sent if "FOR UPDATE" in statement)
+    assert "ORDER BY outbox.attempts > 0, outbox.created_at, outbox.id" in lock
+
+
 async def test_a_retry_the_pass_cannot_work_with_is_refused_before_anything_is_read(
     database: Database, jetstream: JetStreamContext, outbox: Outbox
 ) -> None:
@@ -984,7 +1007,8 @@ async def test_retried_events_cannot_delay_fresh_ones(
         await commit(database, outbox, envelope, subject="quiet.stuck")
     for _ in range(2):  # a batch of three, then the other two: every one of them has failed once
         with pytest.raises(PublishFailedError):
-            await outbox.relay_once(database, jetstream)
+            # The ceiling: the first three are not due again whenever the second pass happens to run
+            await outbox.relay_once(database, jetstream, retry=MAX_RETRY_DELAY)
     await make_due(database)
     for _ in range(3):
         await commit(database, outbox)

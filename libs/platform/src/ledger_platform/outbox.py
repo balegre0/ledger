@@ -75,8 +75,9 @@ MAX_RETRY_DELAY: Final = 30.0
 """The longest delay from a failure to the next attempt, for an event and for a failed pass alike."""
 MAX_IDLE: Final = 30.0
 """The longest ``idle`` allowed: how long a row of another replica, or an event that is due again, can wait
-for the poll that finds it. With the two ceilings above, an event is tried again at most 80 seconds after the
-attempt before (20 + 30 + 30), well inside the two-minute duplicate window of a stream by default."""
+for the poll that finds it. With the two ceilings above, an event is tried again about 80 seconds after the
+attempt before (20 + 30 + 30), and up to 100 when a slow pass is in flight when it falls due (20 more): still
+inside the two-minute duplicate window of a stream by default."""
 DEFAULT_MAX_PAYLOAD: Final = 1024 * 1024
 """NATS's default ``max_payload``, which counts the headers of a message as well as its body. A service passes
 the one its connection reports."""
@@ -284,7 +285,9 @@ class Outbox:
     passes that failed as a whole (the database, not a publish); gauges of the number of events waiting and of
     the time the oldest was stored (a timestamp, so ``time() - x`` keeps growing while the relay is blind).
     The gauges are read from the table, so every replica exports the same table-wide values: aggregate them
-    with ``max``, never ``sum``.
+    with ``max``, never ``sum``. To alert on lag: ``pending > 0 and time() - oldest_pending_timestamp_seconds
+    > threshold``; the timestamp is 0 when nothing waits, and ``time() - 0`` alone would read as a lag of
+    decades.
     """
 
     __slots__ = (
