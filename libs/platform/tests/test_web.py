@@ -15,7 +15,7 @@ from fastapi.responses import StreamingResponse
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SpanExporter
 from opentelemetry.trace import SpanKind, StatusCode, format_span_id, format_trace_id
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, TypeAdapter, field_validator
 from structlog.testing import capture_logs
 lazy from fastapi import FastAPI
 lazy from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
@@ -32,6 +32,8 @@ from ledger_kernel.errors import (
     described,
 )
 from ledger_platform.health import Health
+from ledger_platform.logs import configure_logging
+from ledger_platform.settings import LogFormat, ServiceSettings
 from ledger_platform.web import PROBLEM_JSON, AmbiguousRouteError, ApiInfo, Observability, create_app
 lazy from ledger_platform.tracing import Tracing
 
@@ -126,6 +128,7 @@ class Liveness(TypedDict):
 
 
 PROBLEM: Final = TypeAdapter(Problem)
+RECORD: Final = TypeAdapter(dict[str, JsonValue])
 LIVENESS: Final = TypeAdapter(Liveness)
 OTLP_HTTP: Final = "opentelemetry.exporter.otlp.proto.http"
 """The package of the OTLP/HTTP exporters FastAPI attaches by itself when told to: not installed here."""
@@ -218,6 +221,19 @@ async def fail(kind: str) -> None:
 @router.get("/crash")
 async def crash() -> None:
     raise ZeroDivisionError
+
+
+class Profile(BaseModel):
+    tax_id: int
+
+
+TAX_ID: Final = "001-1234567-8"
+"""A cédula a route answers where its response model wants a number: pydantic quotes it."""
+
+
+@router.get("/profile", response_model=Profile, include_in_schema=False)
+async def profile() -> dict[str, str]:
+    return {"tax_id": TAX_ID}
 
 
 async def two_chunks_the_second_one_broken() -> AsyncGenerator[bytes]:
@@ -562,6 +578,27 @@ async def test_an_internal_error_answers_like_a_bug_and_keeps_its_code_for_the_l
         "route": "/errors/{kind}",
         "code": "broken_invariant",
     }
+
+
+async def test_a_response_that_breaks_its_model_is_logged_without_what_it_held(
+    client: httpx.AsyncClient, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """FastAPI's error quotes the response it refused; the log says where and of which type, once."""
+    configure_logging(
+        ServiceSettings(
+            service_name="web-test",
+            database_url=SecretStr("postgresql+psycopg://x"),
+            log_format=LogFormat.JSON,
+        )
+    )
+    response = await client.get("/profile")
+    assert (response.status_code, PROBLEM.validate_json(response.content)["code"]) == (500, "internal")
+    output = capsys.readouterr().out
+    assert TAX_ID not in output
+    records = [RECORD.validate_json(line) for line in output.splitlines()]
+    (record,) = [record for record in records if record["logger"] != "httpx"]  # the test's client logs too
+    assert record["event"] == "http.unhandled_error"
+    assert "1 validation errors: response.tax_id (int_parsing)" in str(record["exception"])
 
 
 async def test_a_bug_is_logged_without_the_request(client: httpx.AsyncClient) -> None:

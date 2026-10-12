@@ -1,12 +1,18 @@
 import logging
 import threading
 from typing import Final, Literal
+lazy from collections.abc import AsyncGenerator
 
 import pytest
 import structlog
-from pydantic import JsonValue, SecretStr, TypeAdapter
+from fastapi.exceptions import RequestValidationError, ResponseValidationError
+from pydantic import BaseModel, JsonValue, SecretStr, TypeAdapter, ValidationError
+from sqlalchemy import Column, MetaData, Table, Text, insert
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import IntegrityError, OperationalError, StatementError
 lazy from structlog.typing import EventDict
 
+from ledger_platform.database import Database
 from ledger_platform.logs import configure_logging
 from ledger_platform.settings import LogFormat, ServiceSettings
 
@@ -170,3 +176,168 @@ def test_request_scoped_values_are_merged_and_the_callers_context_is_left_alone(
     (line,) = lines(capsys.readouterr().out)
     assert line["request_id"] == "r-1"
     assert structlog.contextvars.get_contextvars() == {"request_id": "r-1"}
+
+
+# ── Exceptions that quote data ──────────────────────────────────────────────────
+
+TAX_ID: Final = "00112345678"
+"""A cédula: personal data, which PostgreSQL quotes in the DETAIL of a unique violation."""
+TAXPAYERS: Final = Table("taxpayers", MetaData(), Column("tax_id", Text, unique=True))
+UNIQUE: Final = "taxpayers_tax_id_key"
+WITHHELD: Final = "(message withheld: it can quote values)"
+INSERT: Final = "INSERT INTO taxpayers (tax_id) VALUES (%(tax_id)s::VARCHAR)"
+"""The statement SQLAlchemy runs to add a taxpayer: code, not data, so the log keeps it."""
+
+
+class RecordingFailedError(Exception):
+    """An error of a service's own, raised while handling a database error: its message is ours."""
+
+    def __init__(self) -> None:
+        super().__init__("the payment could not be recorded")
+
+
+@pytest.fixture
+async def taxpayers(database: Database) -> AsyncGenerator[Database]:
+    async with database.engine.begin() as connection:
+        await connection.run_sync(TAXPAYERS.create)
+    yield database
+    async with database.engine.begin() as connection:
+        await connection.run_sync(TAXPAYERS.drop)
+
+
+async def unique_violation(database: Database) -> IntegrityError:
+    """A real one: the same tax id twice. PostgreSQL's answer quotes it."""
+    async with database.transaction(None) as unit:
+        await unit.connection.execute(insert(TAXPAYERS).values(tax_id=TAX_ID))
+    with pytest.raises(IntegrityError) as violated:
+        async with database.transaction(None) as unit:
+            await unit.connection.execute(insert(TAXPAYERS).values(tax_id=TAX_ID))
+    assert TAX_ID in str(violated.value)
+    return violated.value
+
+
+def logged(error: BaseException, log_format: LogFormat, capsys: pytest.CaptureFixture[str]) -> str:
+    configure_logging(settings(log_format))
+    structlog.stdlib.get_logger("ledger.test").error("work.failed", exc_info=error)
+    return capsys.readouterr().out
+
+
+def exception_values(output: str) -> dict[str, str]:
+    """Each exception of the chain by its type: what a JSON record says it said."""
+    (line,) = lines(output)
+    stacks = line["exception"]
+    assert isinstance(stacks, list)
+    values: dict[str, str] = {}
+    for stack in stacks:
+        assert isinstance(stack, dict)
+        kind, value = stack["exc_type"], stack["exc_value"]
+        assert isinstance(kind, str)
+        assert isinstance(value, str)
+        values[kind] = value
+    return values
+
+
+async def test_a_unique_violation_is_logged_as_json_by_its_sqlstate_and_names_without_the_value(
+    taxpayers: Database, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output = logged(await unique_violation(taxpayers), LogFormat.JSON, capsys)
+    assert TAX_ID not in output
+    named = f"sqlstate=23505 schema=public table=taxpayers constraint={UNIQUE} {WITHHELD}"
+    assert exception_values(output) == {
+        "IntegrityError": (f"(psycopg.errors.UniqueViolation) {named} [SQL: {INSERT}]"),
+        "UniqueViolation": named,
+    }
+
+
+async def test_a_unique_violation_is_logged_to_a_terminal_without_the_value(
+    taxpayers: Database, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output = logged(await unique_violation(taxpayers), LogFormat.CONSOLE, capsys)
+    assert TAX_ID not in output
+    assert f"UniqueViolation: sqlstate=23505 schema=public table=taxpayers constraint={UNIQUE}" in output
+    assert "IntegrityError: (psycopg.errors.UniqueViolation) sqlstate=23505" in output
+    assert "Traceback (most recent call last)" in output
+
+
+@pytest.mark.parametrize("log_format", list(LogFormat))
+async def test_a_violation_anywhere_in_the_chain_or_a_group_is_withheld(
+    taxpayers: Database, capsys: pytest.CaptureFixture[str], log_format: LogFormat
+) -> None:
+    """The context of an error raised while handling it, and a member of a group: every copy is withheld."""
+    violation = await unique_violation(taxpayers)
+    try:
+        try:
+            raise violation
+        except IntegrityError as caught:
+            raise RecordingFailedError from caught.__cause__
+    except RecordingFailedError as wrapped:
+        group = ExceptionGroup("tasks failed", [wrapped, violation])
+    output = logged(group, log_format, capsys)
+    assert TAX_ID not in output
+    assert "the payment could not be recorded" in output  # ours: kept
+
+
+async def test_a_failed_connection_keeps_what_libpq_says(
+    database_url: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A connection attempt names the server and the role, never a row: its words are what ops need."""
+    refused = make_url(database_url).set(password="wrong-password").render_as_string(hide_password=False)
+    async with Database.open(refused, pool_size=1) as unreachable:
+        with pytest.raises(OperationalError) as failed:
+            await unreachable.ping()
+    output = logged(failed.value, LogFormat.JSON, capsys)
+    assert (
+        'password authentication failed for user "ledger_app"' in exception_values(output)["OperationalError"]
+    )
+    assert "wrong-password" not in output
+
+
+class Payment(BaseModel):
+    payer: str
+    amount: int
+
+
+def test_a_validation_error_is_logged_by_its_locations_and_types_without_the_input(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(ValidationError) as invalid:
+        Payment.model_validate({"payer": 7, "amount": TAX_ID + "x"})
+    assert TAX_ID in str(invalid.value)  # pydantic quotes the input
+    output = logged(invalid.value, LogFormat.JSON, capsys)
+    assert TAX_ID not in output
+    assert exception_values(output) == {
+        "ValidationError": "2 validation errors for Payment: payer (string_type), amount (int_parsing)"
+    }
+
+
+def test_a_request_that_breaks_the_schema_is_logged_without_what_was_sent(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    errors = [{"loc": ("body", "payer"), "type": "missing", "msg": "Field required", "input": {"x": TAX_ID}}]
+    output = logged(RequestValidationError(errors), LogFormat.CONSOLE, capsys)
+    assert TAX_ID not in output
+    assert "RequestValidationError: 1 validation errors: body.payer (missing)" in output
+
+
+def test_validation_problems_beyond_twenty_are_counted_and_unreadable_ones_only_counted(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    many = [{"loc": ("body", index), "type": "missing", "input": TAX_ID} for index in range(25)]
+    (shown,) = exception_values(logged(ResponseValidationError(many), LogFormat.JSON, capsys)).values()
+    assert shown.startswith("25 validation errors: body.0 (missing), body.1 (missing)")
+    assert shown.endswith("body.19 (missing), and 5 more")
+    odd = exception_values(logged(ResponseValidationError([TAX_ID]), LogFormat.JSON, capsys))
+    assert odd == {"ResponseValidationError": "1 validation errors"}
+
+
+def test_a_statement_error_without_a_driver_error_says_so(capsys: pytest.CaptureFixture[str]) -> None:
+    error = StatementError(f"bad value {TAX_ID}", "SELECT 1", {"x": TAX_ID}, None)
+    assert exception_values(logged(error, LogFormat.JSON, capsys)) == {
+        "StatementError": "(no driver error) [SQL: SELECT 1]"
+    }
+
+
+def test_an_exception_of_another_type_keeps_its_message(capsys: pytest.CaptureFixture[str]) -> None:
+    """Ours, or a library's that carries no data: what it says is what the reader needs."""
+    shown = exception_values(logged(KeyError("payments-ledger"), LogFormat.JSON, capsys))
+    assert shown == {"KeyError": "'payments-ledger'"}

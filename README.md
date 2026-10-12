@@ -314,19 +314,22 @@ ledger_outbox_oldest_pending_timestamp_seconds > 60` (the timestamp is 0 when no
 
 - Logs are structlog, JSON in production, with the standard-library loggers going through the same pipeline and
   every record stamped with the service and the environment. A traceback never carries the local variables of its
-  frames: a frame that failed to connect holds the database password.
+  frames: a frame that failed to connect holds the database password. An exception whose text can quote data is
+  logged without that text, wherever it sits in the chain of causes, contexts and groups: an error of PostgreSQL
+  or psycopg (including SQLAlchemy's wrapper) by its SQLSTATE, the names of its schema, table, column and
+  constraint, and the statement, never the message (`Key (tax_id)=(...)`) or the parameters; a pydantic or FastAPI
+  validation error by how many problems it has and where and of which type the first twenty are. A failed
+  connection keeps libpq's words (the server and the role); any other exception keeps its message.
 - Spans record an exception's type and nothing else. Every exporter drops `exception.message`,
   `exception.stacktrace`, the description of a status, and the path and query string of a request (`url.path`,
   `url.query`, `url.full`, `http.target`, `http.url`: a path carries the values of its parameters); the span's
   name and `http.route` keep the route's template.
 - Errors never echo a whole input: they quote an excerpt, and a validation problem says where and of what type.
-  SQLAlchemy does not echo bound values in a SQL error.
+  SQLAlchemy does not echo bound values in a SQL error. A tax id is never repeated: an `InvalidTaxIdError` says what
+  is wrong and how long the text was, and `repr(TaxId)` shows the kind and the last three digits.
 - Traces cross the outbox: an event carries the `traceparent` of the span that added it, and a consumer's span
   continues that trace from the event alone. FastAPI's own request spans go to the service's provider and
   continue the caller's `traceparent`; the probes and `/metrics` are not traced.
-
-Known limit: PostgreSQL's own `DETAIL` line of a constraint violation, such as `Key (tax_id)=(...)`, can quote
-values, and it reaches the service's log through the exception (never a span).
 
 ## Quality gate
 

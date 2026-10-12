@@ -362,8 +362,9 @@ class Database:
         its arguments.
 
         SQLAlchemy does not echo the values bound to a statement (tenant ids, payloads) in the text of a SQL
-        error (``hide_parameters``): that text reaches logs. PostgreSQL's own ``DETAIL`` can still carry
-        values, such as the ``Key (...)=(...)`` of a unique violation.
+        error (``hide_parameters``): that text reaches logs. PostgreSQL's own message can still carry
+        values, such as the ``Key (...)=(...)`` of a unique violation: the logs withhold it
+        (``ledger_platform.logs``).
         """
         require_at_least(InvalidDatabaseOptionError, "pool_size", pool_size)
         parsed = make_url(url)
