@@ -8,12 +8,7 @@ import structlog
 
 
 def use_the_plain_baseline() -> None:
-    """Log as a service does to a terminal: no colors, and tracebacks as plain text without locals.
-
-    structlog's own defaults render a traceback with ``rich`` and every local variable of every frame, which
-    is slow (seconds for one logged exception) and prints exactly what ``configure_logging`` keeps out of a
-    record. A test that logs gets the production rules, and ``capture_logs`` keeps working on top of them.
-    """
+    """No colors, no locals; redaction is ``configure_logging``'s own, tested in the platform."""
     structlog.reset_defaults()
     structlog.configure(
         processors=[

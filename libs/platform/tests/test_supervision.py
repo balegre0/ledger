@@ -20,6 +20,7 @@ from ledger_platform.supervision import (
     Supervisor,
     restart_delay,
 )
+from ledger_testing.clock import Moment
 
 NAME: Final = "consumer payments-ledger"
 NO_JITTER: Final = 0.0
@@ -37,21 +38,10 @@ class BlipError(ConnectionError):
 
 
 @final
-class Clock:
-    """Monotonic time that moves only when a test or a fake says so."""
-
-    def __init__(self) -> None:
-        self.now = 1_000.0
-
-    def __call__(self) -> float:
-        return self.now
-
-
-@final
 class Pause:
     """A sleep that returns at once and moves ``clock`` instead, keeping each delay it was asked for."""
 
-    def __init__(self, clock: Clock) -> None:
+    def __init__(self, clock: Moment) -> None:
         self.delays: list[float] = []
         self._clock = clock
 
@@ -65,7 +55,7 @@ class Pause:
 class Flaky:
     """A worker whose runs end as told, one per run: after ``ran_for`` seconds with ``error``, or never."""
 
-    def __init__(self, clock: Clock, *runs: tuple[float, Exception]) -> None:
+    def __init__(self, clock: Moment, *runs: tuple[float, Exception]) -> None:
         self.started = 0
         self.running = asyncio.Event()
         self._clock = clock
@@ -95,12 +85,12 @@ async def stubborn() -> Never:
 
 
 @pytest.fixture
-def clock() -> Clock:
-    return Clock()
+def clock() -> Moment:
+    return Moment(1_000.0)
 
 
 @pytest.fixture
-def pause(clock: Clock) -> Pause:
+def pause(clock: Moment) -> Pause:
     return Pause(clock)
 
 
@@ -110,7 +100,7 @@ def registry() -> CollectorRegistry:
 
 
 @pytest.fixture
-def supervisor(registry: CollectorRegistry, clock: Clock, pause: Pause) -> Supervisor:
+def supervisor(registry: CollectorRegistry, clock: Moment, pause: Pause) -> Supervisor:
     return Supervisor(
         registry=registry, permanent=(MisconfiguredError,), sleep=pause, clock=clock, draw=lambda: NO_JITTER
     )
@@ -127,7 +117,7 @@ async def finish(worker: asyncio.Task[Never]) -> None:
 
 
 async def test_a_worker_that_fails_is_restarted_after_growing_delays_and_each_restart_counted(
-    supervisor: Supervisor, clock: Clock, pause: Pause, registry: CollectorRegistry
+    supervisor: Supervisor, clock: Moment, pause: Pause, registry: CollectorRegistry
 ) -> None:
     work = Flaky(clock, (0, BlipError()), (0, BlipError()), (0, BlipError()))
     with capture_logs() as logs:
@@ -146,7 +136,7 @@ async def test_a_worker_that_fails_is_restarted_after_growing_delays_and_each_re
 
 
 async def test_a_worker_that_ran_long_enough_starts_its_delays_over(
-    supervisor: Supervisor, clock: Clock, pause: Pause
+    supervisor: Supervisor, clock: Moment, pause: Pause
 ) -> None:
     work = Flaky(clock, (0, BlipError()), (0, BlipError()), (HEALTHY_RUN, BlipError()), (0, BlipError()))
     worker = supervisor.start(NAME, work)
@@ -187,7 +177,7 @@ def test_the_extremes_of_the_draw_are_the_extremes_of_the_jitter() -> None:
 
 
 async def test_the_jitter_is_drawn_anew_for_every_restart(
-    registry: CollectorRegistry, clock: Clock, pause: Pause
+    registry: CollectorRegistry, clock: Moment, pause: Pause
 ) -> None:
     draws = iter([0.5, 0.25])
     supervisor = Supervisor(
@@ -202,7 +192,7 @@ async def test_the_jitter_is_drawn_anew_for_every_restart(
 
 
 async def test_a_permanent_error_is_not_retried_and_leaves_the_worker_dead(
-    supervisor: Supervisor, clock: Clock, pause: Pause, registry: CollectorRegistry
+    supervisor: Supervisor, clock: Moment, pause: Pause, registry: CollectorRegistry
 ) -> None:
     work = Flaky(clock, (0, MisconfiguredError()))
     with capture_logs() as logs:
@@ -216,7 +206,7 @@ async def test_a_permanent_error_is_not_retried_and_leaves_the_worker_dead(
 
 
 async def test_a_worker_cancelled_by_anyone_but_its_stop_is_dead(
-    supervisor: Supervisor, clock: Clock
+    supervisor: Supervisor, clock: Moment
 ) -> None:
     work = Flaky(clock)
     worker = supervisor.start(NAME, work)
@@ -228,7 +218,7 @@ async def test_a_worker_cancelled_by_anyone_but_its_stop_is_dead(
     assert logs == [{"event": "worker.cancelled", "log_level": "error", "worker": NAME}]
 
 
-async def test_a_stopped_worker_is_cancelled_and_not_dead(supervisor: Supervisor, clock: Clock) -> None:
+async def test_a_stopped_worker_is_cancelled_and_not_dead(supervisor: Supervisor, clock: Moment) -> None:
     work = Flaky(clock)
     worker = supervisor.start(NAME, work)
     async with asyncio.timeout(5):
@@ -239,7 +229,7 @@ async def test_a_stopped_worker_is_cancelled_and_not_dead(supervisor: Supervisor
 
 
 async def test_a_stop_during_the_delay_before_a_restart_restarts_nothing(
-    registry: CollectorRegistry, clock: Clock
+    registry: CollectorRegistry, clock: Moment
 ) -> None:
     waiting = asyncio.Event()
 
@@ -270,7 +260,7 @@ async def test_a_worker_that_will_not_stop_is_left_after_its_grace_and_named(sup
 
 
 async def test_every_worker_is_exported_from_its_start_at_zero_restarts(
-    supervisor: Supervisor, clock: Clock, registry: CollectorRegistry
+    supervisor: Supervisor, clock: Moment, registry: CollectorRegistry
 ) -> None:
     """A series that appears with its first restart hides that restart from ``rate()`` and ``increase()``."""
     workers = [supervisor.start(name, Flaky(clock)) for name in ("outbox relay", NAME)]
@@ -304,7 +294,7 @@ async def test_a_worker_whose_stop_ends_in_another_error_is_not_started_again(
 
 
 async def test_workers_stop_together_within_one_grace_and_each_that_did_not_is_named(
-    supervisor: Supervisor, clock: Clock
+    supervisor: Supervisor, clock: Moment
 ) -> None:
     """Three stuck workers do not take three graces: the stop waits for all of them at once."""
     grace = 0.3
@@ -336,7 +326,7 @@ async def test_a_stop_with_no_worker_running_waits_for_nothing(supervisor: Super
     ids=["no responders", "no leader"],
 )
 async def test_a_consumer_that_jetstream_could_not_serve_is_started_again_and_not_dead(
-    registry: CollectorRegistry, clock: Clock, pause: Pause, error: Exception
+    registry: CollectorRegistry, clock: Moment, pause: Pause, error: Exception
 ) -> None:
     """With the service's permanent errors: a JetStream that cannot serve for now restarts the consumer, and
     leaves the process live; a configuration JetStream refuses leaves it dead."""

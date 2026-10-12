@@ -10,6 +10,7 @@ from structlog.testing import capture_logs
 
 from ledger_kernel.errors import ErrorKind
 from ledger_platform.health import DuplicateCheckError, Health, InvalidHealthOptionError
+from ledger_testing.clock import Moment
 
 
 async def healthy() -> None:
@@ -228,7 +229,7 @@ async def test_a_stuck_check_is_cancelled_again_by_every_later_run() -> None:
 
 async def test_a_check_stuck_past_the_limit_is_wedged_until_it_ends() -> None:
     release, ended = asyncio.Event(), asyncio.Event()
-    now = [100.0]
+    moment = Moment(100.0)
 
     async def stubborn() -> None:
         while not release.is_set():
@@ -236,15 +237,15 @@ async def test_a_check_stuck_past_the_limit_is_wedged_until_it_ends() -> None:
                 await release.wait()
         ended.set()
 
-    health = Health(timeout=0.02, wedge_after=30, clock=lambda: now[0])
+    health = Health(timeout=0.02, wedge_after=30, clock=moment)
     health.add("stubborn", stubborn)
     health.add("database", healthy)
     try:
         await health.run()
         assert health.wedged() == ()
-        now[0] += 30
+        moment.now += 30
         assert health.wedged() == ()
-        now[0] += 0.5
+        moment.now += 0.5
         assert health.wedged() == ("stubborn",)
     finally:
         release.set()
@@ -256,20 +257,20 @@ async def test_a_check_stuck_past_the_limit_is_wedged_until_it_ends() -> None:
 
 async def test_the_limit_for_a_wedge_is_ten_timeouts_unless_chosen() -> None:
     release = asyncio.Event()
-    now = [0.0]
+    moment = Moment()
 
     async def stubborn() -> None:
         while not release.is_set():
             with contextlib.suppress(asyncio.CancelledError):
                 await release.wait()
 
-    health = Health(timeout=0.01, clock=lambda: now[0])
+    health = Health(timeout=0.01, clock=moment)
     health.add("stubborn", stubborn)
     try:
         await health.run()
-        now[0] = 0.09
+        moment.now = 0.09
         assert health.wedged() == ()
-        now[0] = 0.11
+        moment.now = 0.11
         assert health.wedged() == ("stubborn",)
     finally:
         release.set()

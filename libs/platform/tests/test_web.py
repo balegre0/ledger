@@ -37,6 +37,7 @@ from ledger_platform.health import Health
 from ledger_platform.logs import configure_logging
 from ledger_platform.settings import LogFormat, ServiceSettings
 from ledger_platform.web import PROBLEM_JSON, AmbiguousRouteError, ApiInfo, Observability, create_app
+from ledger_testing.clock import Moment
 lazy from ledger_platform.tracing import Tracing
 
 TRACE_ID: Final = "0af7651916cd43dd8448eb211c80319c"
@@ -429,7 +430,7 @@ async def test_liveness_fails_while_a_check_is_wedged_and_recovers_when_it_ends(
     registry: CollectorRegistry, tracing: Tracing
 ) -> None:
     release, ended = asyncio.Event(), asyncio.Event()
-    now = [0.0]
+    moment = Moment()
 
     async def stubborn() -> None:
         while not release.is_set():
@@ -437,14 +438,14 @@ async def test_liveness_fails_while_a_check_is_wedged_and_recovers_when_it_ends(
                 await release.wait()
         ended.set()
 
-    health = Health(timeout=0.02, wedge_after=30, clock=lambda: now[0])
+    health = Health(timeout=0.02, wedge_after=30, clock=moment)
     health.add("nats", stubborn)
     try:
         observability = Observability(health=health, registry=registry, tracer_provider=tracing.provider)
         async with serving(build(observability, router)) as client:
             assert (await client.get("/readyz")).status_code == 503
             assert (await client.get("/livez")).status_code == 200
-            now[0] = 31
+            moment.now = 31
             wedged = await client.get("/livez")
             assert (wedged.status_code, LIVENESS.validate_json(wedged.content)) == (
                 503,
