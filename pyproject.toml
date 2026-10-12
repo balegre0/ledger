@@ -31,6 +31,7 @@ dev = [
 [tool.uv]
 required-version = ">=0.13.0"
 package = false
+constraint-dependencies = ["cryptography>=50.0.2"]  # joserfc's: the first release with CPython 3.15 wheels of its own
 
 [tool.uv.workspace]
 members = ["libs/*"]
@@ -230,7 +231,7 @@ include_external_packages = true
 name = "Production code never imports test tooling"
 type = "forbidden"
 source_modules = ["ledger_kernel", "ledger_contracts", "ledger_platform"]
-forbidden_modules = ["pytest", "hypothesis", "testcontainers", "httpx", "ledger_testing"]
+forbidden_modules = ["pytest", "hypothesis", "testcontainers", "ledger_testing"]
 
 [[tool.importlinter.contracts]]
 name = "Packages point down: platform -> contracts -> kernel"
@@ -253,7 +254,7 @@ layers = [
     "web | grpc_server | consumer",
     "outbox",
     "streams",
-    "database | tracing | health | logs | jetstream",
+    "database | tracing | health | logs | jetstream | authentication",
     "settings | options | lifecycle | supervision",
 ]
 
