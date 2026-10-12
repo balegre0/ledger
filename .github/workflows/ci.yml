@@ -44,3 +44,9 @@ jobs:
         run: uv run poe check
       - name: Local infrastructure configuration
         run: docker compose -f deploy/local/compose.yaml config --quiet
+      - name: Local infrastructure starts healthy
+        # Exercises init.sql (the runtime role and its database) and both health checks; torn down on any exit.
+        run: |
+          compose='docker compose -p ledger-ci -f deploy/local/compose.yaml'
+          trap '$compose down -v' EXIT
+          $compose up -d --wait || { $compose logs; exit 1; }

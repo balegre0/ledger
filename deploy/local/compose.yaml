@@ -3,7 +3,8 @@
 # What a service running on the host is configured with (the LEDGER_* variables of ServiceSettings):
 #   LEDGER_DATABASE_URL=postgresql+psycopg://ledger_app:ledger_app@127.0.0.1:5432/ledger
 #   LEDGER_NATS_URL=nats://127.0.0.1:4222
-# The same URLs reach a service that runs inside this network at the hosts `postgres` and `nats`.
+# A service that runs inside this network uses the same URLs with the host names `postgres` and `nats` in
+# place of 127.0.0.1.
 #
 # PostgreSQL's administrator is `postgres`. A service never connects as that role: a superuser bypasses
 # row-level security, and a database that ignored the policies would hide exactly the bugs they exist to
@@ -11,7 +12,8 @@
 # is no superuser (the platform's tests run as the same role). It runs only when the volume is first
 # created: after editing it, `docker compose down -v` starts over.
 #
-# Every image is pinned to an exact tag, not to a floating one.
+# Every image is pinned to an exact version tag, not to a floating one. A version tag can still be
+# re-pushed (a rebuild on a newer base image keeps it); pinning digests is a later hardening step.
 name: ledger
 
 services:

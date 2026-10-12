@@ -110,9 +110,12 @@ A service may depend on `libs/*`, never on another service. import-linter enforc
 
 - Streams per producing service (`IDENTITY`, `INVOICING`, `FISCAL_DO`...), subjects
   `<service>.<aggregate>.<event>`: `invoicing.document.issued`, `fiscal.document.accepted`. The service
-  that publishes declares its streams and creates or updates them at start (file storage). A declaration
-  only moves forward (more subjects, no shorter limits): replicas of two versions run side by side during
-  a rollout, and an older one restarting must not shrink what a newer one declared.
+  that publishes declares its streams; every start creates a missing one (file storage) or applies the
+  starting replica's own declaration of subjects and limits over what is there. Replicas of two versions
+  run side by side during a rollout, so a declaration must keep everything the older versions still
+  running need (more subjects, no shorter limits): an older replica that restarts reverts the stream to its
+  own declaration, and a shorter `max_age` makes JetStream delete messages at once. Moving forward only is
+  a rule for the authors of a declaration; the code does not enforce it.
 - Envelope: CloudEvents 1.0 attributes in NATS headers (`ce-specversion`, `ce-id`, `ce-type`, `ce-source`,
   `ce-time`, `ce-subject` = company id, `ce-organizationid` = organization id (both absent for
   platform-wide events), `traceparent`, `content-type: application/protobuf`), payload as a versioned
@@ -131,21 +134,24 @@ A service may depend on `libs/*`, never on another service. import-linter enforc
   `MAX_DELIVERIES` advisory.
 - Events that can never succeed (unreadable envelope, or a handler error of kind INVALID) are terminated
   at once; JetStream's MAX_DELIVERIES and MSG_TERMINATED advisories are kept in the DEAD_LETTERS stream
-  for 30 days. An advisory names the stream and the sequence of the message, which stays in its own stream
-  for that stream's `max_age` (7 days by default): a dead letter has to be looked at within that time. An
-  alert fires while `DEAD_LETTERS` is not empty (§11).
+  for 30 days. An advisory names the stream and the sequence of the message, which is deleted from its
+  stream when it is `max_age` old (7 days by default; acknowledging does not delete): the time to inspect
+  it counts from when the event was stored, not from the advisory, so an advisory can leave far less than
+  7 days, and one kept for its 30 days can point at a message that is gone. A dead letter has to be looked
+  at promptly; the alert is in §11.
 - A consumer's spec is its configuration: starting it creates the durable consumer or brings the existing
   one to the spec. `max_deliver` and `ack_wait` change in place (JetStream keeps the position and the
-  pending messages). The filter subject does not: one durable consumer serves every replica of every
-  version during a rollout, so widening it would hand new events to old replicas that cannot read them
-  (they would be terminated) and narrowing it would skip them for good. A service that needs another
-  subject names its consumer anew (`invoicing-projections-v2`), which starts over with the whole stream.
-  `ack_wait` defaults to twice what one claim and one statement can take at the database's default limits
-  (70 s); a handler may outlast it, and the inbox makes the second delivery harmless.
+  pending messages), and as with streams the latest start wins, so a new value must suit the older versions
+  still running. The filter subject does not change in place: one durable consumer serves every replica of
+  every version during a rollout, so widening it would hand new events to old replicas that cannot read them
+  (they would be terminated) and narrowing it would skip them for good. A service that needs another subject
+  names its consumer anew (`invoicing-projections-v2`), which starts over with the whole stream. `ack_wait`
+  defaults to twice what one claim and one statement can take at the database's default limits (70 s); a
+  handler may outlast it, and the inbox makes the second delivery harmless.
 - Ordering: only per aggregate matters. The platform promises no order across events (a retried event
   follows the ones published after it); events carry the aggregate version, and a handler that needs the
-  order fails a delivery with a version gap, which is retried after its backoff, by when the missing event
-  should have arrived.
+  order fails a delivery with a version gap by raising an error that is not of kind INVALID (that kind
+  terminates the event), so it is retried after its backoff, by when the missing event should have arrived.
 
 **Outbox.** In the same transaction as the state change, the service inserts the event into
 `outbox`. An event no relay could ever publish (a subject NATS cannot route, a message over NATS's size
@@ -154,8 +160,10 @@ same process locks the due rows with `FOR UPDATE SKIP LOCKED`, publishes the bat
 JetStream acks inside that transaction. The relay deletes rows once JetStream acknowledges them, every
 acknowledged one in the pass, whatever happened to the others. A commit wakes the relay of the same
 process at once; rows from other replicas are picked up by any relay within a 1 s poll. There is no
-`LISTEN/NOTIFY`: the poll is needed anyway (for events that are due again, and for other replicas' rows),
-so a second wake-up path would cost a connection for little. Several replicas share the work safely.
+`LISTEN/NOTIFY`: a replica's own commit already wakes its relay, retried events that fall due need the
+poll anyway, a dropped listener loses notifications so the poll would stay the safety net regardless, and
+listening takes a dedicated connection per replica outside the pool. It would only shave at most the poll
+interval (`idle`) off rows that their own replica cannot relay. Several replicas share the work safely.
 
 An event JetStream did not acknowledge stays in the table on a schedule of its own (`attempts` and
 `next_attempt_at`: 1 s after the first failure, doubling up to 30 s). A pass takes only the rows that are
@@ -163,16 +171,16 @@ due, fresh events before retried ones, so a pile of stuck events cannot delay a 
 measured, not guessed: gauges for the number of pending events and for when the oldest was stored, and
 counters for publishes, failed publishes and failed passes.
 
-**Inbox.** A consumer handles a message inside a transaction, scoped to the event's tenant so that
-row-level security applies to the handler's writes, that first inserts `(consumer, event_id)` into
-`inbox`; a duplicate finds the row (`ON CONFLICT DO NOTHING`) and is acked without calling the handler.
-Two deliveries of one event at once serialize on the primary key: the second waits, bounded by the
-database's lock timeout, and then sees the outcome of the first. The message is acked only after the
-commit; a failed claim or handler is nacked with the backoff's delay. A consumer that stops (a deploy, a
-scale-down) rolls back the handling in progress and hands the rest of its batch back to JetStream at once.
-The inbox is outside row-level security on purpose (it holds no business data and is claimed before the
-handler runs), and its rows are not yet deleted: a retention job comes with the first service that
-produces volume.
+**Inbox.** A consumer handles a message inside a transaction, scoped to the event's tenant so that row-level
+security applies to the handler's writes, that first inserts `(consumer, event_id)` into `inbox`; a
+duplicate finds the row (`ON CONFLICT DO NOTHING`) and is acked without calling the handler. Two deliveries
+of one event at once serialize on the primary key: the second waits and then sees the outcome of the first;
+if it waits longer than the database's lock timeout its claim fails and is retried after the backoff, using
+up one of its deliveries. The message is acked only after the commit; a failed claim or handler is nacked
+with the backoff's delay. A consumer that stops (a deploy, a scale-down) rolls back the handling in progress
+and hands the rest of its batch back to JetStream at once. The inbox is outside row-level security on
+purpose (it holds no business data and is claimed before the handler runs), and its rows are not yet
+deleted: a retention job comes with the first service that produces volume.
 
 ### 4.2 Synchronous calls (gRPC)
 
@@ -305,9 +313,11 @@ company can certify while another runs in production.
 
 ## 7. Data
 
-- PostgreSQL 18, one database per service, one role per service with access only to its database. The
-  role owns its database and is no superuser and has no `BYPASSRLS`: both ignore row-level security, so a
-  service, its tests and the local stack all connect as an ordinary role.
+- PostgreSQL 18, one database per service, one role per service with access only to its database.
+  Services never connect as a superuser or as a `BYPASSRLS` role: both ignore row-level security.
+  Production separates a migration owner from a DML-only runtime role (settled with the deployment
+  milestone); the local stack and the tests use one non-superuser role that owns its database, for
+  simplicity, and rely on `FORCE ROW LEVEL SECURITY` to subject the owner to the policies.
 - SQLAlchemy 2.1 Core with typed tables (no ORM sessions in the domain); psycopg 3, asynchronous, as the
   only driver (the chassis refuses any other); Alembic migrations, reviewed and tested up and down in CI.
 - Every connection carries limits, none of them unlimited: connect 5 s, statement 30 s, lock 5 s,
@@ -320,12 +330,11 @@ company can certify while another runs in production.
   as well keeps a company id from reaching across organizations). A table's migration enables the policy
   with the chassis's `tenant_isolation(table)`, which also forces it on the table's owner. A missing
   tenant context fails closed: no rows are seen and none can be written. The chassis's own `outbox` and
-  `inbox` are the exceptions: they hold no business data, and a relay reads them across tenants.
-- A transaction commits only if every statement in it succeeded. A caller that catches a database error
-  without a savepoint would otherwise lose its work silently (PostgreSQL answers the `COMMIT` of an
-  aborted transaction with `ROLLBACK` and the driver reports success), so the exit raises instead. What
-  must follow a commit, such as waking the relay, runs in after-commit callbacks, which cannot change the
-  outcome and never run after a rollback.
+  `inbox` are the exceptions: a relay reads the outbox across tenants, and the inbox is claimed before the
+  handler runs (§4.1).
+- A transaction commits only if every statement in it succeeded: a caller that swallows a database
+  error gets an error at the exit, never a silent rollback. What must follow a commit, such as waking the
+  relay, runs in after-commit callbacks, which cannot change the outcome and never run after a rollback.
 - Ids: UUIDv7 (time-ordered) for every entity, wrapped in typed `NewType`s per entity.
 - Money: exact `Decimal` with currency, never float, never a silent rounding. Amounts stay below 10^18
   with at most 24 decimal places; arithmetic is exact, so a result that would need rounding, leave that
@@ -378,9 +387,9 @@ company can certify while another runs in production.
 - REST with JSON, OpenAPI 3.1 generated from the code and published; versioned in the path (`/v1`).
 - Errors: every failure, the framework's own 404 and 405 included, is RFC 9457
   `application/problem+json` with a stable `type` URN (`urn:ledger:error:<code>`), a `code` clients
-  match on and, for DGII rejections, the DGII codes and messages. The codes of plain HTTP statuses are
-  written out in the platform (`not_found`, `conflict`, `unavailable`...), not derived from a library's
-  names, and the status of a domain error follows its kind (§4.2). A request that breaks the schema is a
+  match on and, for DGII rejections, the DGII codes and messages. The codes of plain HTTP statuses
+  are pinned (`not_found`, `conflict`, `unavailable`...), and the status of a domain error follows its
+  kind (§4.2). A request that breaks the schema is a
   422 `invalid_request` listing at most 20 problems (where, of which type) and how many were left out.
   The operational routes `/livez`, `/readyz` and `/metrics` are outside the OpenAPI document.
 - `Idempotency-Key` required on every `POST`; stored 24 h with the response; a different body with
@@ -392,36 +401,38 @@ company can certify while another runs in production.
 ## 11. Observability and operations
 
 - **Traces:** OpenTelemetry in every service: HTTP, gRPC, SQL, NATS (context in headers), Temporal
-  (interceptor), DGII calls. Exported over OTLP to the collector; without an endpoint spans are created
-  but not exported. The trace crosses the outbox: an event carries the `traceparent` of the span that
-  added it, and a consumer's span continues that trace from the event alone, never from whatever span is
-  active. A `traceparent` longer than any valid one is not parsed at all (the SDK's pattern backtracks
-  quadratically on it). A failed span records the exception's type and nothing else: spans leave the process
-  and cannot be recalled. Milestone 1 builds the tracer provider and the propagation through events;
-  the automatic instrumentation of FastAPI, SQLAlchemy and gRPC arrives with the first service
-  (milestone 2).
+  (interceptor), DGII calls. Exported over OTLP to the collector; without an endpoint spans are created but
+  not exported. The trace crosses the outbox: an event carries the `traceparent` of the span that added it,
+  and a consumer's span continues that trace from the event alone, never from whatever span is active. An
+  over-long `traceparent` is never parsed, so a hostile header costs nothing. A failed span records the
+  exception's type and nothing else: spans leave the process and cannot be recalled. Milestone 1 builds the
+  tracer provider and the propagation through events; the automatic instrumentation of FastAPI, SQLAlchemy
+  and gRPC arrives with the first service (milestone 2).
 - **Metrics:** Prometheus: RED metrics per endpoint and RPC, outbox lag, consumer lag, DLQ size,
   workflow states, DGII latency and error rate per environment, certificates expiring. The chassis
-  exports the HTTP request duration by method, route template and status (the template the code declared,
-  never the client's path or an invented method, so the labels stay bounded); the outbox backlog (events
+  exports the HTTP request duration by method, route template and status (labels are bounded:
+  the route is a template the code declared, never the client's path); the outbox backlog (events
   pending, and the time the oldest was stored, so that lag keeps growing while a relay is blind) with
   counters of publishes, failed publishes and failed passes; and consumer deliveries by consumer and
   outcome (handled, duplicate, failed, rejected, malformed). The outbox gauges read the table, so every
   replica exports the same values: aggregate them with `max`, never `sum`.
 - **Logs:** structlog, JSON in production and readable in a terminal, with the standard-library loggers
   going through the same pipeline. Every record carries the service and the environment, and
-  request-scoped fields (trace id, company id) merge in from context variables. Never personal data
-  beyond ids, never XML bodies or keys, and never the local variables of a traceback's frames.
+  request-scoped fields (trace id, company id) will merge in from context variables once the request
+  middleware binds them (milestone 2); nothing binds them yet. Never personal data beyond ids, never XML
+  bodies or keys, and never the local variables of a traceback's frames.
 - **Health:** every service serves HTTP `/livez`, `/readyz` and `/metrics`. Kubernetes probes use each
   service's HTTP `/livez` and `/readyz` (gRPC health is not needed: every service serves HTTP).
   `/readyz` runs the service's named checks (database, NATS, background workers) concurrently, each held
-  to a time limit that a check cannot argue with, and answers 503 if any fails; probers that overlap share
-  one run of each check, so a slow dependency is asked once, not once per prober. `/livez` does not
-  consult the dependencies, so that a PostgreSQL outage does not restart every pod: it answers 503 only
+  to a time limit, and answers 503 if any fails; overlapping probes share one run of each check. `/livez`
+  does not consult the dependencies, so that a PostgreSQL outage does not restart every pod: it answers 503 only
   when a check has outlived ten time limits and will not stop, and such a process cannot recover by itself.
 - **SLOs:** API availability 99.9 %; p95 `POST /v1/invoices` < 300 ms (excluding DGII); 99 % of
   documents reach a final DGII state within 5 minutes when DGII is up.
-- **Alerts:** SLO burn rate, DLQ non-empty, outbox lag > 1 min (events pending and the oldest stored
+- **Alerts:** SLO burn rate, new dead letters (a new advisory in `DEAD_LETTERS`, or that stream
+  growing: with 30 days of retention it is hardly ever empty, so "not empty" would never clear; nothing
+  exports its size yet, and until then the `rejected` and `malformed` outcomes count the events
+  terminated), outbox lag > 1 min (events pending and the oldest stored
   more than a minute ago: the timestamp is 0 when nothing waits, so the condition needs both), DGII
   circuit open > 10 min, certificate expiring < 7 days, contingency queue age.
 - Grafana dashboards as code; runbooks linked from every alert.
@@ -500,8 +511,8 @@ configuration, not by comments, but its `.pyi` stubs are type-checked against.
   Helm), Zitadel (Helm), object storage with object lock, cloud KMS.
 - Local development: `tilt up` runs `deploy/local/compose.yaml` (PostgreSQL and NATS with JetStream,
   each with a health check that proves it is usable) and, from milestone 2, builds and runs each service
-  with live reload; compose runs the infrastructure alone. The local PostgreSQL creates the non-superuser
-  role services connect as, so that row-level security applies on a laptop as it does in production.
+  with live reload; compose runs the infrastructure alone. The local PostgreSQL creates a non-superuser
+  role that owns the database, so that row-level security applies on a laptop as in production.
 - Services are configured only through `LEDGER_*` environment variables. A variable that is not a setting
   (a misspelled name) stops the start, with every problem listed, instead of silently running on a
   default.
