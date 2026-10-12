@@ -25,6 +25,7 @@ from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
 from ledger_platform.outbox import (
     DEFAULT_MAX_PAYLOAD,
     MAX_BATCH,
+    MAX_IDLE,
     MAX_PUBLISH_TIMEOUT,
     MAX_RETRY_DELAY,
     MIN_RETRY_DELAY,
@@ -349,23 +350,26 @@ async def test_a_failure_names_the_event_and_nothing_of_its_content(
 async def test_the_relay_logs_a_failed_publish_and_names_the_event(
     database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
 ) -> None:
+    await ensure_stream(jetstream, STREAM)
     outbox = Outbox(tracing=tracing, registry=registry)
-    envelope = event()
-    await commit(database, outbox, envelope)  # no stream: the publish fails
+    first = event()
+    await commit(database, outbox, first, subject="quiet.a")  # no stream for these two
+    await commit(database, outbox)
+    await commit(database, outbox, subject="quiet.c")
 
     with capture_logs() as logs:
-        async with relaying(outbox.run(database, jetstream, idle=60)):
-            await eventually(partial(reached, registry, "ledger_outbox_publish_failed_total", 1))
+        async with relaying(outbox.run(database, jetstream, idle=MAX_IDLE)):
+            await eventually(partial(reached, registry, "ledger_outbox_publish_failed_total", 2))
 
     assert logs == [
         {
             "event": "outbox.publish_failed",
-            "log_level": "error",
-            "exc_info": True,
-            "event_id": str(envelope.id),
-            "subject": "test.created",
-            "acknowledged": 0,
-            "failed": 1,
+            "log_level": "warning",
+            "event_id": str(first.id),
+            "subject": "quiet.a",
+            "error": "nats.js.errors.NoStreamResponseError",
+            "acknowledged": 1,
+            "failed": 2,
         }
     ]
 
@@ -433,7 +437,7 @@ async def test_a_commit_wakes_the_relay(
     database: Database, jetstream: JetStreamContext, outbox: Outbox
 ) -> None:
     await ensure_stream(jetstream, STREAM)
-    async with relaying(outbox.run(database, jetstream, idle=60)):
+    async with relaying(outbox.run(database, jetstream, idle=MAX_IDLE)):
         await asyncio.sleep(0.1)
         async with database.transaction(None) as unit:
             await outbox.add(unit, event(), subject="test.created")
@@ -462,7 +466,7 @@ async def test_more_events_than_a_batch_go_out_without_waiting(
     async with database.transaction(None) as unit:
         for _ in range(25):
             await outbox.add(unit, event(), subject="test.created")
-    async with relaying(outbox.run(database, jetstream, idle=60)):
+    async with relaying(outbox.run(database, jetstream, idle=MAX_IDLE)):
         await eventually(partial(delivered, jetstream, 25), within=3)
 
 
@@ -486,7 +490,7 @@ async def test_a_relay_does_not_wait_for_events_another_one_holds(
             subject = "quiet.created" if n < 5 else "test.created"
             await stalled.add(unit, replace(event(), time=start + timedelta(seconds=n)), subject=subject)
 
-    async with relaying(stalled.run(database, jetstream, idle=60)):
+    async with relaying(stalled.run(database, jetstream, idle=MAX_IDLE)):
         await eventually(partial(unlocked, database, 5))
 
         assert await other_replica.relay_once(database, jetstream) == 5
@@ -507,7 +511,7 @@ async def test_stopping_the_relay_mid_publish_releases_the_events(
         await outbox.add(unit, event(), subject="test.silent")
 
     await silent(await connect(), "test.silent")
-    async with relaying(outbox.run(database, jetstream, idle=60)):
+    async with relaying(outbox.run(database, jetstream, idle=MAX_IDLE)):
         await eventually(partial(unlocked, database, 0))  # the relay holds the event, waiting for an ack
     assert await pending(database) == 1
 
@@ -531,20 +535,22 @@ def test_a_publish_timeout_that_is_not_a_positive_number_is_refused(
         Outbox(tracing=tracing, registry=registry, publish_timeout=timeout)
 
 
-@pytest.mark.parametrize("idle", [0, -1, nan, inf])
+@pytest.mark.parametrize("idle", [0, -1, nan, inf, MAX_IDLE + 1])
 async def test_an_idle_wait_that_is_not_a_positive_number_is_refused(
     idle: float, database: Database, jetstream: JetStreamContext, outbox: Outbox
 ) -> None:
-    with pytest.raises(InvalidOutboxOptionError, match="idle"):
-        await outbox.run(database, jetstream, idle=idle)
+    async with asyncio.timeout(5):  # a relay that accepted the value would run for ever
+        with pytest.raises(InvalidOutboxOptionError, match="idle"):
+            await outbox.run(database, jetstream, idle=idle)
 
 
 @pytest.mark.parametrize("retry", [0, -1, nan, inf, MIN_RETRY_DELAY / 2, MAX_RETRY_DELAY + 1])
 async def test_a_retry_delay_outside_its_bounds_is_refused(
     retry: float, database: Database, jetstream: JetStreamContext, outbox: Outbox
 ) -> None:
-    with pytest.raises(InvalidOutboxOptionError, match="retry"):
-        await outbox.run(database, jetstream, retry=retry)
+    async with asyncio.timeout(5):  # a relay that accepted the value would run for ever
+        with pytest.raises(InvalidOutboxOptionError, match="retry"):
+            await outbox.run(database, jetstream, retry=retry)
 
 
 async def test_an_event_that_cannot_go_out_does_not_hold_back_the_ones_around_it(
@@ -603,7 +609,7 @@ async def test_a_failing_event_does_not_block_the_relay(
     for _ in range(5):
         await commit(database, outbox)
 
-    async with relaying(outbox.run(database, jetstream, idle=60, retry=0.05)):
+    async with relaying(outbox.run(database, jetstream, idle=MAX_IDLE, retry=0.05)):
         await eventually(partial(delivered, jetstream, 5))
 
     assert await pending(database) == 1
@@ -807,7 +813,7 @@ async def test_stuck_events_in_numbers_beyond_a_batch_do_not_hold_back_healthy_o
     for _ in range(3):
         await commit(database, outbox)
 
-    async with relaying(outbox.run(database, jetstream, idle=60, retry=MAX_RETRY_DELAY)):
+    async with relaying(outbox.run(database, jetstream, idle=MAX_IDLE, retry=MAX_RETRY_DELAY)):
         await eventually(partial(delivered, jetstream, 3), within=3)
 
     assert await pending(database) == 5
@@ -897,7 +903,7 @@ async def test_a_full_pass_is_followed_by_another_at_once(
     for _ in range(9):
         await commit(database, outbox)
 
-    async with relaying(outbox.run(database, jetstream, idle=60)):
+    async with relaying(outbox.run(database, jetstream, idle=MAX_IDLE)):
         await eventually(partial(delivered, jetstream, 9), within=3)
 
 
@@ -925,7 +931,7 @@ async def test_the_relay_measures_the_backlog_at_most_once_per_idle_period(
     outbox = Outbox(tracing=tracing, registry=registry)
     await commit(database, outbox, subject="quiet.a")
 
-    async with relaying(outbox.run(database, jetstream, idle=60)):
+    async with relaying(outbox.run(database, jetstream, idle=MAX_IDLE)):
         await eventually(partial(gauge_is, registry, "ledger_outbox_pending", 1))
         await commit(database, outbox, subject="quiet.b")  # wakes the relay: another pass, no new measure
         await eventually(partial(reached, registry, "ledger_outbox_publish_failed_total", 2))
@@ -942,7 +948,7 @@ async def test_the_events_that_are_due_are_read_through_an_index(database: Datab
             definitions.where(column("indexname", String) == "ix_outbox_due")
         )
         definition = found.scalar_one()
-    assert definition.endswith("(created_at, id, next_attempt_at)")
+    assert definition.endswith("(((attempts > 0)), created_at, id, next_attempt_at)")
 
 
 async def test_a_retry_the_pass_cannot_work_with_is_refused_before_anything_is_read(
@@ -950,3 +956,41 @@ async def test_a_retry_the_pass_cannot_work_with_is_refused_before_anything_is_r
 ) -> None:
     with pytest.raises(InvalidOutboxOptionError, match="retry"):
         await outbox.relay_once(database, jetstream, retry=MAX_RETRY_DELAY + 1)
+
+
+async def test_the_backlog_is_measured_during_a_run_of_full_passes_too(
+    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+) -> None:
+    """Forty events, a batch of one: forty full passes, none of them the last word on the backlog."""
+    await ensure_stream(jetstream, STREAM)
+    outbox = Outbox(tracing=tracing, registry=registry, batch=1)
+    for _ in range(40):
+        await commit(database, outbox)
+
+    async with relaying(outbox.run(database, jetstream, idle=MAX_IDLE)):
+        await eventually(partial(drained, database))
+
+    assert sample(registry, "ledger_outbox_pending") == 39  # measured once, after the first pass
+
+
+async def test_retried_events_cannot_delay_fresh_ones(
+    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+) -> None:
+    """Five events that failed before are due again and older than three fresh ones, and a batch is three."""
+    await ensure_stream(jetstream, STREAM)
+    outbox = Outbox(tracing=tracing, registry=registry, batch=3)
+    stuck = [event() for _ in range(5)]
+    for envelope in stuck:
+        await commit(database, outbox, envelope, subject="quiet.stuck")
+    for _ in range(2):  # a batch of three, then the other two: every one of them has failed once
+        with pytest.raises(PublishFailedError):
+            await outbox.relay_once(database, jetstream)
+    await make_due(database)
+    for _ in range(3):
+        await commit(database, outbox)
+
+    assert await outbox.relay_once(database, jetstream) == 3  # the fresh ones, with nothing to report
+
+    assert await stored(jetstream) == 3
+    for envelope in stuck:
+        assert (await attempts_and_due(database, envelope.id))[0] == 1

@@ -4,15 +4,16 @@ The relay publishes a batch and waits for JetStream's acknowledgements inside th
 the rows (``FOR UPDATE SKIP LOCKED``), then deletes the rows JetStream acknowledged and commits: an event
 leaves the table only after JetStream has stored it. One that was not acknowledged stays, on a schedule of
 its own (``attempts`` and ``next_attempt_at``: the relay's ``retry``, doubling up to ``MAX_RETRY_DELAY``),
-and a pass takes only the rows that are due. However many events are stuck, they never fill a batch for
-long, and the healthy ones behind them go out. One published twice (a crash between the acknowledgement and
-the commit, or a retry) is dropped by JetStream's de-duplication (``Nats-Msg-Id``) within the stream's
+and a pass takes only the rows that are due, the ones never tried before the ones that failed. However many
+events are stuck, they do not delay a fresh one. One published twice (a crash between the acknowledgement
+and the commit, or a retry) is dropped by JetStream's de-duplication (``Nats-Msg-Id``) within the stream's
 window, and by the consumer's inbox after that.
 
-A commit wakes the relay of the same process at once; rows written by other replicas are picked up within
-``idle`` seconds by any relay. Rows go out oldest first by event time, but order is only kept within a pass
-and a relay: an event that failed follows the ones published after it, and replicas take batches in turn.
-Consumers rely on the version of the aggregate an event carries, never on the order of unrelated events.
+A commit wakes the relay of the same process at once; rows written by other replicas, and events that
+are due again, are picked up within ``idle`` seconds by any relay. Fresh events go out oldest first by event
+time, then the retried ones in the same order, but order is only kept within a pass and a relay: an event
+that failed follows the ones published after it, and replicas take batches in turn. Consumers rely on the
+version of the aggregate an event carries, never on the order of unrelated events.
 
 Events nobody could ever publish (a subject NATS cannot route, a message over its size limit) are
 refused when they are added, in the caller's transaction. What is left to wait for is a stream that does not
@@ -39,6 +40,7 @@ from sqlalchemy import (
     delete,
     func,
     insert,
+    literal_column,
     select,
     text,
     type_coerce,
@@ -70,7 +72,11 @@ DEFAULT_RETRY: Final = 1.0
 MIN_RETRY_DELAY: Final = 0.001
 """Retrying sooner than this is a busy loop."""
 MAX_RETRY_DELAY: Final = 30.0
-"""The longest wait between two attempts: a recovered NATS is found again within this."""
+"""The longest delay from a failure to the next attempt, for an event and for a failed pass alike."""
+MAX_IDLE: Final = 30.0
+"""The longest ``idle`` allowed: how long a row of another replica, or an event that is due again, can wait
+for the poll that finds it. With the two ceilings above, an event is tried again at most 80 seconds after the
+attempt before (20 + 30 + 30), well inside the two-minute duplicate window of a stream by default."""
 DEFAULT_MAX_PAYLOAD: Final = 1024 * 1024
 """NATS's default ``max_payload``, which counts the headers of a message as well as its body. A service passes
 the one its connection reports."""
@@ -138,16 +144,21 @@ class PublishFailedError(LedgerError):
 
     event_id: UUID
     subject: str
+    error_type: str
+    """The qualified class name of what went wrong with that event: its message is for the traceback."""
     acknowledged: int
     """How many events of the pass JetStream did acknowledge (and the pass removed)."""
     failed: int
     """How many events of the pass it did not."""
 
-    def __init__(self, *, event_id: UUID, subject: str, acknowledged: int, failed: int) -> None:
+    def __init__(
+        self, *, event_id: UUID, subject: str, error_type: str, acknowledged: int, failed: int
+    ) -> None:
         what = f"event {event_id} was not acknowledged by JetStream on subject {excerpt(subject)}"
         super().__init__(f"{what}: {failed} events of the pass failed and {acknowledged} went out")
         self.event_id = event_id
         self.subject = subject
+        self.error_type = error_type
         self.acknowledged = acknowledged
         self.failed = failed
 
@@ -185,6 +196,12 @@ def _wire_size(headers: Mapping[str, str], data: bytes) -> int:
     return len("NATS/1.0\r\n") + lines + len("\r\n") + len(data)
 
 
+def _type_name(error: BaseException) -> str:
+    """The qualified class name of ``error``."""
+    kind = type(error)
+    return f"{kind.__module__}.{kind.__qualname__}"
+
+
 def _delays(first: float) -> Iterator[float]:
     """``first``, then twice the one before, never more than ``MAX_RETRY_DELAY``."""
     delay = first
@@ -212,10 +229,12 @@ class OutboxRecord(PlatformTable):
     """When the relay may try again: at once for a new event, later for one that failed."""
 
 
-Index("ix_outbox_due", OutboxRecord.created_at, OutboxRecord.id, OutboxRecord.next_attempt_at)
-"""The relay reads the due rows in ``(created_at, id)`` order. With ``next_attempt_at`` in the index
-PostgreSQL skips the rows that are not due without visiting them: stuck rows by the hundred thousand ahead of
-the healthy ones cost a pass a few milliseconds, against thirty and more when each is read to be skipped."""
+_RETRIED: Final = OutboxRecord.attempts > literal_column("0")
+"""Whether the event failed before. The zero is in the SQL, not bound, so that the index matches it."""
+Index("ix_outbox_due", _RETRIED, OutboxRecord.created_at, OutboxRecord.id, OutboxRecord.next_attempt_at)
+"""The relay reads the due rows in ``(retried, created_at, id)`` order: the events never tried first. With
+``next_attempt_at`` in the index PostgreSQL skips the rows that are not due without visiting them, and a
+pass starts where the fresh events are: hundreds of thousands of stuck rows cost a pass a few milliseconds."""
 _BACKLOG: Final = select(
     func.count(),
     type_coerce(
@@ -351,7 +370,10 @@ class Outbox:
     async def relay_once(
         self, database: Database, jetstream: JetStreamContext, *, retry: float = DEFAULT_RETRY
     ) -> int:
-        """Publish up to one batch of the events that are due, oldest first, and remove those acknowledged.
+        """Publish up to one batch of the events that are due, and remove those acknowledged.
+
+        The events never tried come first, oldest first by event time, then the retried ones in the same
+        order: a pile of stuck events cannot delay a fresh one.
 
         The batch is published at once and all acknowledgements awaited together, so the transaction (and the
         row locks in it) lasts one ``publish_timeout`` however many events there are. Every acknowledged event
@@ -378,7 +400,11 @@ class Outbox:
         if failures:
             event, reason = failures[0]
             raise PublishFailedError(
-                event_id=event.id, subject=event.subject, acknowledged=len(acknowledged), failed=len(failures)
+                event_id=event.id,
+                subject=event.subject,
+                error_type=_type_name(reason),
+                acknowledged=len(acknowledged),
+                failed=len(failures),
             ) from reason
         return len(acknowledged)
 
@@ -394,16 +420,18 @@ class Outbox:
         """Relay forever, one pass after another.
 
         A pass that took a whole batch is followed by another at once; after any other, the relay waits for a
-        commit of this process, or ``idle`` seconds (which is also how soon an event that failed is tried
-        again, and a row another replica wrote is found).
+        commit of this process, or ``idle`` seconds, which is also how soon after it is due an event that
+        failed is tried again, and a row another replica wrote is found.
 
-        An event that failed is logged and keeps to its own schedule (see ``relay_once``). A pass that failed
-        as a whole, which means the database, is logged and counted, and tried again after ``retry`` seconds,
-        then twice that, up to ``MAX_RETRY_DELAY``; a pass that works starts the delays over. The backlog
-        gauges are refreshed after a pass that was not full, at most once per ``idle`` seconds. Stops only
-        when cancelled. ``sleep`` waits between the attempts after a failed pass.
+        Events that failed keep to their own schedule (see ``relay_once``) and are logged once per pass, as
+        a warning without a traceback: how many failed and went out, and the first failure's event, subject
+        and error type. A pass that failed as a whole, which means the database, is logged with its traceback
+        and counted, and tried again after ``retry`` seconds, then twice that, up to ``MAX_RETRY_DELAY``; a
+        pass that works starts the delays over. The backlog gauges are refreshed after a pass, full or not,
+        at most once per ``idle`` seconds. Stops only when cancelled. ``sleep`` waits between the attempts
+        after a failed pass.
         """
-        _require_seconds("idle", idle)
+        _require_seconds("idle", idle, ceiling=MAX_IDLE)
         _require_retry(retry)
         delays = _delays(retry)
         loop = asyncio.get_running_loop()
@@ -412,10 +440,11 @@ class Outbox:
             try:
                 attempted = await self.relay_once(database, jetstream, retry=retry)
             except PublishFailedError as failure:
-                _logger.exception(
+                _logger.warning(
                     "outbox.publish_failed",
                     event_id=str(failure.event_id),
                     subject=failure.subject,
+                    error=failure.error_type,
                     acknowledged=failure.acknowledged,
                     failed=failure.failed,
                 )
@@ -427,18 +456,21 @@ class Outbox:
                 await sleep(delay)
                 continue
             delays = _delays(retry)
+            if loop.time() - measured_at >= idle:
+                await self.measure_backlog(database)
+                measured_at = loop.time()
             if attempted < self._batch:
-                if loop.time() - measured_at >= idle:
-                    await self.measure_backlog(database)
-                    measured_at = loop.time()
                 await self._wait_for_a_commit(idle)
 
     async def measure_backlog(self, database: Database) -> None:
         """Set the gauges from the table: how many events wait, and when the oldest was stored.
 
         A transaction of its own, apart from the delivery's, so that reading the backlog can never undo or
-        delay what a pass did. A failure is logged and goes no further: the gauges keep their last values,
-        and the timestamp keeps ageing.
+        delay what a pass did. A failure is logged and goes no further: the gauges keep their last values.
+
+        To alert on lag: ``pending > 0 and time() - oldest_pending_timestamp_seconds > threshold``. The
+        timestamp is 0 when nothing was waiting at the last measure, so it says nothing then; the counter of
+        failed passes, and a ``time()`` that moves on past the last measure, are what show a relay gone blind.
         """
         try:
             async with database.transaction(None) as unit:
@@ -459,7 +491,7 @@ class Outbox:
         rows = await unit.connection.execute(
             select(OutboxRecord.id, OutboxRecord.subject, OutboxRecord.headers, OutboxRecord.data)
             .where(OutboxRecord.next_attempt_at <= func.now())
-            .order_by(OutboxRecord.created_at, OutboxRecord.id)
+            .order_by(_RETRIED, OutboxRecord.created_at, OutboxRecord.id)
             .limit(self._batch)
             .with_for_update(skip_locked=True)
         )
