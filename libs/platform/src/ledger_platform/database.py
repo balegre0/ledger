@@ -358,8 +358,9 @@ class Database:
         must not carry ``application_name``, ``connect_timeout`` or ``options``: the chassis sets them from
         its arguments.
 
-        The text of a SQL error never carries the values bound to the statement (tenant ids, payloads): it
-        reaches logs, and a value must not outlive the statement it was bound to.
+        SQLAlchemy does not echo the values bound to a statement (tenant ids, payloads) in the text of a SQL
+        error (``hide_parameters``): that text reaches logs. PostgreSQL's own ``DETAIL`` can still carry
+        values, such as the ``Key (...)=(...)`` of a unique violation.
         """
         if pool_size < 1:
             raise InvalidDatabaseOptionError(option="pool_size", requirement="at least 1", value=pool_size)

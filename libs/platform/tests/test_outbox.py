@@ -8,13 +8,14 @@ from functools import partial
 from math import inf, nan
 from typing import Never, Protocol
 lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
+lazy from uuid import UUID
 
 import pytest
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js import JetStreamContext
 from opentelemetry.sdk.trace import TracerProvider
 from prometheus_client import CollectorRegistry
-from sqlalchemy import func, select, text, update
+from sqlalchemy import DateTime, String, column, delete, func, select, text, type_coerce, update
 from structlog.testing import capture_logs
 lazy from nats.aio.client import Client
 
@@ -26,6 +27,7 @@ from ledger_platform.outbox import (
     MAX_BATCH,
     MAX_PUBLISH_TIMEOUT,
     MAX_RETRY_DELAY,
+    MIN_RETRY_DELAY,
     EventTooLargeError,
     InvalidOutboxOptionError,
     InvalidSubjectError,
@@ -100,6 +102,39 @@ def sample(registry: CollectorRegistry, name: str) -> float:
     value = registry.get_sample_value(name)
     assert value is not None
     return value
+
+
+async def reached(registry: CollectorRegistry, name: str, at_least: float) -> bool:
+    return (registry.get_sample_value(name) or 0) >= at_least
+
+
+async def make_due(database: Database) -> None:
+    """Let time pass for the events that wait for their next attempt."""
+    async with database.transaction(None) as unit:
+        await unit.connection.execute(
+            update(OutboxRecord).values(next_attempt_at=func.now() - timedelta(seconds=1))
+        )
+
+
+async def attempts_and_due(database: Database, event_id: UUID) -> tuple[int, float]:
+    """How often publishing the event failed, and in how many seconds it is due again (database clock)."""
+    now = type_coerce(func.clock_timestamp(), DateTime(timezone=True))
+    async with database.transaction(None) as unit:
+        row = await unit.connection.execute(
+            select(OutboxRecord.attempts, OutboxRecord.next_attempt_at, now).where(
+                OutboxRecord.id == event_id
+            )
+        )
+        attempts, due, at = row.one()
+    return attempts, (due - at).total_seconds()
+
+
+async def database_time(database: Database) -> float:
+    """The database's clock as a Unix time, to compare with what the database dated."""
+    async with database.transaction(None) as unit:
+        now = type_coerce(func.clock_timestamp(), DateTime(timezone=True))
+        at = (await unit.connection.execute(select(now))).scalar_one()
+    return at.timestamp()
 
 
 async def drained(database: Database) -> bool:
@@ -311,40 +346,31 @@ async def test_a_failure_names_the_event_and_nothing_of_its_content(
     assert await pending(database) == 1
 
 
-async def test_the_relay_logs_a_failure_and_the_delay_before_the_next_attempt(
+async def test_the_relay_logs_a_failed_publish_and_names_the_event(
     database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
 ) -> None:
-    waiting = asyncio.Event()
-
-    async def stop_at_the_first_wait(delay: float) -> None:
-        del delay
-        waiting.set()
-        await asyncio.Event().wait()
-
     outbox = Outbox(tracing=tracing, registry=registry)
     envelope = event()
-    await commit(database, outbox, envelope)
+    await commit(database, outbox, envelope)  # no stream: the publish fails
 
     with capture_logs() as logs:
-        async with relaying(
-            outbox.run(database, jetstream, retry=2, sleep=stop_at_the_first_wait)
-        ):  # no stream
-            async with asyncio.timeout(5):
-                await waiting.wait()
+        async with relaying(outbox.run(database, jetstream, idle=60)):
+            await eventually(partial(reached, registry, "ledger_outbox_publish_failed_total", 1))
 
     assert logs == [
         {
-            "event": "outbox.relay_failed",
+            "event": "outbox.publish_failed",
             "log_level": "error",
             "exc_info": True,
-            "retry_in": 2,
             "event_id": str(envelope.id),
             "subject": "test.created",
+            "acknowledged": 0,
+            "failed": 1,
         }
     ]
 
 
-async def test_the_relay_backs_off_exponentially_up_to_a_ceiling(
+async def test_the_relay_backs_off_while_the_database_fails_up_to_a_ceiling(
     database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
 ) -> None:
     delays: list[float] = []
@@ -357,42 +383,48 @@ async def test_the_relay_backs_off_exponentially_up_to_a_ceiling(
             await asyncio.Event().wait()  # the test ends the relay
 
     outbox = Outbox(tracing=tracing, registry=registry)
-    async with database.transaction(None) as unit:
-        await outbox.add(unit, event(), subject="test.created")
-
-    async with relaying(outbox.run(database, jetstream, retry=1, sleep=sleep)):  # no stream: all fail
-        async with asyncio.timeout(10):
-            await enough.wait()
+    await rename_outbox(database, "outbox", "outbox_away")  # every statement of the relay fails
+    try:
+        async with relaying(outbox.run(database, jetstream, retry=1, sleep=sleep)):
+            async with asyncio.timeout(10):
+                await enough.wait()
+    finally:
+        await rename_outbox(database, "outbox_away", "outbox", if_exists=True)
 
     assert MAX_RETRY_DELAY == 30
     assert delays == [1, 2, 4, 8, 16, 30, 30, 30]
+    assert sample(registry, "ledger_outbox_failed_passes_total") == 8
 
 
-async def test_a_success_starts_the_delays_over(
+async def test_a_pass_that_works_starts_the_delays_over(
     database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
 ) -> None:
+    await ensure_stream(jetstream, STREAM)
     delays: list[float] = []
-    failed_again = asyncio.Event()
+    restored, failed_again = asyncio.Event(), asyncio.Event()
 
     async def sleep(delay: float) -> None:
         delays.append(delay)
         if len(delays) == 3:
-            await ensure_stream(jetstream, STREAM)  # NATS is fine from now on
+            await rename_outbox(database, "outbox_away", "outbox")  # the database is back
+            restored.set()
         elif len(delays) == 4:
             failed_again.set()
             await asyncio.Event().wait()  # the test ends the relay
 
     outbox = Outbox(tracing=tracing, registry=registry)
-    async with database.transaction(None) as unit:
-        await outbox.add(unit, event(), subject="test.created")
-
-    async with relaying(outbox.run(database, jetstream, retry=1, sleep=sleep)):
-        await eventually(partial(drained, database))  # three failures, then the event goes out
-        await jetstream.delete_stream("TEST")
-        async with database.transaction(None) as unit:
-            await outbox.add(unit, event(), subject="test.created")
-        async with asyncio.timeout(5):
-            await failed_again.wait()
+    await commit(database, outbox)
+    await rename_outbox(database, "outbox", "outbox_away")
+    try:
+        async with relaying(outbox.run(database, jetstream, idle=0.05, retry=1, sleep=sleep)):
+            async with asyncio.timeout(5):
+                await restored.wait()
+            await eventually(partial(drained, database))  # three failed passes, then the event goes out
+            await rename_outbox(database, "outbox", "outbox_away")
+            async with asyncio.timeout(5):
+                await failed_again.wait()
+    finally:
+        await rename_outbox(database, "outbox_away", "outbox", if_exists=True)
 
     assert delays == [1, 2, 4, 1]
 
@@ -507,7 +539,7 @@ async def test_an_idle_wait_that_is_not_a_positive_number_is_refused(
         await outbox.run(database, jetstream, idle=idle)
 
 
-@pytest.mark.parametrize("retry", [0, -1, nan, inf, MAX_RETRY_DELAY + 1])
+@pytest.mark.parametrize("retry", [0, -1, nan, inf, MIN_RETRY_DELAY / 2, MAX_RETRY_DELAY + 1])
 async def test_a_retry_delay_outside_its_bounds_is_refused(
     retry: float, database: Database, jetstream: JetStreamContext, outbox: Outbox
 ) -> None:
@@ -535,6 +567,8 @@ async def test_an_event_that_cannot_go_out_does_not_hold_back_the_ones_around_it
     assert await pending(database) == 1
 
     await ensure_stream(jetstream, StreamSpec(name="QUIET", subjects=("quiet.>",)))
+    assert await outbox.relay_once(database, jetstream) == 0  # b waits for its next attempt
+    await make_due(database)
     assert await outbox.relay_once(database, jetstream) == 1
     assert await stored(jetstream) == 2
     assert await stored(jetstream, "QUIET") == 1
@@ -576,34 +610,6 @@ async def test_a_failing_event_does_not_block_the_relay(
     assert sample(registry, "ledger_outbox_publish_failed_total") >= 1
 
 
-async def test_the_delays_start_over_when_a_pass_got_events_out_in_spite_of_a_failure(
-    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
-) -> None:
-    """Behind an event that cannot go out, a pass with nothing else to send backs off; one that sends, no."""
-    await ensure_stream(jetstream, STREAM)
-    outbox = Outbox(tracing=tracing, registry=registry)
-    delays: list[float] = []
-    enough = asyncio.Event()
-
-    async def sleep(delay: float) -> None:
-        delays.append(delay)
-        if len(delays) == 3:
-            await commit(database, outbox)  # a healthy event arrives behind the stuck one
-        elif len(delays) == 4:
-            enough.set()
-            await asyncio.Event().wait()  # the test ends the relay
-
-    await commit(database, outbox, subject="quiet.poison")
-    await commit(database, outbox)
-
-    async with relaying(outbox.run(database, jetstream, retry=1, sleep=sleep)):
-        async with asyncio.timeout(5):
-            await enough.wait()
-
-    assert delays == [1, 2, 4, 1]
-    assert await stored(jetstream) == 2
-
-
 async def rename_outbox(database: Database, old: str, new: str, *, if_exists: bool = False) -> None:
     """Take the table away from (or give it back to) the relay: fixed names, never input."""
     exists = "IF EXISTS " if if_exists else ""
@@ -637,6 +643,7 @@ async def test_the_relay_survives_the_database_failing(
 
     assert delays == [1]
     assert logs == [{"event": "outbox.relay_failed", "log_level": "error", "exc_info": True, "retry_in": 1}]
+    assert sample(registry, "ledger_outbox_failed_passes_total") == 1
     assert await stored(jetstream) == 1
 
 
@@ -718,20 +725,21 @@ async def test_the_limit_on_an_event_is_the_one_the_outbox_is_given(
     assert await pending(database) == 1
 
 
-async def test_the_backlog_is_measured_from_when_the_events_were_stored(
-    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+async def test_the_backlog_is_dated_from_when_the_events_were_stored(
+    database: Database, tracing: Tracing, registry: CollectorRegistry
 ) -> None:
-    """Event times can be backdated or skewed: the oldest event's age counts from the database's clock."""
+    """Event times can be backdated or skewed: the oldest event is dated by the database's clock."""
     outbox = Outbox(tracing=tracing, registry=registry)
     backdated = replace(event(), time=datetime.now(UTC) - timedelta(days=1))
     await commit(database, outbox, backdated)
     await commit(database, outbox)
 
-    with pytest.raises(PublishFailedError):  # no stream: nothing goes out
-        await outbox.relay_once(database, jetstream)
+    await outbox.measure_backlog(database)
     assert sample(registry, "ledger_outbox_pending") == 2
-    assert 0 <= sample(registry, "ledger_outbox_oldest_pending_age_seconds") < 60
-    assert sample(registry, "ledger_outbox_publish_failed_total") == 2
+    stored_ago = await database_time(database) - sample(
+        registry, "ledger_outbox_oldest_pending_timestamp_seconds"
+    )
+    assert 0 <= stored_ago < 60  # not the day the envelope says
 
     async with database.transaction(None) as unit:
         await unit.connection.execute(
@@ -739,23 +747,44 @@ async def test_the_backlog_is_measured_from_when_the_events_were_stored(
             .values(stored_at=func.now() - timedelta(seconds=90))
             .where(OutboxRecord.id == backdated.id)
         )
-    with pytest.raises(PublishFailedError):
-        await outbox.relay_once(database, jetstream)
-    assert 90 <= sample(registry, "ledger_outbox_oldest_pending_age_seconds") < 150
-
-    await ensure_stream(jetstream, STREAM)
-    assert await outbox.relay_once(database, jetstream) == 2
-    assert sample(registry, "ledger_outbox_pending") == 0
-    assert sample(registry, "ledger_outbox_oldest_pending_age_seconds") == 0
-    assert sample(registry, "ledger_outbox_published_total") == 2
+    await outbox.measure_backlog(database)
+    stored_ago = await database_time(database) - sample(
+        registry, "ledger_outbox_oldest_pending_timestamp_seconds"
+    )
+    assert 90 <= stored_ago < 150
 
 
-async def test_an_idle_pass_reports_an_empty_backlog(
-    database: Database, jetstream: JetStreamContext, outbox: Outbox, registry: CollectorRegistry
+async def test_an_empty_outbox_has_no_backlog(
+    database: Database, outbox: Outbox, registry: CollectorRegistry
 ) -> None:
-    assert await outbox.relay_once(database, jetstream) == 0
+    await commit(database, outbox)
+    await outbox.measure_backlog(database)
+    assert sample(registry, "ledger_outbox_pending") == 1
+
+    async with database.transaction(None) as unit:
+        await unit.connection.execute(delete(OutboxRecord))
+    await outbox.measure_backlog(database)
     assert sample(registry, "ledger_outbox_pending") == 0
-    assert sample(registry, "ledger_outbox_oldest_pending_age_seconds") == 0
+    assert sample(registry, "ledger_outbox_oldest_pending_timestamp_seconds") == 0
+
+
+async def test_a_backlog_that_cannot_be_read_is_logged_and_changes_nothing(
+    database: Database, outbox: Outbox, registry: CollectorRegistry
+) -> None:
+    await commit(database, outbox)
+    await outbox.measure_backlog(database)
+    before = sample(registry, "ledger_outbox_oldest_pending_timestamp_seconds")
+
+    await rename_outbox(database, "outbox", "outbox_away")
+    try:
+        with capture_logs() as logs:
+            await outbox.measure_backlog(database)
+    finally:
+        await rename_outbox(database, "outbox_away", "outbox", if_exists=True)
+
+    assert logs == [{"event": "outbox.backlog_unreadable", "log_level": "error", "exc_info": True}]
+    assert sample(registry, "ledger_outbox_pending") == 1
+    assert sample(registry, "ledger_outbox_oldest_pending_timestamp_seconds") == before
 
 
 @pytest.mark.parametrize("max_payload", [0, -1])
@@ -764,3 +793,160 @@ def test_a_payload_limit_below_one_byte_is_refused(
 ) -> None:
     with pytest.raises(InvalidOutboxOptionError, match="max_payload"):
         Outbox(tracing=tracing, registry=registry, max_payload=max_payload)
+
+
+async def test_stuck_events_in_numbers_beyond_a_batch_do_not_hold_back_healthy_ones(
+    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+) -> None:
+    """Five events with no stream are older than three healthy ones, and a batch is three: the oldest rows of
+    every pass are the stuck ones, unless each stuck row keeps to its own schedule."""
+    await ensure_stream(jetstream, STREAM)
+    outbox = Outbox(tracing=tracing, registry=registry, batch=3)
+    for _ in range(5):
+        await commit(database, outbox, subject="quiet.stuck")
+    for _ in range(3):
+        await commit(database, outbox)
+
+    async with relaying(outbox.run(database, jetstream, idle=60, retry=MAX_RETRY_DELAY)):
+        await eventually(partial(delivered, jetstream, 3), within=3)
+
+    assert await pending(database) == 5
+    assert sample(registry, "ledger_outbox_failed_passes_total") == 0
+
+
+async def test_the_first_failure_in_the_batch_order_is_the_one_reported(
+    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+) -> None:
+    await ensure_stream(jetstream, STREAM)
+    outbox = Outbox(tracing=tracing, registry=registry)
+    first, second, third = event(), event(), event()
+    await commit(database, outbox, first, subject="quiet.a")
+    await commit(database, outbox, second, subject="test.b")
+    await commit(database, outbox, third, subject="quiet.c")
+
+    with pytest.raises(PublishFailedError, match=str(first.id)) as failed:
+        await outbox.relay_once(database, jetstream)
+
+    assert (failed.value.subject, failed.value.acknowledged, failed.value.failed) == ("quiet.a", 1, 2)
+    assert await pending(database) == 2
+
+
+async def test_a_stuck_event_keeps_to_a_schedule_of_its_own(
+    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+) -> None:
+    """Tried again after ``retry`` seconds, then twice, then four times as long, never beyond the ceiling."""
+    outbox = Outbox(tracing=tracing, registry=registry)
+    stuck = event()
+    await commit(database, outbox, stuck, subject="quiet.stuck")
+
+    for attempts, expected in enumerate((10, 20, 30, 30, 30), start=1):
+        with pytest.raises(PublishFailedError):
+            await outbox.relay_once(database, jetstream, retry=10)
+        recorded, due = await attempts_and_due(database, stuck.id)
+        assert recorded == attempts
+        assert expected - 5 < due <= expected
+        assert (
+            await outbox.relay_once(database, jetstream, retry=10) == 0
+        )  # not due: left alone, nothing to report
+        await make_due(database)
+    assert sample(registry, "ledger_outbox_publish_failed_total") == 5
+
+
+async def test_a_schedule_does_not_overflow_after_thousands_of_attempts(
+    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+) -> None:
+    outbox = Outbox(tracing=tracing, registry=registry)
+    stuck = event()
+    await commit(database, outbox, stuck, subject="quiet.stuck")
+    async with database.transaction(None) as unit:
+        await unit.connection.execute(update(OutboxRecord).values(attempts=5000))
+
+    for retry in (MIN_RETRY_DELAY, 10, MAX_RETRY_DELAY):
+        await make_due(database)
+        with pytest.raises(PublishFailedError):
+            await outbox.relay_once(database, jetstream, retry=retry)
+        _, due = await attempts_and_due(database, stuck.id)
+        assert MAX_RETRY_DELAY - 5 < due <= MAX_RETRY_DELAY
+
+
+async def test_stuck_events_go_out_once_their_stream_appears(
+    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+) -> None:
+    """More than two batches of them, each due again in half a minute: until time passes, nothing moves."""
+    outbox = Outbox(tracing=tracing, registry=registry, batch=3)
+    for _ in range(7):
+        await commit(database, outbox, subject="quiet.stuck")
+
+    async with relaying(outbox.run(database, jetstream, idle=0.05, retry=MAX_RETRY_DELAY)):
+        await eventually(partial(reached, registry, "ledger_outbox_publish_failed_total", 7))
+        await ensure_stream(jetstream, StreamSpec(name="QUIET", subjects=("quiet.>",)))
+        await asyncio.sleep(0.2)
+        assert await pending(database) == 7
+        await make_due(database)
+        await eventually(partial(drained, database))
+
+    assert await stored(jetstream, "QUIET") == 7
+    assert sample(registry, "ledger_outbox_publish_failed_total") == 7
+
+
+async def test_a_full_pass_is_followed_by_another_at_once(
+    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+) -> None:
+    await ensure_stream(jetstream, STREAM)
+    outbox = Outbox(tracing=tracing, registry=registry, batch=2)
+    for _ in range(9):
+        await commit(database, outbox)
+
+    async with relaying(outbox.run(database, jetstream, idle=60)):
+        await eventually(partial(delivered, jetstream, 9), within=3)
+
+
+async def gauge_is(registry: CollectorRegistry, name: str, value: float) -> bool:
+    return registry.get_sample_value(name) == value
+
+
+async def test_the_relay_measures_the_backlog_after_a_pass_that_was_not_full(
+    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+) -> None:
+    outbox = Outbox(tracing=tracing, registry=registry)
+    await commit(database, outbox, subject="quiet.a")
+
+    async with relaying(outbox.run(database, jetstream, idle=0.05)):
+        await eventually(partial(gauge_is, registry, "ledger_outbox_pending", 1))
+        await commit(database, outbox, subject="quiet.b")
+        await eventually(partial(gauge_is, registry, "ledger_outbox_pending", 2))
+
+    assert sample(registry, "ledger_outbox_oldest_pending_timestamp_seconds") > 0
+
+
+async def test_the_relay_measures_the_backlog_at_most_once_per_idle_period(
+    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+) -> None:
+    outbox = Outbox(tracing=tracing, registry=registry)
+    await commit(database, outbox, subject="quiet.a")
+
+    async with relaying(outbox.run(database, jetstream, idle=60)):
+        await eventually(partial(gauge_is, registry, "ledger_outbox_pending", 1))
+        await commit(database, outbox, subject="quiet.b")  # wakes the relay: another pass, no new measure
+        await eventually(partial(reached, registry, "ledger_outbox_publish_failed_total", 2))
+        await asyncio.sleep(0.1)
+
+    assert sample(registry, "ledger_outbox_pending") == 1
+
+
+async def test_the_events_that_are_due_are_read_through_an_index(database: Database) -> None:
+    """``ix_outbox_due`` lets PostgreSQL pass over the events that are not due without visiting them."""
+    definitions = select(column("indexdef", String)).select_from(text("pg_indexes"))
+    async with database.transaction(None) as unit:
+        found = await unit.connection.execute(
+            definitions.where(column("indexname", String) == "ix_outbox_due")
+        )
+        definition = found.scalar_one()
+    assert definition.endswith("(created_at, id, next_attempt_at)")
+
+
+async def test_a_retry_the_pass_cannot_work_with_is_refused_before_anything_is_read(
+    database: Database, jetstream: JetStreamContext, outbox: Outbox
+) -> None:
+    with pytest.raises(InvalidOutboxOptionError, match="retry"):
+        await outbox.relay_once(database, jetstream, retry=MAX_RETRY_DELAY + 1)

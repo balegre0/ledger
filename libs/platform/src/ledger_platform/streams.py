@@ -49,9 +49,10 @@ class StreamSpec:
     duplicate_window: timedelta = timedelta(minutes=2)
     """How long a repeated ``Nats-Msg-Id`` is recognized and dropped: the relay may publish an event twice.
 
-    It must be longer than the longest gap between two attempts to publish the same event: the outbox relay's
-    retry ceiling plus its publish timeout (50 seconds at most). An event published again after the window
-    is stored twice.
+    It must be longer than the gap between two attempts to publish the same event: the outbox relay's retry
+    ceiling plus its publish timeout (50 seconds at most). A republish after an outage or a restart can come
+    later than that; an event published again after the window is stored twice, and the consumer's inbox is
+    the backstop.
     """
     max_age: timedelta = timedelta(days=7)
     """How long an event stays in the stream, for consumers that were down and for replays."""
