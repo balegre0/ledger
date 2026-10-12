@@ -68,7 +68,7 @@ Ten rules hold everywhere:
 2. **Commands are synchronous, facts are asynchronous.** gRPC for "do this now and tell me"; NATS
    events for "this happened".
 3. **Every state change and the event announcing it commit together** (transactional outbox).
-4. **Every consumer is idempotent** (inbox table keyed by event id).
+4. **Every consumer is idempotent** (inbox table keyed by consumer and event id).
 5. **Every external write is idempotent** (`Idempotency-Key` on the public API; deterministic ids
    inside).
 6. **Country rules live in a country service** (`fiscal-do`). `invoicing` knows commercial documents,
@@ -98,9 +98,9 @@ Future country services (`fiscal-mx`, `fiscal-co`) consume `invoicing.document.i
 
 | Library | Contains | May depend on |
 |---|---|---|
-| `kernel` | typed ids, `Money` and currency, `Rnc`/`Cedula` value objects with check digits, clock, the base domain exception hierarchy, pagination primitives | stdlib only |
+| `kernel` | UUIDv7 ids (a type per entity), exact `Money` and `Currency`, `TaxId` (RNC or cédula; check digit reported, not enforced, because DGII has issued numbers that fail it), clock, the base domain exception hierarchy (a kind and a stable code per error), pagination primitives (with the first list endpoint) | stdlib only |
 | `contracts` | `.proto` files for gRPC services and event payloads, generated code and stubs, event envelope | `kernel`, protobuf, grpcio |
-| `platform` | the service chassis: settings, logging, tracing, metrics, PostgreSQL session and unit of work, outbox relay, inbox, NATS client, gRPC server/client factories, HTTP app factory, health, lifecycle, authz context | `kernel`, `contracts`, third-party infrastructure libraries |
+| `platform` | the service chassis: settings, logging, tracing, metrics, PostgreSQL transactions (unit of work, row-level security), outbox relay, inbox and consumers, JetStream stream management, gRPC server, HTTP app factory, health, lifecycle, and the `Service` that assembles them. gRPC client helpers and the authorization context come with the first service that needs them (milestone 2) | `kernel`, `contracts`, third-party infrastructure libraries |
 
 A service may depend on `libs/*`, never on another service. import-linter enforces it.
 
@@ -109,24 +109,78 @@ A service may depend on `libs/*`, never on another service. import-linter enforc
 ### 4.1 Events (NATS JetStream)
 
 - Streams per producing service (`IDENTITY`, `INVOICING`, `FISCAL_DO`...), subjects
-  `<service>.<aggregate>.<event>`: `invoicing.document.issued`, `fiscal.document.accepted`.
-- Envelope: CloudEvents 1.0 attributes in NATS headers (`ce-id`, `ce-type`, `ce-source`,
-  `ce-time`, `ce-subject` = company id, `traceparent`), payload as a versioned protobuf message
-  (`ledger.events.invoicing.v1.DocumentIssued`).
+  `<service>.<aggregate>.<event>`: `invoicing.document.issued`, `fiscal.document.accepted`. The service
+  that publishes declares its streams; every start creates a missing one (file storage) or applies the
+  starting replica's own declaration of subjects and limits over what is there. Replicas of two versions
+  run side by side during a rollout, so a declaration must keep everything the older versions still
+  running need (more subjects, no shorter limits): an older replica that restarts reverts the stream to its
+  own declaration, and a shorter `max_age` makes JetStream delete messages at once. Moving forward only is
+  a rule for the authors of a declaration; the code does not enforce it.
+- Envelope: CloudEvents 1.0 attributes in NATS headers (`ce-specversion`, `ce-id`, `ce-type`, `ce-source`,
+  `ce-time`, `ce-subject` = company id, `ce-organizationid` = organization id (both absent for
+  platform-wide events), `traceparent`, `content-type: application/protobuf`), payload as a versioned
+  protobuf message (`ledger.events.invoicing.v1.DocumentIssued`).
+- `ce-type` is the payload's protobuf full name (a dotted name), so a consumer knows what it received
+  before decoding; `ce-source` is visible ASCII; both are at most 128 characters. An envelope that exists
+  can always be published and read back: it refuses what a header could not carry, so no value can inject
+  a header or break NATS's framing, and the headers `ce-specversion` and `content-type` are checked on
+  reading. A `traceparent` that is not a valid W3C version 00 one is dropped, not fatal: a lost trace link
+  must not lose the event.
 - JetStream message de-duplication uses `Nats-Msg-Id` = event id (window 2 minutes); consumers still
-  de-duplicate durably through the inbox.
-- Durable pull consumers, explicit ack, `max_deliver` 10 with backoff 1 s → 10 min, then the message
-  goes to a dead-letter stream with an alert.
-- Ordering: only per aggregate matters; events carry the aggregate version and consumers reject a
-  version gap by not acking (redelivery after the missing one arrives).
+  de-duplicate durably through the inbox. The relay's retry delays are capped so that its ordinary
+  republishes fall inside the window; the inbox is the backstop for those that do not (after an outage).
+- Durable pull consumers, explicit ack, `max_deliver` 10 with backoff 1 s → 10 min (1 s, 10 s, 1 min,
+  5 min, then 10 min between the rest), then JetStream gives up on the message and publishes a
+  `MAX_DELIVERIES` advisory.
+- Events that can never succeed (unreadable envelope, or a handler error of kind INVALID) are terminated
+  at once; JetStream's MAX_DELIVERIES and MSG_TERMINATED advisories are kept in the DEAD_LETTERS stream
+  for 30 days. An advisory names the stream and the sequence of the message, which is deleted from its
+  stream when it is `max_age` old (7 days by default; acknowledging does not delete): the time to inspect
+  it counts from when the event was stored, not from the advisory, so an advisory can leave far less than
+  7 days, and one kept for its 30 days can point at a message that is gone. A dead letter has to be looked
+  at promptly; the alert is in §11.
+- A consumer's spec is its configuration: starting it creates the durable consumer or brings the existing
+  one to the spec. `max_deliver` and `ack_wait` change in place (JetStream keeps the position and the
+  pending messages), and as with streams the latest start wins, so a new value must suit the older versions
+  still running. The filter subject does not change in place: one durable consumer serves every replica of
+  every version during a rollout, so widening it would hand new events to old replicas that cannot read them
+  (they would be terminated) and narrowing it would skip them for good. A service that needs another subject
+  names its consumer anew (`invoicing-projections-v2`), which starts over with the whole stream. `ack_wait`
+  defaults to twice what one claim and one statement can take at the database's default limits (70 s); a
+  handler may outlast it, and the inbox makes the second delivery harmless.
+- Ordering: only per aggregate matters. The platform promises no order across events (a retried event
+  follows the ones published after it); events carry the aggregate version, and a handler that needs the
+  order fails a delivery with a version gap by raising an error that is not of kind INVALID (that kind
+  terminates the event), so it is retried after its backoff, by when the missing event should have arrived.
 
 **Outbox.** In the same transaction as the state change, the service inserts the event into
-`outbox`. A relay in the same process reads with `FOR UPDATE SKIP LOCKED`, publishes, waits for the
-JetStream ack, marks it sent. PostgreSQL `LISTEN/NOTIFY` wakes the relay; a 1 s poll is the fallback.
-Several replicas share the work safely.
+`outbox`. An event no relay could ever publish (a subject NATS cannot route, a message over NATS's size
+limit) is refused there, so that its transaction fails instead of a relay stalling on it. A relay in the
+same process locks the due rows with `FOR UPDATE SKIP LOCKED`, publishes the batch and waits for the
+JetStream acks inside that transaction. The relay deletes rows once JetStream acknowledges them, every
+acknowledged one in the pass, whatever happened to the others. A commit wakes the relay of the same
+process at once; rows from other replicas are picked up by any relay within a 1 s poll. There is no
+`LISTEN/NOTIFY`: a replica's own commit already wakes its relay, retried events that fall due need the
+poll anyway, a dropped listener loses notifications so the poll would stay the safety net regardless, and
+listening takes a dedicated connection per replica outside the pool. It would only shave at most the poll
+interval (`idle`) off rows that their own replica cannot relay. Several replicas share the work safely.
 
-**Inbox.** A consumer handles a message inside a transaction that inserts `(consumer, event_id)` into
-`inbox`; a duplicate violates the primary key and is acked without effect.
+An event JetStream did not acknowledge stays in the table on a schedule of its own (`attempts` and
+`next_attempt_at`: 1 s after the first failure, doubling up to 30 s). A pass takes only the rows that are
+due, fresh events before retried ones, so a pile of stuck events cannot delay a new one. The backlog is
+measured, not guessed: gauges for the number of pending events and for when the oldest was stored, and
+counters for publishes, failed publishes and failed passes.
+
+**Inbox.** A consumer handles a message inside a transaction, scoped to the event's tenant so that row-level
+security applies to the handler's writes, that first inserts `(consumer, event_id)` into `inbox`; a
+duplicate finds the row (`ON CONFLICT DO NOTHING`) and is acked without calling the handler. Two deliveries
+of one event at once serialize on the primary key: the second waits and then sees the outcome of the first;
+if it waits longer than the database's lock timeout its claim fails and is retried after the backoff, using
+up one of its deliveries. The message is acked only after the commit; a failed claim or handler is nacked
+with the backoff's delay. A consumer that stops (a deploy, a scale-down) rolls back the handling in progress
+and hands the rest of its batch back to JetStream at once. The inbox is outside row-level security on
+purpose (it holds no business data and is claimed before the handler runs), and its rows are not yet
+deleted: a retention job comes with the first service that produces volume.
 
 ### 4.2 Synchronous calls (gRPC)
 
@@ -134,10 +188,25 @@ Several replicas share the work safely.
   major version (`ledger.fiscal_do.v1`).
 - Deadlines always set by the caller and propagated; retries only on idempotent methods
   (declared in the service config), with hedging off.
-- Errors use the gRPC rich error model (`google.rpc.Status` with `ErrorInfo` reasons such as
-  `CERTIFICATE_EXPIRED`), mapped to domain exceptions by `platform`.
+- Errors use the status code of the error's kind and its stable code (`certificate_expired`) in the
+  trailing metadata `ledger-error-code`, mapped back to domain exceptions by `platform` (its client
+  helpers, built with the first gRPC client). An error of kind `INTERNAL`, and any bug, answers `INTERNAL`
+  with generic details and the code `internal`: what went wrong is logged, never sent. The server guards
+  every asynchronous method, whether the request, the response or both stream.
 - Identity and tenant travel in metadata, signed by the gateway (see §8); services trust only that.
-- mTLS between pods by the service mesh (Linkerd), so services hold no TLS code.
+- mTLS between pods by the service mesh (Linkerd), so services hold no TLS code: the chassis's server
+  listens on a plain port.
+
+Every error has a kind, and each kind has one status per protocol (HTTP answers in §10):
+
+| Kind | HTTP | gRPC |
+|---|---|---|
+| `INVALID` (can never succeed as sent) | 422 | `INVALID_ARGUMENT` |
+| `NOT_FOUND` | 404 | `NOT_FOUND` |
+| `CONFLICT` (the current state forbids it) | 409 | `FAILED_PRECONDITION` |
+| `FORBIDDEN` | 403 | `PERMISSION_DENIED` |
+| `UNAVAILABLE` (a dependency failed; retry may work) | 503 | `UNAVAILABLE` |
+| `INTERNAL` (a defect of ours) | 500, code `internal` | `INTERNAL`, code `internal` |
 
 ### 4.3 Long-running processes (Temporal)
 
@@ -245,14 +314,33 @@ company can certify while another runs in production.
 ## 7. Data
 
 - PostgreSQL 18, one database per service, one role per service with access only to its database.
-- SQLAlchemy 2.1 Core with typed tables (no ORM sessions in the domain); psycopg 3 driver (async,
-  pipeline mode, binary protocol); Alembic migrations, reviewed and tested up and down in CI.
-- Every tenant-owned table has `organization_id` and `company_id`; **row-level security** policies
-  filter by the session variables that `platform` sets at the start of every transaction. A missing
-  tenant context fails closed.
+  Services never connect as a superuser or as a `BYPASSRLS` role: both ignore row-level security.
+  Production separates a migration owner from a DML-only runtime role (settled with the deployment
+  milestone); the local stack and the tests use one non-superuser role that owns its database, for
+  simplicity, and rely on `FORCE ROW LEVEL SECURITY` to subject the owner to the policies.
+- SQLAlchemy 2.1 Core with typed tables (no ORM sessions in the domain); psycopg 3, asynchronous, as the
+  only driver (the chassis refuses any other); Alembic migrations, reviewed and tested up and down in CI.
+- Every connection carries limits, none of them unlimited: connect 5 s, statement 30 s, lock 5 s,
+  idle-in-transaction 60 s, wait for a pooled connection 10 s. A missing limit turns one stuck dependency
+  into every worker stuck; a migration or batch job passes longer ones. SQLAlchemy does not echo the values
+  bound to a statement in its errors (`hide_parameters`), because the text of a SQL error reaches logs.
+- Every tenant-owned table has `organization_id` and `company_id`; **row-level security** shows and
+  accepts only the rows where **both** equal the transaction-local settings `ledger.organization_id` and
+  `ledger.company_id`, which `platform` sets at the start of every transaction (binding the organization
+  as well keeps a company id from reaching across organizations). A table's migration enables the policy
+  with the chassis's `tenant_isolation(table)`, which also forces it on the table's owner. A missing
+  tenant context fails closed: no rows are seen and none can be written. The chassis's own `outbox` and
+  `inbox` are the exceptions: a relay reads the outbox across tenants, and the inbox is claimed before the
+  handler runs (§4.1).
+- A transaction commits only if every statement in it succeeded: a caller that swallows a database
+  error gets an error at the exit, never a silent rollback. What must follow a commit, such as waking the
+  relay, runs in after-commit callbacks, which cannot change the outcome and never run after a rollback.
 - Ids: UUIDv7 (time-ordered) for every entity, wrapped in typed `NewType`s per entity.
-- Money: `Decimal` with currency, never float; DGII rounding rules applied in one place
-  (`kernel.money`), with property tests.
+- Money: exact `Decimal` with currency, never float, never a silent rounding. Amounts stay below 10^18
+  with at most 24 decimal places; arithmetic is exact, so a result that would need rounding, leave that
+  range or mix currencies is an error; zero is never signed. Rounding happens only when asked for
+  (`Money.rounded()`: half away from zero, to the currency's minor unit); the fiscal rules that decide
+  where to round come with `fiscal-do`. Property tests cover the laws.
 - Times: `timestamptz` in UTC; DGII's local-time fields converted at the XML adapter only
   (`America/Santo_Domingo`).
 - **Legal archive.** Signed XML (emitted and received) and DGII responses go to object storage with
@@ -274,8 +362,8 @@ company can certify while another runs in production.
 - Authorization is decided in the service, per request: `platform` loads the principal's permissions
   for the target company through `IdentityQuery` (cached 30 s, invalidated by `identity.membership.*`
   events) and checks a typed permission (`Permission.INVOICE_ISSUE`).
-- Every request carries one `company_id`; it sets the RLS context. Cross-company queries exist only
-  in admin endpoints with a separate permission.
+- Every request carries one `company_id` and, with it, its organization; together they set the RLS
+  context. Cross-company queries exist only in admin endpoints with a separate permission.
 
 ## 9. Security
 
@@ -284,7 +372,8 @@ company can certify while another runs in production.
 | Certificate custody | `.p12` uploaded once, parsed in `vault`, private key encrypted with a per-certificate data key; the data key encrypted by the cloud KMS (envelope). The KMS key never leaves the KMS |
 | Key use | Only `vault.Sign*` uses keys, in memory for the operation; every signature is logged (who, company, document hash) |
 | Certificate checks | Subject RNC must match the company; validity window; chain to an accepted DR certification authority |
-| Secrets | Kubernetes secrets from the cloud secret manager (External Secrets Operator); none in images or repos |
+| Secrets | Kubernetes secrets from the cloud secret manager (External Secrets Operator); none in images or repos. Inside a service a secret is never in a `repr`, a log or an error message |
+| Leaks through telemetry | What a client sent never leaves in an error or a trace: messages quote at most an excerpt of the input; a validation problem says where and of what type, never the value; a span records the exception's type only, no message or traceback; tracebacks in logs carry no local variables (a frame that failed to connect holds the database password); an unexpected failure answers a bare `internal` |
 | Transport | TLS 1.3 at the edge; mTLS inside (Linkerd); DGII calls verify DGII's certificate |
 | Public API | OAuth 2.0 only; idempotency keys; request size limits; JSON schemas strict (unknown fields rejected) |
 | Webhooks | HMAC-SHA256 signature with timestamp (replay window 5 min); secrets rotatable with overlap |
@@ -296,8 +385,13 @@ company can certify while another runs in production.
 ## 10. Public API
 
 - REST with JSON, OpenAPI 3.1 generated from the code and published; versioned in the path (`/v1`).
-- Errors: RFC 9457 `application/problem+json` with stable `type` URIs and, for DGII rejections, the
-  DGII codes and messages.
+- Errors: every failure, the framework's own 404 and 405 included, is RFC 9457
+  `application/problem+json` with a stable `type` URN (`urn:ledger:error:<code>`), a `code` clients
+  match on and, for DGII rejections, the DGII codes and messages. The codes of plain HTTP statuses
+  are pinned (`not_found`, `conflict`, `unavailable`...), and the status of a domain error follows its
+  kind (§4.2). A request that breaks the schema is a
+  422 `invalid_request` listing at most 20 problems (where, of which type) and how many were left out.
+  The operational routes `/livez`, `/readyz` and `/metrics` are outside the OpenAPI document.
 - `Idempotency-Key` required on every `POST`; stored 24 h with the response; a different body with
   the same key is a 422.
 - Cursor pagination, `ETag` + `If-Match` on updates, ISO 8601 dates, amounts as strings.
@@ -307,15 +401,40 @@ company can certify while another runs in production.
 ## 11. Observability and operations
 
 - **Traces:** OpenTelemetry in every service: HTTP, gRPC, SQL, NATS (context in headers), Temporal
-  (interceptor), DGII calls. Exported over OTLP to the collector.
+  (interceptor), DGII calls. Exported over OTLP to the collector; without an endpoint spans are created but
+  not exported. The trace crosses the outbox: an event carries the `traceparent` of the span that added it,
+  and a consumer's span continues that trace from the event alone, never from whatever span is active. An
+  over-long `traceparent` is never parsed, so a hostile header costs nothing. A failed span records the
+  exception's type and nothing else: spans leave the process and cannot be recalled. Milestone 1 builds the
+  tracer provider and the propagation through events; the automatic instrumentation of FastAPI, SQLAlchemy
+  and gRPC arrives with the first service (milestone 2).
 - **Metrics:** Prometheus: RED metrics per endpoint and RPC, outbox lag, consumer lag, DLQ size,
-  workflow states, DGII latency and error rate per environment, certificates expiring.
-- **Logs:** structlog JSON with trace id, company id, never personal data beyond ids, never XML
-  bodies or keys.
+  workflow states, DGII latency and error rate per environment, certificates expiring. The chassis
+  exports the HTTP request duration by method, route template and status (labels are bounded:
+  the route is a template the code declared, never the client's path); the outbox backlog (events
+  pending, and the time the oldest was stored, so that lag keeps growing while a relay is blind) with
+  counters of publishes, failed publishes and failed passes; and consumer deliveries by consumer and
+  outcome (handled, duplicate, failed, rejected, malformed). The outbox gauges read the table, so every
+  replica exports the same values: aggregate them with `max`, never `sum`.
+- **Logs:** structlog, JSON in production and readable in a terminal, with the standard-library loggers
+  going through the same pipeline. Every record carries the service and the environment, and
+  request-scoped fields (trace id, company id) will merge in from context variables once the request
+  middleware binds them (milestone 2); nothing binds them yet. Never personal data beyond ids, never XML
+  bodies or keys, and never the local variables of a traceback's frames.
+- **Health:** every service serves HTTP `/livez`, `/readyz` and `/metrics`. Kubernetes probes use each
+  service's HTTP `/livez` and `/readyz` (gRPC health is not needed: every service serves HTTP).
+  `/readyz` runs the service's named checks (database, NATS, background workers) concurrently, each held
+  to a time limit, and answers 503 if any fails; overlapping probes share one run of each check. `/livez`
+  does not consult the dependencies, so that a PostgreSQL outage does not restart every pod: it answers 503 only
+  when a check has outlived ten time limits and will not stop, and such a process cannot recover by itself.
 - **SLOs:** API availability 99.9 %; p95 `POST /v1/invoices` < 300 ms (excluding DGII); 99 % of
   documents reach a final DGII state within 5 minutes when DGII is up.
-- **Alerts:** SLO burn rate, DLQ non-empty, outbox lag > 1 min, DGII circuit open > 10 min,
-  certificate expiring < 7 days, contingency queue age.
+- **Alerts:** SLO burn rate, new dead letters (a new advisory in `DEAD_LETTERS`, or that stream
+  growing: with 30 days of retention it is hardly ever empty, so "not empty" would never clear; nothing
+  exports its size yet, and until then the `rejected` and `malformed` outcomes count the events
+  terminated), outbox lag > 1 min (events pending and the oldest stored
+  more than a minute ago: the timestamp is 0 when nothing waits, so the condition needs both), DGII
+  circuit open > 10 min, certificate expiring < 7 days, contingency queue age.
 - Grafana dashboards as code; runbooks linked from every alert.
 
 ## 12. Stack
@@ -348,11 +467,11 @@ All verified installable on Python 3.15 (cp315 or abi3 wheels, or pure Python) o
 ledger/
 ├── pyproject.toml             workspace root: shared tool configuration
 ├── uv.lock
-├── libs/{kernel,contracts,platform}/
+├── libs/{kernel,contracts,platform}/    (contracts/proto is the buf module: the .proto sources)
 ├── services/{identity,catalog,invoicing,fiscal-do,fiscal-receiver,vault,webhooks}/
 │   └── <service>/{pyproject.toml, src/, tests/, migrations/, Dockerfile}
-├── proto/                     .proto sources (buf module)
-├── deploy/{helm/, local/}     Helm charts; compose + Tilt for local development
+├── Tiltfile                   local development: runs deploy/local, then each service
+├── deploy/{helm/, local/}     Helm charts; compose (PostgreSQL, NATS) for local development
 └── docs/                      architecture, ADRs, runbooks, specs
 ```
 
@@ -363,13 +482,14 @@ Quality gate (`uv run poe check`, every package, CI on Linux):
 | Format, lint | ruff (every rule) |
 | Types | basedpyright `all` + mypy `--strict`, both with warnings as errors |
 | Architecture | import-linter: libs never import services; services never import each other; hexagonal layers inside each service |
-| Contracts | `buf lint`, `buf breaking` against `main` |
+| Contracts | `buf lint`, `buf breaking` against `main`; CI regenerates the code of every `.proto` and fails on a diff |
 | Dependencies, spelling | deptry, typos |
 | Tests | pytest + hypothesis, 100 % branch coverage, warnings are errors, random order |
 | Security | pip-audit, image scan, secret scan |
 
-Zero `type: ignore`, `noqa`, `pragma: no cover`. Generated protobuf code is excluded from linting but
-its `.pyi` stubs are type-checked against.
+Zero `type: ignore`, `noqa`, `pragma: no cover`: a gate step (`suppressions`) fails on any of them, and
+on a tool directive such as `# ruff:` or `# mypy:`. Generated protobuf code is excluded from linting by
+configuration, not by comments, but its `.pyi` stubs are type-checked against.
 
 ## 14. Testing
 
@@ -377,7 +497,7 @@ its `.pyi` stubs are type-checked against.
 |---|---|---|
 | Unit | domain, use cases with fakes | pytest, hypothesis (money, check digits, sequences, state machine) |
 | XML | every e-CF type | golden files validated against DGII's XSDs; signatures verified by an independent verifier (xmlsec1) |
-| Adapters | repositories, outbox, inbox, NATS, gRPC | testcontainers: real PostgreSQL and NATS |
+| Adapters | repositories, outbox, inbox, NATS, gRPC | testcontainers: real PostgreSQL and NATS, connecting as a non-superuser role that owns its database (a superuser would bypass row-level security) |
 | Workflows | emission, approval, annulment | Temporal test environment with time skipping; DGII fake with scripted outages |
 | Contracts | protobuf, events, OpenAPI | buf breaking; schemathesis against the OpenAPI document |
 | End to end | full stack | compose environment; nightly run against DGII's `TesteCF` with a test certificate |
@@ -389,8 +509,13 @@ its `.pyi` stubs are type-checked against.
 - Managed Kubernetes; Helm chart per service; Argo CD (GitOps) for staging and production.
 - Managed PostgreSQL, NATS (Helm, 3 replicas, JetStream file storage), Temporal (Temporal Cloud or
   Helm), Zitadel (Helm), object storage with object lock, cloud KMS.
-- Local development: `tilt up` builds and runs everything with live reload; compose for the
-  infrastructure alone.
+- Local development: `tilt up` runs `deploy/local/compose.yaml` (PostgreSQL and NATS with JetStream,
+  each with a health check that proves it is usable) and, from milestone 2, builds and runs each service
+  with live reload; compose runs the infrastructure alone. The local PostgreSQL creates a non-superuser
+  role that owns the database, so that row-level security applies on a laptop as in production.
+- Services are configured only through `LEDGER_*` environment variables. A variable that is not a setting
+  (a misspelled name) stops the start, with every problem listed, instead of silently running on a
+  default.
 - Region chosen after the Reglamento 587-24 check (§9). Until that check, the design assumes no
   provider-specific service beyond Kubernetes, PostgreSQL, object storage and KMS, all available
   from every major cloud.
