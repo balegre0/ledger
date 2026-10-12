@@ -72,7 +72,7 @@ def test_an_empty_variable_counts_as_unset(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("LEDGER_NATS_URL", "")
     monkeypatch.setenv("LEDGER_OTLP_ENDPOINT", "")
     settings = ServiceSettings()
-    assert (settings.nats_url, settings.otlp_endpoint) == ("nats://localhost:4222", None)
+    assert (settings.nats_url.get_secret_value(), settings.otlp_endpoint) == ("nats://localhost:4222", None)
 
 
 def test_an_empty_database_url_is_a_missing_one(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,6 +198,8 @@ def test_the_database_url_must_use_the_psycopg_driver_and_stays_secret(
         "nats://user:s3cret@nats:port",
         "nats://nats:70000",
         "nats://nats:0",
+        "nats://none:4222",
+        "tls://app:s3cret@NONE:4443",
     ],
     ids=[
         "no-scheme",
@@ -208,12 +210,19 @@ def test_the_database_url_must_use_the_psycopg_driver_and_stays_secret(
         "port-not-a-number",
         "port-too-big",
         "port-0",
+        "host-none",
+        "host-none-in-capitals",
     ],
 )
 def test_the_nats_url_must_name_a_nats_server_and_stays_unshown(
     monkeypatch: pytest.MonkeyPatch, url: str
 ) -> None:
-    """A URL nats-py could not even parse fails the settings, not the connection: it can hold a password."""
+    """A URL nats-py could not even parse fails the settings, not the connection: it can hold a password.
+
+    nats-py's ``_parse_server_uri`` (2.16) refuses a URL without a host or whose host is ``none``, and one
+    whose port is no number in range; the chassis also refuses another scheme than ``nats`` or ``tls``, and
+    port 0.
+    """
     set_environment(monkeypatch, VALID | {"LEDGER_NATS_URL": url})
     with pytest.raises(ValidationError) as refused:
         ServiceSettings()
@@ -228,4 +237,13 @@ def test_the_nats_url_must_name_a_nats_server_and_stays_unshown(
 )
 def test_a_nats_or_tls_url_with_a_host_is_accepted(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
     set_environment(monkeypatch, VALID | {"LEDGER_NATS_URL": url})
-    assert ServiceSettings().nats_url == url
+    assert ServiceSettings().nats_url.get_secret_value() == url
+
+
+def test_the_nats_url_never_shows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It may hold the credentials NATS asks for."""
+    set_environment(monkeypatch, VALID | {"LEDGER_NATS_URL": "nats://app:s3cret@nats:4222"})
+    settings = ServiceSettings()
+    assert "s3cret" not in repr(settings)
+    assert "s3cret" not in str(settings)
+    assert "s3cret" not in settings.model_dump_json()

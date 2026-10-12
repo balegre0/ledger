@@ -3,15 +3,16 @@
 ``Service`` builds the FastAPI app; the app's lifespan starts the rest, in this order: the database pool, the
 connection to NATS, ``DEAD_LETTERS`` and the service's own streams, the outbox relay, one worker per consumer,
 the gRPC server. Stopping goes the other way and waits for each part: the gRPC server stops taking calls and
-lets those in flight finish, the workers are cancelled and awaited (newest first, each for at most its stop
-grace), the connection to NATS drains, the pool closes, and the spans still pending are exported. A start
-that fails halfway releases what had started, in the same order.
+lets those in flight finish, the workers are cancelled and awaited (all together, within one stop grace),
+the connection to NATS drains, the pool closes, and the spans still pending are exported. A start that fails
+halfway releases what had started, in the same order.
 
 Workers are supervised (``ledger_platform.supervision``): one that fails is started again after a growing
 delay, and one that fails on a configuration mistake (``ConsumerRefusedError``, any ``InvalidOptionError``)
 is not, since it would fail the same way every time. ``/readyz`` checks that PostgreSQL answers, that NATS is
-connected and that no worker is dead; a worker waiting to start again is not dead, so a transient outage of a
-consumer never takes the HTTP API out of rotation. A dead worker also fails ``/livez``: nothing in the process
+connected and that no worker is dead. A worker waiting to start again is not dead, so the failure of a worker
+alone (JetStream unable to serve its consumer for a moment) never makes the service unready; NATS itself
+being unreachable does, through its own check. A dead worker also fails ``/livez``: nothing in the process
 brings it back, so the orchestrator restarts the process, and a misconfiguration shows as a crash loop.
 
 The first connection to NATS is retried for ``ServiceLimits.nats_connect_timeout`` seconds, then the
@@ -53,7 +54,6 @@ lazy from ledger_platform.consumer import ConsumerSpec
 lazy from ledger_platform.database import DatabaseLimits
 lazy from ledger_platform.settings import ServiceSettings
 lazy from ledger_platform.streams import StreamSpec
-lazy from ledger_platform.supervision import Work
 
 _RECONNECT_WAIT: Final = 2
 """Seconds between two attempts to reach NATS: nats-py's own default, short enough for a blip."""
@@ -70,7 +70,8 @@ DEFAULT_NATS_CONNECT_TIMEOUT: Final = 60.0
 """Seconds the first connection to NATS is retried before the start fails: long enough for NATS to start
 alongside the service, short enough that a wrong address shows as a crash loop."""
 DEFAULT_WORKER_STOP_GRACE: Final = 10.0
-"""Seconds a worker is given to stop, like the gRPC server's grace: a handler may be finishing a statement."""
+"""Seconds the workers are given to stop, all together, like the gRPC server's grace: a handler may be
+finishing a statement."""
 _logger = structlog.stdlib.get_logger(__name__)
 
 
@@ -209,7 +210,7 @@ class ServiceLimits:
     nats_connect_timeout: float = DEFAULT_NATS_CONNECT_TIMEOUT
     """Seconds the first connection to NATS is retried before the start fails; reconnections are unlimited."""
     worker_stop_grace: float = DEFAULT_WORKER_STOP_GRACE
-    """Seconds each worker is given to stop; one that takes longer is logged and left behind."""
+    """Seconds the workers are given to stop, together; one that takes longer is logged and left behind."""
 
     def __post_init__(self) -> None:
         require_seconds(InvalidServiceOptionError, "nats_connect_timeout", self.nats_connect_timeout)
@@ -266,7 +267,7 @@ async def _connect(client: Client, settings: ServiceSettings, limit: float) -> N
     try:
         async with asyncio.timeout(limit):
             await client.connect(
-                servers=settings.nats_url,
+                servers=settings.nats_url.get_secret_value(),
                 name=settings.service_name,
                 max_reconnect_attempts=_UNLIMITED,
                 reconnect_time_wait=_RECONNECT_WAIT,
@@ -420,22 +421,19 @@ class Service[S: ServiceSettings]:
             tracing=tracing,
             registry=self._registry,
         )
-        self._spawn(lifecycle, "outbox relay", partial(outbox.run, database, jetstream))
+        # One stop for every worker started from here on, before NATS drains and after gRPC stops.
+        lifecycle.on_close(partial(self._supervisor.stop, limits.worker_stop_grace))
+        _ = self._supervisor.start("outbox relay", partial(outbox.run, database, jetstream))
         metrics = ConsumerMetrics(self._registry)
         for spec in self._events.consumers(runtime):
             consumer = Consumer(spec, database=database, tracing=tracing, metrics=metrics)
-            self._spawn(lifecycle, f"consumer {spec.name}", partial(consumer.run, jetstream))
+            _ = self._supervisor.start(f"consumer {spec.name}", partial(consumer.run, jetstream))
         services = self._interfaces.grpc
         if services is not None:
             self._grpc_port = await lifecycle.enter(
                 serve_grpc(port=settings.grpc_port, register=partial(services, runtime))
             )
         return runtime
-
-    def _spawn(self, lifecycle: Lifecycle, name: str, work: Work) -> None:
-        """Run ``work`` as the supervised worker ``name``, stopped within its grace when the service stops."""
-        worker = self._supervisor.start(name, work)
-        lifecycle.on_close(partial(self._supervisor.stop, worker, self._limits.worker_stop_grace))
 
     async def _current_runtime(self) -> Runtime[S]:
         """The ``RuntimeDependency`` routes are handed."""

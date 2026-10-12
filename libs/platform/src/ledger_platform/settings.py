@@ -18,6 +18,8 @@ _DATABASE_URL_SCHEME: Final = "postgresql+psycopg://"
 """The chassis talks to PostgreSQL through SQLAlchemy's asynchronous psycopg driver, and only that one."""
 _NATS_SCHEMES: Final = frozenset({"nats", "tls"})
 """How the chassis reaches NATS: its own protocol, in clear or over TLS (never a websocket)."""
+_NO_HOST: Final = frozenset({None, "none"})
+"""What nats-py takes for a URL without a host: none at all, or the word (``urlsplit`` lowercases hosts)."""
 
 
 class LogFormat(StrEnum):
@@ -42,13 +44,18 @@ class _UnsupportedNatsUrlError(ValueError):
 
 
 def _names_a_nats_server(url: str) -> bool:
-    """Whether ``url`` has a NATS scheme, a host and, if any, a port from 1 to 65535."""
+    """Whether ``url`` has a NATS scheme, a host and, if any, a port from 1 to 65535.
+
+    What nats-py itself refuses (``Client._parse_server_uri`` in 2.16: no host, the host ``none``, a port that
+    is no number in range) fails before its client is set up, and a client in that state cannot even be
+    closed: such a URL is refused here, with the settings.
+    """
     try:
         parts = urlsplit(url)
         port = parts.port
     except ValueError:  # a port that is no number, or out of range
         return False
-    return parts.scheme in _NATS_SCHEMES and parts.hostname is not None and port != 0
+    return parts.scheme in _NATS_SCHEMES and parts.hostname not in _NO_HOST and port != 0
 
 
 @final
@@ -106,8 +113,8 @@ class ServiceSettings(BaseSettings):
     log_format: LogFormat = LogFormat.CONSOLE
     database_url: SecretStr = Field(default=...)
     """SQLAlchemy URL with the psycopg driver: ``postgresql+psycopg://user:password@host:5432/db``."""
-    nats_url: str = "nats://localhost:4222"
-    """``nats://host:port``, or ``tls://`` for TLS; credentials, if any, in the URL."""
+    nats_url: SecretStr = SecretStr("nats://localhost:4222")
+    """``nats://host:port``, or ``tls://`` for TLS; credentials, if any, in the URL (hence a secret)."""
     http_port: Annotated[int, Field(ge=1, le=65535)] = 8000
     grpc_port: Annotated[int, Field(ge=0, le=65535)] = 50051
     """0 binds any free port (tests)."""
@@ -124,9 +131,9 @@ class ServiceSettings(BaseSettings):
 
     @field_validator("nats_url")
     @classmethod
-    def require_a_nats_server(cls, url: str) -> str:
+    def require_a_nats_server(cls, url: SecretStr) -> SecretStr:
         """Refuse a URL that names no NATS server now, not when the service connects."""
-        if not _names_a_nats_server(url):
+        if not _names_a_nats_server(url.get_secret_value()):
             raise _UnsupportedNatsUrlError
         return url
 

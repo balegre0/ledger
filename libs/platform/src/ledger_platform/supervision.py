@@ -4,13 +4,14 @@ A worker is an endless coroutine (an outbox relay, a consumer) that ends only wh
 ``Supervisor`` runs each in a task of its own. A failure it is told is permanent (a configuration mistake)
 ends the worker for good. Any other is logged with its traceback, and the worker starts again after a delay:
 ``FIRST_RESTART_DELAY`` seconds, twice that after the next failure in a row, and so on up to
-``MAX_RESTART_DELAY``. Each delay is moved at random by up to ``RESTART_JITTER`` of itself either way, so that
-replicas that failed together (a NATS outage) do not all come back at the same instant. A worker that ran for
-``HEALTHY_RUN`` seconds before it failed starts its delays over.
+``MAX_RESTART_DELAY``. Each delay is shortened at random by up to ``RESTART_JITTER`` of itself, so that
+replicas that failed together (a NATS outage) do not all come back at the same instant, those that reached the
+ceiling included; no delay is ever longer than ``MAX_RESTART_DELAY``. A worker that ran for ``HEALTHY_RUN``
+seconds before it failed starts its delays over.
 
 A worker waiting to start again is not dead: only one that ended for good is (``dead``), whether by a
 permanent error or because something other than ``stop`` cancelled it. Nothing brings such a worker back but a
-restart of the process.
+restart of the process. A worker being stopped is never started again, whatever it ends with.
 
 Metrics: the counter ``ledger_worker_restarts_total{worker}``, exported at zero from the worker's start.
 """
@@ -31,7 +32,7 @@ FIRST_RESTART_DELAY: Final = 1.0
 MAX_RESTART_DELAY: Final = 60.0
 """The longest delay before a restart: a minute, however long the outage."""
 RESTART_JITTER: Final = 0.2
-"""How much of a delay chance moves it, either way."""
+"""How much of a delay chance may take off it."""
 HEALTHY_RUN: Final = 60.0
 """Seconds a worker must have run before it failed for its delays to start over."""
 _DOUBLINGS: Final = ceil(log2(MAX_RESTART_DELAY / FIRST_RESTART_DELAY))
@@ -51,11 +52,18 @@ type Draw = Callable[[], float]
 def restart_delay(in_a_row: int, draw: float) -> float:
     """Seconds before a worker starts again after ``in_a_row`` + 1 failures in a row.
 
-    ``draw`` in ``[0, 1)`` places the delay within its jitter: 0 shortens it by ``RESTART_JITTER``, 0.5 leaves
-    it as it is, and nearly 1 lengthens it by nearly as much.
+    ``draw`` in ``[0, 1)`` is the share of ``RESTART_JITTER`` taken off the backoff: 0 takes nothing, nearly 1
+    takes nearly a fifth. The jitter only ever shortens, so that the ceiling holds and still does not bring
+    every replica back at the same instant (a jitter both ways, capped after, would for half of them).
     """
     backoff = min(FIRST_RESTART_DELAY * 2.0 ** min(in_a_row, _DOUBLINGS), MAX_RESTART_DELAY)
-    return backoff * (1 + RESTART_JITTER * (2 * draw - 1))
+    return backoff * (1 - RESTART_JITTER * draw)
+
+
+def _being_cancelled() -> bool:
+    """Whether the task running this has been asked to stop."""
+    current = asyncio.current_task()
+    return current is not None and current.cancelling() > 0
 
 
 @final
@@ -107,17 +115,22 @@ class Supervisor:
         """The workers that ended for good while nobody was stopping them."""
         return tuple(self._dead)
 
-    async def stop(self, worker: asyncio.Task[Never], grace: float) -> None:
-        """Cancel ``worker`` and wait up to ``grace`` seconds for it to end.
+    async def stop(self, grace: float) -> None:
+        """Cancel every worker still running, and wait up to ``grace`` seconds for all of them together.
 
-        One that does not end in time (it swallows its cancellation) is logged and left behind: a stuck worker
-        must not keep the rest of the process from stopping.
+        One that does not end in time (it swallows its cancellation) is logged and left behind: stuck workers
+        must not keep the rest of the process from stopping, nor take a grace each.
         """
-        self._stopping.add(worker)
-        worker.cancel()
-        done, _ = await asyncio.wait((worker,), timeout=grace)
-        if not done:
-            _logger.error("worker.not_stopped", worker=worker.get_name(), grace=grace)
+        running = [worker for worker in self._workers if not worker.done()]
+        if not running:
+            return
+        self._stopping.update(running)
+        for worker in running:
+            worker.cancel()
+        _, pending = await asyncio.wait(running, timeout=grace)
+        for worker in running:
+            if worker in pending:
+                _logger.error("worker.not_stopped", worker=worker.get_name(), grace=grace)
 
     async def _keep(self, name: str, work: Work) -> Never:
         in_a_row = 0
@@ -128,6 +141,9 @@ class Supervisor:
             except self._permanent:
                 raise
             except Exception as error:  # a worker may fail with anything; a cancellation is no Exception
+                # A clean-up that turned a stop into another error: the worker is stopped all the same.
+                if _being_cancelled():
+                    raise
                 if self._clock() - started >= HEALTHY_RUN:
                     in_a_row = 0
                 delay = restart_delay(in_a_row, self._draw())
@@ -137,10 +153,15 @@ class Supervisor:
                 self._restarts.labels(name).inc()
 
     def _ended(self, worker: asyncio.Task[Never]) -> None:
-        """Note a worker that ended without being stopped: it is dead, and logged once with why."""
-        if worker in self._stopping:
-            return
+        """Note how a worker ended, once: stopped as asked, stopped with an error, or dead.
+
+        Every error is retrieved here and logged, so that none is reported again as never retrieved.
+        """
         name = worker.get_name()
+        if worker in self._stopping:
+            if not worker.cancelled():
+                _logger.error("worker.failed_while_stopping", worker=name, exc_info=worker.exception())
+            return
         self._dead.append(name)
         if worker.cancelled():
             _logger.error("worker.cancelled", worker=name)

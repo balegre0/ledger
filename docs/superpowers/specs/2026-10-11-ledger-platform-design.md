@@ -431,10 +431,13 @@ company can certify while another runs in production.
   does not consult the dependencies, so that a PostgreSQL outage does not restart every pod: it answers 503 only
   when the process cannot recover by itself, that is, when a check has outlived ten time limits and will not
   stop, or a background worker stopped for good. Workers are supervised: one that fails is started again
-  after a growing delay (capped at a minute, with jitter), and while it waits it fails neither probe, so a
-  transient outage of a consumer never takes the HTTP API out of rotation. A worker that fails on a
-  configuration mistake (JetStream refuses its consumer, an option cannot work) is not started again: `/readyz`
-  and `/livez` both fail, the orchestrator restarts the pod, and the mistake shows as a crash loop.
+  after a growing delay (at most a minute, shortened at random so that replicas do not come back together),
+  and while it waits it fails neither probe, so a worker failing for a moment (JetStream unable to serve its
+  consumer) never takes the HTTP API out of rotation; NATS itself being unreachable does, through the
+  readiness check of the connection. A worker that fails on a configuration mistake (JetStream refuses the
+  consumer's configuration, by one of the error codes nats-server gives such a refusal, or an option cannot
+  work) is not started again: `/readyz` and `/livez` both fail, the orchestrator restarts the pod, and the
+  mistake shows as a crash loop. A stop gives all the workers one grace together.
 - **SLOs:** API availability 99.9 %; p95 `POST /v1/invoices` < 300 ms (excluding DGII); 99 % of
   documents reach a final DGII state within 5 minutes when DGII is up.
 - **Alerts:** SLO burn rate, new dead letters (a new advisory in `DEAD_LETTERS`, or that stream

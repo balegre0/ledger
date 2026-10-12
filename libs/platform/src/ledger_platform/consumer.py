@@ -104,6 +104,92 @@ MAX_NAME_LENGTH: Final = 255
 """The longest name NATS accepts for a consumer."""
 _NAME: Final = re.compile(r"(?:(?![.*>/\\])[!-~])+", re.ASCII)
 """Visible ASCII without ``.``, ``*``, ``>``, ``/`` or a backslash: what NATS accepts as a consumer's name."""
+_REFUSALS: Final = frozenset(
+    {
+        # The request, or the account it is made for (status 400).
+        10002,  # JSAccountResourcesExceededErr
+        10003,  # JSBadRequestErr
+        10025,  # JSInvalidJSONErr
+        10026,  # JSMaximumConsumersLimitErr
+        10133,  # JSReplicasCountCannotBeNegative
+        10157,  # JSPedanticErrF
+        # The stream the consumer reads does not exist (404).
+        10059,  # JSStreamNotFoundErr
+        # A field of the existing consumer that cannot change, such as its ack policy (500).
+        10012,  # JSConsumerCreateErrF
+        # The consumer's own configuration: every JSConsumer... error of status 400.
+        10013,  # JSConsumerNameExistErr
+        10016,  # JSConsumerDurableNameNotInSubjectErr
+        10017,  # JSConsumerDurableNameNotMatchSubjectErr
+        10018,  # JSConsumerDurableNameNotSetErr
+        10019,  # JSConsumerEphemeralWithDurableInSubjectErr
+        10020,  # JSConsumerEphemeralWithDurableNameErr
+        10078,  # JSConsumerConfigRequiredErr
+        10079,  # JSConsumerDeliverToWildcardsErr
+        10080,  # JSConsumerPushMaxWaitingErr
+        10081,  # JSConsumerDeliverCycleErr
+        10082,  # JSConsumerMaxPendingAckPolicyRequiredErr
+        10083,  # JSConsumerSmallHeartbeatErr
+        10084,  # JSConsumerPullRequiresAckErr
+        10085,  # JSConsumerPullNotDurableErr
+        10086,  # JSConsumerPullWithRateLimitErr
+        10087,  # JSConsumerMaxWaitingNegativeErr
+        10088,  # JSConsumerHBRequiresPushErr
+        10089,  # JSConsumerFCRequiresPushErr
+        10090,  # JSConsumerDirectRequiresPushErr
+        10091,  # JSConsumerDirectRequiresEphemeralErr
+        10092,  # JSConsumerOnMappedErr
+        10093,  # JSConsumerFilterNotSubsetErr
+        10094,  # JSConsumerInvalidPolicyErrF
+        10095,  # JSConsumerInvalidSamplingErrF
+        10098,  # JSConsumerWQRequiresExplicitAckErr
+        10099,  # JSConsumerWQMultipleUnfilteredErr
+        10100,  # JSConsumerWQConsumerNotUniqueErr
+        10101,  # JSConsumerWQConsumerNotDeliverAllErr
+        10102,  # JSConsumerNameTooLongErrF
+        10103,  # JSConsumerBadDurableNameErr
+        10105,  # JSConsumerExistingActiveErr
+        10106,  # JSConsumerReplacementWithDifferentNameErr
+        10107,  # JSConsumerDescriptionTooLongErrF
+        10108,  # JSConsumerWithFlowControlNeedsHeartbeats
+        10112,  # JSConsumerInvalidDeliverSubject
+        10114,  # JSConsumerMaxRequestBatchNegativeErr
+        10115,  # JSConsumerMaxRequestExpiresTooSmall
+        10116,  # JSConsumerMaxDeliverBackoffErr
+        10121,  # JSConsumerMaxPendingAckExcessErrF
+        10125,  # JSConsumerMaxRequestBatchExceededF
+        10126,  # JSConsumerReplicasExceedsStream
+        10127,  # JSConsumerNameContainsPathSeparatorsErr
+        10131,  # JSConsumerCreateFilterSubjectMismatchErr
+        10132,  # JSConsumerCreateDurableAndNameMismatch
+        10134,  # JSConsumerReplicasShouldMatchStream
+        10135,  # JSConsumerMetadataLengthErrF
+        10136,  # JSConsumerDuplicateFilterSubjects
+        10137,  # JSConsumerMultipleFiltersNotAllowed
+        10138,  # JSConsumerOverlappingSubjectFilters
+        10139,  # JSConsumerEmptyFilter
+        10148,  # JSConsumerAlreadyExists
+        10149,  # JSConsumerDoesNotExist
+        10153,  # JSConsumerInactiveThresholdExcess
+        10159,  # JSConsumerPriorityPolicyWithoutGroup
+        10160,  # JSConsumerInvalidPriorityGroupErr
+        10161,  # JSConsumerEmptyGroupName
+        10162,  # JSConsumerInvalidGroupNameErr
+        10178,  # JSConsumerPushWithPriorityGroupErr
+        10181,  # JSConsumerAckPolicyInvalidErr
+        10182,  # JSConsumerReplayPolicyInvalidErr
+        10183,  # JSConsumerAckWaitNegativeErr
+        10184,  # JSConsumerBackOffNegativeErr
+        10196,  # JSConsumerPriorityGroupWithPolicyNone
+        10197,  # JSConsumerPinnedTTLWithoutPriorityPolicyNone
+    }
+)
+"""The ``err_code`` of JetStream's answers to a consumer it will never create or update as configured, from
+``server/errors.json`` of nats-server v2.12.15. Any other answer means JetStream cannot serve for now: every
+503 (no responders, 10008 temporarily unavailable, 10004 incomplete results, 10023 insufficient resources),
+the other 500s (10009 no leader, 10007 not assigned, 10118 and 10119 offline) and the cluster's own 400s
+(10005 no suitable peers, 10202 membership changing). Those are not refusals: the error goes on, and the
+consumer is tried again."""
 _logger = structlog.stdlib.get_logger(__name__)
 
 type Handler = Callable[[Envelope, UnitOfWork], Awaitable[None]]
@@ -267,13 +353,14 @@ class ConsumerSpec:
 
 
 class ConsumerRefusedError(LedgerError):
-    """JetStream refused to create or update a durable consumer, and left it as it was.
+    """JetStream refused the configuration of a durable consumer for good, and left the consumer as it was.
 
     Or the chassis refused before asking: the subject of an existing consumer never changes (see
     ``ensure_consumer``). Typically a field of the existing consumer that nobody can change (its ack policy),
-    or a stream that does not exist. ``fields`` are the fields of the consumer that were to change; none when
-    the consumer was to be created. The cause, when JetStream was asked, is the server's own answer, or
-    nats-py's when it could not build the request.
+    or a stream that does not exist. Only an answer no retry can change is one (``_REFUSALS``): JetStream
+    unable to serve for now (no responders, no leader) raises its own error instead. ``fields`` are the fields
+    of the consumer that were to change; none when the consumer was to be created. The cause, when JetStream
+    was asked, is the server's own answer, or nats-py's when it could not build the request.
     """
 
     code: ClassVar[str] = "consumer_refused"
@@ -335,7 +422,8 @@ async def ensure_consumer(jetstream: ConsumerApi, spec: ConsumerSpec) -> None:
     the consumer). Its subject is not: ``ConsumerRefusedError`` naming ``filter_subject``, without a word to
     JetStream, because a durable consumer serves every replica whichever version it runs (see the module's
     note): a new subject needs a new name, such as ``invoicing-projections-v2``. ``ConsumerRefusedError`` too
-    when JetStream refuses, or nats-py cannot build the request.
+    when JetStream refuses the configuration (``_REFUSALS``), or nats-py cannot build the request. Any other
+    answer of JetStream (unavailable, no leader) is raised as it came: it may well work next time.
 
     Specs of the fields that change in place only move forward, as streams do: replicas of different versions
     start during a rollout and each applies its own spec over what the others declared, so an older replica
@@ -362,10 +450,15 @@ async def ensure_consumer(jetstream: ConsumerApi, spec: ConsumerSpec) -> None:
             return
     try:
         await jetstream.add_consumer(spec.stream, wanted)
-    except (APIError, ValueError) as error:  # nats-py raises ValueError when it cannot serialize the config
-        reason = error.description if isinstance(error, APIError) else None
+    except ValueError as error:  # nats-py raises it when it cannot serialize the config
         raise ConsumerRefusedError(
-            consumer=spec.name, stream=spec.stream, fields=fields, reason=reason
+            consumer=spec.name, stream=spec.stream, fields=fields, reason=None
+        ) from error
+    except APIError as error:
+        if error.err_code not in _REFUSALS:
+            raise
+        raise ConsumerRefusedError(
+            consumer=spec.name, stream=spec.stream, fields=fields, reason=error.description
         ) from error
 
 

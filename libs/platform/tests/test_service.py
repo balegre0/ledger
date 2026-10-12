@@ -130,7 +130,7 @@ def configured(
         service_name="payments",
         environment="test",
         database_url=SecretStr(database_url),
-        nats_url=nats_url,
+        nats_url=SecretStr(nats_url),
         grpc_port=grpc_port,
         otlp_endpoint=otlp_endpoint,
     )
@@ -140,7 +140,7 @@ def bare(database_url: str, nats_url: str) -> Service[ServiceSettings]:
     """A service with nothing of its own: no routes, no streams, no consumers, no gRPC."""
     return Service(
         settings=ServiceSettings(
-            service_name="bare", database_url=SecretStr(database_url), nats_url=nats_url
+            service_name="bare", database_url=SecretStr(database_url), nats_url=SecretStr(nats_url)
         ),
         version="1.0",
     )
@@ -619,7 +619,10 @@ async def test_the_runtime_holds_the_settings_the_service_was_given_with_their_o
     """A service's own settings reach its code with their own type: the type checkers know ``currency``."""
     del infrastructure
     settings = PaymentsSettings(
-        service_name="payments", database_url=SecretStr(database_url), nats_url=nats_url, currency="USD"
+        service_name="payments",
+        database_url=SecretStr(database_url),
+        nats_url=SecretStr(nats_url),
+        currency="USD",
     )
     service = Service(settings=settings, version="1.0")
     async with running(service):
@@ -1039,3 +1042,19 @@ async def test_routes_are_handed_an_asynchronous_dependency_that_gives_them_the_
         await runtime()
     async with running(service):
         assert await runtime() is service.runtime()
+
+
+async def test_the_credentials_in_the_nats_url_never_reach_a_log(database_url: str, nats_url: str) -> None:
+    """Each failed attempt to connect is logged, and the start fails with an error: neither says the URL."""
+    async with Proxy.to(nats_url) as proxy:
+        proxy.cut()
+        with_credentials = proxy.url.replace("nats://", "nats://app:s3cret@")
+        payments = Payments(
+            configured(database_url, with_credentials), limits=ServiceLimits(nats_connect_timeout=TIMEOUT / 2)
+        )
+        with capture_logs() as logs, pytest.raises(NatsUnreachableError) as unreachable:
+            async with asyncio.timeout(TIMEOUT), running(payments.service):
+                pass
+    assert [entry["event"] for entry in logs if entry["event"] == "nats.error"] != []
+    assert "s3cret" not in "".join(repr(entry) for entry in logs)
+    assert "s3cret" not in str(unreachable.value)

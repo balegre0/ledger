@@ -5,14 +5,14 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from math import inf, nan
-from typing import ClassVar, Protocol, TypedDict, Unpack, final, override
+from typing import ClassVar, Final, Protocol, TypedDict, Unpack, final, override
 lazy from collections.abc import AsyncGenerator, Awaitable, Callable
 lazy from uuid import UUID
 
 import pytest
 from nats.errors import ConnectionClosedError
 from nats.js.api import AckPolicy, ConsumerConfig
-from nats.js.errors import APIError
+from nats.js.errors import APIError, BadRequestError, ServerError, ServiceUnavailableError
 from nats.js.errors import NotFoundError as JetStreamNotFoundError
 from opentelemetry.trace import StatusCode
 from prometheus_client import CollectorRegistry
@@ -164,6 +164,22 @@ class Counting(ConsumerApi):
     async def add_consumer(self, stream: str, config: ConsumerConfig) -> ConsumerInfo:
         self.writes += 1
         return await self._api.add_consumer(stream, config)
+
+
+@final
+class Answering(ConsumerApi):
+    """JetStream that has no such consumer yet and answers its creation with ``error``."""
+
+    def __init__(self, error: APIError) -> None:
+        self._error = error
+
+    @override
+    async def consumer_info(self, stream: str, consumer: str) -> ConsumerInfo:
+        raise JetStreamNotFoundError
+
+    @override
+    async def add_consumer(self, stream: str, config: ConsumerConfig) -> ConsumerInfo:
+        raise self._error
 
 
 @final
@@ -1142,3 +1158,61 @@ async def test_a_poll_that_is_not_a_positive_finite_number_of_seconds_is_refused
     async with asyncio.timeout(5):  # a consumer that accepted the value would run for ever
         with pytest.raises(InvalidConsumerOptionError, match="poll"):
             await make(Recorder()).run(streams, poll=poll)
+
+
+TRANSIENT: Final = {
+    "no responders": ServiceUnavailableError(),
+    "10008 temporarily unavailable": ServiceUnavailableError(code=503, err_code=10008),
+    "10004 incomplete results": ServiceUnavailableError(code=503, err_code=10004),
+    "10023 insufficient resources": ServiceUnavailableError(code=503, err_code=10023),
+    "10009 no leader": ServerError(code=500, err_code=10009),
+    "10007 not assigned": ServerError(code=500, err_code=10007),
+    "10118 stream offline": ServerError(code=500, err_code=10118),
+    "10119 consumer offline": ServerError(code=500, err_code=10119),
+    "10005 no suitable peers": BadRequestError(code=400, err_code=10005),
+    "10202 member change in progress": BadRequestError(code=400, err_code=10202),
+}
+"""What JetStream answers while it cannot serve for now (nats-server 2.12.15, server/errors.json)."""
+REFUSALS: Final = {
+    "10012 immutable field": ServerError(
+        code=500, err_code=10012, description="ack policy can not be updated"
+    ),
+    "10013 name in use": BadRequestError(
+        code=400, err_code=10013, description="consumer name already in use"
+    ),
+    "10002 account resources": BadRequestError(code=400, err_code=10002, description="resource limits"),
+    "10003 bad request": BadRequestError(code=400, err_code=10003, description="bad request"),
+    "10026 max consumers": BadRequestError(code=400, err_code=10026, description="maximum consumers"),
+    "10116 max deliver": BadRequestError(code=400, err_code=10116, description="max deliver"),
+    "10131 filter mismatch": BadRequestError(code=400, err_code=10131, description="filter mismatch"),
+    "10132 name mismatch": BadRequestError(code=400, err_code=10132, description="name mismatch"),
+    "10148 already exists": BadRequestError(code=400, err_code=10148, description="already exists"),
+    "10149 does not exist": BadRequestError(code=400, err_code=10149, description="does not exist"),
+    "10059 stream not found": JetStreamNotFoundError(
+        code=404, err_code=10059, description="stream not found"
+    ),
+}
+"""What JetStream answers to a consumer it will never accept as configured (same source)."""
+
+
+@pytest.mark.parametrize("answer", TRANSIENT.values(), ids=TRANSIENT.keys())
+async def test_a_jetstream_that_cannot_serve_for_now_is_no_refusal_and_its_error_goes_on(
+    answer: APIError,
+) -> None:
+    """A blip during a deploy must not look like a misconfiguration: the error reaches the supervisor as it
+    came, and the supervisor starts the consumer again later."""
+    with pytest.raises(APIError) as raised:
+        await ensure_consumer(Answering(answer), spec(Recorder()))
+    assert raised.value is answer
+
+
+@pytest.mark.parametrize("answer", REFUSALS.values(), ids=REFUSALS.keys())
+async def test_a_configuration_jetstream_will_never_accept_is_refused_with_its_answer(
+    answer: APIError,
+) -> None:
+    with pytest.raises(ConsumerRefusedError) as refused:
+        await ensure_consumer(Answering(answer), spec(Recorder()))
+    assert refused.value.__cause__ is answer
+    assert (
+        str(refused.value) == f"consumer '{NAME}' of stream 'EVENTS' cannot be created: {answer.description}"
+    )
