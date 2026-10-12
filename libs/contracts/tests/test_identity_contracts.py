@@ -68,18 +68,28 @@ def test_a_first_grant_has_no_previous_role() -> None:
 def test_membership_events_carry_a_version_so_readers_can_order_a_principals_changes() -> None:
     granted = MembershipGranted(version=3)
     revoked = MembershipRevoked(version=4)
-    assert (granted.version, revoked.version) == (3, 4)
+    assert MembershipGranted.FromString(granted.SerializeToString()).version == 3
     assert MembershipRevoked.FromString(revoked.SerializeToString()).version == 4
 
 
-def test_roles_are_named_as_identity_names_them() -> None:
-    assert [value.name for value in EVENTS_DESCRIPTOR.enum_types_by_name["Role"].values] == [
-        "ROLE_UNSPECIFIED",
-        "ROLE_OWNER",
-        "ROLE_ADMIN",
-        "ROLE_ACCOUNTANT",
-        "ROLE_ISSUER",
-        "ROLE_VIEWER",
+def test_roles_keep_their_names_and_numbers() -> None:
+    """A number on the wire is forever: renumbering a role would grant another one to every reader."""
+    assert [(value.name, value.number) for value in EVENTS_DESCRIPTOR.enum_types_by_name["Role"].values] == [
+        ("ROLE_UNSPECIFIED", 0),
+        ("ROLE_OWNER", 1),
+        ("ROLE_ADMIN", 2),
+        ("ROLE_ACCOUNTANT", 3),
+        ("ROLE_ISSUER", 4),
+        ("ROLE_VIEWER", 5),
+    ]
+
+
+def test_company_statuses_keep_their_names_and_numbers() -> None:
+    statuses = QUERY_DESCRIPTOR.enum_types_by_name["CompanyStatus"].values
+    assert [(value.name, value.number) for value in statuses] == [
+        ("COMPANY_STATUS_UNSPECIFIED", 0),
+        ("COMPANY_STATUS_ACTIVE", 1),
+        ("COMPANY_STATUS_INACTIVE", 2),
     ]
 
 
