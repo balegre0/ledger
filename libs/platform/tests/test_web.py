@@ -22,6 +22,7 @@ from ledger_kernel.errors import (
     LedgerError,
     NotFoundError,
     UnavailableError,
+    described,
 )
 from ledger_platform.health import Health
 from ledger_platform.web import PROBLEM_JSON, AmbiguousRouteError, ApiInfo, create_app
@@ -64,6 +65,12 @@ class Dog(BaseModel):
 
 class Household(BaseModel):
     pet: Annotated[Cat | Dog, Field(discriminator="kind")]
+
+
+class Blob(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(val_json_bytes="base64")
+
+    data: bytes
 
 
 class Guarded(BaseModel):
@@ -148,6 +155,23 @@ async def secure() -> None:
 @router.get("/http-errors/{status}", include_in_schema=False)
 async def http_error(status: int, detail: str = "because 4f9a") -> None:
     raise HTTPException(status_code=status, detail=detail, headers={"X-Reason": "test"})
+
+
+DETAILS: Final[dict[str, object]] = {
+    "mapping": {"reason": "x" * 1_000},
+    "list": list(range(10_000)),
+    "number": 42,
+}
+
+
+@router.get("/structured-errors/{kind}", include_in_schema=False)
+async def structured_error(kind: str) -> None:
+    raise HTTPException(status_code=503, detail=DETAILS[kind], headers={"Retry-After": "30"})
+
+
+@router.post("/blobs", include_in_schema=False)
+async def blob(item: Blob) -> None:
+    del item
 
 
 @router.post("/households", include_in_schema=False)
@@ -247,6 +271,7 @@ async def test_liveness_fails_while_a_check_is_wedged_and_recovers_when_it_ends(
     registry: CollectorRegistry,
 ) -> None:
     release, ended = asyncio.Event(), asyncio.Event()
+    now = [0.0]
 
     async def stubborn() -> None:
         while not release.is_set():
@@ -254,13 +279,13 @@ async def test_liveness_fails_while_a_check_is_wedged_and_recovers_when_it_ends(
                 await release.wait()
         ended.set()
 
-    health = Health(timeout=0.02, wedge_after=0.05)
+    health = Health(timeout=0.02, wedge_after=30, clock=lambda: now[0])
     health.add("nats", stubborn)
     try:
         async with serving(build(health, registry, router)) as client:
             assert (await client.get("/readyz")).status_code == 503
             assert (await client.get("/livez")).status_code == 200
-            await asyncio.sleep(0.1)
+            now[0] = 31
             wedged = await client.get("/livez")
             assert (wedged.status_code, wedged.json()) == (503, {"status": "wedged", "wedged": ["nats"]})
             release.set()
@@ -412,6 +437,18 @@ async def test_a_character_of_a_malformed_uuid_does_not_come_back(client: httpx.
         "type": "uuid_parsing",
         "message": "Input should be a valid UUID.",
     }
+
+
+async def test_the_symbol_of_an_undecodable_blob_does_not_come_back(client: httpx.AsyncClient) -> None:
+    response = await client.post("/blobs", json={"data": "!!SECRET!!"})
+    (issue,) = INVALID_REQUEST.validate_json(response.content)["errors"]
+    assert issue == {
+        "location": "body.data",
+        "type": "bytes_invalid_encoding",
+        "message": "Data is not valid in the encoding the field expects.",
+    }
+    assert "SECRET" not in response.text
+    assert "symbol" not in response.text
 
 
 async def test_the_message_of_a_validator_is_cut(client: httpx.AsyncClient) -> None:
@@ -584,6 +621,31 @@ async def test_a_route_reachable_under_two_templates_is_refused(
     api.include_router(child, prefix="/new")
     with pytest.raises(AmbiguousRouteError, match=r"/old/{item_id}.*/new/{item_id}"):
         build(health, registry, api)
+
+
+@pytest.mark.parametrize("kind", ["mapping", "list", "number"])
+async def test_a_detail_that_is_not_text_is_logged_bounded_and_the_answer_is_unchanged(
+    client: httpx.AsyncClient, kind: str
+) -> None:
+    """FastAPI takes any detail: a mapping, a list of ten thousand, a number. The 503 stands, headers too."""
+    with capture_logs() as logs:
+        response = await client.get(f"/structured-errors/{kind}")
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "30"
+    assert PROBLEM.validate_json(response.content)["code"] == "unavailable"
+    shown = described(DETAILS[kind])
+    assert len(shown) < 100
+    assert logs == [
+        {
+            "event": "http.server_error",
+            "log_level": "error",
+            "method": "GET",
+            "route": "/structured-errors/{kind}",
+            "status": 503,
+            "code": "unavailable",
+            "detail": shown,
+        }
+    ]
 
 
 async def test_a_route_added_after_the_app_was_built_is_unregistered_and_said_so_once(

@@ -1,5 +1,7 @@
 import asyncio
 import contextlib
+import gc
+import weakref
 lazy from collections.abc import Callable
 
 import pytest
@@ -94,7 +96,7 @@ async def test_a_check_that_ignores_cancellation_does_not_hold_up_the_probe() ->
     assert started == ["stubborn", "stubborn"]
 
 
-async def test_cancelling_the_run_cancels_the_checks_and_propagates() -> None:
+async def test_cancelling_a_run_propagates_and_the_check_stops_at_its_own_deadline() -> None:
     running, cancelled = asyncio.Event(), asyncio.Event()
 
     async def waits() -> None:
@@ -114,6 +116,33 @@ async def test_cancelling_the_run_cancels_the_checks_and_propagates() -> None:
     async with asyncio.timeout(2):
         await cancelled.wait()
     await asyncio.sleep(0)
+
+
+async def test_a_prober_that_gives_up_does_not_cancel_the_check_for_the_others() -> None:
+    running, release = asyncio.Event(), asyncio.Event()
+    cancelled = False
+
+    async def slow() -> None:
+        nonlocal cancelled
+        running.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    health = Health(timeout=5)
+    health.add("slow", slow)
+    leaving = asyncio.create_task(health.run())
+    staying = asyncio.create_task(health.run())
+    await running.wait()
+    leaving.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await leaving
+    release.set()
+    async with asyncio.timeout(2):
+        assert await staying == {"slow": True}
+    assert not cancelled
 
 
 def record_into(
@@ -196,6 +225,7 @@ async def test_a_stuck_check_is_cancelled_again_by_every_later_run() -> None:
 
 async def test_a_check_stuck_past_the_limit_is_wedged_until_it_ends() -> None:
     release, ended = asyncio.Event(), asyncio.Event()
+    now = [100.0]
 
     async def stubborn() -> None:
         while not release.is_set():
@@ -203,13 +233,15 @@ async def test_a_check_stuck_past_the_limit_is_wedged_until_it_ends() -> None:
                 await release.wait()
         ended.set()
 
-    health = Health(timeout=0.02, wedge_after=0.1)
+    health = Health(timeout=0.02, wedge_after=30, clock=lambda: now[0])
     health.add("stubborn", stubborn)
     health.add("database", healthy)
     try:
         await health.run()
         assert health.wedged() == ()
-        await asyncio.sleep(0.15)
+        now[0] += 30
+        assert health.wedged() == ()
+        now[0] += 0.5
         assert health.wedged() == ("stubborn",)
     finally:
         release.set()
@@ -221,23 +253,61 @@ async def test_a_check_stuck_past_the_limit_is_wedged_until_it_ends() -> None:
 
 async def test_the_limit_for_a_wedge_is_ten_timeouts_unless_chosen() -> None:
     release = asyncio.Event()
+    now = [0.0]
 
     async def stubborn() -> None:
         while not release.is_set():
             with contextlib.suppress(asyncio.CancelledError):
                 await release.wait()
 
-    health = Health(timeout=0.01)
+    health = Health(timeout=0.01, clock=lambda: now[0])
     health.add("stubborn", stubborn)
     try:
         await health.run()
-        await asyncio.sleep(0.05)
+        now[0] = 0.09
         assert health.wedged() == ()
-        await asyncio.sleep(0.1)
+        now[0] = 0.11
         assert health.wedged() == ("stubborn",)
     finally:
         release.set()
         await asyncio.sleep(0)
+
+
+class LateError(Exception):
+    pass
+
+
+@pytest.mark.parametrize("noticed_by", ["a run", "a liveness check"])
+async def test_a_stuck_check_that_ended_is_forgotten_with_its_traceback(noticed_by: str) -> None:
+    release, ended = asyncio.Event(), asyncio.Event()
+    errors: list[weakref.ref[LateError]] = []
+
+    async def fails_when_released() -> None:
+        while not release.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await release.wait()
+        error = LateError()
+        errors.append(weakref.ref(error))
+        ended.set()
+        raise error
+
+    health = Health(timeout=0.02)
+    health.add("stubborn", fails_when_released)
+    try:
+        await health.run()
+    finally:
+        release.set()
+    await ended.wait()
+    await asyncio.sleep(0)
+    (late,) = errors
+    gc.collect()
+    assert late() is not None, "kept until a probe or a liveness check notices that it ended"
+    if noticed_by == "a run":
+        await health.run()
+    else:
+        assert health.wedged() == ()
+    gc.collect()
+    assert late() is None
 
 
 async def test_no_checks_is_healthy() -> None:

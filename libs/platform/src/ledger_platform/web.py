@@ -29,7 +29,7 @@ from starlette.exceptions import HTTPException
 lazy from fastapi import APIRouter, Request
 lazy from prometheus_client import CollectorRegistry
 
-from ledger_kernel.errors import ErrorKind, LedgerError, truncate
+from ledger_kernel.errors import ErrorKind, LedgerError, described, truncate
 lazy from ledger_platform.health import Health
 
 PROBLEM_JSON: Final = "application/problem+json"
@@ -81,12 +81,15 @@ _TEXT_LIMIT: Final = 200
 _QUOTES_THE_INPUT: Final[Mapping[str, str]] = {
     "union_tag_invalid": "Input tag does not match any of the expected tags.",
     "uuid_parsing": "Input should be a valid UUID.",
+    "bytes_invalid_encoding": "Data is not valid in the encoding the field expects.",
 }
 """Pydantic error types whose message repeats part of what the client sent, and what they say instead.
 
-``union_tag_invalid`` quotes the whole tag; ``uuid_parsing`` quotes the first character that is wrong.
-Every other type in pydantic-core 2.50 (``list_all_errors``) is fixed text, a count or a parser's own wording,
-except ``value_error`` and ``assertion_error``, which carry what the validator that raised them wrote."""
+``union_tag_invalid`` quotes the whole tag; ``uuid_parsing`` and ``bytes_invalid_encoding`` quote the first
+character or symbol that is wrong and where. No other type in pydantic-core 2.50 (``list_all_errors``) quotes
+the input: they are fixed text, a measure of it (a length, a time zone offset, a line and column) or a
+parser's own wording, except ``value_error`` and ``assertion_error``, which carry what the validator that
+raised them wrote."""
 _logger = structlog.stdlib.get_logger(__name__)
 
 # The ASGI protocol, as far as the metrics middleware needs it. Starlette's own aliases hide the values
@@ -163,7 +166,7 @@ def _describe(status: int) -> _Line:
 
 
 @final
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _RouteLabels:
     """The template each route is measured and logged under: the full path a client reaches it by.
 
@@ -174,9 +177,9 @@ class _RouteLabels:
     """
 
     templates: Mapping[int, str]
-    """By ``id`` of the route object: routes are not hashable, and the app keeps them alive."""
+    """By ``id`` of the route object: routes are not hashable, and the app keeps them alive. Never edited."""
     reported: set[int] = field(default_factory=set[int])
-    """The routes found missing from ``templates``, so that each is said once."""
+    """The routes found missing from ``templates``, so that each is said once. The only thing that changes."""
 
     @classmethod
     def of(cls, app: FastAPI) -> Self:
@@ -304,6 +307,14 @@ def _field_problems(error: RequestValidationError) -> dict[str, object]:
     return {"errors": problems, "omitted_errors": max(len(raised) - _MAX_ISSUES, 0)}
 
 
+def _logged(detail: object) -> str:
+    """The detail of an ``HTTPException`` as the log may carry it: bounded, whatever it is.
+
+    The class says text, FastAPI's takes anything (a mapping, a list of ten thousand, a number).
+    """
+    return truncate(detail if isinstance(detail, str) else described(detail), _TEXT_LIMIT)
+
+
 def _report_defect(request: Request, error: Exception, code: str, labels: _RouteLabels) -> None:
     """Log where a defect happened and what it was, never the request: it may carry credentials."""
     _logger.error(
@@ -349,7 +360,7 @@ def _answer_errors_as_problems(app: FastAPI, labels: _RouteLabels) -> None:
                 route=labels.of_scope(request.scope),
                 status=error.status_code,
                 code=code,
-                detail=truncate(error.detail, _TEXT_LIMIT),
+                detail=_logged(error.detail),
             )
         if not is_body_allowed_for_status_code(error.status_code):
             return Response(status_code=error.status_code, headers=error.headers)

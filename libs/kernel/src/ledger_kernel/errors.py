@@ -84,8 +84,10 @@ class UnavailableError(LedgerError):
     code: ClassVar[str] = "unavailable"
 
 
-class InvalidExcerptLimitError(LedgerError):
-    """A caller asked for text cut shorter than one character: a bug in our code, never the client's input.
+class InvalidTextLimitError(LedgerError):
+    """A caller asked ``excerpt`` or ``truncate`` for text cut shorter than one character.
+
+    A bug in our code, never the client's input.
 
     It stays an ``INTERNAL`` error on purpose. ``InvalidInputError`` means "the request can never succeed
     as sent" and crosses a boundary as a client error; this is a defect to fix and must surface as a server
@@ -93,6 +95,7 @@ class InvalidExcerptLimitError(LedgerError):
     """
 
     code: ClassVar[str] = "invalid_excerpt_limit"
+    """Named for the function that came first; a code is API and does not follow a rename."""
 
     def __init__(self, limit: int) -> None:
         super().__init__(f"a text limit must be at least {_MIN_LIMIT}, not {limit}")
@@ -105,7 +108,7 @@ def truncate(text: str, limit: int) -> str:
     is at most ``limit`` plus the three characters of the mark; a ``limit`` below one is a programming error.
     """
     if limit < _MIN_LIMIT:
-        raise InvalidExcerptLimitError(limit)
+        raise InvalidTextLimitError(limit)
     return text if len(text) <= limit else text[:limit] + "..."
 
 

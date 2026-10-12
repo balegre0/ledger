@@ -59,17 +59,27 @@ class Health:
     A check left behind is cancelled again by every later probe and is not started again while it lives, so a
     hung dependency cannot pile up one stuck task per probe. One that outlives ``wedge_after`` seconds
     (by default ten timeouts) means the process cannot be trusted to recover: ``wedged`` names it, for the
-    liveness probe to ask for a restart.
+    liveness probe to ask for a restart. Only checks that ``run`` has started can be found wedged: a
+    service whose readiness is never probed is never told that a check hangs. ``clock`` is the monotonic
+    time that ages a stuck check, and a test moves its own.
 
-    Finished runs and finished stuck checks stay in their tables until the next probe replaces them: no
-    callback ever edits the tables, so no two of them can disagree about whose entry it is.
+    Finished runs and finished stuck checks are dropped by the next ``run`` or ``wedged``, so that the
+    traceback a late failure carries is not kept for the life of the process. No callback edits the tables,
+    so no two of them can disagree about whose entry it is.
     """
 
-    __slots__ = ("_checks", "_flights", "_stuck", "_timeout", "_wedge_after")
+    __slots__ = ("_checks", "_clock", "_flights", "_stuck", "_timeout", "_wedge_after")
 
-    def __init__(self, *, timeout: float = 2.0, wedge_after: float | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        timeout: float = 2.0,
+        wedge_after: float | None = None,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
         self._checks: dict[str, Check] = {}
         self._timeout = timeout
+        self._clock = clock
         self._wedge_after = _WEDGE_TIMEOUTS * timeout if wedge_after is None else wedge_after
         self._flights: dict[str, asyncio.Task[bool]] = {}
         self._stuck: dict[str, _Stuck] = {}
@@ -81,16 +91,17 @@ class Health:
         self._checks[name] = check
 
     def wedged(self) -> tuple[str, ...]:
-        """The checks that have outlived ``wedge_after`` seconds and still will not stop."""
-        now = monotonic()
-        return tuple(
-            name
-            for name, stuck in self._stuck.items()
-            if not stuck.task.done() and now - stuck.started > self._wedge_after
-        )
+        """The checks that have outlived ``wedge_after`` seconds and still will not stop.
+
+        Only those a ``run`` has started: a check nobody has asked for is not watched.
+        """
+        self._forget_the_finished()
+        now = self._clock()
+        return tuple(name for name, stuck in self._stuck.items() if now - stuck.started > self._wedge_after)
 
     async def run(self) -> dict[str, bool]:
         """Every check's result; one that raises, is cancelled or exceeds the timeout is unhealthy."""
+        self._forget_the_finished()
         async with asyncio.TaskGroup() as group:
             tasks = {
                 name: group.create_task(self._verdict(name, check)) for name, check in self._checks.items()
@@ -114,7 +125,7 @@ class Health:
             stuck.task.cancel()  # again: the last cancellation may have reached a check that was not looking
             _logger.warning("health.check_still_running", check=name)
             return False
-        started = monotonic()
+        started = self._clock()
         task = asyncio.create_task(_call(check))
         done, _ = await asyncio.wait((task,), timeout=self._timeout)
         if not done:
@@ -129,6 +140,11 @@ class Health:
             _logger.error("health.check_failed", check=name, exc_info=error)
             return False
         return True
+
+    def _forget_the_finished(self) -> None:
+        """Drop the runs and the stuck checks that have ended; nothing is edited while a probe awaits."""
+        self._flights = {name: flight for name, flight in self._flights.items() if not flight.done()}
+        self._stuck = {name: stuck for name, stuck in self._stuck.items() if not stuck.task.done()}
 
     def _leave(self, name: str, stuck: _Stuck) -> None:
         """Ask the check to stop and move on without waiting for it: it may never answer."""

@@ -8,8 +8,8 @@ from ledger_kernel.errors import (
     ConflictError,
     ErrorKind,
     ForbiddenError,
-    InvalidExcerptLimitError,
     InvalidInputError,
+    InvalidTextLimitError,
     LedgerError,
     NotFoundError,
     UnavailableError,
@@ -78,7 +78,7 @@ def test_a_truncated_text_is_the_text_or_its_prefix_with_a_mark(text: str, limit
 
 @pytest.mark.parametrize("limit", [0, -1, -40])
 def test_truncating_to_less_than_one_character_is_a_programming_error(limit: int) -> None:
-    with pytest.raises(InvalidExcerptLimitError, match=f"at least 1, not {limit}"):
+    with pytest.raises(InvalidTextLimitError, match=f"at least 1, not {limit}"):
         truncate("abc", limit)
 
 
@@ -103,7 +103,7 @@ def test_the_limit_can_be_chosen() -> None:
 @pytest.mark.parametrize("limit", [0, -1, -40])
 @pytest.mark.parametrize("text", ["", "abc"], ids=["empty", "short"])
 def test_a_limit_below_one_is_a_programming_error(text: str, limit: int) -> None:
-    with pytest.raises(InvalidExcerptLimitError, match=f"at least 1, not {limit}") as caught:
+    with pytest.raises(InvalidTextLimitError, match=f"at least 1, not {limit}") as caught:
         excerpt(text, limit=limit)
     assert (caught.value.kind, caught.value.code) == (ErrorKind.INTERNAL, "invalid_excerpt_limit")
     assert not isinstance(caught.value, InvalidInputError)
