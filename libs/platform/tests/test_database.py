@@ -981,6 +981,22 @@ async def test_an_organization_scope_sees_no_company_owned_row(isolated: Databas
             await unit.connection.execute(note(ALPHA, "no company in scope"))
 
 
+async def test_an_organization_scope_hides_the_company_owned_rows_of_another_organization(
+    isolated: Database,
+) -> None:
+    stranger = Tenant(OTHER_ORGANIZATION, CompanyId(new_id()))
+    await write(isolated, stranger, "theirs")
+    async with isolated.transaction(ORGANIZATION) as unit:
+        visible = list((await unit.connection.execute(select(notes.c.body))).scalars())
+        changed = (await unit.connection.execute(update(notes).values(body="taken"))).rowcount
+        deleted = (await unit.connection.execute(delete(notes))).rowcount
+    assert (visible, changed, deleted) == ([], 0, 0)
+    assert await read(isolated, stranger) == ["theirs"]
+    with pytest.raises(DBAPIError, match="row-level security"):
+        async with isolated.transaction(ORGANIZATION) as unit:
+            await unit.connection.execute(note(stranger, "planted"))
+
+
 async def test_an_organization_scope_sets_the_organization_and_no_company(database: Database) -> None:
     organization = literal_column("current_setting('ledger.organization_id')", Text)
     company = literal_column("current_setting('ledger.company_id')", Text)

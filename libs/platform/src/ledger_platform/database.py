@@ -14,7 +14,7 @@ from datetime import timedelta
 from functools import partial
 from math import ceil
 from types import BuiltinFunctionType, FunctionType, MethodType
-from typing import ClassVar, Final, final
+from typing import ClassVar, Final, assert_type, final
 lazy from collections.abc import AsyncGenerator, Callable, Sequence
 
 import psycopg
@@ -303,12 +303,18 @@ class _Callbacks:
 
 
 def _settings_of(scope: Scope | None) -> dict[str, str]:
-    """What ``ledger.organization_id`` and ``ledger.company_id`` are set to for ``scope``; empty if absent."""
-    if scope is None:
-        return {"organization": "", "company": ""}
-    if isinstance(scope, Tenant):
-        return {"organization": str(scope.organization), "company": str(scope.company)}
-    return {"organization": str(scope), "company": ""}
+    """What ``ledger.organization_id`` and ``ledger.company_id`` are set to for ``scope``; empty if absent.
+
+    Exhaustive over ``Scope``: what reaches the last case must be an ``OrganizationId`` (``assert_type``), so
+    a new kind of scope fails type checking here instead of being taken for an organization.
+    """
+    match scope:
+        case None:
+            return {"organization": "", "company": ""}
+        case Tenant(organization=organization, company=company):
+            return {"organization": str(organization), "company": str(company)}
+        case organization:
+            return {"organization": str(assert_type(organization, OrganizationId)), "company": ""}
 
 
 @final
