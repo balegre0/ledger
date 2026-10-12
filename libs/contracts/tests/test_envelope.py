@@ -198,8 +198,9 @@ def test_a_time_written_with_z_is_read_as_utc() -> None:
     ],
 )
 def test_a_malformed_header_is_named(change: dict[str, str], field: str) -> None:
-    with pytest.raises(MalformedEventError, match=field):
+    with pytest.raises(MalformedEventError, match=field) as caught:
         Envelope.from_headers(wrapped().headers() | change, b"")
+    assert caught.value.field == field
 
 
 @pytest.mark.parametrize(
@@ -208,8 +209,9 @@ def test_a_malformed_header_is_named(change: dict[str, str], field: str) -> None
 def test_a_missing_header_is_named(missing: str) -> None:
     headers = wrapped().headers()
     del headers[missing]
-    with pytest.raises(MalformedEventError, match=missing):
+    with pytest.raises(MalformedEventError, match=missing) as caught:
         Envelope.from_headers(headers, b"")
+    assert caught.value.field == missing
 
 
 @pytest.mark.parametrize("missing", ["ce-organizationid", "ce-subject"])
@@ -285,8 +287,9 @@ def test_unwrapping_checks_the_type_and_the_bytes() -> None:
     "data", [b"\x0a\xff", b"\x0a\x01\xff", b"\x0a\x05ab"], ids=["varint", "utf8", "truncated"]
 )
 def test_an_unreadable_payload_is_malformed_not_a_crash(data: bytes) -> None:
-    with pytest.raises(MalformedEventError, match="data"):
+    with pytest.raises(MalformedEventError, match="data") as caught:
         replace(wrapped(), data=data).unwrap(Money)
+    assert caught.value.field == "data"
 
 
 def test_the_payload_bytes_do_not_depend_on_map_insertion_order() -> None:

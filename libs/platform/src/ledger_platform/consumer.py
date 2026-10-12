@@ -7,50 +7,69 @@ the claim and is acknowledged without calling the handler. The message is acknow
 What happens to a delivery:
 
 * handled or a duplicate: acknowledged;
-* the handler raised: negatively acknowledged with a delay from the spec's ``backoff``, until JetStream has
-  delivered it ``max_deliver`` times and gives up (a ``MAX_DELIVERIES`` advisory, stored by ``DEAD_LETTERS``);
+* the claim or the handler failed: negatively acknowledged with a delay from the spec's ``backoff``, until
+  JetStream has delivered it ``max_deliver`` times and gives up (a ``MAX_DELIVERIES`` advisory, stored by
+  ``DEAD_LETTERS``);
 * the envelope cannot be read, or the handler raised an error of kind ``INVALID`` (the event can never
   succeed): terminated at once (a ``MSG_TERMINATED`` advisory, stored by ``DEAD_LETTERS`` too).
 
 An advisory names the stream and the sequence of the message to inspect; the log line of the failure names the
 same sequence, with the event's id and type. The consumer's own log fields never include the payload or the
-headers; the traceback of a handler's exception says whatever that exception says.
+headers (an unreadable message is logged with the name of the header that failed, never its value); the
+traceback of a handler's exception says whatever that exception says. A failure before the handler ran (the
+database could not be reached, the claim waited too long for a lock) is logged as ``consumer.claim_failed``,
+one of the handler as ``consumer.handler_failed``.
+
+The spec is the configuration: ``Consumer.run`` creates the durable consumer in JetStream if it is missing,
+and brings an existing one to the spec (its subject, ``max_deliver`` and ``ack_wait``), as ``ensure_stream``
+does for a stream. A consumer JetStream cannot change (its ack policy, say) is refused by name. A subject
+widened by a new version covers the events published from then on; JetStream does not go back for the older
+ones.
+
+A consumer that is stopped (a deploy, a scale-down) rolls back the handling it was in, and gives the
+messages of its batch it had not settled back to JetStream at once, so that the next consumer does not wait
+for ``ack_wait`` to find them.
 
 Long handlers. JetStream delivers a message again when nobody has acknowledged it within ``ack_wait``, so a
 handler that takes longer is handed the same event a second time, here or on another replica, while the first
 handling is still running. The inbox makes that safe: the second claim waits on the inbox's primary key until
 the first transaction ends, then finds the event handled (a duplicate) or, if the first rolled back, handles
 it itself. The wait is bounded by the database's ``lock_timeout`` (5 seconds by default): a claim that waits
-longer fails like any handler error and is retried after its backoff, using up one of the ``max_deliver``
-deliveries. A handler's database work is bounded by the statement timeout of the database (30 seconds by
-default, for each statement): ``ack_wait`` defaults to the same 30 seconds, so a handler within its statement
-limits is usually done before JetStream looks for it again.
+longer fails like any other and is retried after its backoff, using up one of the ``max_deliver`` deliveries.
+``ack_wait`` defaults to twice what one claim and one statement can take at the database's default limits
+(``lock_timeout`` plus ``statement_timeout``). That is not a bound on a handler: it runs as many statements as
+it likes, each within the statement timeout, and so may outlast ``ack_wait``. Then the event is delivered
+again while the handler still works, and the inbox makes that safe, as above.
 """
 
 import contextlib
 import re
+from abc import ABCMeta, abstractmethod
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import ClassVar, Final, Never, final
+from typing import ClassVar, Final, Never, Protocol, final
 from uuid import UUID
 lazy from collections.abc import Awaitable, Callable
 
 import structlog
 from nats.errors import Error as NatsError
 from nats.js.api import AckPolicy, ConsumerConfig
+from nats.js.errors import APIError, NotFoundError
 from prometheus_client import Counter
 from sqlalchemy import DateTime
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Mapped, mapped_column
 lazy from nats.aio.msg import Msg
 lazy from nats.js import JetStreamContext
+lazy from nats.js.api import ConsumerInfo
 lazy from prometheus_client import CollectorRegistry
 
 from ledger_contracts.envelope import Envelope, MalformedEventError
 from ledger_kernel.clock import utc_now
 from ledger_kernel.errors import ErrorKind, LedgerError
-from ledger_platform.database import PlatformTable
+from ledger_platform.database import DEFAULT_LIMITS, PlatformTable
 from ledger_platform.options import (
     InvalidOptionError,
     is_positive_and_finite,
@@ -64,13 +83,16 @@ lazy from ledger_platform.tracing import Tracing
 DEFAULT_MAX_DELIVER: Final = 10
 DEFAULT_BACKOFF: Final = (1.0, 10.0, 60.0, 300.0, 600.0)
 """Seconds to wait after the first failed delivery, after the second, and so on; the last one repeats."""
-DEFAULT_ACK_WAIT: Final = 30.0
-"""Seconds JetStream waits for an acknowledgement before it delivers the message again: the default
-statement timeout of ``Database``."""
+DEFAULT_ACK_WAIT: Final = 2 * (DEFAULT_LIMITS.lock_timeout + DEFAULT_LIMITS.statement_timeout).total_seconds()
+"""Seconds JetStream waits for an acknowledgement before it delivers the message again: twice what a claim (it
+may wait ``lock_timeout`` for a lock) and a statement (``statement_timeout``) can take at the default limits
+of ``Database``. See the module's note on long handlers for what this is not."""
 DEFAULT_BATCH: Final = 20
 DEFAULT_POLL: Final = 5.0
 MIN_POLL: Final = 0.001
 """Polling more often than this is a busy loop."""
+MAX_NAME_LENGTH: Final = 255
+"""The longest name NATS accepts for a consumer."""
 _NAME: Final = re.compile(r"(?:(?![.*>/\\])[!-~])+", re.ASCII)
 """Visible ASCII without ``.``, ``*``, ``>``, ``/`` or a backslash: what NATS accepts as a consumer's name."""
 _logger = structlog.stdlib.get_logger(__name__)
@@ -88,8 +110,10 @@ class InvalidConsumerOptionError(InvalidOptionError):
 
 
 def _require_name(name: str) -> None:
-    if _NAME.fullmatch(name) is None:
-        requirement = "one or more visible ASCII characters, none of '.', '*', '>', '/' or a backslash"
+    if len(name) > MAX_NAME_LENGTH or _NAME.fullmatch(name) is None:
+        requirement = (
+            f"1 to {MAX_NAME_LENGTH} visible ASCII characters, none of '.', '*', '>', '/' or a backslash"
+        )
         raise InvalidConsumerOptionError(option="name", requirement=requirement, value=name)
 
 
@@ -106,12 +130,21 @@ def _require_backoff(backoff: tuple[float, ...], max_deliver: int) -> None:
         )
 
 
-def _read(message: Msg) -> Envelope | None:
-    """The envelope ``message`` carries, or ``None`` when its headers or body cannot be read."""
+def _read(message: Msg) -> Envelope | MalformedEventError:
+    """The envelope ``message`` carries, or what is wrong with its headers."""
     try:
         return Envelope.from_headers(message.headers or {}, message.data)
-    except MalformedEventError:
-        return None
+    except MalformedEventError as error:
+        return error
+
+
+@final
+@dataclass(slots=True)
+class _Progress:
+    """How far the handling of one delivery got, so that a failure can be told by where it happened."""
+
+    claimed: bool = False
+    """The inbox holds the event and the handler is about to run (or has)."""
 
 
 class InboxRecord(PlatformTable):
@@ -179,20 +212,21 @@ class ConsumerMetrics:
 class ConsumerSpec:
     """A durable JetStream consumer and what it does with each event.
 
-    JetStream applies this configuration when it creates the durable consumer. One that already exists keeps
-    the configuration it was created with: changing ``max_deliver`` or ``ack_wait`` of a deployed consumer
-    takes effect only after deleting it (it then starts over with the whole stream, and the inbox makes every
-    event it has handled before a duplicate).
+    ``Consumer.run`` brings the consumer in JetStream to this spec when it starts (``ensure_consumer``), so a
+    new version of a service that changes the subject, ``max_deliver`` or ``ack_wait`` takes effect on the
+    consumer it finds. ``backoff`` is not part of the consumer in JetStream: each negative acknowledgement
+    carries its own delay, so it always is the running version's.
     """
 
     name: str
-    """The durable name in JetStream, the ``consumer`` of its inbox rows and of its metrics. Visible ASCII
-    without ``.``, ``*``, ``>``, ``/`` or a backslash. A new name starts over with the whole stream and
-    handles every event once more, as another consumer."""
+    """The durable name in JetStream, the ``consumer`` of its inbox rows and of its metrics. Up to
+    ``MAX_NAME_LENGTH`` visible ASCII characters, without ``.``, ``*``, ``>``, ``/`` or a backslash. A new
+    name starts over with the whole stream and handles every event once more, as another consumer."""
     stream: str
     """The stream the consumer reads."""
     subject: str
-    """Which of the stream's subjects it takes (a filter, wildcards allowed)."""
+    """Which of the stream's subjects it takes (a filter, wildcards allowed). Widening it later covers the
+    events published from then on, not the older ones."""
     handler: Handler
     """What to do with each event that is not a duplicate. An error it raises fails the delivery."""
     max_deliver: int = DEFAULT_MAX_DELIVER
@@ -205,8 +239,9 @@ class ConsumerSpec:
     ``max_deliver``, positive and finite."""
     ack_wait: float = DEFAULT_ACK_WAIT
     """Seconds JetStream waits for an acknowledgement before delivering the message again, even though the
-    handler is still working (see the module's note on long handlers). Longer than the handler usually takes,
-    which the database's statement timeout bounds for each statement."""
+    handler is still working (see the module's note on long handlers). The default outlasts a claim and a
+    statement at the database's default limits; a service with longer limits, or handlers that run many
+    statements, raises it."""
 
     def __post_init__(self) -> None:
         _require_name(self.name)
@@ -217,6 +252,93 @@ class ConsumerSpec:
     def retry_delay(self, delivery: int) -> float:
         """Seconds to wait after the ``delivery``-th delivery failed (the first is 1)."""
         return self.backoff[min(delivery, len(self.backoff)) - 1]
+
+
+class ConsumerRefusedError(LedgerError):
+    """JetStream refused to create or update a durable consumer, and left it as it was.
+
+    Typically a field of the existing consumer that nobody can change (its ack policy), or a stream that does
+    not exist. ``fields`` are the fields of the consumer the update tried to change; none when the consumer
+    was to be created. The cause is the server's own answer, or nats-py's when it could not build the request.
+    """
+
+    code: ClassVar[str] = "consumer_refused"
+
+    consumer: str
+    stream: str
+    fields: tuple[str, ...]
+
+    def __init__(self, *, consumer: str, stream: str, fields: tuple[str, ...], reason: str | None) -> None:
+        what = f"change {', '.join(fields)} of" if fields else "create"
+        why = "" if reason is None else f": {reason}"
+        super().__init__(f"JetStream refused to {what} consumer {consumer!r} of stream {stream!r}{why}")
+        self.consumer = consumer
+        self.stream = stream
+        self.fields = fields
+
+
+class ConsumerApi(Protocol, metaclass=ABCMeta):
+    """What the chassis asks of JetStream to manage consumers: a ``JetStreamContext`` is one.
+
+    nats-py leaves the ``**params`` of ``add_consumer`` without a type, and strict type checking refuses to
+    call a method whose signature is partly unknown. Seen through this protocol, only the parameter the
+    chassis passes remains.
+
+    The methods are abstract so that they need no body: a ``...`` is a statement no test could reach.
+    """
+
+    @abstractmethod
+    async def consumer_info(self, stream: str, consumer: str) -> ConsumerInfo:
+        """The consumer's configuration and state; ``NotFoundError`` when there is none."""
+
+    @abstractmethod
+    async def add_consumer(self, stream: str, config: ConsumerConfig) -> ConsumerInfo:
+        """Create the durable consumer ``config`` describes, or bring the one of that name to it."""
+
+
+def _configuration(spec: ConsumerSpec) -> ConsumerConfig:
+    return ConsumerConfig(
+        name=spec.name,
+        durable_name=spec.name,
+        ack_policy=AckPolicy.EXPLICIT,
+        ack_wait=spec.ack_wait,
+        max_deliver=spec.max_deliver,
+        filter_subject=spec.subject,
+    )
+
+
+def _changes(current: ConsumerConfig, wanted: ConsumerConfig) -> tuple[str, ...]:
+    """The fields ``wanted`` sets that ``current`` does not have as they are."""
+    held = current.as_dict()
+    return tuple(field for field, value in wanted.as_dict().items() if held.get(field) != value)
+
+
+async def ensure_consumer(jetstream: ConsumerApi, spec: ConsumerSpec) -> None:
+    """Create the durable consumer ``spec`` describes, or bring an existing one to it.
+
+    A consumer that is already as the spec says is not written. ``ConsumerRefusedError`` when JetStream
+    refuses, or nats-py cannot build the request.
+
+    Specs only move forward, as streams do: replicas of different versions start during a rollout and each
+    applies its own spec over what the others declared, so an older replica restarting after a newer one
+    undoes the change until it is replaced too.
+    """
+    wanted = _configuration(spec)
+    try:
+        current = (await jetstream.consumer_info(spec.stream, spec.name)).config
+    except NotFoundError:
+        fields: tuple[str, ...] = ()
+    else:
+        fields = _changes(current, wanted)
+        if not fields:
+            return
+    try:
+        await jetstream.add_consumer(spec.stream, wanted)
+    except (APIError, ValueError) as error:  # nats-py raises ValueError when it cannot serialize the config
+        reason = error.description if isinstance(error, APIError) else None
+        raise ConsumerRefusedError(
+            consumer=spec.name, stream=spec.stream, fields=fields, reason=reason
+        ) from error
 
 
 @final
@@ -250,10 +372,13 @@ class Consumer:
     ) -> Never:
         """Consume forever, up to ``batch`` messages at a time, waiting up to ``poll`` seconds for them.
 
-        Binds to the durable consumer, creating it from the spec if there is none. A handler's failure never
-        ends the loop. What does: an error of NATS itself (the stream is gone, the connection is closed) and
-        a cancellation; the service's supervision reports the first and restarts, and a message that was not
-        acknowledged is delivered again after ``ack_wait``.
+        First brings the durable consumer to the spec (``ensure_consumer``: ``ConsumerRefusedError`` when
+        JetStream refuses). A handler's failure never ends the loop. What does: an error of NATS itself (the
+        stream is gone, the connection is closed) and a cancellation. The service's supervision reports the
+        first and restarts. On either, the handling in progress is rolled back and every message of the batch
+        not yet settled goes back to JetStream at once (a negative acknowledgement without a delay: it counts
+        as a delivery), so that nothing waits for ``ack_wait``; if the connection is gone, those messages are
+        delivered again after ``ack_wait``.
 
         The messages of a batch are handled one after the other, so ``batch`` times the usual time to handle
         one should stay well inside ``ack_wait``; otherwise the tail of a batch is delivered again while it
@@ -261,27 +386,25 @@ class Consumer:
         """
         require_at_least(InvalidConsumerOptionError, "batch", batch)
         require_seconds(InvalidConsumerOptionError, "poll", poll, floor=MIN_POLL)
-        subscription = await jetstream.pull_subscribe(
-            self._spec.subject,
-            durable=self._spec.name,
-            stream=self._spec.stream,
-            config=ConsumerConfig(
-                ack_policy=AckPolicy.EXPLICIT,
-                max_deliver=self._spec.max_deliver,
-                ack_wait=self._spec.ack_wait,
-            ),
-        )
+        await ensure_consumer(jetstream, self._spec)
+        subscription = await jetstream.pull_subscribe_bind(durable=self._spec.name, stream=self._spec.stream)
+        unsettled: deque[Msg] = deque()
         try:
             while True:
                 try:
-                    messages = await subscription.fetch(batch, timeout=poll)
+                    unsettled.extend(await subscription.fetch(batch, timeout=poll))
                 except TimeoutError:  # nats-py's timeouts are subclasses of the built-in one
                     continue
-                for message in messages:
-                    await self.handle(message)
+                while unsettled:
+                    await self.handle(unsettled[0])
+                    unsettled.popleft()
         finally:
+            # The connection may be what is gone: a settlement that fails is not worth a second error.
+            for message in unsettled:
+                with contextlib.suppress(NatsError):
+                    await message.nak()
             # A pull request left at the server would be answered, and its message would wait for ``ack_wait``
-            # in a subscription nobody reads. The connection may be the very thing that is gone.
+            # in a subscription nobody reads.
             with contextlib.suppress(NatsError):
                 await subscription.unsubscribe()
 
@@ -292,34 +415,37 @@ class Consumer:
         an error of NATS itself (the settlement could not be sent) is raised.
         """
         envelope = _read(message)
-        if envelope is None:
+        if isinstance(envelope, MalformedEventError):
             metadata = message.metadata
             _logger.error(
                 "consumer.event_malformed",
                 consumer=self._spec.name,
                 subject=message.subject,
+                field=envelope.field,
                 delivery=metadata.num_delivered,
                 stream_sequence=metadata.sequence.stream,
             )
             await self._terminate(message, Outcome.MALFORMED)
             return
+        progress = _Progress()
         try:
             # The error leaves the span before it is handled here: a failed handling shows in the trace.
             with self._tracing.consuming(f"consume {self._spec.name}", envelope.traceparent):
-                outcome = await self._claim_and_handle(envelope)
+                outcome = await self._claim_and_handle(envelope, progress)
         except Exception as error:  # a handler may raise anything; a cancellation is no Exception
             fields = self._fields(message, envelope)
             if isinstance(error, LedgerError) and error.kind is ErrorKind.INVALID:
                 _logger.exception("consumer.event_rejected", code=error.code, **fields)
                 await self._terminate(message, Outcome.REJECTED)
             else:
-                _logger.exception("consumer.handler_failed", **fields)
+                failed = "consumer.handler_failed" if progress.claimed else "consumer.claim_failed"
+                _logger.exception(failed, **fields)
                 await self._retry(message)
             return
         self._metrics.count(self._spec.name, outcome)
         await message.ack()
 
-    async def _claim_and_handle(self, envelope: Envelope) -> Outcome:
+    async def _claim_and_handle(self, envelope: Envelope, progress: _Progress) -> Outcome:
         """The inbox claim and the handler in one transaction scoped to the event's tenant."""
         async with self._database.transaction(envelope.tenant) as unit:
             claimed = await unit.connection.execute(
@@ -330,6 +456,7 @@ class Consumer:
             )
             if claimed.first() is None:
                 return Outcome.DUPLICATE
+            progress.claimed = True
             await self._spec.handler(envelope, unit)
         return Outcome.HANDLED
 

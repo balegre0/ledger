@@ -57,8 +57,12 @@ class MalformedEventError(InvalidInputError):
 
     code: ClassVar[str] = "malformed_event"
 
+    field: str
+    """The header (or ``data``, the body) that cannot be read: a name of ours, never what the event says."""
+
     def __init__(self, field: str, value: str = "") -> None:
         super().__init__(f"event field {field!r} is missing or invalid: {excerpt(value)}")
+        self.field = field
 
 
 class UnexpectedEventError(InvalidInputError):

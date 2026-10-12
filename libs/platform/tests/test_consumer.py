@@ -1,15 +1,18 @@
 import asyncio
 import contextlib
+import re
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from math import inf, nan
-from typing import ClassVar, Protocol, TypedDict, Unpack, final
+from typing import ClassVar, Protocol, TypedDict, Unpack, final, override
 lazy from collections.abc import AsyncGenerator, Awaitable, Callable
 lazy from uuid import UUID
 
 import pytest
 from nats.errors import ConnectionClosedError
+from nats.js.api import AckPolicy, ConsumerConfig
+from nats.js.errors import APIError
 from nats.js.errors import NotFoundError as JetStreamNotFoundError
 from opentelemetry.trace import StatusCode
 from prometheus_client import CollectorRegistry
@@ -34,6 +37,7 @@ lazy from nats.aio.client import Client
 lazy from nats.aio.msg import Msg
 lazy from nats.aio.subscription import Subscription
 lazy from nats.js import JetStreamContext
+lazy from nats.js.api import ConsumerInfo
 lazy from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from ledger.common.v1.money_pb2 import Money
@@ -48,15 +52,20 @@ from ledger_kernel.errors import (
 )
 from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
 from ledger_platform.consumer import (
+    DEFAULT_ACK_WAIT,
+    MAX_NAME_LENGTH,
     MIN_POLL,
     Consumer,
+    ConsumerApi,
     ConsumerMetrics,
+    ConsumerRefusedError,
     ConsumerSpec,
     InboxRecord,
     InvalidConsumerOptionError,
     Outcome,
+    ensure_consumer,
 )
-from ledger_platform.database import Database, DatabaseLimits
+from ledger_platform.database import DEFAULT_LIMITS, Database, DatabaseLimits
 from ledger_platform.outbox import Outbox
 from ledger_platform.streams import DEAD_LETTERS, StreamSpec, ensure_stream
 lazy from ledger_platform.consumer import Handler
@@ -139,6 +148,47 @@ class Swallower:
                 await unit.connection.execute(text("SELECT 1 / 0"))
 
 
+@final
+class Counting(ConsumerApi):
+    """JetStream, counting the consumers it was asked to write."""
+
+    def __init__(self, api: ConsumerApi) -> None:
+        self._api = api
+        self.writes = 0
+
+    @override
+    async def consumer_info(self, stream: str, consumer: str) -> ConsumerInfo:
+        return await self._api.consumer_info(stream, consumer)
+
+    @override
+    async def add_consumer(self, stream: str, config: ConsumerConfig) -> ConsumerInfo:
+        self.writes += 1
+        return await self._api.add_consumer(stream, config)
+
+
+@final
+class Unserializable(ConsumerApi):
+    """JetStream when nats-py cannot even build the request (it raises ``ValueError`` before sending)."""
+
+    def __init__(self, *, exists: bool) -> None:
+        self._exists = exists
+
+    @override
+    async def consumer_info(self, stream: str, consumer: str) -> ConsumerInfo:
+        if not self._exists:
+            raise JetStreamNotFoundError
+        return ConsumerInfo(
+            name=consumer,
+            stream_name=stream,
+            config=ConsumerConfig(name=consumer, durable_name=consumer),
+            created=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+    @override
+    async def add_consumer(self, stream: str, config: ConsumerConfig) -> ConsumerInfo:
+        raise ValueError
+
+
 class Subscribing(Protocol):
     """A NATS connection as ``settlement_of`` uses it: nats-py leaves the type of ``future`` open."""
 
@@ -149,6 +199,7 @@ class Tuning(TypedDict, total=False):
     """What a test changes about the consumer's spec: the rest has the values the tests share."""
 
     name: str
+    subject: str
     max_deliver: int
     backoff: tuple[float, ...]
     ack_wait: float
@@ -164,7 +215,7 @@ def spec(handler: Handler, **tuning: Unpack[Tuning]) -> ConsumerSpec:
     return ConsumerSpec(
         name=tuning.get("name", NAME),
         stream="EVENTS",
-        subject="events.>",
+        subject=tuning.get("subject", "events.>"),
         handler=handler,
         max_deliver=tuning.get("max_deliver", 10),
         backoff=tuning.get("backoff", (0.05,)),
@@ -214,8 +265,8 @@ def money(tenant: Tenant | None = TENANT) -> Envelope:
     return Envelope.wrap(Money(amount="1", currency="DOP"), source="test", tenant=tenant)
 
 
-async def publish(jetstream: JetStreamContext, envelope: Envelope) -> None:
-    await jetstream.publish("events.created", envelope.data, headers=envelope.headers())
+async def publish(jetstream: JetStreamContext, envelope: Envelope, subject: str = "events.created") -> None:
+    await jetstream.publish(subject, envelope.data, headers=envelope.headers())
 
 
 async def fetch(jetstream: JetStreamContext, count: int = 1) -> list[Msg]:
@@ -527,11 +578,12 @@ async def test_a_failed_handling_shows_in_its_span_by_error_type_alone(
 async def test_a_failing_handler_is_logged_with_the_event_and_nothing_of_its_content(
     streams: JetStreamContext, make: ConsumerFactory
 ) -> None:
+    """The record's own fields. The traceback of the handler's error says whatever that error says."""
     envelope = Envelope.wrap(Money(amount="31337", currency="DOP"), source="test", tenant=TENANT)
     await publish(streams, envelope)
     (message,) = await fetch(streams)
     with capture_logs() as logs:
-        await make(Recorder(failures=1, error=LeakyError)).handle(message)
+        await make(Recorder(failures=1)).handle(message)
 
     assert logs == [
         {
@@ -573,10 +625,12 @@ async def test_a_rejected_event_is_logged_with_the_stable_code_of_the_error(
     ]
 
 
-async def test_an_unreadable_message_is_logged_without_its_headers_or_body(
-    streams: JetStreamContext, make: ConsumerFactory
+@pytest.mark.parametrize("field", ["ce-id", "ce-time", "ce-source"])
+async def test_an_unreadable_message_is_logged_with_the_failing_field_but_not_its_value_or_body(
+    field: str, streams: JetStreamContext, make: ConsumerFactory
 ) -> None:
-    await streams.publish("events.created", b"secret body", headers={"ce-id": "secret header"})
+    headers = money().headers() | {field: "secret header"}
+    await streams.publish("events.created", b"secret body", headers=headers)
     (message,) = await fetch(streams)
     with capture_logs() as logs:
         await make(Recorder()).handle(message)
@@ -587,6 +641,58 @@ async def test_an_unreadable_message_is_logged_without_its_headers_or_body(
             "log_level": "error",
             "consumer": NAME,
             "subject": "events.created",
+            "field": field,
+            "delivery": 1,
+            "stream_sequence": 1,
+        }
+    ]
+
+
+async def test_a_message_without_headers_is_logged_with_the_first_header_it_lacks(
+    streams: JetStreamContext, make: ConsumerFactory
+) -> None:
+    await streams.publish("events.created", b"secret body")
+    (message,) = await fetch(streams)
+    with capture_logs() as logs:
+        await make(Recorder()).handle(message)
+
+    assert logs == [
+        {
+            "event": "consumer.event_malformed",
+            "log_level": "error",
+            "consumer": NAME,
+            "subject": "events.created",
+            "field": "ce-specversion",
+            "delivery": 1,
+            "stream_sequence": 1,
+        }
+    ]
+
+
+async def test_a_claim_that_cannot_be_made_is_logged_as_such_and_never_reaches_the_handler(
+    database: Database, impatient: Database, streams: JetStreamContext, make: ConsumerFactory
+) -> None:
+    """Another transaction holds the event's inbox row: PostgreSQL gives up on the claim after 100 ms."""
+    envelope = money()
+    await publish(streams, envelope)
+    (message,) = await fetch(streams)
+    recorder = Recorder()
+    async with database.transaction(None) as holder:
+        await holder.connection.execute(
+            insert(InboxRecord).values(consumer=NAME, event_id=envelope.id, processed_at=datetime.now(UTC))
+        )
+        with capture_logs() as logs:
+            await make(recorder, database=impatient).handle(message)
+
+    assert recorder.calls == 0
+    assert logs == [
+        {
+            "event": "consumer.claim_failed",
+            "log_level": "error",
+            "exc_info": True,
+            "consumer": NAME,
+            "event_id": str(envelope.id),
+            "type": "ledger.common.v1.Money",
             "delivery": 1,
             "stream_sequence": 1,
         }
@@ -663,24 +769,95 @@ async def test_an_idle_consumer_keeps_polling(
         await eventually(partial(received, recorder, 1))
 
 
-async def test_the_durable_consumer_is_created_as_the_spec_says_and_an_existing_one_is_left_alone(
+async def test_a_deployed_spec_takes_effect_on_the_existing_consumer(
     streams: JetStreamContext, make: ConsumerFactory, eventually: Eventually
 ) -> None:
-    """JetStream applies a spec when it creates the consumer: a changed spec needs a new consumer."""
-    async with running(make(Recorder(), max_deliver=3, backoff=(1.0,), ack_wait=7.0), streams):
+    """A new version widens the subject and changes ``max_deliver`` and ``ack_wait``: all of it applies."""
+    published_before = money()
+    await publish(streams, published_before, "events.deleted")
+    async with running(make(Recorder(), subject="events.created", max_deliver=3, ack_wait=7.0), streams):
         await eventually(partial(bound, streams))
     created = (await streams.consumer_info("EVENTS", NAME)).config
-    assert (created.durable_name, created.filter_subject, created.ack_policy) == (
+    assert (created.durable_name, created.ack_policy) == (NAME, "explicit")
+    assert (created.filter_subject, created.max_deliver, created.ack_wait) == ("events.created", 3, 7.0)
+
+    recorder = Recorder()
+    new_kind = money()
+    await publish(streams, new_kind, "events.deleted")
+    async with running(make(recorder, subject="events.>", max_deliver=5, ack_wait=9.0), streams):
+        await eventually(partial(received, recorder, 1))
+    updated = (await streams.consumer_info("EVENTS", NAME)).config
+    assert (updated.filter_subject, updated.max_deliver, updated.ack_wait) == ("events.>", 5, 9.0)
+    assert recorder.received == [new_kind]  # a wider subject covers what is published from then on
+
+
+async def test_a_consumer_whose_configuration_cannot_change_is_refused_and_left_alone(
+    streams: JetStreamContext, make: ConsumerFactory
+) -> None:
+    """Someone created it with another ack policy, which JetStream never lets anyone change."""
+    config = ConsumerConfig(
+        name=NAME, durable_name=NAME, ack_policy=AckPolicy.NONE, filter_subject="events.>"
+    )
+    await Counting(streams).add_consumer("EVENTS", config)
+
+    async with asyncio.timeout(5):  # a consumer that went on would run for ever
+        with pytest.raises(ConsumerRefusedError) as refused:
+            await make(Recorder()).run(streams)
+
+    assert (refused.value.consumer, refused.value.stream) == (NAME, "EVENTS")
+    assert "ack_policy" in refused.value.fields
+    named = rf"change [a-z_, ]*ack_policy[a-z_, ]* of consumer '{NAME}' of stream 'EVENTS'"
+    assert re.fullmatch(rf"JetStream refused to {named}: .+", str(refused.value))
+    assert isinstance(refused.value.__cause__, APIError)
+    assert (await streams.consumer_info("EVENTS", NAME)).config.ack_policy == "none"
+
+
+async def test_a_new_consumer_is_created_as_the_spec_says(streams: JetStreamContext) -> None:
+    api = Counting(streams)
+    await ensure_consumer(api, spec(Recorder(), subject="events.created", max_deliver=3, ack_wait=7.0))
+
+    config = (await streams.consumer_info("EVENTS", NAME)).config
+    assert (config.durable_name, config.filter_subject, config.ack_policy) == (
         NAME,
-        "events.>",
+        "events.created",
         "explicit",
     )
-    assert (created.max_deliver, created.ack_wait) == (3, 7.0)
+    assert (config.max_deliver, config.ack_wait) == (3, 7.0)
+    assert api.writes == 1
 
-    async with running(make(Recorder(), max_deliver=5, backoff=(1.0,), ack_wait=9.0), streams):
-        await asyncio.sleep(0.3)
-    kept = (await streams.consumer_info("EVENTS", NAME)).config
-    assert (kept.max_deliver, kept.ack_wait) == (3, 7.0)
+
+async def test_a_consumer_that_is_as_the_spec_says_is_not_written_again(streams: JetStreamContext) -> None:
+    api = Counting(streams)
+    await ensure_consumer(api, spec(Recorder()))
+    await ensure_consumer(api, spec(Recorder()))
+    assert api.writes == 1
+
+    await ensure_consumer(api, spec(Recorder(), ack_wait=9.0))
+    assert api.writes == 2
+
+
+async def test_a_consumer_of_a_missing_stream_is_refused_with_the_answer_of_jetstream(
+    jetstream: JetStreamContext,
+) -> None:
+    with pytest.raises(ConsumerRefusedError, match=f"create consumer '{NAME}' of stream 'EVENTS'") as refused:
+        await ensure_consumer(jetstream, spec(Recorder()))
+
+    assert isinstance(refused.value.__cause__, JetStreamNotFoundError)
+    assert (refused.value.code, refused.value.consumer, refused.value.stream) == (
+        "consumer_refused",
+        NAME,
+        "EVENTS",
+    )
+    assert refused.value.fields == ()
+
+
+@pytest.mark.parametrize(
+    "api", [Unserializable(exists=True), Unserializable(exists=False)], ids=["on update", "on create"]
+)
+async def test_a_request_nats_py_cannot_build_is_a_refused_consumer_too(api: ConsumerApi) -> None:
+    with pytest.raises(ConsumerRefusedError, match=f"'{NAME}'") as refused:
+        await ensure_consumer(api, spec(Recorder(), ack_wait=9.0))
+    assert isinstance(refused.value.__cause__, ValueError)
 
 
 @pytest.mark.usefixtures("effects")
@@ -719,6 +896,40 @@ async def test_a_closed_connection_ends_the_consumer_with_the_error_of_the_conne
         worker.cancel()
         with contextlib.suppress(asyncio.CancelledError, ConnectionClosedError):
             await worker
+
+
+async def test_stopping_a_consumer_mid_handler_rolls_back_and_hands_the_whole_batch_to_the_next(
+    database: Database, streams: JetStreamContext, make: ConsumerFactory, eventually: Eventually
+) -> None:
+    """Three events are in one batch and the first is inside its handler when the consumer is stopped.
+
+    Nothing of it commits, and the next consumer does not wait for ``ack_wait`` (30 seconds here) for that
+    event or for the two it never started.
+    """
+    events = [money() for _ in range(3)]
+    for envelope in events:
+        await publish(streams, envelope)
+    gated = Gated()
+    async with running(make(gated), streams):
+        await eventually(partial(handling, gated))
+
+    assert gated.calls == 1
+    assert await effects_written(database) == 0
+    assert await inbox(database) == []
+    successor = Recorder()
+    async with running(make(successor), streams):
+        await eventually(partial(received, successor, 3))
+    assert sorted(envelope.id for envelope in successor.received) == sorted(
+        envelope.id for envelope in events
+    )
+
+
+async def test_stopping_a_consumer_that_is_waiting_for_events_leaves_nothing_unacknowledged(
+    streams: JetStreamContext, make: ConsumerFactory, eventually: Eventually
+) -> None:
+    async with running(make(Recorder()), streams):
+        await eventually(partial(bound, streams))
+    assert (await streams.consumer_info("EVENTS", NAME)).num_ack_pending == 0
 
 
 async def test_a_delivery_that_arrives_while_the_first_is_still_being_handled_is_a_duplicate(
@@ -802,7 +1013,7 @@ async def test_a_failed_delivery_is_nacked_with_the_delay_of_its_number(
     assert payload == b'-NAK {"delay": %d}' % delay
 
 
-@pytest.mark.parametrize("name", ["a", "orders-projection", "Invoicing_v1"])
+@pytest.mark.parametrize("name", ["a", "orders-projection", "Invoicing_v1", "x" * MAX_NAME_LENGTH])
 def test_a_name_nats_accepts_is_taken(name: str) -> None:
     assert spec(Recorder(), name=name).name == name
 
@@ -814,6 +1025,13 @@ def test_a_name_nats_accepts_is_taken(name: str) -> None:
 def test_a_name_nats_would_refuse_or_misread_is_refused_at_construction(name: str) -> None:
     with pytest.raises(InvalidConsumerOptionError, match="name"):
         spec(Recorder(), name=name)
+
+
+def test_a_name_longer_than_nats_allows_is_refused_and_not_echoed_whole() -> None:
+    assert MAX_NAME_LENGTH == 255
+    with pytest.raises(InvalidConsumerOptionError, match="name") as refused:
+        spec(Recorder(), name="x" * (MAX_NAME_LENGTH + 1))
+    assert len(str(refused.value)) < 200
 
 
 @pytest.mark.parametrize("max_deliver", [0, -1])
@@ -838,6 +1056,14 @@ def test_a_backoff_longer_than_the_deliveries_is_refused() -> None:
 
 def test_a_backoff_as_long_as_the_deliveries_is_taken() -> None:
     assert spec(Recorder(), max_deliver=2, backoff=(1.0, 2.0)).retry_delay(2) == 2.0
+
+
+def test_the_default_ack_wait_outlasts_a_claim_and_a_statement_of_the_default_database_limits() -> None:
+    """A claim may wait ``lock_timeout`` and a statement may take ``statement_timeout``: and then some."""
+    claim_and_statement = DEFAULT_LIMITS.lock_timeout + DEFAULT_LIMITS.statement_timeout
+    assert 2 * claim_and_statement.total_seconds() <= DEFAULT_ACK_WAIT
+    bare = ConsumerSpec(name="x", stream="EVENTS", subject="events.>", handler=Recorder())
+    assert bare.ack_wait == DEFAULT_ACK_WAIT
 
 
 @pytest.mark.parametrize("ack_wait", [0, -1, nan, inf])
