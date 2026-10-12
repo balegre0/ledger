@@ -296,8 +296,8 @@ trailing metadata `ledger-error-code`, with generic details for a defect.
 - `/livez` does not consult the dependencies, so a PostgreSQL outage does not restart every pod. It answers 503
   `unrecoverable` only when the process cannot recover by itself: a check has outlived ten time limits and will
   not stop, or a background worker is dead for good.
-- Workers (the outbox relay, one per consumer, and the service's own) are supervised. One that fails is logged with its traceback and
-  started again after 1 s, then 2 s, up to a minute, each delay shortened at random by up to a fifth so that
+- Workers (the outbox relay, one per consumer, and the service's own) are supervised. One that fails is logged
+  with its traceback and started again after 1 s, then 2 s, up to a minute, each delay shortened at random by up to a fifth so that
   replicas do not come back together; a run of a minute starts the delays over; `ledger_worker_restarts_total`
   counts the restarts. A worker waiting to start again is not dead: JetStream unable to serve a consumer for a
   moment fails neither probe, and NATS being unreachable fails the `nats` check alone; neither does a consumer whose
@@ -333,8 +333,8 @@ The outbox gauges read the table, so every replica exports the same values: aggr
 
 - Logs are structlog, JSON in production, with the standard-library loggers going through the same pipeline and
   every record stamped with the service and the environment. While a handler runs, every line it logs carries the
-  event's `event_id` and `event_type`, its `organization_id` and `company_id`, and the `trace_id`. A traceback never carries the local variables of its
-  frames: a frame that failed to connect holds the database password. An exception whose text can quote data is
+  event's `event_id` and `event_type`, its `organization_id` and `company_id`, and the `trace_id`. A traceback
+  never carries the local variables of its frames: a frame that failed to connect holds the database password. An exception whose text can quote data is
   logged without that text, wherever it sits in the chain of causes, contexts and groups: an error of PostgreSQL
   or psycopg (including SQLAlchemy's wrapper) by its SQLSTATE, the names of its schema, table, column and
   constraint, and the statement, never the message (`Key (tax_id)=(...)`) or the parameters; a pydantic or FastAPI

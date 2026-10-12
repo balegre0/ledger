@@ -346,8 +346,8 @@ company can certify while another runs in production.
 - Money: exact `Decimal` with currency, never float, never a silent rounding. Amounts stay below 10^18
   with at most 24 decimal places; arithmetic is exact, so a result that would need rounding, leave that
   range or mix currencies is an error; zero is never signed, and a positive exponent is written out
-  (`1E+5` is stored as `100000`), so an amount never prints in exponent form above 10^-6. Rounding happens only when asked for
-  (`Money.rounded()`: half away from zero, to the currency's minor unit); the fiscal rules that decide
+  (`1E+5` is stored as `100000`), so an amount never prints in exponent form above 10^-6. Rounding
+  happens only when asked for (`Money.rounded()`: half away from zero, to the currency's minor unit); the fiscal rules that decide
   where to round come with `fiscal-do`. Property tests cover the laws.
 - Times: `timestamptz` in UTC; DGII's local-time fields converted at the XML adapter only
   (`America/Santo_Domingo`).
