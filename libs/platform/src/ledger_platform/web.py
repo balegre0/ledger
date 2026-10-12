@@ -5,11 +5,12 @@ request that breaks the schema with its problems listed, an ``HTTPException`` (t
 405 included) with the code of its status, and anything else as a bare ``internal``. A client reads no more
 than the code and the title unless the error was written to be read: the ``detail`` of an ``HTTPException``
 is boilerplate the title already says, or whatever its author typed (possibly built from the request), so it
-stays out; a service that has something to tell a client raises a ``LedgerError``, whose message is built
-inside its class.
+stays out (a server error a route raises is logged with it, cut); a service that has something to tell a
+client raises a ``LedgerError``, whose message is built inside its class.
 """
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from http import HTTPMethod, HTTPStatus
 from time import perf_counter
 from typing import ClassVar, Final, NamedTuple, Self, TypedDict, final
@@ -28,15 +29,41 @@ from starlette.exceptions import HTTPException
 lazy from fastapi import APIRouter, Request
 lazy from prometheus_client import CollectorRegistry
 
-from ledger_kernel.errors import ErrorKind, LedgerError
+from ledger_kernel.errors import ErrorKind, LedgerError, truncate
 lazy from ledger_platform.health import Health
 
 PROBLEM_JSON: Final = "application/problem+json"
 _UNMATCHED: Final = "unmatched"
+_UNREGISTERED: Final = "unregistered"
 _OTHER_METHOD: Final = "other"
 _METHODS: Final = frozenset(method.value for method in HTTPMethod)
 _FAILED: Final = HTTPStatus.INTERNAL_SERVER_ERROR.value
 _STANDARD: Final = {status.value: status for status in HTTPStatus}
+_CODES: Final[Mapping[int, str]] = {
+    HTTPStatus.BAD_REQUEST: "bad_request",
+    HTTPStatus.UNAUTHORIZED: "unauthorized",
+    HTTPStatus.FORBIDDEN: "forbidden",
+    HTTPStatus.NOT_FOUND: "not_found",
+    HTTPStatus.METHOD_NOT_ALLOWED: "method_not_allowed",
+    HTTPStatus.NOT_ACCEPTABLE: "not_acceptable",
+    HTTPStatus.CONFLICT: "conflict",
+    HTTPStatus.GONE: "gone",
+    HTTPStatus.PRECONDITION_FAILED: "precondition_failed",
+    HTTPStatus.CONTENT_TOO_LARGE: "payload_too_large",
+    HTTPStatus.UNSUPPORTED_MEDIA_TYPE: "unsupported_media_type",
+    HTTPStatus.UNPROCESSABLE_CONTENT: "invalid",
+    HTTPStatus.PRECONDITION_REQUIRED: "precondition_required",
+    HTTPStatus.TOO_MANY_REQUESTS: "too_many_requests",
+    HTTPStatus.INTERNAL_SERVER_ERROR: "internal",
+    HTTPStatus.NOT_IMPLEMENTED: "not_implemented",
+    HTTPStatus.BAD_GATEWAY: "bad_gateway",
+    HTTPStatus.SERVICE_UNAVAILABLE: "unavailable",
+    HTTPStatus.GATEWAY_TIMEOUT: "gateway_timeout",
+}
+"""The codes clients match on, written out: they must not follow the names CPython gives its statuses (3.13
+renamed 413, 414, 416 and 422). Where ``ErrorKind`` has a word for it (404, 403, 409, 422, 500, 503) the
+code is that word, so a route's ``HTTPException`` and a ``LedgerError`` of the same meaning are one code."""
+_NOT_A_WORD: Final = re.compile(r"\W+")
 _STATUS: Final[Mapping[ErrorKind, HTTPStatus]] = {
     ErrorKind.INVALID: HTTPStatus.UNPROCESSABLE_CONTENT,
     ErrorKind.NOT_FOUND: HTTPStatus.NOT_FOUND,
@@ -49,6 +76,17 @@ _MAX_ISSUES: Final = 20
 """A request can break the schema a million times over; a client is told about this many."""
 _LOCATION_PART: Final = 40
 """A location names fields, but a key the client chose is a field name too: it is cut at this length."""
+_TEXT_LIMIT: Final = 200
+"""Text that comes from elsewhere (a validator's message, the detail of an ``HTTPException``) is cut here."""
+_QUOTES_THE_INPUT: Final[Mapping[str, str]] = {
+    "union_tag_invalid": "Input tag does not match any of the expected tags.",
+    "uuid_parsing": "Input should be a valid UUID.",
+}
+"""Pydantic error types whose message repeats part of what the client sent, and what they say instead.
+
+``union_tag_invalid`` quotes the whole tag; ``uuid_parsing`` quotes the first character that is wrong.
+Every other type in pydantic-core 2.50 (``list_all_errors``) is fixed text, a count or a parser's own wording,
+except ``value_error`` and ``assertion_error``, which carry what the validator that raised them wrote."""
 _logger = structlog.stdlib.get_logger(__name__)
 
 # The ASGI protocol, as far as the metrics middleware needs it. Starlette's own aliases hide the values
@@ -80,11 +118,13 @@ class ApiInfo:
 
 class _ValidationIssue(TypedDict):
     loc: tuple[str | int, ...]
+    type: str
     msg: str
 
 
 class _FieldProblem(TypedDict):
     location: str
+    type: str
     message: str
 
 
@@ -98,17 +138,28 @@ class _Line(NamedTuple):
 _ISSUES: Final = TypeAdapter(list[_ValidationIssue])
 
 
+_CLASSES: Final = {
+    1: _Line("Informational", "informational"),
+    2: _Line("Successful", "successful"),
+    3: _Line("Redirection", "redirection"),
+    4: _Line("Client Error", "client_error"),
+    5: _Line("Server Error", "server_error"),
+}
+_OTHER_CLASS: Final = _Line("Error", "error")
+
+
 def _describe(status: int) -> _Line:
     """The title and the stable code of ``status``: ``404`` is ``Not Found`` and ``not_found``.
 
-    A status the standard does not name (``499``) still gets an honest answer: the class it belongs to.
+    The code comes from ``_CODES``, else from the snake-case phrase of a status the standard names, else from
+    the class of one it does not (``499`` is a ``client_error``; ``299`` is ``successful``).
     """
     standard = _STANDARD.get(status)
-    if standard is not None:
-        return _Line(standard.phrase, standard.name.lower())
-    if status < HTTPStatus.INTERNAL_SERVER_ERROR:
-        return _Line("Client Error", "client_error")
-    return _Line("Server Error", "server_error")
+    if standard is None:
+        return _CLASSES.get(status // 100, _OTHER_CLASS)
+    return _Line(
+        standard.phrase, _CODES.get(status) or _NOT_A_WORD.sub("_", standard.phrase.lower()).strip("_")
+    )
 
 
 @final
@@ -124,6 +175,8 @@ class _RouteLabels:
 
     templates: Mapping[int, str]
     """By ``id`` of the route object: routes are not hashable, and the app keeps them alive."""
+    reported: set[int] = field(default_factory=set[int])
+    """The routes found missing from ``templates``, so that each is said once."""
 
     @classmethod
     def of(cls, app: FastAPI) -> Self:
@@ -141,13 +194,24 @@ class _RouteLabels:
     def of_scope(self, scope: Mapping[str, object]) -> str:
         """The template of the route that took the request, bounded by the code, never by a client.
 
-        A route added to the app after it was built is known by the path it declares. Anything no API route
-        took (an unknown path, the documentation FastAPI serves itself) is ``unmatched``.
+        A route that was not there when the app was built (FastAPI mounts a router by reference, so routes
+        added to it later reach the app) is ``unregistered``, and said so once: its own path would be a
+        wrong label whenever a prefix is missing. Anything no API route took (an unknown path, the
+        documentation FastAPI serves itself) is ``unmatched``.
         """
         route = scope.get("route")
-        if isinstance(route, APIRoute):
-            return self.templates.get(id(route), route.path)
-        return _UNMATCHED
+        if not isinstance(route, APIRoute):
+            return _UNMATCHED
+        template = self.templates.get(id(route))
+        if template is None:
+            self._report_once(route)
+            return _UNREGISTERED
+        return template
+
+    def _report_once(self, route: APIRoute) -> None:
+        if id(route) not in self.reported:
+            self.reported.add(id(route))
+            _logger.warning("http.route_unregistered", path=route.path)
 
 
 def _method_label(method: object) -> str:
@@ -219,20 +283,23 @@ def _problem(
     return JSONResponse(body, status_code=status, headers=headers, media_type=PROBLEM_JSON)
 
 
-def _cut(part: str | int) -> str:
-    text = str(part)
-    return text if len(text) <= _LOCATION_PART else text[:_LOCATION_PART] + "..."
-
-
 def _field_problems(error: RequestValidationError) -> dict[str, object]:
-    """The first ``_MAX_ISSUES`` problems of a request, where they are, and how many were left out.
+    """The first ``_MAX_ISSUES`` problems of a request: where, of which type, what to do, how many were cut.
 
-    Locations are cut and ``input`` is never read: what the client sent does not come back to it.
+    Nothing of the request is read but where it went wrong: ``input`` is not, a location is cut part by part,
+    the message of a pydantic type that quotes the input is replaced (``_QUOTES_THE_INPUT``) and any other is
+    cut at ``_TEXT_LIMIT``. What a validator we wrote says in a ``value_error`` is its own to keep free of the
+    input, as the platform's errors do with ``excerpt``.
     """
     raised = error.errors()
     issues = _ISSUES.validate_python(raised[:_MAX_ISSUES])
     problems = [
-        _FieldProblem(location=".".join(map(_cut, issue["loc"])), message=issue["msg"]) for issue in issues
+        _FieldProblem(
+            location=".".join(truncate(str(part), _LOCATION_PART) for part in issue["loc"]),
+            type=issue["type"],
+            message=_QUOTES_THE_INPUT.get(issue["type"]) or truncate(issue["msg"], _TEXT_LIMIT),
+        )
+        for issue in issues
     ]
     return {"errors": problems, "omitted_errors": max(len(raised) - _MAX_ISSUES, 0)}
 
@@ -273,10 +340,20 @@ def _answer_errors_as_problems(app: FastAPI, labels: _RouteLabels) -> None:
     @app.exception_handler(HTTPException)
     async def http_error(request: Request, error: HTTPException) -> Response:
         # Starlette's class, not FastAPI's subclass: the router's own 404 and 405 are the former.
-        del request
+        code = _describe(error.status_code).code
+        if error.status_code >= HTTPStatus.INTERNAL_SERVER_ERROR:
+            # The client is told nothing but the code; whoever runs the service is told why, once, bounded.
+            _logger.error(
+                "http.server_error",
+                method=request.method,
+                route=labels.of_scope(request.scope),
+                status=error.status_code,
+                code=code,
+                detail=truncate(error.detail, _TEXT_LIMIT),
+            )
         if not is_body_allowed_for_status_code(error.status_code):
             return Response(status_code=error.status_code, headers=error.headers)
-        return _problem(error.status_code, _describe(error.status_code).code, headers=error.headers)
+        return _problem(error.status_code, code, headers=error.headers)
 
     @app.exception_handler(Exception)
     async def bug(request: Request, error: Exception) -> JSONResponse:
@@ -286,8 +363,13 @@ def _answer_errors_as_problems(app: FastAPI, labels: _RouteLabels) -> None:
 
 def _add_operational_routes(app: FastAPI, health: Health, registry: CollectorRegistry) -> None:
     @app.get("/livez", include_in_schema=False)
-    async def livez() -> dict[str, str]:
-        return {"status": "ok"}
+    async def livez() -> JSONResponse:
+        wedged = health.wedged()
+        if wedged:  # a check that will not stop: the process cannot recover by itself, ask for a restart
+            return JSONResponse(
+                {"status": "wedged", "wedged": list(wedged)}, status_code=HTTPStatus.SERVICE_UNAVAILABLE
+            )
+        return JSONResponse({"status": "ok"})
 
     @app.get("/readyz", include_in_schema=False)
     async def readyz() -> JSONResponse:
@@ -313,7 +395,9 @@ def create_app(
 ) -> FastAPI:
     """A FastAPI application with ``routers`` plus ``/livez``, ``/readyz`` and ``/metrics``.
 
-    Raises ``AmbiguousRouteError`` when one route is mounted under two different templates.
+    Raises ``AmbiguousRouteError`` when one route is mounted under two different templates. Routes must be
+    complete before this returns: a route added afterwards, to the app or to a router already included, is
+    measured as ``unregistered`` (and logged once), never under a path that may lack a prefix.
     """
     app = FastAPI(title=info.title, version=info.version, lifespan=lifespan)
     _add_operational_routes(app, health, registry)

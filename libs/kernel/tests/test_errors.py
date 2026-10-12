@@ -1,6 +1,8 @@
 from typing import ClassVar
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from ledger_kernel.errors import (
     ConflictError,
@@ -13,6 +15,7 @@ from ledger_kernel.errors import (
     UnavailableError,
     described,
     excerpt,
+    truncate,
 )
 
 
@@ -47,6 +50,36 @@ def test_a_subclass_refines_the_code_and_keeps_the_kind() -> None:
         "duplicate_invoice",
         "invoice 7 exists",
     )
+
+
+@pytest.mark.parametrize(
+    ("text", "limit", "expected"),
+    [
+        ("", 1, ""),
+        ("a", 1, "a"),
+        ("ab", 1, "a..."),
+        ("abc", 3, "abc"),
+        ("abcd", 3, "abc..."),
+        ("abc", 10, "abc"),
+        ("x" * 1_000_000, 5, "xxxxx..."),
+    ],
+    ids=["empty", "at-the-limit-1", "one-over", "at-the-limit-3", "cut", "under", "huge"],
+)
+def test_a_text_is_cut_at_the_limit_and_the_cut_is_marked(text: str, limit: int, expected: str) -> None:
+    assert truncate(text, limit) == expected
+
+
+@given(text=st.text(), limit=st.integers(min_value=1, max_value=100))
+def test_a_truncated_text_is_the_text_or_its_prefix_with_a_mark(text: str, limit: int) -> None:
+    cut = truncate(text, limit)
+    assert cut == (text if len(text) <= limit else text[:limit] + "...")
+    assert len(cut) <= limit + len("...")
+
+
+@pytest.mark.parametrize("limit", [0, -1, -40])
+def test_truncating_to_less_than_one_character_is_a_programming_error(limit: int) -> None:
+    with pytest.raises(InvalidExcerptLimitError, match=f"at least 1, not {limit}"):
+        truncate("abc", limit)
 
 
 def test_an_excerpt_is_short_and_quoted() -> None:

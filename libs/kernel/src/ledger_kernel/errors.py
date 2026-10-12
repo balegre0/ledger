@@ -85,7 +85,7 @@ class UnavailableError(LedgerError):
 
 
 class InvalidExcerptLimitError(LedgerError):
-    """A caller asked for an excerpt shorter than one character: a bug in our code, never the client's input.
+    """A caller asked for text cut shorter than one character: a bug in our code, never the client's input.
 
     It stays an ``INTERNAL`` error on purpose. ``InvalidInputError`` means "the request can never succeed
     as sent" and crosses a boundary as a client error; this is a defect to fix and must surface as a server
@@ -95,18 +95,23 @@ class InvalidExcerptLimitError(LedgerError):
     code: ClassVar[str] = "invalid_excerpt_limit"
 
     def __init__(self, limit: int) -> None:
-        super().__init__(f"an excerpt limit must be at least {_MIN_LIMIT}, not {limit}")
+        super().__init__(f"a text limit must be at least {_MIN_LIMIT}, not {limit}")
 
 
-def _cut(text: str, limit: int) -> str:
+def truncate(text: str, limit: int) -> str:
+    """``text`` cut at ``limit`` characters, with ``...`` after the cut when anything was dropped.
+
+    For text that comes from elsewhere and must not be shown (or logged) at its full length. The result
+    is at most ``limit`` plus the three characters of the mark; a ``limit`` below one is a programming error.
+    """
+    if limit < _MIN_LIMIT:
+        raise InvalidExcerptLimitError(limit)
     return text if len(text) <= limit else text[:limit] + "..."
 
 
 def excerpt(text: str, limit: int = _EXCERPT) -> str:
     """``text`` quoted for an error message, cut at ``limit`` characters so input is never echoed whole."""
-    if limit < _MIN_LIMIT:
-        raise InvalidExcerptLimitError(limit)
-    return repr(_cut(text, limit))
+    return repr(truncate(text, limit))
 
 
 def described(value: object) -> str:
@@ -118,5 +123,5 @@ def described(value: object) -> str:
     is cut like an excerpt, anything else is shown by ``reprlib`` with a fixed ceiling (a number too big to
     print is described, not raised).
     """
-    shown = _cut(value, _EXCERPT) if isinstance(value, str) else _BOUNDED.repr(value)
+    shown = truncate(value, _EXCERPT) if isinstance(value, str) else _BOUNDED.repr(value)
     return f"{type(value).__name__}: {shown}"

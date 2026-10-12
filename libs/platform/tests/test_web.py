@@ -1,7 +1,9 @@
 import asyncio
+import contextlib
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import ClassVar, Final, TypedDict
+from typing import Annotated, ClassVar, Final, Literal, TypedDict
+from uuid import UUID
 lazy from collections.abc import AsyncGenerator, MutableMapping
 
 import httpx
@@ -9,7 +11,7 @@ import pytest
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from prometheus_client import CollectorRegistry
-from pydantic import BaseModel, ConfigDict, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 from structlog.testing import capture_logs
 lazy from fastapi import FastAPI
 
@@ -52,8 +54,32 @@ class Strict(BaseModel):
     name: str
 
 
+class Cat(BaseModel):
+    kind: Literal["cat"]
+
+
+class Dog(BaseModel):
+    kind: Literal["dog"]
+
+
+class Household(BaseModel):
+    pet: Annotated[Cat | Dog, Field(discriminator="kind")]
+
+
+class Guarded(BaseModel):
+    note: str
+
+    @field_validator("note")
+    @classmethod
+    def refuse(cls, note: str) -> str:
+        del note
+        message = "x" * 1_000
+        raise ValueError(message)
+
+
 class FieldProblem(TypedDict):
     location: str
+    type: str
     message: str
 
 
@@ -67,6 +93,15 @@ class OpenApiDocument(TypedDict):
     paths: dict[str, object]
 
 
+class Problem(TypedDict):
+    type: str
+    title: str
+    status: int
+    code: str
+
+
+PROBLEM: Final = TypeAdapter(Problem)
+KNOWN: Final = UUID(int=1)
 INVALID_REQUEST: Final = TypeAdapter(InvalidRequest)
 OPENAPI_DOCUMENT: Final = TypeAdapter(OpenApiDocument)
 
@@ -111,8 +146,23 @@ async def secure() -> None:
 
 
 @router.get("/http-errors/{status}", include_in_schema=False)
-async def http_error(status: int) -> None:
-    raise HTTPException(status_code=status, detail="because 4f9a", headers={"X-Reason": "test"})
+async def http_error(status: int, detail: str = "because 4f9a") -> None:
+    raise HTTPException(status_code=status, detail=detail, headers={"X-Reason": "test"})
+
+
+@router.post("/households", include_in_schema=False)
+async def household(home: Household) -> Household:
+    return home
+
+
+@router.post("/guarded", include_in_schema=False)
+async def guarded(note: Guarded) -> Guarded:
+    return note
+
+
+@router.get("/uuids/{value}", include_in_schema=False)
+async def uuid_of(value: UUID) -> UUID:
+    return value
 
 
 @router.get("/errors/{kind}")
@@ -191,6 +241,34 @@ async def metrics_of(client: httpx.AsyncClient) -> str:
 async def test_liveness_needs_nothing(client: httpx.AsyncClient) -> None:
     response = await client.get("/livez")
     assert (response.status_code, response.json()) == (200, {"status": "ok"})
+
+
+async def test_liveness_fails_while_a_check_is_wedged_and_recovers_when_it_ends(
+    registry: CollectorRegistry,
+) -> None:
+    release, ended = asyncio.Event(), asyncio.Event()
+
+    async def stubborn() -> None:
+        while not release.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await release.wait()
+        ended.set()
+
+    health = Health(timeout=0.02, wedge_after=0.05)
+    health.add("nats", stubborn)
+    try:
+        async with serving(build(health, registry, router)) as client:
+            assert (await client.get("/readyz")).status_code == 503
+            assert (await client.get("/livez")).status_code == 200
+            await asyncio.sleep(0.1)
+            wedged = await client.get("/livez")
+            assert (wedged.status_code, wedged.json()) == (503, {"status": "wedged", "wedged": ["nats"]})
+            release.set()
+            await ended.wait()
+            await asyncio.sleep(0)
+            assert (await client.get("/livez")).status_code == 200
+    finally:
+        release.set()
 
 
 async def test_readiness_reports_each_check(client: httpx.AsyncClient, health: Health) -> None:
@@ -287,9 +365,10 @@ async def test_a_body_that_breaks_the_schema_is_a_problem_document_listing_every
         "code": "invalid_request",
         "detail": "The request does not match the schema.",
         "errors": [
-            {"location": "body.name", "message": "Field required"},
+            {"location": "body.name", "type": "missing", "message": "Field required"},
             {
                 "location": "body.quantity",
+                "type": "int_parsing",
                 "message": "Input should be a valid integer, unable to parse string as an integer",
             },
         ],
@@ -301,7 +380,45 @@ async def test_a_body_that_breaks_the_schema_is_a_problem_document_listing_every
 async def test_a_name_the_client_chose_is_cut_in_a_location(client: httpx.AsyncClient) -> None:
     response = await client.post("/strict", json={"name": "x", "k" * 500: 1})
     (issue,) = INVALID_REQUEST.validate_json(response.content)["errors"]
-    assert issue == {"location": "body." + "k" * 40 + "...", "message": "Extra inputs are not permitted"}
+    assert issue == {
+        "location": "body." + "k" * 40 + "...",
+        "type": "extra_forbidden",
+        "message": "Extra inputs are not permitted",
+    }
+
+
+async def test_the_tag_of_a_discriminated_union_does_not_come_back(client: httpx.AsyncClient) -> None:
+    response = await client.post("/households", json={"pet": {"kind": "SECRET-4f9a"}})
+    assert response.status_code == 422
+    assert "SECRET-4f9a" not in response.text
+    (issue,) = INVALID_REQUEST.validate_json(response.content)["errors"]
+    assert issue == {
+        "location": "body.pet",
+        "type": "union_tag_invalid",
+        "message": "Input tag does not match any of the expected tags.",
+    }
+
+
+async def test_a_well_formed_uuid_goes_through(client: httpx.AsyncClient) -> None:
+    response = await client.get(f"/uuids/{KNOWN}")
+    assert (response.status_code, response.json()) == (200, str(KNOWN))
+
+
+async def test_a_character_of_a_malformed_uuid_does_not_come_back(client: httpx.AsyncClient) -> None:
+    response = await client.get("/uuids/SECRET-4f9a")
+    (issue,) = INVALID_REQUEST.validate_json(response.content)["errors"]
+    assert issue == {
+        "location": "path.value",
+        "type": "uuid_parsing",
+        "message": "Input should be a valid UUID.",
+    }
+
+
+async def test_the_message_of_a_validator_is_cut(client: httpx.AsyncClient) -> None:
+    response = await client.post("/guarded", json={"note": "anything"})
+    (issue,) = INVALID_REQUEST.validate_json(response.content)["errors"]
+    assert issue["type"] == "value_error"
+    assert issue["message"] == ("Value error, " + "x" * 1_000)[:200] + "..."
 
 
 async def test_a_flood_of_problems_is_cut_and_counted(client: httpx.AsyncClient) -> None:
@@ -469,15 +586,112 @@ async def test_a_route_reachable_under_two_templates_is_refused(
         build(health, registry, api)
 
 
-async def test_a_route_added_after_the_app_was_built_is_measured_by_its_own_path(
-    app: FastAPI, client: httpx.AsyncClient
+async def test_a_route_added_after_the_app_was_built_is_unregistered_and_said_so_once(
+    health: Health, registry: CollectorRegistry
 ) -> None:
-    @app.get("/late/{number}", include_in_schema=False)
-    async def late(number: int) -> dict[str, int]:
+    included = APIRouter()
+    app = build(health, registry, included)
+
+    @included.get("/on-the-router/{number}", include_in_schema=False)
+    async def on_the_router(number: int) -> dict[str, int]:
         return {"number": number}
 
-    await client.get("/late/1")
-    assert 'route="/late/{number}",status="200"} 1.0' in await metrics_of(client)
+    @app.get("/on-the-app/{number}", include_in_schema=False)
+    async def on_the_app(number: int) -> dict[str, int]:
+        return {"number": number}
+
+    async with serving(app) as client:
+        with capture_logs() as logs:
+            for path in ("/on-the-router/1", "/on-the-router/2", "/on-the-app/1", "/on-the-app/2"):
+                assert (await client.get(path)).status_code == 200
+        metrics = await metrics_of(client)
+    assert 'route="unregistered",status="200"} 4.0' in metrics
+    assert "/on-the-router" not in metrics
+    assert "/on-the-app" not in metrics
+    assert logs == [
+        {
+            "event": "http.route_unregistered",
+            "log_level": "warning",
+            "path": "/on-the-router/{number}",
+        },
+        {"event": "http.route_unregistered", "log_level": "warning", "path": "/on-the-app/{number}"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [
+        (400, "bad_request"),
+        (401, "unauthorized"),
+        (403, "forbidden"),
+        (404, "not_found"),
+        (405, "method_not_allowed"),
+        (406, "not_acceptable"),
+        (409, "conflict"),
+        (410, "gone"),
+        (412, "precondition_failed"),
+        (413, "payload_too_large"),
+        (415, "unsupported_media_type"),
+        (422, "invalid"),
+        (428, "precondition_required"),
+        (429, "too_many_requests"),
+        (500, "internal"),
+        (501, "not_implemented"),
+        (502, "bad_gateway"),
+        (503, "unavailable"),
+        (504, "gateway_timeout"),
+    ],
+)
+async def test_the_code_of_a_common_status_is_pinned(
+    client: httpx.AsyncClient, status: int, code: str
+) -> None:
+    """The codes are API: they must not follow the names CPython happens to give its statuses."""
+    response = await client.get(f"/http-errors/{status}")
+    assert response.status_code == status
+    body = PROBLEM.validate_json(response.content)
+    assert (body["code"], body["type"], body["status"]) == (code, f"urn:ledger:error:{code}", status)
+
+
+@pytest.mark.parametrize(
+    ("status", "title", "code"),
+    [
+        (418, "I'm a Teapot", "i_m_a_teapot"),
+        (451, "Unavailable For Legal Reasons", "unavailable_for_legal_reasons"),
+        (307, "Temporary Redirect", "temporary_redirect"),
+        (299, "Successful", "successful"),
+        (399, "Redirection", "redirection"),
+        (499, "Client Error", "client_error"),
+        (599, "Server Error", "server_error"),
+        (699, "Error", "error"),
+    ],
+)
+async def test_other_statuses_fall_back_to_their_phrase_or_their_class(
+    client: httpx.AsyncClient, status: int, title: str, code: str
+) -> None:
+    response = await client.get(f"/http-errors/{status}")
+    body = PROBLEM.validate_json(response.content)
+    assert (body["title"], body["code"]) == (title, code)
+
+
+async def test_a_server_error_raised_by_a_route_is_logged_and_a_client_error_is_not(
+    client: httpx.AsyncClient,
+) -> None:
+    with capture_logs() as logs:
+        refused = await client.get("/http-errors/404")
+        failed = await client.get("/http-errors/503", params={"detail": "d" * 1_000})
+    assert (refused.status_code, failed.status_code) == (404, 503)
+    assert logs == [
+        {
+            "event": "http.server_error",
+            "log_level": "error",
+            "method": "GET",
+            "route": "/http-errors/{status}",
+            "status": 503,
+            "code": "unavailable",
+            "detail": "d" * 200 + "...",
+        }
+    ]
+    assert "ddd" not in failed.text
 
 
 async def test_the_lifespan_reaches_the_app_through_its_middleware(app: FastAPI) -> None:
