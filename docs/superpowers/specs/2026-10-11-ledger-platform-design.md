@@ -430,9 +430,10 @@ company can certify while another runs in production.
   failed, rejected, malformed; `ledger_consumer_deliveries_total`). The outbox gauges read the table, so
   every replica exports the same values: aggregate them with `max`, never `sum`.
 - **Logs:** structlog, JSON in production and readable in a terminal, with the standard-library loggers
-  going through the same pipeline. Every record carries the service and the environment, and
-  request-scoped fields (trace id, company id) will merge in from context variables once the request
-  middleware binds them (milestone 2); nothing binds them yet. Never personal data beyond ids, never XML
+  going through the same pipeline. Every record carries the service and the environment. Context
+  variables carry what a unit of work is about: a consumer binds the event's id and type, its tenant
+  (organization and company) and the trace id for its handler's duration; the request middleware binds
+  the trace id and the company of each request in milestone 2. Never personal data beyond ids, never XML
   bodies or keys, and never the local variables of a traceback's frames.
 - **Health:** every service serves HTTP `/livez`, `/readyz` and `/metrics`. Kubernetes probes use each
   service's HTTP `/livez` and `/readyz` (gRPC health is not needed: every service serves HTTP).

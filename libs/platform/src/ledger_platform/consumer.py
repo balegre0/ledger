@@ -16,9 +16,11 @@ What happens to a delivery:
 An advisory names the stream and the sequence of the message to inspect; the log line of the failure names the
 same sequence, with the event's id and type. The consumer's own log fields never include the payload or the
 headers (an unreadable message is logged with the name of the header that failed, never its value); the
-traceback of a handler's exception says whatever that exception says. A failure before the handler ran (the
-database could not be reached, the claim waited too long for a lock) is logged as ``consumer.claim_failed``,
-one of the handler as ``consumer.handler_failed``.
+traceback of a handler's exception says whatever that exception says. While the handler runs, every log line
+of its context carries the event's id and type, its tenant (``organization_id``, ``company_id``) and the
+trace id of its handling: bound as context variables, and unbound when it ends. A failure before the handler
+ran (the database could not be reached, the claim waited too long for a lock) is logged as
+``consumer.claim_failed``, one of the handler as ``consumer.handler_failed``.
 
 The spec is the configuration: ``Consumer.run`` creates the durable consumer in JetStream if it is missing
 and brings an existing one to the spec, as ``ensure_stream`` does for a stream. ``max_deliver`` and
@@ -70,6 +72,7 @@ import structlog
 from nats.errors import Error as NatsError
 from nats.js.api import AckPolicy, ConsumerConfig
 from nats.js.errors import APIError, NotFoundError
+from opentelemetry.trace import format_trace_id
 from prometheus_client import Counter
 from sqlalchemy import DateTime
 from sqlalchemy.dialects.postgresql import insert
@@ -77,6 +80,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 lazy from nats.aio.msg import Msg
 lazy from nats.js import JetStreamContext
 lazy from nats.js.api import ConsumerInfo
+lazy from opentelemetry.trace import Span
 lazy from prometheus_client import CollectorRegistry
 
 from ledger_contracts.envelope import Envelope, MalformedEventError
@@ -153,6 +157,21 @@ def _require_backoff(backoff: tuple[float, ...], max_deliver: int) -> None:
         raise InvalidConsumerOptionError(
             option="backoff", requirement=f"at most max_deliver ({max_deliver}) delays", value=backoff
         )
+
+
+def _log_context(envelope: Envelope, span: Span) -> dict[str, str]:
+    """What every log line of a handler carries: the event, its tenant and the trace of its handling."""
+    context = {
+        "event_id": str(envelope.id),
+        "event_type": envelope.type,
+        "trace_id": format_trace_id(span.get_span_context().trace_id),
+    }
+    if envelope.tenant is not None:
+        context |= {
+            "organization_id": str(envelope.tenant.organization),
+            "company_id": str(envelope.tenant.company),
+        }
+    return context
 
 
 def _read(message: Msg) -> Envelope | MalformedEventError:
@@ -489,7 +508,10 @@ class Consumer:
         progress = _Progress()
         try:
             # The error leaves the span before it is handled here: a failed handling shows in the trace.
-            with self._tracing.consuming(f"consume {self._spec.name}", envelope.traceparent):
+            with (
+                self._tracing.consuming(f"consume {self._spec.name}", envelope.traceparent) as span,
+                structlog.contextvars.bound_contextvars(**_log_context(envelope, span)),
+            ):
                 outcome = await self._claim_and_handle(envelope, progress)
         except Exception as error:  # a handler may raise anything; a cancellation is no Exception
             if being_cancelled():  # a stop that a clean-up (the rollback) turned into another error

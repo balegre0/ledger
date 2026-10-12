@@ -9,11 +9,12 @@ lazy from collections.abc import AsyncGenerator, Awaitable, Callable
 lazy from uuid import UUID
 
 import pytest
+import structlog
 from nats.errors import ConnectionClosedError
 from nats.js.api import AckPolicy, ConsumerConfig
 from nats.js.errors import APIError, BadRequestError, ServerError, ServiceUnavailableError
 from nats.js.errors import NotFoundError as JetStreamNotFoundError
-from opentelemetry.trace import StatusCode
+from opentelemetry.trace import StatusCode, format_trace_id
 from prometheus_client import CollectorRegistry
 from pydantic import TypeAdapter
 from sqlalchemy import (
@@ -1271,3 +1272,45 @@ async def test_a_stop_that_a_clean_up_turned_into_another_error_ends_the_consume
     successor = Recorder()
     async with running(make(successor), streams):
         await eventually(partial(received, successor, 1))  # given back at once: not after ack_wait (30 s)
+
+
+@final
+class Talkative:
+    """A handler that logs a line of its own, and keeps the context variables it ran with."""
+
+    def __init__(self) -> None:
+        self.context: dict[str, object] = {}
+
+    async def __call__(self, envelope: Envelope, unit: UnitOfWork) -> None:
+        del envelope, unit
+        self.context = structlog.contextvars.get_contextvars()
+        structlog.stdlib.get_logger("payments").info("payment.settled")
+
+
+@pytest.mark.parametrize("tenant", [TENANT, None], ids=["tenant", "no tenant"])
+async def test_a_handler_s_log_lines_carry_the_event_its_tenant_and_its_trace(
+    tenant: Tenant | None, streams: JetStreamContext, make: ConsumerFactory, exporter: InMemorySpanExporter
+) -> None:
+    """Bound for the handler's duration, and unbound after: the next line carries none of it."""
+    envelope = money(tenant)
+    await publish(streams, envelope)
+    (message,) = await fetch(streams)
+    talkative = Talkative()
+    with capture_logs(processors=[structlog.contextvars.merge_contextvars]) as logs:
+        await make(talkative).handle(message)
+        structlog.stdlib.get_logger("payments").info("after")
+
+    (span,) = exporter.get_finished_spans()
+    assert span.context is not None
+    expected: dict[str, object] = {
+        "event_id": str(envelope.id),
+        "event_type": "ledger.common.v1.Money",
+        "trace_id": format_trace_id(span.context.trace_id),
+    }
+    if tenant is not None:
+        expected |= {"organization_id": str(tenant.organization), "company_id": str(tenant.company)}
+    assert talkative.context == expected
+    settled, after = logs
+    assert settled == {"event": "payment.settled", "log_level": "info", **expected}
+    assert after == {"event": "after", "log_level": "info"}
+    assert structlog.contextvars.get_contextvars() == {}

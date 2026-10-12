@@ -325,7 +325,8 @@ The outbox gauges read the table, so every replica exports the same values: aggr
 **Data that never leaves the process.**
 
 - Logs are structlog, JSON in production, with the standard-library loggers going through the same pipeline and
-  every record stamped with the service and the environment. A traceback never carries the local variables of its
+  every record stamped with the service and the environment. While a handler runs, every line it logs carries the
+  event's `event_id` and `event_type`, its `organization_id` and `company_id`, and the `trace_id`. A traceback never carries the local variables of its
   frames: a frame that failed to connect holds the database password. An exception whose text can quote data is
   logged without that text, wherever it sits in the chain of causes, contexts and groups: an error of PostgreSQL
   or psycopg (including SQLAlchemy's wrapper) by its SQLSTATE, the names of its schema, table, column and
@@ -370,8 +371,8 @@ Not in the gate yet (spec section 13): `pip-audit`, image scanning and secret sc
 Milestone 2 (identity) and later:
 
 - Identity and the authorization context: tokens validated at the gateway, the principal's permissions per
-  company, the request-scoped log fields (trace id, company id; nothing binds them yet), a request correlation id
-  and the RFC 9457 `instance`.
+  company, and the request-scoped log fields: milestone 2 binds the trace id and the company of each request, as a
+  consumer binds its event's for its handler already. The RFC 9457 `instance` follows with request ids.
 - `Idempotency-Key` on the public API's `POST`s.
 - Tracing of SQL and gRPC calls (FastAPI's request spans exist).
 - gRPC client helpers: deadlines, propagation of identity, and the mapping of `ledger-error-code` back to domain
