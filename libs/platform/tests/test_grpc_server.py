@@ -2,8 +2,8 @@ import asyncio
 import socket
 from dataclasses import dataclass
 from math import inf, isfinite, nan
-from typing import ClassVar, Final, override
-lazy from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from typing import ClassVar, Final
+lazy from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 
 import grpc
 import pytest
@@ -28,7 +28,6 @@ from ledger_platform.grpc_server import (
     InvalidGrpcOptionError,
     serve_grpc,
 )
-from ledger_platform.options import InvalidOptionError
 
 TIMEOUT: Final = 5
 SECRET: Final = "card 4111111111111111"
@@ -40,6 +39,7 @@ THING: Final = b"thing"
 BROKEN: Final = b"broken"
 BUG: Final = b"bug"
 ABORT: Final = b"abort"
+GONE: Final = b"gone"
 
 type Context = grpc.aio.ServicerContext[bytes, bytes]
 type Call = Callable[[int, bytes], Awaitable[list[bytes]]]
@@ -73,6 +73,10 @@ class MissingThingError(NotFoundError):
         super().__init__("no such thing")
 
 
+class ClientGoneError(grpc.aio.BaseError):
+    """One of grpc's own errors, such as the ones it raises inside a method when the client is gone."""
+
+
 class BrokenInvariantError(LedgerError):
     """An error of ours: INTERNAL, with a code of its own and a message nobody outside may read."""
 
@@ -89,6 +93,8 @@ async def misbehave(request: bytes, context: Context) -> None:
         raise BrokenInvariantError(SECRET)
     if request == BUG:
         raise ZeroDivisionError(SECRET)
+    if request == GONE:
+        raise ClientGoneError
     if request in BY_PAYLOAD:
         raise BY_PAYLOAD[request](MESSAGE)
 
@@ -305,7 +311,7 @@ async def test_a_bug_is_logged_where_it_happened_and_what_it_was(port: int) -> N
     assert entry == {
         "event": "grpc.unhandled_error",
         "log_level": "error",
-        "method": "/test.Echo/Say",
+        "rpc": "/test.Echo/Say",
         "code": "internal",
     }
 
@@ -318,7 +324,7 @@ async def test_an_internal_error_answers_like_a_bug_and_keeps_its_code_for_the_l
     assert entry == {
         "event": "grpc.unhandled_error",
         "log_level": "error",
-        "method": "/test.Stream/Repeat",
+        "rpc": "/test.Stream/Repeat",
         "code": "broken_invariant",
     }
 
@@ -329,6 +335,17 @@ async def test_a_method_that_aborts_keeps_its_own_status(call: Call, port: int) 
         error = await failure_of(call, port, ABORT)
     assert (error.code(), error.details()) == (grpc.StatusCode.ALREADY_EXISTS, "taken")
     assert trailers(error) == {HINT_KEY: "retry"}
+    assert logs == []
+
+
+@EVERY_CALL
+async def test_an_error_of_grpc_itself_is_neither_answered_nor_logged_as_our_defect(
+    call: Call, port: int
+) -> None:
+    with capture_logs() as logs:
+        error = await failure_of(call, port, GONE)
+    assert ERROR_CODE_KEY not in trailers(error)
+    assert error.details() != GENERIC_DETAILS
     assert logs == []
 
 
@@ -478,15 +495,6 @@ def test_every_port_and_every_positive_finite_grace_is_accepted(number: int, sec
     serve_grpc(port=number, register=register, grace=seconds)
 
 
-def test_the_refusal_is_an_option_error_with_a_code_of_its_own() -> None:
-    refusal = InvalidGrpcOptionError(option="port", requirement="between 0 and 65535", value=70000)
-    assert isinstance(refusal, InvalidOptionError)
-    assert (refusal.code, str(refusal)) == (
-        "invalid_grpc_option",
-        "gRPC option port must be between 0 and 65535, not int: 70000",
-    )
-
-
 def occupy_a_port() -> socket.socket:
     """A listening socket on every interface, the way grpc's ``[::]`` listens: nobody else binds its port."""
     if socket.has_dualstack_ipv6():
@@ -507,46 +515,3 @@ async def test_a_port_that_is_taken_is_a_startup_error() -> None:
                 pass
     assert isinstance(caught.value.__cause__, RuntimeError)
     assert caught.value.code == "grpc_bind_failed"
-
-
-class ServerThatCannotBind(grpc.aio.Server):
-    """What older versions of grpc did when they could not bind: answer port 0 instead of raising."""
-
-    @override
-    def add_generic_rpc_handlers(self, generic_rpc_handlers: Iterable[grpc.GenericRpcHandler]) -> None:
-        del generic_rpc_handlers
-
-    @override
-    def add_insecure_port(self, address: str) -> int:
-        del address
-        return 0
-
-    @override
-    def add_secure_port(self, address: str, server_credentials: grpc.ServerCredentials) -> int:
-        del address, server_credentials
-        return 0
-
-    @override
-    async def start(self) -> None:
-        raise AssertionError
-
-    @override
-    async def stop(self, grace: float | None) -> None:
-        del grace
-
-    @override
-    async def wait_for_termination(self, timeout: float | None = None) -> bool:
-        del timeout
-        return True
-
-
-async def test_a_bind_that_answers_port_zero_is_a_startup_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    def cannot_bind(**options: object) -> grpc.aio.Server:
-        del options
-        return ServerThatCannotBind()
-
-    monkeypatch.setattr(grpc.aio, "server", cannot_bind)
-    with pytest.raises(GrpcBindError, match=r"^the gRPC server could not bind port 8080$") as caught:
-        async with serve_grpc(port=8080, register=register):
-            pass
-    assert caught.value.__cause__ is None

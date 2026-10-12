@@ -60,7 +60,11 @@ type _Context = grpc.aio.ServicerContext[object, object]
 """The context ``grpc.aio`` hands a method. The guard only ends calls with it, whatever the messages are."""
 
 type _CoroutineMethod[Input] = Callable[[Input, _Context], Awaitable[object]]
-"""A method that answers with a coroutine, or one that streams by writing to its context."""
+"""A method that answers with a coroutine, or one that streams by writing to its context.
+
+``Input`` is a request, or for a method that streams its requests the iterator to read them from: an async
+iterator at runtime, although ``types-grpcio`` types it as an ``Iterator``.
+"""
 type _GeneratorMethod[Input] = Callable[[Input, _Context], AsyncGenerator[object]]
 """A method that streams its responses by yielding them. ``Input`` is a request, or the requests to read."""
 
@@ -77,29 +81,29 @@ _DEFECT: Final = _Answer(_STATUS[ErrorKind.INTERNAL], "internal error", _INTERNA
 """What a client is told about a defect: no more than that there was one."""
 
 
-def _answer(error: Exception, method: str) -> _Answer:
-    """What a client is told about ``error``, which the log is told about first if it is a defect of ours."""
-    if isinstance(error, LedgerError) and error.kind is not ErrorKind.INTERNAL:
-        return _Answer(_STATUS[error.kind], str(error), error.code)
-    # Where it happened and what it was, never the request: it may carry credentials.
+def _report_defect(error: Exception, rpc: str) -> None:
+    """Log where a defect happened and what it was, never the request: it may carry credentials."""
     code = error.code if isinstance(error, LedgerError) else _INTERNAL_CODE
-    _logger.error("grpc.unhandled_error", method=method, code=code, exc_info=error)
-    return _DEFECT
+    _logger.error("grpc.unhandled_error", rpc=rpc, code=code, exc_info=error)
 
 
 @final
 class _Answering:
-    """A block whose errors end the call with their ``_answer``, for ``method``.
+    """A block whose errors end the call, made to ``rpc`` (``/package.Service/Method``), with a status.
 
-    What is no error passes: a cancellation (a client that left, a server that stops) is no ``Exception``, and
-    an ``abort`` the method made itself already ended the call with the status it chose.
+    A ``LedgerError`` that is not ``INTERNAL`` says what it is. Any other error is a defect of ours: it is
+    logged and the client is told no more than that there was one.
+
+    What is not ours to answer passes: a cancellation (a client that left, a server that stops) is no
+    ``Exception``, and grpc's own errors (``grpc.aio.BaseError``: an ``abort`` the method made itself, a
+    client that is gone, a server that is stopping) are grpc's to deal with.
     """
 
-    __slots__ = ("_context", "_method")
+    __slots__ = ("_context", "_rpc")
 
-    def __init__(self, context: _Context, method: str) -> None:
+    def __init__(self, context: _Context, rpc: str) -> None:
         self._context = context
-        self._method = method
+        self._rpc = rpc
 
     async def __aenter__(self) -> None:
         return None
@@ -107,9 +111,13 @@ class _Answering:
     async def __aexit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None
     ) -> None:
-        if not isinstance(exc, Exception) or isinstance(exc, grpc.aio.AbortError):
+        if not isinstance(exc, Exception) or isinstance(exc, grpc.aio.BaseError):
             return
-        answer = _answer(exc, self._method)
+        if isinstance(exc, LedgerError) and exc.kind is not ErrorKind.INTERNAL:
+            answer = _Answer(_STATUS[exc.kind], str(exc), exc.code)
+        else:
+            _report_defect(exc, self._rpc)
+            answer = _DEFECT
         await self._context.abort(
             answer.status, answer.details, trailing_metadata=((ERROR_CODE_KEY, answer.code),)
         )
@@ -133,19 +141,19 @@ def _is_generator_method[Input](
     return inspect.isasyncgenfunction(behavior)
 
 
-def _guard_coroutine[Input](behavior: _CoroutineMethod[Input], method: str) -> _CoroutineMethod[Input]:
+def _guard_coroutine[Input](behavior: _CoroutineMethod[Input], rpc: str) -> _CoroutineMethod[Input]:
     async def guarded(request: Input, context: _Context) -> object:
-        async with _Answering(context, method):
+        async with _Answering(context, rpc):
             return await behavior(request, context)
 
     return guarded
 
 
-def _guard_generator[Input](behavior: _GeneratorMethod[Input], method: str) -> _GeneratorMethod[Input]:
+def _guard_generator[Input](behavior: _GeneratorMethod[Input], rpc: str) -> _GeneratorMethod[Input]:
     async def guarded(request: Input, context: _Context) -> AsyncGenerator[object]:
-        # The method's generator is closed with this one, not left to the garbage collector, whether the call
-        # ends, fails or is abandoned by a client that left.
-        async with _Answering(context, method), aclosing(behavior(request, context)) as responses:
+        # When the call ends or fails, the method's generator is closed with this one, not left to the
+        # garbage collector. A call abandoned by a client that left is finalized by asyncio.
+        async with _Answering(context, rpc), aclosing(behavior(request, context)) as responses:
             async for response in responses:
                 yield response
 
@@ -153,36 +161,36 @@ def _guard_generator[Input](behavior: _GeneratorMethod[Input], method: str) -> _
 
 
 def _guard[Input](
-    behavior: Callable[[Input, grpc.ServicerContext], object] | None, method: str
+    behavior: Callable[[Input, grpc.ServicerContext], object] | None, rpc: str
 ) -> _CoroutineMethod[Input] | _GeneratorMethod[Input] | None:
     """``behavior`` with its errors answered; ``None`` when there is no behaviour or it is synchronous."""
     if behavior is None:
         return None
     if _is_generator_method(behavior):
-        return _guard_generator(behavior, method)
+        return _guard_generator(behavior, rpc)
     if _is_coroutine_method(behavior):
-        return _guard_coroutine(behavior, method)
+        return _guard_coroutine(behavior, rpc)
     return None
 
 
 def _guarded[Request, Response](
-    handler: grpc.RpcMethodHandler[Request, Response], method: str
+    handler: grpc.RpcMethodHandler[Request, Response], rpc: str
 ) -> grpc.RpcMethodHandler[Request, Response]:
     """``handler`` with the errors of its behaviour answered, or ``handler`` itself when it cannot be."""
     deserializer, serializer = handler.request_deserializer, handler.response_serializer
-    if (guarded := _guard(handler.unary_unary, method)) is not None:
+    if (guarded := _guard(handler.unary_unary, rpc)) is not None:
         return grpc.unary_unary_rpc_method_handler(
             guarded, request_deserializer=deserializer, response_serializer=serializer
         )
-    if (guarded := _guard(handler.unary_stream, method)) is not None:
+    if (guarded := _guard(handler.unary_stream, rpc)) is not None:
         return grpc.unary_stream_rpc_method_handler(
             guarded, request_deserializer=deserializer, response_serializer=serializer
         )
-    if (guarded_reader := _guard(handler.stream_unary, method)) is not None:
+    if (guarded_reader := _guard(handler.stream_unary, rpc)) is not None:
         return grpc.stream_unary_rpc_method_handler(
             guarded_reader, request_deserializer=deserializer, response_serializer=serializer
         )
-    if (guarded_reader := _guard(handler.stream_stream, method)) is not None:
+    if (guarded_reader := _guard(handler.stream_stream, rpc)) is not None:
         return grpc.stream_stream_rpc_method_handler(
             guarded_reader, request_deserializer=deserializer, response_serializer=serializer
         )
@@ -195,7 +203,7 @@ class ErrorInterceptor(grpc.aio.ServerInterceptor):
 
     A ``LedgerError`` becomes the status of its kind and its code in ``ledger-error-code``; a defect becomes
     ``INTERNAL``, ``internal`` and nothing more (see the module). A method that aborts the call itself keeps
-    the status it chose.
+    the status it chose, and grpc's own errors are left to grpc.
     """
 
     @override
@@ -218,14 +226,11 @@ def _require_port(port: int) -> None:
 
 
 def _bind(server: grpc.aio.Server, port: int) -> int:
-    """The port ``server`` listens on, on every interface. grpc raises when it cannot; older ones said 0."""
+    """The port ``server`` listens on, on every interface. grpc raises when it cannot: ``GrpcBindError``."""
     try:
-        bound = server.add_insecure_port(f"[::]:{port}")
+        return server.add_insecure_port(f"[::]:{port}")
     except RuntimeError as error:
         raise GrpcBindError(port) from error
-    if bound == 0:
-        raise GrpcBindError(port)
-    return bound
 
 
 @asynccontextmanager
