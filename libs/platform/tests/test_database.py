@@ -1,9 +1,12 @@
 import asyncio
 from contextlib import asynccontextmanager, suppress
 from datetime import timedelta
+from functools import partial
+from types import SimpleNamespace
 lazy from collections.abc import AsyncGenerator, Callable, Iterable
 lazy from uuid import UUID
 
+import psycopg
 import pytest
 from sqlalchemy import (
     Boolean,
@@ -23,6 +26,7 @@ from sqlalchemy import (
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
+from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import QueuePool
 from structlog.testing import capture_logs
 lazy from sqlalchemy import Insert
@@ -32,6 +36,7 @@ from ledger_kernel.errors import ErrorKind
 from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
 from ledger_platform.database import (
     AbortedTransactionError,
+    ClosedUnitOfWorkError,
     Database,
     DatabaseLimits,
     InvalidDatabaseOptionError,
@@ -39,7 +44,7 @@ from ledger_platform.database import (
     tenant_isolation,
     tenant_isolation_removal,
 )
-lazy from ledger_platform.database import AnyTable
+lazy from ledger_platform.database import AnyTable, UnitOfWork
 
 metadata = MetaData()
 notes = Table(
@@ -107,6 +112,19 @@ async def read(database: Database, tenant: Tenant | None) -> list[str]:
 
 async def backend_of(connection: AsyncConnection) -> int:
     return (await connection.execute(select(literal_column("pg_backend_pid()", Integer)))).scalar_one()
+
+
+def sqlstate(error: DBAPIError) -> str | None:
+    """The SQLSTATE PostgreSQL answered with: the code is contract, the wording of the message is not."""
+    return error.orig.sqlstate if isinstance(error.orig, psycopg.Error) else None
+
+
+async def libpq_parameters(database: Database) -> dict[str, str]:
+    """What libpq was actually given for a connection of ``database`` (the password is never listed)."""
+    async with database.engine.connect() as connection:
+        driver = (await connection.get_raw_connection()).driver_connection
+        assert isinstance(driver, psycopg.AsyncConnection)
+        return driver.info.get_parameters()
 
 
 async def setting(database: Database, name: str) -> str:
@@ -275,6 +293,42 @@ async def test_after_commit_callbacks_are_dropped_on_rollback(isolated: Database
     assert await read(isolated, ALPHA) == []
 
 
+async def test_a_callback_added_after_the_commit_is_refused(isolated: Database) -> None:
+    async with isolated.transaction(ALPHA) as unit:
+        pass
+    with pytest.raises(ClosedUnitOfWorkError, match="the transaction has ended") as caught:
+        unit.after_commit(explode)
+    assert (caught.value.kind, caught.value.code) == (ErrorKind.INTERNAL, "closed_unit_of_work")
+
+
+async def keep_the_unit_and_fail(database: Database, kept: list[UnitOfWork]) -> None:
+    async with database.transaction(ALPHA) as unit:
+        kept.append(unit)
+        raise LookupError
+
+
+async def test_a_callback_added_after_a_rollback_is_refused(isolated: Database) -> None:
+    kept: list[UnitOfWork] = []
+    with pytest.raises(LookupError):
+        await keep_the_unit_and_fail(isolated, kept)
+    with pytest.raises(ClosedUnitOfWorkError):
+        kept[0].after_commit(explode)
+
+
+async def test_a_callback_cannot_add_a_callback(isolated: Database) -> None:
+    refused: list[ClosedUnitOfWorkError] = []
+    async with isolated.transaction(ALPHA) as unit:
+
+        def add_another() -> None:
+            try:
+                unit.after_commit(explode)
+            except ClosedUnitOfWorkError as error:
+                refused.append(error)
+
+        unit.after_commit(add_another)
+    assert [(error.kind, error.code) for error in refused] == [(ErrorKind.INTERNAL, "closed_unit_of_work")]
+
+
 async def test_after_commit_callbacks_run_in_the_order_they_were_added(database: Database) -> None:
     calls: list[str] = []
     async with database.transaction(None) as unit:
@@ -288,15 +342,28 @@ def explode() -> None:
     raise LookupError
 
 
+def explode_because(reason: str) -> None:
+    raise LookupError(reason)
+
+
 class Exploder:
     def __call__(self) -> None:
+        raise LookupError
+
+    def method(self) -> None:
         raise LookupError
 
 
 @pytest.mark.parametrize(
     ("failing", "named"),
-    [(explode, f"{__name__}.explode"), (Exploder(), "Exploder")],
-    ids=["function", "callable object"],
+    [
+        (explode, f"{__name__}.explode"),
+        (Exploder().method, f"{__name__}.Exploder.method"),
+        (list[None]().pop, "builtins.list.pop"),
+        (partial(explode_because, "why"), f"partial({__name__}.explode_because)"),
+        (Exploder(), f"{__name__}.Exploder"),
+    ],
+    ids=["function", "method", "builtin method", "partial", "callable object"],
 )
 async def test_a_failing_callback_neither_hides_the_commit_nor_stops_the_others(
     isolated: Database, failing: Callable[[], None], named: str
@@ -377,8 +444,8 @@ async def test_a_full_pool_makes_the_caller_wait_only_for_the_pool_timeout(datab
         small.engine.connect(),
         small.engine.connect(),  # the pool and its one overflow
     ):
-        with pytest.raises(PoolTimeoutError, match=r"timed out, timeout 0\.10"):
-            await small.ping()
+        with pytest.raises(PoolTimeoutError):
+            await asyncio.wait_for(small.ping(), timeout=5)  # the default pool timeout is ten seconds
 
 
 async def test_a_connection_is_replaced_once_it_is_older_than_the_pool_recycle(database_url: str) -> None:
@@ -395,8 +462,41 @@ async def test_a_connection_is_replaced_once_it_is_older_than_the_pool_recycle(d
     assert much_later != first  # ...until it is too old
 
 
+async def test_the_default_connection_parameters_reach_libpq(database_url: str) -> None:
+    async with Database.open(database_url, pool_size=1) as defaults:
+        given = await libpq_parameters(defaults)
+    assert given["connect_timeout"] == "5"
+    assert given["application_name"] == "ledger"
+    assert given["options"] == (
+        "-c statement_timeout=30000 -c lock_timeout=5000 -c idle_in_transaction_session_timeout=60000"
+    )
+
+
+async def test_the_given_connection_parameters_reach_libpq_and_a_fraction_of_a_second_rounds_up(
+    database_url: str,
+) -> None:
+    limits = DatabaseLimits(
+        connect_timeout=timedelta(milliseconds=2500),
+        statement_timeout=timedelta(milliseconds=1500),
+        lock_timeout=timedelta(seconds=2),
+        idle_in_transaction_session_timeout=timedelta(minutes=2),
+    )
+    async with Database.open(
+        database_url, pool_size=1, application_name="ledger-test", limits=limits
+    ) as given:
+        parameters = await libpq_parameters(given)
+    assert parameters["connect_timeout"] == "3"  # never a shorter wait than asked for
+    assert parameters["application_name"] == "ledger-test"
+    assert parameters["options"] == (
+        "-c statement_timeout=1500 -c lock_timeout=2000 -c idle_in_transaction_session_timeout=120000"
+    )
+
+
 async def test_a_server_that_does_not_answer_is_given_up_on_after_the_connect_timeout() -> None:
-    """A closed port: libpq alone keeps retrying it on Windows for over two minutes."""
+    """A closed port. Where it is refused at once this proves little, hence the tests of what libpq is given.
+
+    Where libpq alone would keep retrying it (Windows: over two minutes), it proves the timeout works.
+    """
     limits = DatabaseLimits(connect_timeout=timedelta(seconds=1))
     async with Database.open(UNREACHABLE, pool_size=1, limits=limits) as unreachable:
         with pytest.raises(OperationalError):
@@ -441,8 +541,9 @@ async def sleep_in_postgres(database: Database, seconds: float) -> None:
 async def test_a_statement_that_outlives_the_statement_timeout_is_cancelled(database_url: str) -> None:
     limits = DatabaseLimits(statement_timeout=timedelta(milliseconds=100))
     async with Database.open(database_url, pool_size=1, limits=limits) as impatient:
-        with pytest.raises(DBAPIError, match="statement timeout"):
+        with pytest.raises(DBAPIError) as caught:
             await sleep_in_postgres(impatient, 5)
+        assert sqlstate(caught.value) == "57014"  # query_canceled
         await impatient.ping()  # the session survives the cancelled statement
 
 
@@ -460,8 +561,9 @@ async def test_a_statement_that_waits_too_long_for_a_lock_is_cancelled(database_
         await write(impatient, ALPHA, "contended")
         async with impatient.transaction(ALPHA) as holder:
             await holder.connection.execute(select(notes.c.id).with_for_update())
-            with pytest.raises(DBAPIError, match="lock timeout"):
+            with pytest.raises(DBAPIError) as caught:
                 await lock_every_note(impatient)
+            assert sqlstate(caught.value) == "55P03"  # lock_not_available
 
 
 async def stall_in_a_transaction(database: Database) -> None:
@@ -496,9 +598,46 @@ async def test_only_the_psycopg_driver_is_accepted_and_the_url_is_not_echoed() -
     with pytest.raises(InvalidDatabaseOptionError) as caught:
         await open_it("postgresql+asyncpg://someone:secret@db.internal/ledger")
     assert str(caught.value) == (
-        "database option url driver must be 'postgresql+psycopg', not str: postgresql+asyncpg"
+        "database option url driver must be 'postgresql+psycopg' or 'postgresql+psycopg_async',"
+        " not str: postgresql+asyncpg"
     )
     assert (caught.value.kind, caught.value.code) == (ErrorKind.INTERNAL, "invalid_database_option")
+
+
+async def test_an_engine_of_another_driver_is_refused_whoever_builds_the_database() -> None:
+    stand_in = SimpleNamespace(
+        paramstyle="numeric_dollar"
+    )  # asyncpg is not installed; its dialect needs this
+    engine = create_async_engine("postgresql+asyncpg://someone:secret@db.internal/ledger", module=stand_in)
+    try:
+        with pytest.raises(InvalidDatabaseOptionError, match="url driver must be"):
+            Database(engine)
+    finally:
+        await engine.dispose()
+
+
+async def test_the_asynchronous_spelling_of_the_driver_is_the_same_driver(database_url: str) -> None:
+    spelled = database_url.replace("postgresql+psycopg://", "postgresql+psycopg_async://")
+    assert spelled != database_url
+    async with Database.open(spelled, pool_size=1) as asynchronous:
+        assert (
+            await setting(asynchronous, "application_name") == "ledger"
+        )  # a transaction, so a checked commit
+
+
+@pytest.mark.parametrize("key", ["application_name", "connect_timeout", "options"])
+async def test_the_url_cannot_set_the_connection_parameters_the_chassis_owns(key: str) -> None:
+    with pytest.raises(InvalidDatabaseOptionError) as caught:
+        await open_it(f"postgresql+psycopg://someone:secret@db.internal/ledger?{key}=mine")
+    assert (
+        str(caught.value)
+        == f"database option url query {key} must be absent (the chassis sets it), not str: mine"
+    )
+
+
+async def test_other_parameters_of_the_url_are_left_alone(database_url: str) -> None:
+    async with Database.open(f"{database_url}?sslmode=disable", pool_size=1) as plain:
+        assert (await libpq_parameters(plain))["sslmode"] == "disable"
 
 
 @pytest.mark.parametrize("option", ["connect_timeout", "pool_recycle"])
@@ -509,7 +648,8 @@ async def test_only_the_psycopg_driver_is_accepted_and_the_url_is_not_echoed() -
 )
 def test_a_limit_in_whole_seconds_needs_at_least_one_second(option: str, value: timedelta) -> None:
     with pytest.raises(
-        InvalidDatabaseOptionError, match=f"{option} must be at least one second, not timedelta"
+        InvalidDatabaseOptionError,
+        match=f"{option} must be between one second and 2147483647 milliseconds, not timedelta",
     ):
         DatabaseLimits(**{option: value})
 
@@ -524,9 +664,46 @@ def test_a_limit_in_whole_seconds_needs_at_least_one_second(option: str, value: 
 )
 def test_a_limit_needs_at_least_a_millisecond(option: str, value: timedelta) -> None:
     with pytest.raises(
-        InvalidDatabaseOptionError, match=f"{option} must be at least one millisecond, not timedelta"
+        InvalidDatabaseOptionError,
+        match=f"{option} must be between one millisecond and 2147483647 milliseconds, not timedelta",
     ):
         DatabaseLimits(**{option: value})
+
+
+LIMITS = [
+    "connect_timeout",
+    "statement_timeout",
+    "lock_timeout",
+    "idle_in_transaction_session_timeout",
+    "pool_timeout",
+    "pool_recycle",
+]
+LONGEST = timedelta(milliseconds=2**31 - 1)
+"""PostgreSQL keeps these settings in 32-bit milliseconds; one more and every connection fails."""
+
+
+@pytest.mark.parametrize("option", LIMITS)
+def test_a_limit_beyond_32_bit_milliseconds_is_refused(option: str) -> None:
+    with pytest.raises(
+        InvalidDatabaseOptionError, match=f"{option} must be between .* and 2147483647 milliseconds"
+    ):
+        DatabaseLimits(**{option: LONGEST + timedelta(milliseconds=1)})
+
+
+def test_the_longest_limits_are_accepted() -> None:
+    DatabaseLimits(**dict.fromkeys(LIMITS, LONGEST))
+
+
+async def test_postgresql_accepts_the_longest_limits(database_url: str) -> None:
+    limits = DatabaseLimits(
+        statement_timeout=LONGEST, lock_timeout=LONGEST, idle_in_transaction_session_timeout=LONGEST
+    )
+    async with Database.open(database_url, pool_size=1, limits=limits) as longest:
+        shown = [
+            await setting(longest, name)
+            for name in ("statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout")
+        ]
+    assert shown == ["2147483647ms"] * 3
 
 
 def test_the_smallest_limits_are_accepted() -> None:
@@ -559,7 +736,7 @@ def table_named(name: str, *, schema: str | None = None) -> AnyTable:
     [
         (("id", "company_id"), "organization_id"),
         (("id", "organization_id"), "company_id"),
-        (("id",), "organization_id and company_id"),
+        (("id",), "organization_id, company_id"),
     ],
     ids=["no organization", "no company", "neither"],
 )
@@ -567,7 +744,7 @@ def test_isolation_names_the_tenant_columns_a_table_lacks(columns: tuple[str, ..
     other = Table("other", MetaData(), *(Column(name, Uuid()) for name in columns))
     with pytest.raises(MissingTenantColumnError) as caught:
         tenant_isolation(other)
-    assert str(caught.value) == f"table 'other' has no {missing} column to isolate by"
+    assert str(caught.value) == f"table 'other' is missing the tenant columns {missing}"
     assert (caught.value.kind, caught.value.code) == (ErrorKind.INTERNAL, "missing_tenant_column")
 
 
