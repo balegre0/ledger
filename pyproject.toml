@@ -256,7 +256,7 @@ layers = [
     "outbox | idempotency | authorization",
     "streams",
     "database | tracing | health | logs | jetstream | authentication | request_fields | grpc_client",
-    "settings | options | lifecycle | supervision",
+    "settings | options | lifecycle | supervision | interruptions",
 ]
 
 [[tool.importlinter.contracts]]

@@ -5,17 +5,37 @@ puts it behind a ``CachedPermissions``, and ``MembershipChanges`` drops what a m
 Every replica follows the events itself, on a core NATS subscription: a durable consumer would hand each event
 to one replica only. Following is best effort; the cache's TTL bounds what a lost event costs.
 
-A service opens its channel to identity as one of its resources (``Interfaces.resources``), so that the
-channel is closed in order when the service stops, and follows the membership events from the same hook:
-NATS is connected by then, and the subscription ends when NATS drains at the stop. The first such service
-comes in milestone 3.
+Events published while the connection to NATS is down never reach a core subscription, so the cache forgets
+everything when the connection is lost and again when it is back (``Interruptions``), and once when following
+starts: what it kept before may have changed unannounced.
+
+A service wires it so (the first such service comes in milestone 3)::
+
+    @asynccontextmanager
+    async def resources(settings: Settings) -> AsyncGenerator[Resources]:
+        async with grpc.aio.insecure_channel(settings.identity_address) as channel:
+            yield Resources(permissions=CachedPermissions(RemotePermissions(channel)))
+
+    def workers(runtime: Runtime[Settings]) -> Mapping[str, Work]:
+        cache = runtime.resources(Resources).permissions
+        return {"membership changes": partial(follow_memberships, runtime.nats, cache, runtime.interruptions)}
+
+    Service(..., interfaces=Interfaces(resources=resources, ...), events=Events(workers=workers))
+
+The channel is a resource, closed in order at the stop. The follower is a worker, not a resource: the
+resources hook is handed the settings only, before there is a runtime with its NATS connection. As a worker
+it is supervised (a failure to subscribe is tried again) and stopped before NATS drains, leaving with its
+subscription (``following``).
 """
 
+import asyncio
 from abc import ABCMeta, abstractmethod
-from typing import Final, Protocol, final, override
-lazy from collections.abc import Awaitable, Callable, Iterable, Mapping
+from contextlib import asynccontextmanager, suppress
+from typing import Final, Never, Protocol, final, override
+lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mapping
 
 import structlog
+from nats.errors import ConnectionClosedError, ConnectionDrainingError
 lazy import grpc
 lazy from nats.aio.msg import Msg
 lazy from nats.aio.subscription import Subscription
@@ -30,6 +50,7 @@ from ledger_kernel.ids import CompanyId, OrganizationId, parse_id
 from ledger_platform.authorization import PermissionSource
 from ledger_platform.grpc_client import DEFAULT_DEADLINE, call_unary, require_deadline
 lazy from ledger_kernel.access import Principal, SubjectId
+lazy from ledger_platform.interruptions import Interruptions
 
 GET_PERMISSIONS: Final = "/ledger.identity.v1.IdentityQueryService/GetPermissions"
 MEMBERSHIP_SUBJECTS: Final = "identity.membership.>"
@@ -75,6 +96,10 @@ class PermissionCache(Protocol, metaclass=ABCMeta):
     @abstractmethod
     def forget(self, organization: OrganizationId, company: CompanyId, subject: SubjectId) -> None:
         """Drop what is kept about ``subject`` in ``company``."""
+
+    @abstractmethod
+    def forget_all(self) -> None:
+        """Drop everything kept: changes may have gone unannounced."""
 
 
 class Subscriber(Protocol, metaclass=ABCMeta):
@@ -128,3 +153,33 @@ class MembershipChanges:
             return
         if changed is not None:
             self._cache.forget(*changed)
+
+
+@asynccontextmanager
+async def following(
+    nats: Subscriber, cache: PermissionCache, interruptions: Interruptions
+) -> AsyncGenerator[None]:
+    """Keep ``cache`` honest while inside: follow the membership events, forget everything on interruptions.
+
+    Entering subscribes and forgets everything kept so far; every interruption of the connection to NATS
+    forgets everything again. Leaving unsubscribes and stops listening to the interruptions.
+    """
+    stop_listening = interruptions.listen(cache.forget_all)
+    try:
+        subscription = await MembershipChanges(cache).follow(nats)
+        cache.forget_all()  # kept while nobody followed: changes may have gone unannounced
+        try:
+            yield
+        finally:
+            # A closed or draining connection ended its subscriptions itself.
+            with suppress(ConnectionClosedError, ConnectionDrainingError):
+                await subscription.unsubscribe()
+    finally:
+        stop_listening()
+
+
+async def follow_memberships(nats: Subscriber, cache: PermissionCache, interruptions: Interruptions) -> Never:
+    """Follow the membership events until cancelled (``following``): a service's worker (see the module)."""
+    async with following(nats, cache, interruptions):
+        while True:
+            await asyncio.get_running_loop().create_future()

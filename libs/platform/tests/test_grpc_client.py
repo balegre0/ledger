@@ -7,7 +7,7 @@ import grpc
 import pytest
 from prometheus_client import CollectorRegistry
 
-from ledger_kernel.errors import ErrorKind, NotFoundError
+from ledger_kernel.errors import ErrorKind, NotFoundError, truncate
 from ledger_platform.grpc_client import (
     ERROR_CODE_KEY,
     MAX_DEADLINE,
@@ -26,6 +26,8 @@ from ledger_platform.grpc_server import serve_grpc
 RPC: Final = "/test.Remote/Call"
 LONG_CODE: Final = "x" * 1_000
 """A code no chassis server writes, but another side could (within gRPC's 8 KiB of metadata)."""
+ODD_CODE: Final = "Bad Code! <b>"
+"""Text that is not a stable code: it never reaches a message a client may read."""
 type Context = grpc.aio.ServicerContext[bytes, bytes]
 
 
@@ -45,6 +47,8 @@ async def behave(request: bytes, context: Context) -> bytes:
         await asyncio.sleep(5)
     if text == "bare":
         await context.abort(grpc.StatusCode.NOT_FOUND, "no code")
+    if text == "odd":
+        await context.abort(grpc.StatusCode.NOT_FOUND, "odd", trailing_metadata=((ERROR_CODE_KEY, ODD_CODE),))
     if text == "long":
         await context.abort(
             grpc.StatusCode.NOT_FOUND, "long", trailing_metadata=((ERROR_CODE_KEY, LONG_CODE),)
@@ -108,12 +112,42 @@ async def test_a_ledger_error_of_the_other_side_comes_back_with_its_kind_and_cod
     assert RPC not in str(error)  # a client that gets the message as a problem's detail learns no RPC name
 
 
-async def test_a_code_longer_than_any_stable_code_is_cut(
+async def test_a_code_longer_than_any_stable_code_is_unknown_and_kept_cut_for_the_log(
     call: grpc.aio.UnaryUnaryMultiCallable[bytes, bytes],
 ) -> None:
     error = await failure(call, b"long")
-    assert error.remote_code == "x" * REMOTE_CODE_LIMIT + "..."
-    assert len(str(error)) < 2 * REMOTE_CODE_LIMIT
+    assert (error.remote_code, error.raw_code) == ("unknown", "x" * REMOTE_CODE_LIMIT + "...")
+    assert str(error) == "a service this one depends on answered NOT_FOUND (unknown)"
+
+
+async def test_a_code_that_is_not_a_stable_code_is_unknown(
+    call: grpc.aio.UnaryUnaryMultiCallable[bytes, bytes],
+) -> None:
+    error = await failure(call, b"odd")
+    assert (error.remote_code, error.raw_code) == ("unknown", ODD_CODE)
+    assert "Bad" not in str(error)
+
+
+@pytest.mark.parametrize(
+    ("sent", "kept"),
+    [
+        ("missing_thing", "missing_thing"),
+        ("a", "a"),
+        ("a" * REMOTE_CODE_LIMIT, "a" * REMOTE_CODE_LIMIT),
+        ("a" * (REMOTE_CODE_LIMIT + 1), "unknown"),
+        ("", "unknown"),
+        ("Missing", "unknown"),
+        ("9lives", "unknown"),
+        ("_private", "unknown"),
+        ("kebab-case", "unknown"),
+        ("two words", "unknown"),
+        ("line\n", "unknown"),
+        ("café", "unknown"),
+    ],
+)
+def test_only_a_stable_code_is_taken_as_the_other_sides_code(sent: str, kept: str) -> None:
+    error = RemoteNotFoundError(RPC, grpc.StatusCode.NOT_FOUND, sent)
+    assert (error.remote_code, error.raw_code) == (kept, truncate(sent, REMOTE_CODE_LIMIT))
 
 
 @pytest.mark.parametrize(
@@ -147,7 +181,7 @@ async def test_an_ending_without_a_code_says_it_is_unknown(
     call: grpc.aio.UnaryUnaryMultiCallable[bytes, bytes],
 ) -> None:
     error = await failure(call, b"bare")
-    assert (type(error), error.remote_code) == (RemoteNotFoundError, "unknown")
+    assert (type(error), error.remote_code, error.raw_code) == (RemoteNotFoundError, "unknown", None)
 
 
 async def test_a_call_past_its_deadline_is_unavailable(

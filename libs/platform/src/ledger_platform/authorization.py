@@ -123,6 +123,10 @@ class _Kept:
         """Drop the answer kept for ``key``, if any."""
         self._answers.pop(key, None)
 
+    def clear(self) -> None:
+        """Drop every answer."""
+        self._answers.clear()
+
 
 @final
 class CachedPermissions(PermissionSource):
@@ -130,9 +134,10 @@ class CachedPermissions(PermissionSource):
 
     The ``capacity`` most recently used answers that grant something are kept, and apart from them the
     ``empty_capacity`` most recently used answers without a role: a caller trying random company ids churns
-    the latter only. ``forget`` drops an answer at once, when identity announces a membership change. One
-    fetched before a ``forget`` and arriving after it is handed to its caller but not kept: it may be the old
-    one. Two requests that miss together ask the source twice; both answers are right.
+    the latter only. ``forget`` drops an answer at once, when identity announces a membership change, and
+    ``forget_all`` every answer, when such announcements may have been missed (``identity_client``). One
+    fetched before either and arriving after it is handed to its caller but not kept: it may be the old one.
+    Two requests that miss together ask the source twice; both answers are right.
     """
 
     __slots__ = ("_clock", "_empty", "_epoch", "_granting", "_source", "_ttl")
@@ -180,3 +185,9 @@ class CachedPermissions(PermissionSource):
         key = (organization, company, subject)
         self._granting.drop(key)
         self._empty.drop(key)
+
+    def forget_all(self) -> None:
+        """Drop every answer, and keep none fetched before this: changes may have gone unannounced."""
+        self._epoch += 1
+        self._granting.clear()
+        self._empty.clear()

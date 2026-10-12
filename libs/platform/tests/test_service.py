@@ -39,10 +39,14 @@ lazy from opentelemetry.proto.trace.v1.trace_pb2 import Span
 
 from ledger.common.v1.money_pb2 import Money
 from ledger_contracts.envelope import Envelope
+from ledger_kernel.access import Permission, Principal, SubjectId
+from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_platform.authorization import CachedPermissions, PermissionSource
 from ledger_platform.consumer import ConsumerRefusedError, ConsumerSpec
 from ledger_platform.database import Database, DatabaseLimits
 from ledger_platform.grpc_server import GrpcBindError, serve_grpc
 from ledger_platform.health import DuplicateCheckError
+from ledger_platform.identity_client import PermissionCache, follow_memberships
 from ledger_platform.outbox import DEFAULT_MAX_PAYLOAD, EventTooLargeError, InvalidOutboxOptionError
 from ledger_platform.service import (
     ABANDONED_CLOSES,
@@ -770,6 +774,82 @@ async def test_the_relay_and_the_consumers_resume_when_nats_comes_back(
     events = [entry["event"] for entry in logs]
     assert events.index("nats.disconnected") < events.index("nats.reconnected")
     assert events.count("nats.error") <= 1  # an outage of seconds: the first error, then a minute of silence
+
+
+@final
+class Asked(PermissionSource):
+    """Grants reading to anyone, and counts the questions."""
+
+    def __init__(self) -> None:
+        self.asked = 0
+
+    @override
+    async def permissions(self, principal: Principal, company: CompanyId) -> frozenset[Permission]:
+        del principal, company
+        self.asked += 1
+        return frozenset({Permission.COMPANY_READ})
+
+
+@final
+class Watched(PermissionCache):
+    """A ``CachedPermissions`` that counts how many times it forgot everything."""
+
+    def __init__(self, cache: CachedPermissions) -> None:
+        self.cache = cache
+        self.cleared = 0
+
+    @override
+    def forget(self, organization: OrganizationId, company: CompanyId, subject: SubjectId) -> None:
+        self.cache.forget(organization, company, subject)
+
+    @override
+    def forget_all(self) -> None:
+        self.cleared += 1
+        self.cache.forget_all()
+
+
+async def cleared(watched: Watched, times: int) -> bool:
+    return watched.cleared == times
+
+
+async def test_permissions_kept_before_nats_was_interrupted_are_asked_for_again_after_it(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    """Membership events published while NATS was unreachable never reach the follower: nothing kept from
+    before the interruption is trusted after it."""
+    del infrastructure
+    source = Asked()
+    watched = Watched(CachedPermissions(source))
+    alice = Principal(
+        subject=SubjectId("2001"), organization=OrganizationId(new_id()), provider_organization="1001"
+    )
+    company = CompanyId(new_id())
+    async with Proxy.to(nats_url) as proxy:
+        service = Service(
+            settings=ServiceSettings(
+                service_name="follower", database_url=SecretStr(database_url), nats_url=SecretStr(proxy.url)
+            ),
+            version="1.0",
+            events=Events(
+                workers=lambda runtime: {
+                    "membership changes": partial(
+                        follow_memberships, runtime.nats, watched, runtime.interruptions
+                    )
+                }
+            ),
+        )
+        async with running(service) as client:
+            await within(TIMEOUT, partial(cleared, watched, 1))  # following: nothing kept from before
+            for _ in range(2):
+                await watched.cache.permissions(alice, company)
+            assert source.asked == 1
+            proxy.cut()
+            await within(TIMEOUT, partial(cleared, watched, 2))  # lost
+            await proxy.restore()
+            await within(4 * TIMEOUT, partial(cleared, watched, 3))  # back
+            assert await readiness(client) == (200, ALL_READY)
+            await watched.cache.permissions(alice, company)
+            assert source.asked == 2
 
 
 async def test_a_service_whose_nats_is_unreachable_still_stops(

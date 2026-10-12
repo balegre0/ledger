@@ -151,6 +151,35 @@ async def test_an_answer_fetched_before_a_change_is_not_kept_after_it() -> None:
     assert source.asked == 2
 
 
+async def test_forgetting_everything_drops_every_answer_with_a_role_or_without() -> None:
+    source = Counting()
+    source.grant(ALICE, COMPANY, MANAGE)
+    cache = CachedPermissions(source)
+    await cache.permissions(ALICE, COMPANY)
+    await cache.permissions(BOB, COMPANY)  # no role: kept apart
+    source.grant(ALICE, COMPANY, READ)
+    source.grant(BOB, COMPANY, READ)
+    cache.forget_all()
+    assert (await cache.permissions(ALICE, COMPANY), await cache.permissions(BOB, COMPANY)) == (READ, READ)
+    assert source.asked == 4
+
+
+async def test_an_answer_fetched_before_everything_was_forgotten_is_not_kept_after_it() -> None:
+    source = Counting()
+    source.grant(ALICE, COMPANY, MANAGE)
+    source.hold = asyncio.Event()
+    cache = CachedPermissions(source)
+    stale = asyncio.create_task(cache.permissions(ALICE, COMPANY))
+    await source.answering.wait()
+    cache.forget_all()  # the connection to NATS was lost meanwhile
+    source.hold.set()
+    assert await stale == MANAGE
+    source.hold = None
+    source.grant(ALICE, COMPANY, READ)
+    assert await cache.permissions(ALICE, COMPANY) == READ
+    assert source.asked == 2
+
+
 async def test_the_least_recently_used_answers_go_beyond_the_capacity() -> None:
     source = Counting()
     for principal, company in ((ALICE, COMPANY), (BOB, COMPANY), (ALICE, OTHER_COMPANY)):

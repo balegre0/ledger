@@ -1,3 +1,4 @@
+import asyncio
 from typing import Final, final, override
 lazy from collections.abc import AsyncGenerator, Awaitable, Callable
 
@@ -37,9 +38,13 @@ from ledger_platform.identity_client import (
     MEMBERSHIP_SUBJECTS,
     MembershipChanges,
     RemotePermissions,
+    follow_memberships,
+    following,
     known_permissions,
 )
+from ledger_platform.interruptions import Interruptions
 from ledger_testing.caches import Forgotten
+from ledger_testing.clock import Moment
 
 ORGANIZATION: Final = OrganizationId(new_id())
 COMPANY: Final = CompanyId(new_id())
@@ -133,14 +138,19 @@ async def test_an_identity_that_is_not_there_makes_permissions_unavailable() -> 
             await RemotePermissions(channel, deadline=1.0).permissions(ALICE, COMPANY)
 
 
-async def test_a_cache_in_front_of_identity_asks_once_per_ttl(
+async def test_a_cache_in_front_of_identity_asks_it_once_per_ttl(
     identity: tuple[FakeIdentity, grpc.aio.Channel],
 ) -> None:
     fake, channel = identity
-    cache = CachedPermissions(RemotePermissions(channel))
-    for _ in range(3):
+    moment = Moment()
+    cache = CachedPermissions(RemotePermissions(channel), ttl=30.0, clock=moment)
+    for now in (0.0, 10.0, 29.9):
+        moment.now = now
         await cache.permissions(ALICE, COMPANY)
     assert len(fake.asked) == 1
+    moment.now = 30.0
+    await cache.permissions(ALICE, COMPANY)
+    assert len(fake.asked) == 2
 
 
 # ── Membership changes ──────────────────────────────────────────────────────────
@@ -212,3 +222,117 @@ async def test_every_replica_following_the_subjects_hears_every_change(
 
     await eventually(both_heard)
     assert MEMBERSHIP_SUBJECTS == "identity.membership.>"
+
+
+async def publish(
+    publisher: Client, envelope: Envelope, subject: str = "identity.membership.granted"
+) -> None:
+    await publisher.publish(subject, envelope.data, headers=envelope.headers())
+
+
+async def test_an_unreadable_event_on_the_wire_does_not_stop_the_next_one(
+    connect: Callable[[], Awaitable[Client]],
+    eventually: Callable[[Callable[[], Awaitable[bool]]], Awaitable[None]],
+) -> None:
+    cache = Forgotten()
+    follower, publisher = await connect(), await connect()
+    with capture_logs() as logs:
+        async with following(follower, cache, Interruptions()):
+            await follower.flush()
+            await publisher.publish("identity.membership.granted", b"\xff", headers={"ce-type": "garbage"})
+            await publish(publisher, granted())
+
+            async def heard() -> bool:
+                return len(cache.forgotten) == 1
+
+            await eventually(heard)
+    assert cache.forgotten == [(ORGANIZATION, COMPANY, "2001")]
+    assert [log["event"] for log in logs] == ["authorization.membership_event_unreadable"]
+
+
+async def test_following_forgets_everything_kept_while_nobody_followed(
+    connect: Callable[[], Awaitable[Client]],
+) -> None:
+    cache = Forgotten()
+    async with following(await connect(), cache, Interruptions()):
+        assert cache.cleared == 1
+
+
+async def test_an_interruption_while_following_forgets_everything_and_none_after_it(
+    connect: Callable[[], Awaitable[Client]],
+) -> None:
+    cache, interruptions = Forgotten(), Interruptions()
+    async with following(await connect(), cache, interruptions):
+        interruptions.interrupted()
+        interruptions.interrupted()
+        assert cache.cleared == 3
+    interruptions.interrupted()
+    assert cache.cleared == 3
+
+
+async def test_following_ends_with_its_subscription(
+    connect: Callable[[], Awaitable[Client]],
+    eventually: Callable[[Callable[[], Awaitable[bool]]], Awaitable[None]],
+) -> None:
+    """After the follower left, it hears nothing of a grant that another follower hears."""
+    cache, probe = Forgotten(), Forgotten()
+    follower, prober, publisher = await connect(), await connect(), await connect()
+    async with following(follower, cache, Interruptions()):
+        pass
+    _ = await MembershipChanges(probe).follow(prober)
+    await prober.flush()
+    await publish(publisher, granted())
+
+    async def probe_heard() -> bool:
+        return len(probe.forgotten) == 1
+
+    await eventually(probe_heard)
+    # The server queued whatever it sent the follower before the answer to this ping, and the client hands a
+    # message to its subscription before it reads on.
+    await follower.flush()
+    await asyncio.sleep(0.01)
+    assert cache.forgotten == []
+
+
+async def test_leaving_after_the_connection_closed_is_quiet(connect: Callable[[], Awaitable[Client]]) -> None:
+    """A closed connection ended its subscriptions: there is nothing left to unsubscribe."""
+    connection = await connect()
+    async with following(connection, Forgotten(), Interruptions()):
+        await connection.close()
+
+
+async def test_leaving_while_the_connection_drains_is_quiet(connect: Callable[[], Awaitable[Client]]) -> None:
+    """A draining connection ends its subscriptions itself."""
+    connection = await connect()
+    async with following(connection, Forgotten(), Interruptions()):
+        draining = asyncio.create_task(connection.drain())
+        await asyncio.sleep(0)  # the drain starts draining the subscriptions,
+        await asyncio.sleep(0)  # then says so
+        assert connection.is_draining
+    await draining
+
+
+async def test_a_follower_worker_follows_until_it_is_stopped(
+    connect: Callable[[], Awaitable[Client]],
+    eventually: Callable[[Callable[[], Awaitable[bool]]], Awaitable[None]],
+) -> None:
+    cache, interruptions = Forgotten(), Interruptions()
+    follower, publisher = await connect(), await connect()
+    worker = asyncio.create_task(follow_memberships(follower, cache, interruptions))
+
+    async def following_now() -> bool:
+        return cache.cleared == 1
+
+    await eventually(following_now)
+    await follower.flush()
+    await publish(publisher, granted())
+
+    async def heard() -> bool:
+        return len(cache.forgotten) == 1
+
+    await eventually(heard)
+    worker.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await worker
+    interruptions.interrupted()
+    assert cache.cleared == 1

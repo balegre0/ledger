@@ -19,7 +19,8 @@ The first connection to NATS is retried for ``ServiceLimits.nats_connect_timeout
 start fails (and the process exits). Once connected, NATS is reconnected for as long as it takes: the outbox
 keeps the events meanwhile and the consumers wait. A disconnection and a reconnection are logged, and so are
 the errors of the attempts in between: the first at once, then one a minute (``NATS_ERRORS_LOGGED_EVERY``)
-saying how many were not, never what was being sent.
+saying how many were not, never what was being sent. Both are also told to ``Runtime.interruptions``, for code
+that keeps state fresh from core NATS messages, which miss what was published meanwhile.
 """
 
 import asyncio
@@ -44,6 +45,7 @@ from ledger_platform.consumer import Consumer, ConsumerMetrics, ConsumerRefusedE
 from ledger_platform.database import DEFAULT_LIMITS, DEFAULT_POOL_SIZE, Database
 from ledger_platform.grpc_server import serve_grpc
 from ledger_platform.health import Health
+from ledger_platform.interruptions import Interruptions
 from ledger_platform.lifecycle import Lifecycle
 from ledger_platform.logs import Throttled, configure_logging
 from ledger_platform.options import InvalidOptionError, require_at_least, require_seconds
@@ -179,6 +181,8 @@ class Runtime[S: ServiceSettings]:
     tracing: Tracing
     registry: CollectorRegistry
     """The registry ``/metrics`` exports, for metrics of the service's own."""
+    interruptions: Interruptions
+    """Told when the connection to NATS is lost and when it is back (``ledger_platform.interruptions``)."""
     opened: object = None
     """What ``Interfaces.resources`` yielded; read it typed with ``resources``."""
 
@@ -363,34 +367,39 @@ class _ConnectionLog:
 
     While NATS is unreachable every attempt to reconnect fails: the first error is logged, then one a minute
     (``NATS_ERRORS_LOGGED_EVERY``) saying how many were not, and the reconnection says how many were left
-    out since.
+    out since. A disconnection (not a close on purpose) and a reconnection are told to ``interruptions``.
     """
 
-    __slots__ = ("_client", "_errors")
+    __slots__ = ("_client", "_errors", "_interruptions")
 
-    def __init__(self, client: Client) -> None:
+    def __init__(self, client: Client, interruptions: Interruptions) -> None:
         self._client = client
+        self._interruptions = interruptions
         self._errors = Throttled(_logger, "nats.error", every=NATS_ERRORS_LOGGED_EVERY)
 
     async def failed(self, error: Exception) -> None:
         self._errors.warning(error=error_type(error), detail=truncate(str(error), _DETAIL_LIMIT))
 
     async def disconnected(self) -> None:
-        if not self._client.is_closed:  # closing it on purpose says nothing worth a warning
+        if not self._client.is_closed:  # closing it on purpose is no interruption
             _logger.warning("nats.disconnected")
+            self._interruptions.interrupted()
 
     async def reconnected(self) -> None:
         unlogged = self._errors.settle()
         _logger.info("nats.reconnected", **({"unlogged_errors": unlogged} if unlogged else {}))
+        self._interruptions.interrupted()
 
 
-async def _connect(client: Client, settings: ServiceSettings, limit: float) -> None:
+async def _connect(
+    client: Client, settings: ServiceSettings, limit: float, interruptions: Interruptions
+) -> None:
     """Connect ``client`` within ``limit`` seconds, or raise ``NatsUnreachableError``.
 
     Once connected, the client reconnects for as long as it takes, until it is closed. The caller closes it in
     every case: a connection cut short by the timeout leaves an attempt in flight.
     """
-    log = _ConnectionLog(client)
+    log = _ConnectionLog(client, interruptions)
     try:
         async with asyncio.timeout(limit):
             await client.connect(
@@ -593,7 +602,8 @@ class Service[S: ServiceSettings]:
         connection = Client()
         # Closed in every case, so registered before it connects: an attempt cut short is closed too.
         lifecycle.on_close(partial(_disconnect, connection, limits.nats_drain_timeout))
-        await _connect(connection, settings, limits.nats_connect_timeout)
+        interruptions = Interruptions()
+        await _connect(connection, settings, limits.nats_connect_timeout, interruptions)
         jetstream = JetStreamContext(connection)
         for stream in (DEAD_LETTERS, *self._events.streams):
             await ensure_stream(jetstream, stream)
@@ -617,6 +627,7 @@ class Service[S: ServiceSettings]:
             outbox=outbox,
             tracing=tracing,
             registry=self._registry,
+            interruptions=interruptions,
             opened=opened,
         )
         # One stop for every worker started from here on, before NATS drains and after gRPC stops.
