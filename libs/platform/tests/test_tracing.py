@@ -22,8 +22,9 @@ from ledger_platform.tracing import RedactingSpanExporter, Tracing
 TRACEPARENT: Final = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 SENSITIVE: Final = "Key (tax_id)=(001-1234567-8) already exists"
 """What a database error says: personal data that must never leave the process in a span."""
-QUERY: Final = "rnc=00112345678&page=2"
-"""What a client puts in a query string: a national id, here."""
+RNC: Final = "00112345678"
+"""A national id, as a client sends it in a path or a query string."""
+QUERY: Final = f"rnc={RNC}&page=2"
 
 
 @final
@@ -352,6 +353,18 @@ def test_the_query_string_a_client_sent_never_leaves_in_a_span(exporter: InMemor
     answer_a_query(redacting(exporter))
     (span,) = exporter.get_finished_spans()
     assert span.attributes == {"http.route": "/customers"}
+
+
+@pytest.mark.parametrize("attribute", ["url.path", "url.full", "http.target", "http.url"])
+def test_the_path_a_client_sent_never_leaves_in_a_span_and_the_route_template_does(
+    exporter: InMemorySpanExporter, attribute: str
+) -> None:
+    """A path carries the values of its parameters (``/taxpayers/{rnc}``); its template carries none."""
+    with redacting(exporter).tracer.start_as_current_span("GET /taxpayers/{rnc}") as span:
+        span.set_attributes({"http.route": "/taxpayers/{rnc}", attribute: f"/taxpayers/{RNC}"})
+    (exported,) = exporter.get_finished_spans()
+    assert exported.name == "GET /taxpayers/{rnc}"
+    assert exported.attributes == {"http.route": "/taxpayers/{rnc}"}
 
 
 def test_a_redacted_span_is_otherwise_the_span_that_was_recorded(exporter: InMemorySpanExporter) -> None:

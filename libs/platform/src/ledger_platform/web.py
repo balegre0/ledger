@@ -40,6 +40,8 @@ from ledger_kernel.errors import ErrorKind, LedgerError, described, truncate
 lazy from ledger_platform.health import Health
 
 PROBLEM_JSON: Final = "application/problem+json"
+_OPERATIONAL: Final = frozenset({"/livez", "/readyz", "/metrics"})
+"""The routes probers and scrapers call every few seconds: not traced, their spans would bury the requests."""
 _UNMATCHED: Final = "unmatched"
 _UNREGISTERED: Final = "unregistered"
 _OTHER_METHOD: Final = "other"
@@ -395,10 +397,11 @@ def _answer_errors_as_problems(app: FastAPI, labels: _RouteLabels) -> None:
 def _add_operational_routes(app: FastAPI, health: Health, registry: CollectorRegistry) -> None:
     @app.get("/livez", include_in_schema=False)
     async def livez() -> JSONResponse:
-        wedged = health.wedged()
-        if wedged:  # a check that will not stop: the process cannot recover by itself, ask for a restart
+        wedged, dead = health.wedged(), health.dead()
+        if wedged or dead:  # a check that will not stop, a part that is gone: only a restart helps
             return JSONResponse(
-                {"status": "wedged", "wedged": list(wedged)}, status_code=HTTPStatus.SERVICE_UNAVAILABLE
+                {"status": "unrecoverable", "wedged": list(wedged), "dead": list(dead)},
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE,
             )
         return JSONResponse({"status": "ok"})
 
@@ -422,10 +425,22 @@ def _telemetry(provider: TracerProvider) -> TelemetryConfig:
     Into ``provider``, so that a service's spans never depend on which provider is process-wide. FastAPI's
     logs stay off: they would record every unhandled exception a second time, its message and traceback
     included, beside the chassis's own log line. Its metrics stay off: Prometheus measures every request
-    already. And it never adds exporters from the environment (``FASTAPI_OTEL_AUTO_CONFIGURE``): they would
-    export past the redaction the chassis gives every exporter of its own.
+    already. It never adds exporters from the environment (``FASTAPI_OTEL_AUTO_CONFIGURE``): they would
+    export past the redaction the chassis gives every exporter of its own. And it leaves the operational
+    routes alone.
     """
-    return {"tracer_provider": provider, "logs": False, "metrics": False, "auto_configure": False}
+    return {
+        "tracer_provider": provider,
+        "logs": False,
+        "metrics": False,
+        "auto_configure": False,
+        "exclude": _is_operational,
+    }
+
+
+def _is_operational(scope: MutableMapping[str, object]) -> bool:
+    """Whether the request is for a route of ``_OPERATIONAL``: FastAPI does not trace those."""
+    return scope.get("path") in _OPERATIONAL
 
 
 def create_app(

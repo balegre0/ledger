@@ -185,3 +185,47 @@ def test_the_database_url_must_use_the_psycopg_driver_and_stays_secret(
     assert problems(refused.value) == {"database_url"}
     assert "postgresql+psycopg://" in str(refused.value)
     assert "s3cret" not in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "nats-host:4222",
+        "http://nats:4222",
+        "ws://nats:443",
+        "nats://",
+        "nats://:4222",
+        "nats://user:s3cret@nats:port",
+        "nats://nats:70000",
+        "nats://nats:0",
+    ],
+    ids=[
+        "no-scheme",
+        "http",
+        "websocket",
+        "no-host",
+        "empty-host",
+        "port-not-a-number",
+        "port-too-big",
+        "port-0",
+    ],
+)
+def test_the_nats_url_must_name_a_nats_server_and_stays_unshown(
+    monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    """A URL nats-py could not even parse fails the settings, not the connection: it can hold a password."""
+    set_environment(monkeypatch, VALID | {"LEDGER_NATS_URL": url})
+    with pytest.raises(ValidationError) as refused:
+        ServiceSettings()
+    assert problems(refused.value) == {"nats_url"}
+    assert "nats://host[:port] or tls://host[:port]" in str(refused.value)
+    assert "s3cret" not in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["nats://nats:4222", "nats://localhost", "tls://app:s3cret@nats.internal:4443", "nats://[::1]:4222"],
+)
+def test_a_nats_or_tls_url_with_a_host_is_accepted(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
+    set_environment(monkeypatch, VALID | {"LEDGER_NATS_URL": url})
+    assert ServiceSettings().nats_url == url

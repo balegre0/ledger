@@ -244,7 +244,7 @@ layers = [
     "web | grpc_server | consumer",
     "outbox | streams",
     "database | tracing | health | logs",
-    "settings | options | lifecycle",
+    "settings | options | lifecycle | supervision",
 ]
 
 [[tool.importlinter.contracts]]

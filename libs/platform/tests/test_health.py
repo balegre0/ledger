@@ -319,3 +319,33 @@ def test_a_name_is_used_once() -> None:
     health.add("database", healthy)
     with pytest.raises(DuplicateCheckError, match="database"):
         health.add("database", healthy)
+
+
+def test_a_part_of_the_process_that_is_gone_is_named_dead_while_it_stays_gone() -> None:
+    gone: list[str] = []
+    health = Health()
+    health.add_liveness("workers", lambda: not gone)
+    health.add_liveness("loop", lambda: True)
+    assert health.dead() == ()
+    gone.append("consumer")
+    assert health.dead() == ("workers",)
+
+
+def test_a_liveness_condition_is_no_readiness_check() -> None:
+    health = Health()
+    health.add_liveness("workers", lambda: False)
+    assert health.wedged() == ()
+
+
+async def test_a_readiness_check_is_no_liveness_condition() -> None:
+    health = Health()
+    health.add("nats", broken)
+    assert await health.run() == {"nats": False}
+    assert health.dead() == ()
+
+
+def test_a_liveness_name_is_used_once() -> None:
+    health = Health()
+    health.add_liveness("workers", lambda: True)
+    with pytest.raises(DuplicateCheckError, match="workers"):
+        health.add_liveness("workers", lambda: True)

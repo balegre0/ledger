@@ -3,17 +3,21 @@
 ``Service`` builds the FastAPI app; the app's lifespan starts the rest, in this order: the database pool, the
 connection to NATS, ``DEAD_LETTERS`` and the service's own streams, the outbox relay, one worker per consumer,
 the gRPC server. Stopping goes the other way and waits for each part: the gRPC server stops taking calls and
-lets those in flight finish, the workers are cancelled and awaited (newest first), the connection to NATS
-drains, the pool closes, and the spans still pending are exported. A start that fails halfway releases what
-had started, in the same order.
+lets those in flight finish, the workers are cancelled and awaited (newest first, each for at most its stop
+grace), the connection to NATS drains, the pool closes, and the spans still pending are exported. A start
+that fails halfway releases what had started, in the same order.
 
-``/readyz`` checks that PostgreSQL answers, that NATS is connected and that no worker has stopped. A worker
-that stops on its own (a consumer whose stream is gone) is logged once with its error, and the service stays
-not ready from then on.
+Workers are supervised (``ledger_platform.supervision``): one that fails is started again after a growing
+delay, and one that fails on a configuration mistake (``ConsumerRefusedError``, any ``InvalidOptionError``)
+is not, since it would fail the same way every time. ``/readyz`` checks that PostgreSQL answers, that NATS is
+connected and that no worker is dead; a worker waiting to start again is not dead, so a transient outage of a
+consumer never takes the HTTP API out of rotation. A dead worker also fails ``/livez``: nothing in the process
+brings it back, so the orchestrator restarts the process, and a misconfiguration shows as a crash loop.
 
-NATS is reconnected for as long as it takes, at the first connection too: the outbox keeps the events
-meanwhile and the consumers wait. Each failed attempt, disconnection and reconnection is logged, never what
-was being sent.
+The first connection to NATS is retried for ``ServiceLimits.nats_connect_timeout`` seconds, then the
+start fails (and the process exits). Once connected, NATS is reconnected for as long as it takes: the outbox
+keeps the events meanwhile and the consumers wait. Each failed attempt, disconnection and reconnection is
+logged, never what was being sent.
 """
 
 import asyncio
@@ -33,21 +37,23 @@ lazy from fastapi import APIRouter, FastAPI
 lazy from opentelemetry.sdk.trace.export import SpanExporter
 
 from ledger_kernel.errors import LedgerError, UnavailableError, truncate
-from ledger_platform.consumer import Consumer, ConsumerMetrics
+from ledger_platform.consumer import Consumer, ConsumerMetrics, ConsumerRefusedError
 from ledger_platform.database import DEFAULT_LIMITS, Database
 from ledger_platform.grpc_server import serve_grpc
 from ledger_platform.health import Health
 from ledger_platform.lifecycle import Lifecycle
 from ledger_platform.logs import configure_logging
 from ledger_platform.options import InvalidOptionError, require_seconds
-from ledger_platform.outbox import DEFAULT_PUBLISH_TIMEOUT, MAX_PUBLISH_TIMEOUT, Outbox
+from ledger_platform.outbox import DEFAULT_PUBLISH_TIMEOUT, Outbox
 from ledger_platform.streams import DEAD_LETTERS, ensure_stream
+from ledger_platform.supervision import Supervisor
 from ledger_platform.tracing import Tracing
 from ledger_platform.web import ApiInfo, Observability, create_app
 lazy from ledger_platform.consumer import ConsumerSpec
 lazy from ledger_platform.database import DatabaseLimits
 lazy from ledger_platform.settings import ServiceSettings
 lazy from ledger_platform.streams import StreamSpec
+lazy from ledger_platform.supervision import Work
 
 _RECONNECT_WAIT: Final = 2
 """Seconds between two attempts to reach NATS: nats-py's own default, short enough for a blip."""
@@ -55,6 +61,16 @@ _UNLIMITED: Final = -1
 """nats-py's word for "never stop reconnecting"."""
 _DETAIL_LIMIT: Final = 200
 """What a log line keeps of the message of a NATS error."""
+_PERMANENT: Final = (ConsumerRefusedError, InvalidOptionError)
+"""Failures of a worker that no restart can fix: a consumer JetStream refuses, an option that cannot work."""
+_PUBLISH_SHARE_OF_IDLE: Final = 0.5
+"""The most of PostgreSQL's ``idle_in_transaction_session_timeout`` a relay pass may spend waiting for
+JetStream's acknowledgements: the rest is the margin for the statements of the pass."""
+DEFAULT_NATS_CONNECT_TIMEOUT: Final = 60.0
+"""Seconds the first connection to NATS is retried before the start fails: long enough for NATS to start
+alongside the service, short enough that a wrong address shows as a crash loop."""
+DEFAULT_WORKER_STOP_GRACE: Final = 10.0
+"""Seconds a worker is given to stop, like the gRPC server's grace: a handler may be finishing a statement."""
 _logger = structlog.stdlib.get_logger(__name__)
 
 
@@ -78,6 +94,15 @@ class ServiceAlreadyStartedError(LedgerError):
 
     def __init__(self) -> None:
         super().__init__("a service starts once: build a new one to start again")
+
+
+class NatsUnreachableError(UnavailableError):
+    """The first connection to NATS did not come within ``nats_connect_timeout``: the service cannot start."""
+
+    code: ClassVar[str] = "nats_unreachable"
+
+    def __init__(self, seconds: float) -> None:
+        super().__init__(f"NATS could not be reached within {seconds} seconds")
 
 
 class InvalidServiceOptionError(InvalidOptionError):
@@ -121,10 +146,22 @@ class Runtime[S: ServiceSettings]:
     """The registry ``/metrics`` exports, for metrics of the service's own."""
 
 
+type RuntimeDependency[S: ServiceSettings] = Callable[[], Coroutine[object, object, Runtime[S]]]
+"""What a route declares to be handed its service's runtime: ``Annotated[Runtime[S], Depends(runtime)]``.
+
+Asynchronous, so that FastAPI resolves it on the event loop rather than in its thread pool. While the service
+is not running it raises ``ServiceNotRunningError``, which a client gets as a 503."""
+type HttpRoutes[S: ServiceSettings] = Callable[[RuntimeDependency[S]], Sequence[APIRouter]]
+"""Makes a service's HTTP routes, given the dependency that hands them the runtime (called once, at build)."""
 type ConsumerFactory[S: ServiceSettings] = Callable[[Runtime[S]], Sequence[ConsumerSpec]]
 """The consumers of a service, made once it runs, so that their handlers can use what it runs on."""
 type GrpcServices[S: ServiceSettings] = Callable[[Runtime[S], grpc.aio.Server], None]
 """Adds a service's gRPC services to its server, once it runs."""
+
+
+def _no_routes[S: ServiceSettings](runtime: RuntimeDependency[S]) -> Sequence[APIRouter]:
+    del runtime
+    return ()
 
 
 def _no_consumers[S: ServiceSettings](runtime: Runtime[S]) -> Sequence[ConsumerSpec]:
@@ -137,8 +174,9 @@ def _no_consumers[S: ServiceSettings](runtime: Runtime[S]) -> Sequence[ConsumerS
 class Interfaces[S: ServiceSettings]:
     """How clients reach a service: its HTTP routes and its gRPC services."""
 
-    http: Sequence[APIRouter] = ()
-    """Complete before the service is built: a route added later is measured as ``unregistered``."""
+    http: HttpRoutes[S] = _no_routes
+    """Called when the service is built, and complete then: a route added later is measured as
+    ``unregistered``."""
     grpc: GrpcServices[S] | None = None
     """``None``: the service runs no gRPC server."""
 
@@ -156,26 +194,35 @@ class Events[S: ServiceSettings]:
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ServiceLimits:
-    """How long a service waits on PostgreSQL and JetStream, and PostgreSQL on the service.
+    """How long a service waits on PostgreSQL, NATS and its own workers, and PostgreSQL on the service.
 
     The relay waits for JetStream's acknowledgements of a batch inside the transaction that locks its rows,
-    so ``publish_timeout`` must be below ``database.idle_in_transaction_session_timeout``: PostgreSQL ends a
-    session idle in its transaction for that long, and every pass that waited would fail.
+    so ``publish_timeout`` may take at most half of ``database.idle_in_transaction_session_timeout``
+    (``_PUBLISH_SHARE_OF_IDLE``): PostgreSQL ends a session idle in its transaction for that long, and the
+    pass needs the rest for its statements. That relation is checked here; the outbox checks its own rules for
+    the timeout (positive, at most ``MAX_PUBLISH_TIMEOUT``) when the service starts.
     """
 
     database: DatabaseLimits = DEFAULT_LIMITS
     publish_timeout: float = DEFAULT_PUBLISH_TIMEOUT
-    """Seconds the relay waits for the acknowledgements of a batch (at most ``MAX_PUBLISH_TIMEOUT``)."""
+    """Seconds the relay waits for the acknowledgements of a batch."""
+    nats_connect_timeout: float = DEFAULT_NATS_CONNECT_TIMEOUT
+    """Seconds the first connection to NATS is retried before the start fails; reconnections are unlimited."""
+    worker_stop_grace: float = DEFAULT_WORKER_STOP_GRACE
+    """Seconds each worker is given to stop; one that takes longer is logged and left behind."""
 
     def __post_init__(self) -> None:
-        require_seconds(
-            InvalidServiceOptionError, "publish_timeout", self.publish_timeout, ceiling=MAX_PUBLISH_TIMEOUT
-        )
+        require_seconds(InvalidServiceOptionError, "nats_connect_timeout", self.nats_connect_timeout)
+        require_seconds(InvalidServiceOptionError, "worker_stop_grace", self.worker_stop_grace)
         idle = self.database.idle_in_transaction_session_timeout.total_seconds()
-        if self.publish_timeout >= idle:
+        ceiling = idle * _PUBLISH_SHARE_OF_IDLE
+        if not self.publish_timeout <= ceiling:  # NaN included
             raise InvalidServiceOptionError(
                 option="publish_timeout",
-                requirement=f"below the database's idle_in_transaction_session_timeout ({idle} seconds)",
+                requirement=(
+                    f"at most {ceiling} seconds ({_PUBLISH_SHARE_OF_IDLE:.0%} of the database's "
+                    "idle_in_transaction_session_timeout)"
+                ),
                 value=self.publish_timeout,
             )
 
@@ -209,45 +256,40 @@ class _ConnectionLog:
         _logger.info("nats.reconnected")
 
 
-async def _connect(settings: ServiceSettings) -> Client:
-    """A connection to NATS that keeps reconnecting, for as long as it takes, until it is closed."""
-    client = Client()
+async def _connect(client: Client, settings: ServiceSettings, limit: float) -> None:
+    """Connect ``client`` within ``limit`` seconds, or raise ``NatsUnreachableError``.
+
+    Once connected, the client reconnects for as long as it takes, until it is closed. The caller closes it in
+    every case: a connection cut short by the timeout leaves an attempt in flight.
+    """
     log = _ConnectionLog(client)
-    await client.connect(
-        servers=settings.nats_url,
-        name=settings.service_name,
-        max_reconnect_attempts=_UNLIMITED,
-        reconnect_time_wait=_RECONNECT_WAIT,
-        error_cb=log.failed,
-        disconnected_cb=log.disconnected,
-        reconnected_cb=log.reconnected,
-    )
-    return client
+    try:
+        async with asyncio.timeout(limit):
+            await client.connect(
+                servers=settings.nats_url,
+                name=settings.service_name,
+                max_reconnect_attempts=_UNLIMITED,
+                reconnect_time_wait=_RECONNECT_WAIT,
+                error_cb=log.failed,
+                disconnected_cb=log.disconnected,
+                reconnected_cb=log.reconnected,
+            )
+    except TimeoutError as error:
+        raise NatsUnreachableError(limit) from error
 
 
 async def _disconnect(client: Client) -> None:
     """Drain a live connection: what it has buffered goes out and its subscriptions end. Close any other.
 
-    Draining refuses a connection that is closed (someone closed it) or reconnecting (NATS is unreachable):
-    closing stops the reconnecting, and leaves a closed one as it is.
+    Draining refuses a connection that is closed (someone closed it), reconnecting (NATS is unreachable) or
+    still connecting (the start was cut short): closing stops the attempts, and leaves a closed one as it is.
+    The settings refuse a NATS URL the client could not parse, so ``connect`` has always begun by now.
     """
     try:
         if client.is_connected:
             await client.drain()
     finally:
         await client.close()
-
-
-async def _cancel(worker: asyncio.Task[Never]) -> None:
-    """Cancel ``worker`` and wait until it has stopped, whatever it ends with."""
-    worker.cancel()
-    await asyncio.wait((worker,))
-
-
-def _report_stopped(worker: asyncio.Task[Never]) -> None:
-    """A worker runs until it is cancelled: one that ends otherwise failed, and is logged once, with why."""
-    if not worker.cancelled():
-        _logger.error("service.worker_failed", worker=worker.get_name(), exc_info=worker.exception())
 
 
 @final
@@ -267,8 +309,8 @@ class Service[S: ServiceSettings]:
         "_runtime",
         "_settings",
         "_started",
+        "_supervisor",
         "_tracing",
-        "_workers",
     )
 
     def __init__(
@@ -287,21 +329,22 @@ class Service[S: ServiceSettings]:
         self._limits = limits
         self._registry = CollectorRegistry()
         self._tracing = Tracing.create(service_name=settings.service_name, exporter=_exporter(settings))
+        self._supervisor = Supervisor(registry=self._registry, permanent=_PERMANENT)
         self._runtime: Runtime[S] | None = None
-        self._workers: list[asyncio.Task[Never]] = []
         self._grpc_port: int | None = None
         self._started = False
         health = Health()
         health.add("database", self._database_answers)
         health.add("nats", self._nats_is_connected)
-        health.add("workers", self._workers_run)
+        health.add("workers", self._no_worker_is_dead)
+        health.add_liveness("workers", self._workers_live)
         self._app = create_app(
             info=ApiInfo(title=settings.service_name, version=version),
             observability=Observability(
                 health=health, registry=self._registry, tracer_provider=self._tracing.provider
             ),
             lifespan=self._lifespan,
-            routers=self._interfaces.http,
+            routers=self._interfaces.http(self._current_runtime),
         )
 
     @property
@@ -310,9 +353,10 @@ class Service[S: ServiceSettings]:
         return self._app
 
     def runtime(self) -> Runtime[S]:
-        """What the running service works with; a FastAPI dependency for routes.
+        """What the running service works with, for code that is not handed it.
 
-        Raises ``ServiceNotRunningError`` (503 for an HTTP client) while the service is not running.
+        Routes are handed the asynchronous ``RuntimeDependency`` instead (see ``HttpRoutes``), consumers and
+        gRPC services the runtime itself. Raises ``ServiceNotRunningError`` while the service is not running.
         """
         if self._runtime is None:
             raise ServiceNotRunningError
@@ -321,7 +365,7 @@ class Service[S: ServiceSettings]:
     @property
     def workers(self) -> tuple[asyncio.Task[Never], ...]:
         """The background workers in the order they started: the outbox relay, then one per consumer."""
-        return tuple(self._workers)
+        return self._supervisor.workers
 
     @property
     def grpc_port(self) -> int | None:
@@ -354,8 +398,10 @@ class Service[S: ServiceSettings]:
                 limits=limits.database,
             )
         )
-        connection = await _connect(settings)
+        connection = Client()
+        # Closed in every case, so registered before it connects: an attempt cut short is closed too.
         lifecycle.on_close(partial(_disconnect, connection))
+        await _connect(connection, settings, limits.nats_connect_timeout)
         jetstream = JetStreamContext(connection)
         for stream in (DEAD_LETTERS, *self._events.streams):
             await ensure_stream(jetstream, stream)
@@ -374,11 +420,11 @@ class Service[S: ServiceSettings]:
             tracing=tracing,
             registry=self._registry,
         )
-        self._spawn(lifecycle, "outbox relay", outbox.run(database, jetstream))
+        self._spawn(lifecycle, "outbox relay", partial(outbox.run, database, jetstream))
         metrics = ConsumerMetrics(self._registry)
         for spec in self._events.consumers(runtime):
             consumer = Consumer(spec, database=database, tracing=tracing, metrics=metrics)
-            self._spawn(lifecycle, f"consumer {spec.name}", consumer.run(jetstream))
+            self._spawn(lifecycle, f"consumer {spec.name}", partial(consumer.run, jetstream))
         services = self._interfaces.grpc
         if services is not None:
             self._grpc_port = await lifecycle.enter(
@@ -386,12 +432,14 @@ class Service[S: ServiceSettings]:
             )
         return runtime
 
-    def _spawn(self, lifecycle: Lifecycle, name: str, work: Coroutine[object, object, Never]) -> None:
-        """Run ``work`` as a worker named ``name``, cancelled and awaited when ``lifecycle`` closes."""
-        worker = asyncio.create_task(work, name=name)
-        worker.add_done_callback(_report_stopped)
-        self._workers.append(worker)
-        lifecycle.on_close(partial(_cancel, worker))
+    def _spawn(self, lifecycle: Lifecycle, name: str, work: Work) -> None:
+        """Run ``work`` as the supervised worker ``name``, stopped within its grace when the service stops."""
+        worker = self._supervisor.start(name, work)
+        lifecycle.on_close(partial(self._supervisor.stop, worker, self._limits.worker_stop_grace))
+
+    async def _current_runtime(self) -> Runtime[S]:
+        """The ``RuntimeDependency`` routes are handed."""
+        return self.runtime()
 
     async def _export_pending_spans(self) -> None:
         await asyncio.to_thread(self._tracing.shutdown)
@@ -403,8 +451,11 @@ class Service[S: ServiceSettings]:
         if not self.runtime().nats.is_connected:
             raise _NatsDisconnectedError
 
-    async def _workers_run(self) -> None:
+    async def _no_worker_is_dead(self) -> None:
         self.runtime()  # raises while the service is not running
-        stopped = [worker.get_name() for worker in self._workers if worker.done()]
-        if stopped:
-            raise _WorkerStoppedError(stopped)
+        dead = self._supervisor.dead()
+        if dead:
+            raise _WorkerStoppedError(dead)
+
+    def _workers_live(self) -> bool:
+        return not self._supervisor.dead()

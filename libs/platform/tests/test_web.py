@@ -1,8 +1,10 @@
 import asyncio
 import contextlib
+import sys
+import types
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Annotated, ClassVar, Final, Literal, TypedDict
+from typing import Annotated, ClassVar, Final, Literal, TypedDict, final, override
 from uuid import UUID
 lazy from collections.abc import AsyncGenerator, MutableMapping
 
@@ -10,11 +12,13 @@ import httpx
 import pytest
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SpanExporter
 from opentelemetry.trace import SpanKind, StatusCode, format_span_id, format_trace_id
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 from structlog.testing import capture_logs
 lazy from fastapi import FastAPI
-lazy from opentelemetry.sdk.trace import ReadableSpan
+lazy from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 lazy from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 lazy from prometheus_client import CollectorRegistry
 
@@ -115,7 +119,16 @@ class Problem(TypedDict):
     code: str
 
 
+class Liveness(TypedDict):
+    status: str
+    wedged: list[str]
+    dead: list[str]
+
+
 PROBLEM: Final = TypeAdapter(Problem)
+LIVENESS: Final = TypeAdapter(Liveness)
+OTLP_HTTP: Final = "opentelemetry.exporter.otlp.proto.http"
+"""The package of the OTLP/HTTP exporters FastAPI attaches by itself when told to: not installed here."""
 KNOWN: Final = UUID(int=1)
 INVALID_REQUEST: Final = TypeAdapter(InvalidRequest)
 OPENAPI_DOCUMENT: Final = TypeAdapter(OpenApiDocument)
@@ -270,6 +283,28 @@ async def metrics_of(client: httpx.AsyncClient) -> str:
     return (await client.get("/metrics")).text
 
 
+@final
+class RecordingProvider(TracerProvider):
+    """A tracer provider that remembers every span processor anyone adds to it."""
+
+    def __init__(self) -> None:
+        super().__init__(shutdown_on_exit=False)
+        self.added: list[SpanProcessor] = []
+
+    @override
+    def add_span_processor(self, span_processor: SpanProcessor) -> None:
+        self.added.append(span_processor)
+        super().add_span_processor(span_processor)
+
+
+@final
+class StandInExporter(SpanExporter):
+    """Takes the place of an OTLP/HTTP exporter: made with an endpoint, it exports nothing."""
+
+    def __init__(self, endpoint: str) -> None:
+        self.endpoint = endpoint
+
+
 def server_span(exporter: InMemorySpanExporter) -> ReadableSpan:
     """The span of the one request a test made, as FastAPI recorded it."""
     (span,) = [span for span in exporter.get_finished_spans() if span.kind is SpanKind.SERVER]
@@ -314,7 +349,10 @@ async def test_liveness_fails_while_a_check_is_wedged_and_recovers_when_it_ends(
             assert (await client.get("/livez")).status_code == 200
             now[0] = 31
             wedged = await client.get("/livez")
-            assert (wedged.status_code, wedged.json()) == (503, {"status": "wedged", "wedged": ["nats"]})
+            assert (wedged.status_code, LIVENESS.validate_json(wedged.content)) == (
+                503,
+                {"status": "unrecoverable", "wedged": ["nats"], "dead": []},
+            )
             release.set()
             await ended.wait()
             await asyncio.sleep(0)
@@ -828,14 +866,50 @@ async def test_a_bug_is_traced_by_its_type_alone_and_logged_once(
 
 
 async def test_the_environment_cannot_attach_exporters_of_its_own(
-    observability: Observability, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    health: Health, registry: CollectorRegistry, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """FastAPI adds OTLP exporters to the provider when ``FASTAPI_OTEL_AUTO_CONFIGURE`` asks for them, past
     the redaction the chassis gives every exporter of its own; the app never does.
 
-    FastAPI's exporters are not installed in this workspace, so an attempt would be logged as a failure.
+    FastAPI's OTLP/HTTP exporters are not installed here: stand-ins take their place, so that an attempt would
+    reach the provider instead of failing at the import.
     """
+    for name in ("_log_exporter", "metric_exporter", "trace_exporter"):
+        module = types.ModuleType(f"{OTLP_HTTP}.{name}")
+        for exporter in ("OTLPLogExporter", "OTLPMetricExporter", "OTLPSpanExporter"):
+            monkeypatch.setattr(module, exporter, StandInExporter, raising=False)
+        monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setenv("FASTAPI_OTEL_AUTO_CONFIGURE", "true")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
-    await start_and_stop(build(observability, router))
-    assert [record.getMessage() for record in caplog.records if record.name.startswith("fastapi")] == []
+    provider = RecordingProvider()
+    await start_and_stop(
+        build(Observability(health=health, registry=registry, tracer_provider=provider), router)
+    )
+    assert provider.added == []
+
+
+@pytest.mark.parametrize("path", ["/livez", "/readyz", "/metrics"])
+async def test_the_operational_routes_are_not_traced(
+    client: httpx.AsyncClient, exporter: InMemorySpanExporter, path: str
+) -> None:
+    """Probes and scrapes come every few seconds from every prober: their spans would bury the requests."""
+    await client.get(path)
+    await client.get("/items/7")
+    assert [span.name for span in exporter.get_finished_spans() if span.kind is SpanKind.SERVER] == [
+        "GET /items/{item_id}"
+    ]
+
+
+async def test_liveness_fails_while_a_part_of_the_process_is_dead(
+    client: httpx.AsyncClient, health: Health
+) -> None:
+    """A part nothing brings back (a worker stopped by a configuration mistake): only a restart helps."""
+    gone: list[str] = []
+    health.add_liveness("workers", lambda: not gone)
+    assert (await client.get("/livez")).status_code == 200
+    gone.append("consumer")
+    dead = await client.get("/livez")
+    assert (dead.status_code, LIVENESS.validate_json(dead.content)) == (
+        503,
+        {"status": "unrecoverable", "wedged": [], "dead": ["workers"]},
+    )

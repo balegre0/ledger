@@ -8,6 +8,7 @@ is not a setting: a misspelled name must never mean "silently running with the d
 import os
 from enum import StrEnum
 from typing import Annotated, ClassVar, Final, Literal, final, override
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, EnvSettingsSource, SettingsConfigDict
@@ -15,6 +16,8 @@ lazy from pydantic_settings import PydanticBaseSettingsSource
 
 _DATABASE_URL_SCHEME: Final = "postgresql+psycopg://"
 """The chassis talks to PostgreSQL through SQLAlchemy's asynchronous psycopg driver, and only that one."""
+_NATS_SCHEMES: Final = frozenset({"nats", "tls"})
+"""How the chassis reaches NATS: its own protocol, in clear or over TLS (never a websocket)."""
 
 
 class LogFormat(StrEnum):
@@ -29,6 +32,23 @@ class _UnsupportedDatabaseUrlError(ValueError):
 
     def __init__(self) -> None:
         super().__init__(f"must start with {_DATABASE_URL_SCHEME}")
+
+
+class _UnsupportedNatsUrlError(ValueError):
+    """The NATS URL names no NATS server. It never repeats the URL: it can hold a password."""
+
+    def __init__(self) -> None:
+        super().__init__("must be nats://host[:port] or tls://host[:port]")
+
+
+def _names_a_nats_server(url: str) -> bool:
+    """Whether ``url`` has a NATS scheme, a host and, if any, a port from 1 to 65535."""
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:  # a port that is no number, or out of range
+        return False
+    return parts.scheme in _NATS_SCHEMES and parts.hostname is not None and port != 0
 
 
 @final
@@ -87,6 +107,7 @@ class ServiceSettings(BaseSettings):
     database_url: SecretStr = Field(default=...)
     """SQLAlchemy URL with the psycopg driver: ``postgresql+psycopg://user:password@host:5432/db``."""
     nats_url: str = "nats://localhost:4222"
+    """``nats://host:port``, or ``tls://`` for TLS; credentials, if any, in the URL."""
     http_port: Annotated[int, Field(ge=1, le=65535)] = 8000
     grpc_port: Annotated[int, Field(ge=0, le=65535)] = 50051
     """0 binds any free port (tests)."""
@@ -99,6 +120,14 @@ class ServiceSettings(BaseSettings):
         """Refuse a URL for another driver now, not at the first query."""
         if not url.get_secret_value().startswith(_DATABASE_URL_SCHEME):
             raise _UnsupportedDatabaseUrlError
+        return url
+
+    @field_validator("nats_url")
+    @classmethod
+    def require_a_nats_server(cls, url: str) -> str:
+        """Refuse a URL that names no NATS server now, not when the service connects."""
+        if not _names_a_nats_server(url):
+            raise _UnsupportedNatsUrlError
         return url
 
     @classmethod

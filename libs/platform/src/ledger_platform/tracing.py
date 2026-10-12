@@ -1,9 +1,10 @@
 """Distributed tracing: one trace from a client's request through events and workers (W3C traceparent).
 
 Spans leave the process and cannot be recalled, so what a span may carry is decided here, once: the type of an
-exception, never its message or its traceback (they can quote personal data), and never the query string a
-client sent. The platform's own spans record no more than that; every exporter is given the spans of others
-(a service's code, FastAPI's instrumentation) through ``RedactingSpanExporter``.
+exception, never its message or its traceback (they can quote personal data), and never the path or the query
+string a client sent (a path carries the values of its parameters). The platform's own spans record no more
+than that; every exporter is given the spans of others (a service's code, FastAPI's instrumentation) through
+``RedactingSpanExporter``.
 """
 
 from contextlib import contextmanager
@@ -33,8 +34,10 @@ _EXCEPTION: Final = "exception"
 _EXCEPTION_TYPE: Final = "exception.type"
 _REDACTED_EVENT_ATTRIBUTES: Final = frozenset({"exception.message", "exception.stacktrace"})
 """What OpenTelemetry records of an exception besides its type: its text and its traceback."""
-_REDACTED_SPAN_ATTRIBUTES: Final = frozenset({"url.query"})
-"""What FastAPI copies from a request as it came: the query string, whatever a client chose to put in it."""
+_REDACTED_SPAN_ATTRIBUTES: Final = frozenset({"url.path", "url.query", "url.full", "http.target", "http.url"})
+"""What an instrumentation copies from a request as it came: the path, with the values of its parameters
+(``/taxpayers/00112345678``), and the query string, whatever a client chose to put in it, in the names of the
+current semantic conventions and of the older ones. The span's name and ``http.route`` keep the template."""
 _logger = structlog.stdlib.get_logger(__name__)
 
 
@@ -86,8 +89,10 @@ class RedactingSpanExporter(SpanExporter):
     message`` as the description of the status. The message of a database error can quote a row (``Key
     (tax_id)=(...)``), that of a validation error what a client sent. Whoever recorded them, the spans leave
     without ``exception.message`` and ``exception.stacktrace``, without the description of their status, and
-    without the ``url.query`` FastAPI copies from a request. The type of the exception stays, and so does the
-    rest.
+    without the path and the query string an instrumentation copies from a request (``url.path``,
+    ``url.query``; ``url.full``, ``http.target`` and ``http.url`` in other conventions): a path carries the
+    values of its parameters. The type of the exception stays, and so does the rest, the span's name and its
+    ``http.route`` included: they are the route's template.
 
     A span with nothing to remove is handed on as it is. One that is rebuilt no longer tells how many
     attributes, events and links the SDK dropped from it for exceeding its limits.

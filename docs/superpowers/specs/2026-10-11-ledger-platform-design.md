@@ -405,9 +405,12 @@ company can certify while another runs in production.
   not exported. The trace crosses the outbox: an event carries the `traceparent` of the span that added it,
   and a consumer's span continues that trace from the event alone, never from whatever span is active. An
   over-long `traceparent` is never parsed, so a hostile header costs nothing. A failed span records the
-  exception's type and nothing else: spans leave the process and cannot be recalled. Milestone 1 builds the
-  tracer provider and the propagation through events; the automatic instrumentation of FastAPI, SQLAlchemy
-  and gRPC arrives with the first service (milestone 2).
+  exception's type and nothing else: spans leave the process and cannot be recalled, so every exporter drops
+  exception messages and stack traces, status descriptions, and the path and query string a client sent
+  (the span's name and `http.route` keep the route's template). Milestone 1 builds the tracer provider, the
+  propagation through events and FastAPI's own request spans (into the service's provider, continuing the
+  caller's `traceparent`; the operational routes are not traced); the instrumentation of SQLAlchemy and gRPC
+  arrives with the first service (milestone 2).
 - **Metrics:** Prometheus: RED metrics per endpoint and RPC, outbox lag, consumer lag, DLQ size,
   workflow states, DGII latency and error rate per environment, certificates expiring. The chassis
   exports the HTTP request duration by method, route template and status (labels are bounded:
@@ -426,7 +429,12 @@ company can certify while another runs in production.
   `/readyz` runs the service's named checks (database, NATS, background workers) concurrently, each held
   to a time limit, and answers 503 if any fails; overlapping probes share one run of each check. `/livez`
   does not consult the dependencies, so that a PostgreSQL outage does not restart every pod: it answers 503 only
-  when a check has outlived ten time limits and will not stop, and such a process cannot recover by itself.
+  when the process cannot recover by itself, that is, when a check has outlived ten time limits and will not
+  stop, or a background worker stopped for good. Workers are supervised: one that fails is started again
+  after a growing delay (capped at a minute, with jitter), and while it waits it fails neither probe, so a
+  transient outage of a consumer never takes the HTTP API out of rotation. A worker that fails on a
+  configuration mistake (JetStream refuses its consumer, an option cannot work) is not started again: `/readyz`
+  and `/livez` both fail, the orchestrator restarts the pod, and the mistake shows as a crash loop.
 - **SLOs:** API availability 99.9 %; p95 `POST /v1/invoices` < 300 ms (excluding DGII); 99 % of
   documents reach a final DGII state within 5 minutes when DGII is up.
 - **Alerts:** SLO burn rate, new dead letters (a new advisory in `DEAD_LETTERS`, or that stream

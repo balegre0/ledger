@@ -12,6 +12,8 @@ from ledger_kernel.errors import LedgerError
 
 type Check = Callable[[], Awaitable[object]]
 """Returns when healthy, raises when not."""
+type Alive = Callable[[], bool]
+"""Whether a part of the process that nothing brings back once it is gone is still there; answers at once."""
 
 _WEDGE_TIMEOUTS: Final = 10
 """How many timeouts a check may outlive before the process counts as wedged, unless told otherwise."""
@@ -66,9 +68,13 @@ class Health:
     Finished runs and finished stuck checks are dropped by the next ``run`` or ``wedged``, so that the
     traceback a late failure carries is not kept for the life of the process. No callback edits the tables,
     so no two of them can disagree about whose entry it is.
+
+    The liveness probe also asks the parts registered with ``add_liveness``, which are not readiness checks:
+    a part that is gone for good (a background worker stopped by a configuration mistake) makes ``dead``
+    name it, and nothing but a restart of the process brings it back.
     """
 
-    __slots__ = ("_checks", "_clock", "_flights", "_stuck", "_timeout", "_wedge_after")
+    __slots__ = ("_checks", "_clock", "_flights", "_liveness", "_stuck", "_timeout", "_wedge_after")
 
     def __init__(
         self,
@@ -83,12 +89,23 @@ class Health:
         self._wedge_after = _WEDGE_TIMEOUTS * timeout if wedge_after is None else wedge_after
         self._flights: dict[str, asyncio.Task[bool]] = {}
         self._stuck: dict[str, _Stuck] = {}
+        self._liveness: dict[str, Alive] = {}
 
     def add(self, name: str, check: Check) -> None:
         """Register ``check`` under ``name``."""
         if name in self._checks:
             raise DuplicateCheckError(name)
         self._checks[name] = check
+
+    def add_liveness(self, name: str, alive: Alive) -> None:
+        """Register ``alive``, which answers whether the part ``name`` of the process is still there."""
+        if name in self._liveness:
+            raise DuplicateCheckError(name)
+        self._liveness[name] = alive
+
+    def dead(self) -> tuple[str, ...]:
+        """The parts registered with ``add_liveness`` that are gone."""
+        return tuple(name for name, alive in self._liveness.items() if not alive())
 
     def wedged(self) -> tuple[str, ...]:
         """The checks that have outlived ``wedge_after`` seconds and still will not stop.

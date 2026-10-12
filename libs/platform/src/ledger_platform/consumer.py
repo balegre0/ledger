@@ -401,9 +401,12 @@ class Consumer:
         """Consume forever, up to ``batch`` messages at a time, waiting up to ``poll`` seconds for them.
 
         First brings the durable consumer to the spec (``ensure_consumer``: ``ConsumerRefusedError`` when
-        JetStream refuses). A handler's failure never ends the loop. What does: an error of NATS itself (the
-        stream is gone, the connection is closed) and a cancellation. The service's supervision reports the
-        first and restarts. On either, the handling in progress is rolled back and every message of the batch
+        JetStream refuses). A handler's failure never ends the loop. What does: an error of NATS itself (a
+        request that timed out during an outage, the stream gone, the connection closed) and a cancellation.
+        The service's supervisor (``ledger_platform.supervision``) logs such an error and runs the consumer
+        again after a growing delay, binding it anew; a ``ConsumerRefusedError`` is a configuration mistake no
+        new run can fix, so the consumer stays stopped and the process reports itself not live, to be
+        restarted. On either, the handling in progress is rolled back and every message of the batch
         not yet settled goes back to JetStream at once (a negative acknowledgement without a delay: it counts
         as a delivery), so that nothing waits for ``ack_wait``; if the connection is gone, those messages are
         delivered again after ``ack_wait``.

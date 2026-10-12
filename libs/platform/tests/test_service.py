@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import inspect
 import logging
 import socket
 from contextlib import asynccontextmanager
@@ -7,7 +8,7 @@ from dataclasses import replace
 from datetime import timedelta
 from functools import partial
 from math import inf, nan
-from typing import Annotated, Final, Protocol, TypedDict, final, override
+from typing import Annotated, Final, Literal, Protocol, TypedDict, final, override
 from urllib.parse import urlsplit
 lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 
@@ -36,11 +37,12 @@ from ledger_contracts.envelope import Envelope
 from ledger_platform.consumer import ConsumerRefusedError, ConsumerSpec
 from ledger_platform.database import DatabaseLimits
 from ledger_platform.grpc_server import GrpcBindError, serve_grpc
-from ledger_platform.outbox import DEFAULT_MAX_PAYLOAD, MAX_PUBLISH_TIMEOUT, EventTooLargeError
+from ledger_platform.outbox import DEFAULT_MAX_PAYLOAD, EventTooLargeError, InvalidOutboxOptionError
 from ledger_platform.service import (
     Events,
     Interfaces,
     InvalidServiceOptionError,
+    NatsUnreachableError,
     Service,
     ServiceAlreadyStartedError,
     ServiceLimits,
@@ -50,12 +52,13 @@ from ledger_platform.settings import ServiceSettings
 from ledger_platform.streams import StreamSpec
 lazy from ledger_platform.consumer import Handler
 lazy from ledger_platform.database import Database, UnitOfWork
-lazy from ledger_platform.service import Runtime
+lazy from ledger_platform.service import Runtime, RuntimeDependency
 
 STREAM: Final = StreamSpec(name="SERVICE_TEST", subjects=("service-test.>",))
 SUBJECT: Final = "service-test.paid"
 LEDGER: Final = "payments-ledger"
 AUDIT: Final = "payments-audit"
+ORPHAN: Final = "orphan"
 SECRET: Final = "Key (tax_id)=(001-1234567-8) already exists"
 """What a database error says: personal data that must never leave the process in a span."""
 RNC: Final = "00112345678"
@@ -69,6 +72,8 @@ WINDING_DOWN: Final = 0.3
 """Seconds a held handler takes to stop once cancelled: a stop that did not wait for it would not see it."""
 
 type Context = grpc.aio.ServicerContext[bytes, bytes]
+type Holding = Literal["no", "politely", "stubbornly"]
+"""Whether a consumer's handler waits for ``release``, and how it takes a cancellation meanwhile."""
 
 
 class Readiness(TypedDict):
@@ -84,9 +89,16 @@ class Problem(TypedDict):
     code: str
 
 
+class Liveness(TypedDict):
+    status: str
+    wedged: list[str]
+    dead: list[str]
+
+
 READINESS: Final = TypeAdapter(Readiness)
 PAID: Final = TypeAdapter(Paid)
 PROBLEM: Final = TypeAdapter(Problem)
+LIVENESS: Final = TypeAdapter(Liveness)
 ADDRESS: Final = TypeAdapter(tuple[str, int] | tuple[str, int, int, int])
 """An internet address as a socket reports it: host and port, plus flow and scope for IPv6."""
 
@@ -134,14 +146,19 @@ def bare(database_url: str, nats_url: str) -> Service[ServiceSettings]:
     )
 
 
+def nothing() -> None:
+    return None
+
+
 @final
 class Payments:
     """A small service with a part of every kind, keeping what each part receives for the test to read.
 
     ``POST /payments`` stores an event; ``GET /settle`` fails inside a span of its own. The consumers named
-    in ``consumers`` keep what they handle (or, when ``hold``, wait for ``release`` first, and take a moment
-    to wind down when they are cancelled meanwhile). Its gRPC methods: ``Ping`` echoes, ``Slow`` waits for
-    ``release`` and then uses the database and NATS.
+    in ``consumers`` keep what they handle. When ``hold``, they wait for ``release`` first and, cancelled
+    meanwhile, take a moment to wind down (or, when ``stubborn``, ignore the cancellation and wait on). Its
+    gRPC methods: ``Ping`` echoes, ``Slow`` waits for ``release`` and then uses the database and NATS.
+    ``while_starting`` runs as the service makes its consumers, before any worker has run.
     """
 
     def __init__(
@@ -149,8 +166,8 @@ class Payments:
         settings: ServiceSettings,
         *,
         consumers: Sequence[str] = (LEDGER,),
-        orphan: bool = False,
-        hold: bool = False,
+        hold: Holding = "no",
+        while_starting: Callable[[], None] = nothing,
         limits: ServiceLimits | None = None,
     ) -> None:
         self.received: dict[str, list[Envelope]] = {name: [] for name in consumers}
@@ -158,17 +175,20 @@ class Payments:
         self.slow_started = asyncio.Event()
         self.release = asyncio.Event()
         self._hold = hold
-        specs = [
-            ConsumerSpec(name=name, stream=STREAM.name, subject="service-test.>", handler=self._keeper(name))
+        self._while_starting = while_starting
+        self._specs = tuple(
+            # a consumer of a stream nobody declared: JetStream refuses it, and its worker stops for good
+            ConsumerSpec(name=ORPHAN, stream="NOWHERE", subject="nowhere.>", handler=ignore)
+            if name == ORPHAN
+            else ConsumerSpec(
+                name=name, stream=STREAM.name, subject="service-test.>", handler=self._keeper(name)
+            )
             for name in consumers
-        ]
-        if orphan:  # a consumer of a stream nobody declared: JetStream refuses it, and its worker stops
-            specs.append(ConsumerSpec(name="orphan", stream="NOWHERE", subject="nowhere.>", handler=ignore))
-        self._specs = tuple(specs)
+        )
         self.service = Service(
             settings=settings,
             version="1.0",
-            interfaces=Interfaces(http=(self._routes(),), grpc=self._register),
+            interfaces=Interfaces(http=self._routes, grpc=self._register),
             events=Events(streams=(STREAM,), consumers=self._consumers),
             limits=ServiceLimits() if limits is None else limits,
         )
@@ -176,37 +196,39 @@ class Payments:
     async def got(self, consumer: str, count: int) -> bool:
         return len(self.received[consumer]) >= count
 
-    async def _runtime(self) -> Runtime[ServiceSettings]:
-        return self.service.runtime()
-
-    def _routes(self) -> APIRouter:
+    def _routes(self, runtime: RuntimeDependency[ServiceSettings]) -> Sequence[APIRouter]:
+        """The routes as a service declares them: ``runtime`` is the dependency the service hands them."""
         router = APIRouter()
 
         @router.post("/payments", status_code=202)
-        async def pay(runtime: Annotated[Runtime[ServiceSettings], Depends(self._runtime)]) -> Paid:
+        async def pay(current: Annotated[Runtime[ServiceSettings], Depends(runtime)]) -> Paid:
             envelope = paid()
-            async with runtime.database.transaction(None) as unit:
-                await runtime.outbox.add(unit, envelope, subject=SUBJECT)
+            async with current.database.transaction(None) as unit:
+                await current.outbox.add(unit, envelope, subject=SUBJECT)
             return {"id": str(envelope.id)}
 
         @router.get("/settle")
-        async def settle(
-            runtime: Annotated[Runtime[ServiceSettings], Depends(self._runtime)], rnc: str
-        ) -> None:
+        async def settle(current: Annotated[Runtime[ServiceSettings], Depends(runtime)], rnc: str) -> None:
             del rnc
-            with runtime.tracing.tracer.start_as_current_span("settle"):
+            with current.tracing.tracer.start_as_current_span("settle"):
                 raise SettlementError(SECRET)
 
-        return router
+        @router.get("/taxpayers/{rnc}")
+        async def taxpayer(rnc: str) -> dict[str, int]:
+            return {"digits": len(rnc)}
+
+        return (router,)
 
     def _keeper(self, consumer: str) -> Handler:
         async def keep(envelope: Envelope, unit: UnitOfWork) -> None:
             del unit
-            if self._hold:
+            if self._hold != "no":
                 self.handling.set()
                 try:
                     await self.release.wait()
                 except asyncio.CancelledError:
+                    if self._hold == "stubbornly":
+                        await self.release.wait()  # as if nothing had happened, until cancelled again
                     await asyncio.sleep(WINDING_DOWN)
                     raise
             self.received[consumer].append(envelope)
@@ -215,6 +237,7 @@ class Payments:
 
     def _consumers(self, runtime: Runtime[ServiceSettings]) -> Sequence[ConsumerSpec]:
         del runtime
+        self._while_starting()
         return self._specs
 
     def _register(self, runtime: Runtime[ServiceSettings], server: grpc.aio.Server) -> None:
@@ -247,14 +270,23 @@ async def ignore(envelope: Envelope, unit: UnitOfWork) -> None:
 
 @final
 class Proxy:
-    """A TCP relay to NATS that a test can cut: the connections through it drop, and new ones are closed at
-    once, until it is restored. NATS itself, and what JetStream stores, are untouched."""
+    """A TCP relay to NATS that a test can cut or hold, until it restores it. NATS itself, and what JetStream
+    stores, are untouched.
+
+    Cut, it drops the connections through it and stops listening, so that every attempt to connect is refused
+    before a stream exists: nats-py does not close the stream of a reconnection attempt that fails during its
+    handshake, and leaves it to the garbage collector (a ``ResourceWarning`` that would fail some later test).
+    Held, it drops them and accepts new ones without ever answering.
+    """
 
     def __init__(self, host: str, port: int) -> None:
         self._upstream = (host, port)
-        self._open = True
+        self._holding = False
         self._writers: set[asyncio.StreamWriter] = set()
-        self.url = ""
+        self._listening: asyncio.Server | None = None
+        self._listeners: list[asyncio.Server] = []
+        self.port = 0
+        self.held = 0
 
     @classmethod
     @asynccontextmanager
@@ -263,31 +295,63 @@ class Proxy:
         assert upstream.hostname is not None
         assert upstream.port is not None
         proxy = cls(upstream.hostname, upstream.port)
-        server = await asyncio.start_server(proxy.accept, "127.0.0.1", 0)
-        proxy.url = f"nats://127.0.0.1:{ADDRESS.validate_python(server.sockets[0].getsockname())[1]}"
+        await proxy.restore()
         try:
             yield proxy
         finally:
             proxy.cut()
-            server.close()
-            await server.wait_closed()
+            for listener in proxy._listeners:
+                await listener.wait_closed()
+
+    @property
+    def url(self) -> str:
+        return f"nats://127.0.0.1:{self.port}"
 
     async def accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        if not self._open:
-            writer.close()
+        if self._holding:
+            await self._hold(reader, writer)
             return
         upstream_reader, upstream_writer = await asyncio.open_connection(*self._upstream)
         self._writers |= {writer, upstream_writer}
         await asyncio.gather(relay(reader, upstream_writer), relay(upstream_reader, writer))
 
     def cut(self) -> None:
-        self._open = False
+        self._drop()
+        if self._listening is not None:
+            self._listening.close()
+            self._listening = None
+
+    def hold(self) -> None:
+        self._drop()
+        self._holding = True
+
+    async def restore(self) -> None:
+        """Relay again, listening on the port it had (any free one, the first time)."""
+        self._holding = False
+        if self._listening is None:
+            self._listening = await asyncio.start_server(self.accept, "127.0.0.1", self.port)
+            self._listeners.append(self._listening)
+            self.port = ADDRESS.validate_python(self._listening.sockets[0].getsockname())[1]
+
+    async def holds_nothing(self) -> bool:
+        """Whether every connection it held has been closed by its client."""
+        return self.held == 0
+
+    def _drop(self) -> None:
         for writer in self._writers:
             writer.close()
         self._writers.clear()
 
-    def restore(self) -> None:
-        self._open = True
+    async def _hold(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Say nothing until the client closes its end (or the proxy is cut)."""
+        self.held += 1
+        self._writers.add(writer)
+        try:
+            with contextlib.suppress(ConnectionError):
+                await reader.read()
+        finally:
+            self.held -= 1
+            writer.close()
 
 
 async def relay(source: asyncio.StreamReader, sink: asyncio.StreamWriter) -> None:
@@ -365,6 +429,17 @@ async def running[S: ServiceSettings](service: Service[S]) -> AsyncGenerator[htt
 async def readiness(client: httpx.AsyncClient) -> tuple[int, dict[str, bool]]:
     response = await client.get("/readyz")
     return response.status_code, READINESS.validate_json(response.content)["checks"]
+
+
+async def liveness(client: httpx.AsyncClient) -> tuple[int, list[str]]:
+    response = await client.get("/livez")
+    if response.status_code == 200:
+        return 200, []
+    return response.status_code, LIVENESS.validate_json(response.content)["dead"]
+
+
+async def restarted(registry: CollectorRegistry, worker: str) -> bool:
+    return (registry.get_sample_value("ledger_worker_restarts_total", {"worker": worker}) or 0) >= 1
 
 
 async def nats_is(client: httpx.AsyncClient, *, connected: bool) -> bool:
@@ -487,9 +562,10 @@ async def test_a_database_that_refuses_the_service_makes_it_not_ready(
         assert await readiness(client) == (503, {"database": False, "nats": True, "workers": True})
 
 
-async def test_a_worker_that_stops_makes_the_service_not_ready(
+async def test_a_worker_that_something_else_cancelled_is_dead_and_the_service_neither_ready_nor_live(
     database_url: str, nats_url: str, infrastructure: JetStreamContext
 ) -> None:
+    """Nothing restarts a worker that was cancelled: only a restart of the process brings it back."""
     del infrastructure
     payments = Payments(configured(database_url, nats_url))
     async with running(payments.service) as client:
@@ -497,23 +573,32 @@ async def test_a_worker_that_stops_makes_the_service_not_ready(
         relay.cancel()
         await asyncio.wait((relay,))
         assert await readiness(client) == (503, {"database": True, "nats": True, "workers": False})
+        assert await liveness(client) == (503, ["workers"])
 
 
-async def test_a_worker_that_fails_is_logged_with_its_error_and_keeps_the_service_not_ready(
+async def test_a_misconfigured_worker_is_not_restarted_and_the_service_is_neither_ready_nor_live(
     database_url: str, nats_url: str, infrastructure: JetStreamContext
 ) -> None:
+    """A consumer JetStream refuses (here, of a stream nobody declared) fails the same way however often it
+    starts: the process asks for a restart, and a misconfiguration shows as a crash loop."""
     del infrastructure
-    payments = Payments(configured(database_url, nats_url), orphan=True)
+    payments = Payments(configured(database_url, nats_url), consumers=(LEDGER, ORPHAN))
     with capture_logs() as logs:
         async with running(payments.service) as client:
             orphan = next(
                 worker for worker in payments.service.workers if worker.get_name() == "consumer orphan"
             )
-            await asyncio.wait((orphan,))
-            assert (await readiness(client))[1]["workers"] is False
-    (failure,) = [entry for entry in logs if entry["event"] == "service.worker_failed"]
+            await asyncio.wait((orphan,), timeout=TIMEOUT)
+            assert (await readiness(client))[1] == {"database": True, "nats": True, "workers": False}
+            assert await liveness(client) == (503, ["workers"])
+            registry = payments.service.runtime().registry
+            assert (
+                registry.get_sample_value("ledger_worker_restarts_total", {"worker": "consumer orphan"}) == 0
+            )
+    (failure,) = [entry for entry in logs if entry["event"] == "worker.failed"]
     assert isinstance(failure.pop("exc_info"), ConsumerRefusedError)
-    assert failure == {"event": "service.worker_failed", "log_level": "error", "worker": "consumer orphan"}
+    assert failure == {"event": "worker.failed", "log_level": "error", "worker": "consumer orphan"}
+    assert [entry for entry in logs if entry["event"] == "worker.restarting"] == []
 
 
 async def test_without_otlp_and_grpc_the_service_still_runs(
@@ -584,7 +669,7 @@ async def test_the_relay_and_the_consumers_resume_when_nats_comes_back(
                 response = await client.post("/payments")
                 assert response.status_code == 202
 
-                proxy.restore()
+                await proxy.restore()
                 await within(4 * TIMEOUT, partial(payments.got, LEDGER, 1))
                 assert await readiness(client) == (200, ALL_READY)
     (envelope,) = payments.received[LEDGER]
@@ -610,43 +695,73 @@ async def test_a_service_whose_nats_is_unreachable_still_stops(
 async def test_a_service_started_before_nats_is_reachable_waits_for_it(
     database_url: str, nats_url: str, infrastructure: JetStreamContext
 ) -> None:
-    """The first connection is retried like any other, each attempt logged, instead of failing the start."""
+    """Within its time limit, the first connection is retried, each attempt logged, instead of failing."""
     del infrastructure
     async with Proxy.to(nats_url) as proxy:
         proxy.cut()
         payments = Payments(configured(database_url, proxy.url))
-        asyncio.get_running_loop().call_later(TIMEOUT / 5, proxy.restore)
         with capture_logs() as logs:
+
+            async def refused() -> bool:
+                return any(entry["event"] == "nats.error" for entry in logs)
+
+            async def restore_once_refused() -> None:
+                await within(4 * TIMEOUT, refused)
+                await proxy.restore()
+
+            restoring = asyncio.create_task(restore_once_refused())
             async with asyncio.timeout(4 * TIMEOUT), running(payments.service) as client:
                 assert await readiness(client) == (200, ALL_READY)
+            await restoring
     (attempt, *_) = [entry for entry in logs if entry["event"] == "nats.error"]
     assert set(attempt) == {"event", "log_level", "error", "detail"}
     assert attempt["log_level"] == "warning"
 
 
-@pytest.mark.parametrize("publish_timeout", [0.0, -1.0, nan, inf, MAX_PUBLISH_TIMEOUT + 1])
-def test_a_publish_timeout_the_relay_cannot_wait_is_refused(publish_timeout: float) -> None:
-    with pytest.raises(InvalidServiceOptionError, match=r"^service option publish_timeout must be"):
-        ServiceLimits(publish_timeout=publish_timeout)
-
-
-@pytest.mark.parametrize("publish_timeout", [5.0, 6.0])
-def test_a_publish_timeout_the_database_would_cut_short_is_refused(publish_timeout: float) -> None:
-    """The relay waits for JetStream inside its transaction: PostgreSQL would end a session idle that long."""
-    database = DatabaseLimits(idle_in_transaction_session_timeout=timedelta(seconds=5))
+@pytest.mark.parametrize("publish_timeout", [5.001, 6.0, 10.0, inf, nan])
+def test_a_publish_timeout_beyond_half_the_database_s_idle_limit_is_refused(publish_timeout: float) -> None:
+    """The relay waits for JetStream inside its transaction: PostgreSQL ends a session idle for the limit,
+    and the pass needs the other half for its statements."""
+    database = DatabaseLimits(idle_in_transaction_session_timeout=timedelta(seconds=10))
     with pytest.raises(
         InvalidServiceOptionError,
         match=(
-            r"^service option publish_timeout must be below the database's "
-            r"idle_in_transaction_session_timeout \(5\.0 seconds\), not float: "
+            r"^service option publish_timeout must be at most 5\.0 seconds \(50% of the database's "
+            r"idle_in_transaction_session_timeout\), not float: "
         ),
     ):
         ServiceLimits(database=database, publish_timeout=publish_timeout)
 
 
-def test_a_publish_timeout_below_the_database_s_idle_limit_is_accepted() -> None:
-    database = DatabaseLimits(idle_in_transaction_session_timeout=timedelta(seconds=5))
-    assert ServiceLimits(database=database, publish_timeout=4.999).publish_timeout == 4.999
+def test_a_publish_timeout_of_half_the_database_s_idle_limit_is_accepted() -> None:
+    database = DatabaseLimits(idle_in_transaction_session_timeout=timedelta(seconds=10))
+    assert ServiceLimits(database=database, publish_timeout=5.0).publish_timeout == 5.0
+
+
+@pytest.mark.parametrize("option", ["nats_connect_timeout", "worker_stop_grace"])
+@pytest.mark.parametrize("seconds", [0.0, -1.0, nan, inf])
+def test_a_wait_that_is_not_a_positive_number_of_seconds_is_refused(option: str, seconds: float) -> None:
+    waits = {"nats_connect_timeout": 60.0, "worker_stop_grace": 10.0} | {option: seconds}
+    with pytest.raises(InvalidServiceOptionError, match=rf"^service option {option} must be a positive"):
+        ServiceLimits(
+            nats_connect_timeout=waits["nats_connect_timeout"], worker_stop_grace=waits["worker_stop_grace"]
+        )
+
+
+def test_the_waits_are_a_minute_for_nats_and_ten_seconds_for_a_worker_by_default() -> None:
+    limits = ServiceLimits()
+    assert (limits.nats_connect_timeout, limits.worker_stop_grace) == (60.0, 10.0)
+
+
+async def test_what_the_outbox_refuses_of_its_publish_timeout_fails_the_start(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    """The outbox's own rules for the timeout are checked by the outbox alone, when the service starts."""
+    del infrastructure
+    payments = Payments(configured(database_url, nats_url), limits=ServiceLimits(publish_timeout=0.0))
+    with pytest.raises(InvalidOutboxOptionError, match="publish_timeout"):
+        async with running(payments.service):
+            pass
 
 
 async def test_the_service_s_name_and_limits_reach_postgresql(
@@ -730,7 +845,7 @@ async def test_an_event_carries_the_trace_of_the_request_that_stored_it(
     assert envelope.traceparent.split("-")[1] == TRACE_ID
 
 
-async def test_spans_reach_the_collector_without_exception_messages_or_query_strings(
+async def test_spans_reach_the_collector_without_exception_messages_paths_or_query_strings(
     database_url: str, nats_url: str, infrastructure: JetStreamContext
 ) -> None:
     del infrastructure
@@ -740,6 +855,8 @@ async def test_spans_reach_the_collector_without_exception_messages_or_query_str
         async with running(payments.service) as client:
             failed = await client.get("/settle", params={"rnc": RNC})
             assert failed.status_code == 500
+            found = await client.get(f"/taxpayers/{RNC}")
+            assert found.status_code == 200
         # stopping the service exported what was pending, to the collector that is still listening
     exported = "".join(str(request) for request in collector.requests)
     assert SECRET not in exported
@@ -748,6 +865,8 @@ async def test_spans_reach_the_collector_without_exception_messages_or_query_str
     request, settling = spans["GET /settle"], spans["settle"]
     assert texts(request.attributes)["error.type"] == f"{SettlementError.__module__}.SettlementError"
     assert "url.query" not in texts(request.attributes)
+    looked_up = spans["GET /taxpayers/{rnc}"]
+    assert texts(looked_up.attributes)["http.route"] == "/taxpayers/{rnc}"
     assert (request.status.message, settling.status.message) == ("", "")
     (event,) = settling.events
     assert texts(event.attributes)["exception.type"] == f"{SettlementError.__module__}.SettlementError"
@@ -793,7 +912,7 @@ async def test_a_delivery_in_flight_when_the_service_stops_goes_back_to_jetstrea
     given back, so the next replica gets it now, not after the consumer's ``ack_wait`` (seventy seconds by
     default). The handler takes a moment to wind down: a stop that did not wait would drain NATS under it."""
     del infrastructure
-    stopping = Payments(configured(database_url, nats_url), hold=True)
+    stopping = Payments(configured(database_url, nats_url), hold="politely")
     async with running(stopping.service) as client:
         await client.post("/payments")
         async with asyncio.timeout(TIMEOUT):
@@ -819,3 +938,104 @@ async def test_a_start_that_fails_halfway_releases_what_had_started(
     assert all(worker.cancelled() for worker in workers)
     with pytest.raises(ServiceNotRunningError):
         payments.service.runtime()
+
+
+async def test_a_consumer_that_cannot_reach_jetstream_as_it_starts_is_restarted_once_nats_is_back(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    """The connection drops before the consumer has bound: its first request times out, the supervisor
+    starts it again after a delay, and it resumes once NATS is back. Meanwhile it is not dead: the service
+    stays live, and its readiness says only that NATS is away, never that a worker stopped."""
+    del infrastructure
+    async with Proxy.to(nats_url) as proxy:
+        payments = Payments(configured(database_url, proxy.url), while_starting=proxy.cut)
+        with capture_logs() as logs:
+            async with running(payments.service) as client:
+
+                async def restarting() -> bool:
+                    return any(entry["event"] == "worker.restarting" for entry in logs)
+
+                await within(4 * TIMEOUT, restarting)
+                assert await readiness(client) == (503, {"database": True, "nats": False, "workers": True})
+                assert await liveness(client) == (200, [])
+
+                await proxy.restore()
+                response = await client.post("/payments")
+                await within(4 * TIMEOUT, partial(payments.got, LEDGER, 1))
+                assert await readiness(client) == (200, ALL_READY)
+                assert await restarted(payments.service.runtime().registry, f"consumer {LEDGER}")
+    (first, *_) = [entry for entry in logs if entry["event"] == "worker.restarting"]
+    assert (first["worker"], first["log_level"]) == (f"consumer {LEDGER}", "warning")
+    assert str(payments.received[LEDGER][0].id) == PAID.validate_json(response.content)["id"]
+
+
+@pytest.mark.parametrize("nats", ["refusing", "silent"])
+async def test_a_first_connection_to_nats_that_does_not_come_fails_the_start_and_leaves_nothing_open(
+    database_url: str, nats_url: str, nats: str
+) -> None:
+    """Refused, or accepted and never answered: past its time limit the start fails (the process exits, to be
+    started again), and the connection attempt in flight is closed with it."""
+    async with Proxy.to(nats_url) as proxy:
+        if nats == "refusing":
+            proxy.cut()
+        else:
+            proxy.hold()
+        payments = Payments(
+            configured(database_url, proxy.url), limits=ServiceLimits(nats_connect_timeout=0.5)
+        )
+        with pytest.raises(NatsUnreachableError, match=r"^NATS could not be reached within 0\.5 seconds$"):
+            async with asyncio.timeout(TIMEOUT), running(payments.service):
+                pass
+        await within(TIMEOUT, proxy.holds_nothing)
+
+
+async def test_a_worker_that_will_not_stop_is_left_behind_after_its_grace_and_the_stop_goes_on(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    del infrastructure
+    stopping = Payments(
+        configured(database_url, nats_url),
+        hold="stubbornly",
+        limits=ServiceLimits(worker_stop_grace=WINDING_DOWN),
+    )
+    with capture_logs() as logs:
+        async with asyncio.timeout(TIMEOUT), running(stopping.service) as client:
+            await client.post("/payments")
+            await stopping.handling.wait()
+            connection = stopping.service.runtime().nats
+            consumer = stopping.service.workers[1]
+    assert connection.is_closed  # the stop went on past the consumer, down to NATS
+    assert not consumer.done()
+    not_stopped = [entry for entry in logs if entry["event"] == "worker.not_stopped"]
+    assert not_stopped == [
+        {
+            "event": "worker.not_stopped",
+            "log_level": "error",
+            "worker": f"consumer {LEDGER}",
+            "grace": WINDING_DOWN,
+        }
+    ]
+    consumer.cancel()  # asked again, it stops
+    await asyncio.wait((consumer,))
+
+
+async def test_routes_are_handed_an_asynchronous_dependency_that_gives_them_the_runtime_while_it_runs(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    """Asynchronous, FastAPI resolves it on the event loop, without a trip through its thread pool."""
+    del infrastructure
+    handed: list[RuntimeDependency[ServiceSettings]] = []
+
+    def routes(runtime: RuntimeDependency[ServiceSettings]) -> Sequence[APIRouter]:
+        handed.append(runtime)
+        return ()
+
+    service = Service(
+        settings=configured(database_url, nats_url), version="1.0", interfaces=Interfaces(http=routes)
+    )
+    (runtime,) = handed
+    assert inspect.iscoroutinefunction(runtime)
+    with pytest.raises(ServiceNotRunningError):
+        await runtime()
+    async with running(service):
+        assert await runtime() is service.runtime()
