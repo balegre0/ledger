@@ -1,4 +1,6 @@
-from typing import final, override
+import asyncio
+from time import perf_counter
+from typing import Final, final, override
 lazy from collections.abc import Sequence
 
 import pytest
@@ -17,6 +19,15 @@ from ledger_kernel.clock import utc_now
 from ledger_kernel.ids import new_id
 from ledger_platform.tracing import Tracing
 
+TRACEPARENT: Final = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+SENSITIVE: Final = "Key (tax_id)=(001-1234567-8) already exists"
+"""What a database error says: personal data that must never leave the process in a span."""
+
+
+@final
+class PoisonError(Exception):
+    """An error of the tests' own, to tell its qualified name from a built-in's."""
+
 
 @final
 class CountingExporter(InMemorySpanExporter):
@@ -30,6 +41,19 @@ class CountingExporter(InMemorySpanExporter):
     def shutdown(self) -> None:
         self.shutdowns += 1
         super().shutdown()
+
+
+@final
+class RejectingExporter(SpanExporter):
+    """The collector answers with errors: every export fails, and the attempts are counted."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    @override
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        self.attempts += 1
+        raise ConnectionError
 
 
 @final
@@ -102,10 +126,10 @@ def test_without_an_active_span_there_is_no_traceparent(tracing: Tracing) -> Non
         "garbage",
         "00-" + "0" * 32 + "-b7ad6b7169203331-01",
         "00-0af7651916cd43dd8448eb211c80319c-" + "0" * 16 + "-01",
-        "00-0AF7651916CD43DD8448EB211C80319C-B7AD6B7169203331-01",
-        "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331",
-        "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01-extra",
-        "0" * 100_000,
+        TRACEPARENT.upper(),
+        TRACEPARENT.removesuffix("-01"),
+        TRACEPARENT + "-extra",
+        " " + TRACEPARENT,
     ],
     ids=[
         "none",
@@ -116,7 +140,7 @@ def test_without_an_active_span_there_is_no_traceparent(tracing: Tracing) -> Non
         "uppercase",
         "no-flags",
         "suffix",
-        "huge",
+        "padded",
     ],
 )
 def test_without_a_usable_parent_a_new_trace_starts(
@@ -124,6 +148,19 @@ def test_without_a_usable_parent_a_new_trace_starts(
 ) -> None:
     with tracing.consuming("consume", traceparent):
         pass
+    (span,) = exporter.get_finished_spans()
+    assert span.parent is None
+
+
+def test_a_hostile_traceparent_costs_no_time_and_starts_a_new_trace(
+    tracing: Tracing, exporter: InMemorySpanExporter
+) -> None:
+    """A valid start and a long padding: the SDK's own pattern backtracks quadratically on it (seconds)."""
+    hostile = TRACEPARENT + "-" + " " * 50_000 + "\nx"
+    started = perf_counter()
+    with tracing.consuming("consume", hostile):
+        pass
+    assert perf_counter() - started < 0.1
     (span,) = exporter.get_finished_spans()
     assert span.parent is None
 
@@ -140,24 +177,37 @@ def test_a_consumer_without_a_parent_does_not_adopt_the_span_that_happens_to_be_
     assert consume.context.trace_id != ambient.context.trace_id
 
 
-def test_a_failing_consumer_leaves_the_error_on_its_span_and_raises_it_unchanged(
-    tracing: Tracing, exporter: InMemorySpanExporter
+@pytest.mark.parametrize(
+    ("kind", "named"),
+    [(PoisonError, f"{PoisonError.__module__}.PoisonError"), (RuntimeError, "RuntimeError")],
+    ids=["own", "built-in"],
+)
+def test_a_failing_consumer_is_recorded_by_error_type_alone_and_the_error_is_raised_unchanged(
+    tracing: Tracing, exporter: InMemorySpanExporter, kind: type[Exception], named: str
 ) -> None:
-    failure = RuntimeError("poison event")
-    with (
-        pytest.raises(RuntimeError, match="poison event") as raised,
-        tracing.consuming("consume invoicing", None),
-    ):
+    """Spans leave the process and cannot be recalled: the message and the traceback stay in the logs."""
+    failure = kind(SENSITIVE)
+    with pytest.raises(kind) as raised, tracing.consuming("consume invoicing", None):
         raise failure
     assert raised.value is failure
     (span,) = exporter.get_finished_spans()
     assert span.status.status_code is StatusCode.ERROR
+    assert span.status.description is None
     (event,) = span.events
     assert event.name == "exception"
-    assert event.attributes is not None
-    assert event.attributes["exception.type"] == "RuntimeError"
-    assert event.attributes["exception.message"] == "poison event"
+    assert event.attributes == {"exception.type": named}
+    assert "tax_id" not in span.to_json()
     assert tracing.current_traceparent() is None
+
+
+def test_a_cancelled_consumer_is_not_reported_as_a_failure(
+    tracing: Tracing, exporter: InMemorySpanExporter
+) -> None:
+    with pytest.raises(asyncio.CancelledError), tracing.consuming("consume invoicing", None):
+        raise asyncio.CancelledError
+    (span,) = exporter.get_finished_spans()
+    assert span.status.status_code is StatusCode.UNSET
+    assert span.events == ()
 
 
 @given(
@@ -210,7 +260,16 @@ def test_shutdown_stops_the_exporter_once_however_often_it_is_asked() -> None:
     assert exporter.shutdowns == 1
 
 
-def test_an_exporter_that_fails_at_the_flush_does_not_fail_the_shutdown() -> None:
+def test_spans_the_exporter_rejects_at_the_flush_do_not_fail_the_shutdown() -> None:
+    exporter = RejectingExporter()
+    tracing = Tracing.create(service_name="invoicing", exporter=exporter)
+    with tracing.tracer.start_as_current_span("pending"):
+        pass
+    tracing.shutdown()
+    assert exporter.attempts == 1
+
+
+def test_an_exporter_that_fails_to_stop_is_logged_and_does_not_fail_the_shutdown() -> None:
     tracing = Tracing.create(service_name="invoicing", exporter=UnreachableExporter())
     with tracing.tracer.start_as_current_span("pending"):
         pass
