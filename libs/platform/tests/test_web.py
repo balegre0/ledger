@@ -24,6 +24,7 @@ lazy from prometheus_client import CollectorRegistry
 
 from ledger_kernel.errors import (
     ConflictError,
+    ErrorKind,
     ForbiddenError,
     InvalidInputError,
     LedgerError,
@@ -218,6 +219,29 @@ async def fail(kind: str) -> None:
     raise ERRORS[kind]
 
 
+BY_KIND: Final[dict[ErrorKind, type[LedgerError]]] = {
+    ErrorKind.INVALID: InvalidInputError,
+    ErrorKind.NOT_FOUND: NotFoundError,
+    ErrorKind.CONFLICT: ConflictError,
+    ErrorKind.FORBIDDEN: ForbiddenError,
+    ErrorKind.UNAVAILABLE: UnavailableError,
+    ErrorKind.INTERNAL: LedgerError,
+}
+STATUS_OF: Final[dict[ErrorKind, HTTPStatus]] = {
+    ErrorKind.INVALID: HTTPStatus.UNPROCESSABLE_CONTENT,
+    ErrorKind.NOT_FOUND: HTTPStatus.NOT_FOUND,
+    ErrorKind.CONFLICT: HTTPStatus.CONFLICT,
+    ErrorKind.FORBIDDEN: HTTPStatus.FORBIDDEN,
+    ErrorKind.UNAVAILABLE: HTTPStatus.SERVICE_UNAVAILABLE,
+    ErrorKind.INTERNAL: HTTPStatus.INTERNAL_SERVER_ERROR,
+}
+
+
+@router.get("/kinds/{kind}", include_in_schema=False)
+async def fail_as(kind: ErrorKind) -> None:
+    raise BY_KIND[kind]
+
+
 @router.get("/crash")
 async def crash() -> None:
     raise ZeroDivisionError
@@ -244,6 +268,52 @@ async def two_chunks_the_second_one_broken() -> AsyncGenerator[bytes]:
 @router.get("/stream", include_in_schema=False)
 async def stream() -> StreamingResponse:
     return StreamingResponse(two_chunks_the_second_one_broken())
+
+
+async def two_chunks_the_second_one_refused() -> AsyncGenerator[bytes]:
+    yield b"first"
+    raise ConflictError
+
+
+@router.get("/stream-ledger-error", include_in_schema=False)
+async def stream_ledger_error() -> StreamingResponse:
+    """A ``LedgerError`` once the response has begun: too late for its problem document."""
+    return StreamingResponse(two_chunks_the_second_one_refused())
+
+
+async def exchange(app: FastAPI, path: str) -> list[MutableMapping[str, object]]:
+    """One ``GET`` as an ASGI server makes it: every message the app sends back. Whatever the app raises
+    reaches the caller, as it would reach the server."""
+    sent: list[MutableMapping[str, object]] = []
+    requested = False
+    never = asyncio.Event()
+
+    async def receive() -> MutableMapping[str, object]:
+        nonlocal requested
+        if requested:
+            await never.wait()  # the client stays: Starlette listens for a disconnect while it streams
+        requested = True
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: MutableMapping[str, object]) -> None:
+        sent.append(message)
+
+    scope: dict[str, object] = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"host", b"test")],
+        "server": ("test", 80),
+        "client": ("127.0.0.1", 50000),
+    }
+    await app(scope, receive, send)
+    return sent
 
 
 events: list[str] = []
@@ -411,10 +481,46 @@ async def test_a_request_whose_handler_raises_is_still_measured(client: httpx.As
     assert 'http_request_duration_seconds_count{method="GET",route="/crash",status="500"} 1.0' in metrics
 
 
-async def test_a_response_that_breaks_after_it_began_is_measured_as_failed(client: httpx.AsyncClient) -> None:
-    await client.get("/stream")
+async def test_a_response_that_breaks_after_it_began_is_measured_as_failed(
+    app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    await exchange(app, "/stream")
     metrics = (await client.get("/metrics")).text
     assert 'http_request_duration_seconds_count{method="GET",route="/stream",status="500"} 1.0' in metrics
+
+
+async def test_a_bug_never_reaches_the_server_and_is_logged_once(app: FastAPI) -> None:
+    """Starlette raises a bug again after answering it, for the server to log a second time, message and all:
+    the app stops it. A client that lets exceptions through (as a server sees them) gets the answer alone."""
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=True)
+    with capture_logs() as logs:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as strict:
+            response = await strict.get("/crash")
+    assert (response.status_code, PROBLEM.validate_json(response.content)["code"]) == (500, "internal")
+    assert [entry["event"] for entry in logs] == ["http.unhandled_error"]
+
+
+@pytest.mark.parametrize("path", ["/stream", "/stream-ledger-error"])
+async def test_a_response_that_breaks_after_it_began_is_cut_off_logged_once_and_never_raised(
+    app: FastAPI, path: str
+) -> None:
+    """The status and the first chunk are on the wire: the app leaves the response unfinished (the server
+    closes the connection, so the client never takes a cut body for a whole one) and raises nothing."""
+    with capture_logs() as logs:
+        sent = await exchange(app, path)
+    assert [(message["type"], message.get("status"), message.get("more_body")) for message in sent] == [
+        ("http.response.start", 200, None),
+        ("http.response.body", None, True),
+    ]
+    (entry,) = logs
+    del entry["exc_info"]
+    assert entry == {
+        "event": "http.unhandled_error",
+        "log_level": "error",
+        "method": "GET",
+        "route": path,
+        "code": "internal",
+    }
 
 
 async def test_methods_nobody_defined_share_one_label(client: httpx.AsyncClient) -> None:
@@ -441,21 +547,17 @@ async def test_a_ledger_error_is_a_problem_document(client: httpx.AsyncClient) -
     }
 
 
-@pytest.mark.parametrize(
-    ("kind", "status"),
-    [
-        ("invalid", HTTPStatus.UNPROCESSABLE_CONTENT),
-        ("conflict", HTTPStatus.CONFLICT),
-        ("forbidden", HTTPStatus.FORBIDDEN),
-        ("unavailable", HTTPStatus.SERVICE_UNAVAILABLE),
-        ("internal", HTTPStatus.INTERNAL_SERVER_ERROR),
-    ],
-)
-async def test_each_error_kind_has_its_status(
-    client: httpx.AsyncClient, kind: str, status: HTTPStatus
-) -> None:
-    response = await client.get(f"/errors/{kind}")
-    assert (response.status_code, response.json()["status"]) == (status, status)
+def test_every_kind_of_error_is_expected_to_have_a_status() -> None:
+    """A kind added to the kernel fails here until it has a status: never a ``KeyError`` in the handler."""
+    assert STATUS_OF.keys() == set(ErrorKind)
+    assert BY_KIND.keys() == set(ErrorKind)
+
+
+@pytest.mark.parametrize("kind", list(ErrorKind))
+async def test_each_error_kind_has_its_status(client: httpx.AsyncClient, kind: ErrorKind) -> None:
+    response = await client.get(f"/kinds/{kind}")
+    status = STATUS_OF[kind]
+    assert (response.status_code, PROBLEM.validate_json(response.content)["status"]) == (status, status)
 
 
 async def test_a_body_that_breaks_the_schema_is_a_problem_document_listing_every_problem(
@@ -612,7 +714,7 @@ async def test_a_bug_is_logged_without_the_request(client: httpx.AsyncClient) ->
             content="card=4111111111111111",
         )
     (entry,) = logs
-    assert isinstance(entry.pop("exc_info"), ZeroDivisionError)
+    assert entry.pop("exc_info") is True  # the exception being handled: the one the route raised
     assert entry == {
         "event": "http.unhandled_error",
         "log_level": "error",

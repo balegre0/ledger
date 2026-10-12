@@ -280,8 +280,9 @@ HTTP failures are RFC 9457 `application/problem+json`, the framework's own 404 a
 stable; the message may change. A request that breaks the schema is a 422 `invalid_request` whose body also has
 `"errors"`, at most 20 entries of `{"location", "type", "message"}` (where it went wrong and of which type, never
 the value), and `"omitted_errors"`, how many were left out. A bug answers a bare `internal` and the log gets the
-details. gRPC carries the code in the trailing metadata `ledger-error-code`, with generic
-details for a defect.
+details, once: the exception never reaches the ASGI server, which would log it a second time with its message (a
+response that had begun is left unfinished, and the server closes the connection). gRPC carries the code in the
+trailing metadata `ledger-error-code`, with generic details for a defect.
 
 **Probes.** `/livez`, `/readyz` and `/metrics` are outside the OpenAPI document.
 

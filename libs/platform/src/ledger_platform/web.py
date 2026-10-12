@@ -8,6 +8,9 @@ is boilerplate the title already says, or whatever its author typed (possibly bu
 stays out (a server error a route raises is logged with it, cut); a service that has something to tell a
 client raises a ``LedgerError``, whose message is built inside its class.
 
+A bug is logged once, by the chassis, and never reaches the ASGI server (which would log it again, message
+and all): see ``_Contained``.
+
 Each request is traced by FastAPI's own instrumentation into the provider the app is given, under its route
 template and continuing the caller's ``traceparent``: whatever the route does (an event it stores, say) is
 part of that trace. A failure is recorded by its type. The rest of FastAPI's telemetry stays off (see
@@ -18,7 +21,7 @@ import re
 from dataclasses import dataclass, field
 from http import HTTPMethod, HTTPStatus
 from time import perf_counter
-from typing import ClassVar, Final, NamedTuple, Self, TypedDict, final
+from typing import ClassVar, Final, NamedTuple, Self, TypedDict, final, override
 lazy from collections.abc import Awaitable, Callable, Mapping, MutableMapping, Sequence
 lazy from contextlib import AbstractAsyncContextManager
 
@@ -35,6 +38,7 @@ lazy from fastapi import APIRouter, Request
 lazy from fastapi.telemetry import TelemetryConfig
 lazy from opentelemetry.trace import TracerProvider
 lazy from prometheus_client import CollectorRegistry
+lazy from starlette.types import ASGIApp
 
 from ledger_kernel.errors import ErrorKind, LedgerError, described, truncate
 lazy from ledger_platform.health import Health
@@ -43,6 +47,9 @@ PROBLEM_JSON: Final = "application/problem+json"
 _OPERATIONAL: Final = frozenset({"/livez", "/readyz", "/metrics"})
 """The routes probers and scrapers call every few seconds: not traced, their spans would bury the requests."""
 _UNMATCHED: Final = "unmatched"
+_INTERNAL: Final = "internal"
+_ROUTE: Final = "ledger.route"
+"""Where in the scope of a request ``_Measure`` leaves the template of its route."""
 _UNREGISTERED: Final = "unregistered"
 _OTHER_METHOD: Final = "other"
 _METHODS: Final = frozenset(method.value for method in HTTPMethod)
@@ -281,10 +288,54 @@ class _Measure:
         self._observe(scope, started, status)
 
     def _observe(self, scope: _Scope, started: float, status: int) -> None:
-        # The router names the route while it dispatches, so it is known only after the application ran.
-        self._duration.labels(
-            _method_label(scope["method"]), self._labels.of_scope(scope), str(status)
-        ).observe(perf_counter() - started)
+        """Measure the request, and leave its route in the scope (``_ROUTE``) for ``_Contained``.
+
+        The router names the route while it dispatches, so it is known only after the application ran.
+        """
+        route = scope[_ROUTE] = self._labels.of_scope(scope)
+        self._duration.labels(_method_label(scope["method"]), route, str(status)).observe(
+            perf_counter() - started
+        )
+
+
+@final
+class _Contained:
+    """The outermost layer of the app: no exception of a request reaches the server; each is logged once.
+
+    Starlette answers an exception nothing else handled (with the ``internal`` problem, see ``bug``) and then
+    raises it again, for the server to log a second time, message and all. It ends here: logged once, under
+    the route ``_Measure`` saw it take, and never raised. A response that had begun is left unfinished, so
+    that the server closes the connection: a client never takes a cut body for a whole one. Anything that is
+    not an ``Exception`` (a cancellation: the client left, the server stops) goes on.
+    """
+
+    __slots__ = ("_app",)
+
+    def __init__(self, app: _ASGIApp) -> None:
+        self._app = app
+
+    async def __call__(self, scope: _Scope, receive: _Receive, send: _Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+        try:
+            await self._app(scope, receive, send)
+        except Exception:
+            _logger.exception(
+                "http.unhandled_error",
+                method=scope["method"],
+                route=scope.get(_ROUTE, _UNMATCHED),
+                code=_INTERNAL,
+            )
+
+
+@final
+class _ChassisApp(FastAPI):
+    """FastAPI, with ``_Contained`` around everything Starlette builds: its error middleware included."""
+
+    @override
+    def build_middleware_stack(self) -> ASGIApp:
+        return _Contained(super().build_middleware_stack())
 
 
 def _problem(
@@ -357,7 +408,7 @@ def _answer_errors_as_problems(app: FastAPI, labels: _RouteLabels) -> None:
         if error.kind is ErrorKind.INTERNAL:
             # A defect of ours: the client gets what any bug gets, the log gets the code and the message.
             _report_defect(request, error, error.code, labels)
-            return _problem(status, "internal")
+            return _problem(status, _INTERNAL)
         return _problem(status, error.code, detail=str(error) or None)
 
     @app.exception_handler(RequestValidationError)
@@ -390,8 +441,9 @@ def _answer_errors_as_problems(app: FastAPI, labels: _RouteLabels) -> None:
 
     @app.exception_handler(Exception)
     async def bug(request: Request, error: Exception) -> JSONResponse:
-        _report_defect(request, error, "internal", labels)
-        return _problem(HTTPStatus.INTERNAL_SERVER_ERROR, "internal")
+        """The answer to an exception nothing else handled; ``_Contained`` logs it, once."""
+        del request, error
+        return _problem(HTTPStatus.INTERNAL_SERVER_ERROR, _INTERNAL)
 
 
 def _add_operational_routes(app: FastAPI, health: Health, registry: CollectorRegistry) -> None:
@@ -456,7 +508,7 @@ def create_app(
     complete before this returns: a route added afterwards, to the app or to a router already included, is
     measured as ``unregistered`` (and logged once), never under a path that may lack a prefix.
     """
-    app = FastAPI(
+    app = _ChassisApp(
         title=info.title,
         version=info.version,
         lifespan=lifespan,
