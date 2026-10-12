@@ -19,6 +19,9 @@ pydantic and FastAPI say of an input (``input_value=...``). The log shows instea
   there are, and where and of which type the first twenty are.
 
 Any other exception keeps its message: it is ours, or a library's that carries no data.
+
+Every record written inside a span names the trace and span of the work in progress (``trace_id``,
+``span_id``, lowercase hex): a log line leads to its trace.
 """
 
 import io
@@ -34,6 +37,8 @@ lazy from typing import TextIO
 import psycopg
 import structlog
 from fastapi.exceptions import ValidationException
+from opentelemetry import trace
+from opentelemetry.trace import format_span_id, format_trace_id
 from pydantic import ConfigDict, TypeAdapter, ValidationError, with_config
 from sqlalchemy.exc import StatementError
 lazy from structlog.typing import EventDict, ExcInfo, Processor
@@ -280,10 +285,21 @@ class _ProcessFields:
         return event_dict
 
 
+def _trace_fields(logger: object, method_name: str, event_dict: EventDict) -> EventDict:
+    """Every record written inside a span names its trace and span, so a log line leads to its trace."""
+    del logger, method_name
+    context = trace.get_current_span().get_span_context()
+    if context.is_valid:
+        event_dict.setdefault("trace_id", format_trace_id(context.trace_id))
+        event_dict.setdefault("span_id", format_span_id(context.span_id))
+    return event_dict
+
+
 def _shared_processors(settings: ServiceSettings) -> list[Processor]:
     """What both structlog records and standard-library records go through, in this order."""
     return [
         structlog.contextvars.merge_contextvars,
+        _trace_fields,
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso", utc=True),

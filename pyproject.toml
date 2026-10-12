@@ -252,8 +252,8 @@ exhaustive = true
 layers = [
     "service",
     "schema",
-    "web | grpc_server | consumer",
-    "outbox | idempotency",
+    "web | grpc_server | consumer | routes",
+    "outbox | idempotency | authorization",
     "streams",
     "database | tracing | health | logs | jetstream | authentication",
     "settings | options | lifecycle | supervision",

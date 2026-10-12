@@ -6,6 +6,8 @@ lazy from collections.abc import AsyncGenerator
 import pytest
 import structlog
 from fastapi.exceptions import RequestValidationError, ResponseValidationError
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.trace import format_span_id, format_trace_id
 from pydantic import BaseModel, JsonValue, SecretStr, TypeAdapter, ValidationError
 from sqlalchemy import Column, MetaData, Table, Text, insert
 from sqlalchemy.engine import make_url
@@ -178,6 +180,32 @@ def test_request_scoped_values_are_merged_and_the_callers_context_is_left_alone(
     (line,) = lines(capsys.readouterr().out)
     assert line["request_id"] == "r-1"
     assert structlog.contextvars.get_contextvars() == {"request_id": "r-1"}
+
+
+def test_a_record_written_inside_a_span_carries_its_trace_and_span(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_logging(settings(LogFormat.JSON))
+    tracer = TracerProvider().get_tracer("test")
+    with tracer.start_as_current_span("work") as span:
+        structlog.stdlib.get_logger("ledger.test").info("inside")
+        logging.getLogger("lib").info("inside too")
+    context = span.get_span_context()
+    records = lines(capsys.readouterr().out)
+    assert len(records) == 2
+    for line in records:
+        assert (line["trace_id"], line["span_id"]) == (
+            format_trace_id(context.trace_id),
+            format_span_id(context.span_id),
+        )
+
+
+def test_a_record_written_outside_any_span_carries_no_trace(capsys: pytest.CaptureFixture[str]) -> None:
+    configure_logging(settings(LogFormat.JSON))
+    structlog.stdlib.get_logger("ledger.test").info("outside")
+    (line,) = lines(capsys.readouterr().out)
+    assert "trace_id" not in line
+    assert "span_id" not in line
 
 
 # ── Exceptions that quote data ──────────────────────────────────────────────────
