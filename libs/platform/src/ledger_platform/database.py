@@ -357,6 +357,9 @@ class Database:
         service passes its own name. Beyond ``pool_size`` the pool opens as many again, for bursts. The URL
         must not carry ``application_name``, ``connect_timeout`` or ``options``: the chassis sets them from
         its arguments.
+
+        The text of a SQL error never carries the values bound to the statement (tenant ids, payloads): it
+        reaches logs, and a value must not outlive the statement it was bound to.
         """
         if pool_size < 1:
             raise InvalidDatabaseOptionError(option="pool_size", requirement="at least 1", value=pool_size)
@@ -370,6 +373,7 @@ class Database:
             pool_timeout=limits.pool_timeout.total_seconds(),
             pool_recycle=limits.pool_recycle // _SECOND,
             pool_pre_ping=True,
+            hide_parameters=True,
             connect_args={
                 "application_name": application_name,
                 "connect_timeout": ceil(limits.connect_timeout / _SECOND),

@@ -1,19 +1,20 @@
 from datetime import timedelta
+from typing import final, override
 lazy from collections.abc import Callable
 
 import pytest
-from nats.js.api import RetentionPolicy, StorageType, StreamConfig
-from nats.js.errors import APIError
+from nats.js.api import RetentionPolicy, StorageType, StreamConfig, StreamInfo, StreamState
+from nats.js.errors import APIError, NotFoundError
 lazy from nats.js import JetStreamContext
 
 from ledger_platform.streams import (
     DEAD_LETTERS,
     InvalidStreamSpecError,
+    StreamApi,
     StreamRefusedError,
     StreamSpec,
     ensure_stream,
 )
-lazy from ledger_platform.streams import StreamApi
 
 STREAM = StreamSpec(name="TEST", subjects=("test.>",))
 
@@ -143,11 +144,56 @@ async def test_a_stream_nats_refuses_to_create_is_named(jetstream: JetStreamCont
         ),
         ("max_age", lambda: StreamSpec(name="TEST", subjects=("a",), max_age=timedelta(0))),
         ("max_age", lambda: StreamSpec(name="TEST", subjects=("a",), max_age=-timedelta(1))),
+        (
+            "duplicate_window",
+            lambda: StreamSpec(
+                name="TEST", subjects=("a",), duplicate_window=timedelta(days=2), max_age=timedelta(days=1)
+            ),
+        ),
     ],
 )
 def test_a_spec_that_would_misconfigure_the_stream_is_refused(
     field: str, spec: Callable[[], StreamSpec]
 ) -> None:
-    """Nothing means "everything" to NATS: no subjects store the stream's own name, zero age never expires."""
+    """Nothing means "everything" to NATS: no subjects store the stream's own name, zero age never expires,
+    and a window longer than the age is a stream NATS refuses."""
     with pytest.raises(InvalidStreamSpecError, match=field):
         spec()
+
+
+def test_a_window_as_long_as_the_age_is_allowed() -> None:
+    spec = StreamSpec(
+        name="TEST", subjects=("a",), duplicate_window=timedelta(hours=1), max_age=timedelta(hours=1)
+    )
+    assert spec.duplicate_window == spec.max_age
+
+
+@final
+class Unserializable(StreamApi):
+    """JetStream when nats-py cannot even build the request (it raises ``ValueError`` before sending)."""
+
+    def __init__(self, *, exists: bool) -> None:
+        self._exists = exists
+
+    @override
+    async def stream_info(self, name: str) -> StreamInfo:
+        if not self._exists:
+            raise NotFoundError
+        return StreamInfo(config=StreamConfig(name=name), state=StreamState(0, 0, 0, 0, 0))
+
+    @override
+    async def add_stream(self, config: StreamConfig) -> StreamInfo:
+        raise ValueError
+
+    @override
+    async def update_stream(self, config: StreamConfig) -> StreamInfo:
+        raise ValueError
+
+
+@pytest.mark.parametrize(
+    "api", [Unserializable(exists=True), Unserializable(exists=False)], ids=["on update", "on create"]
+)
+async def test_a_request_nats_py_cannot_build_is_a_refused_stream_too(api: StreamApi) -> None:
+    with pytest.raises(StreamRefusedError, match="'TEST'") as refused:
+        await ensure_stream(api, STREAM)
+    assert isinstance(refused.value.__cause__, ValueError)

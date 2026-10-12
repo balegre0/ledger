@@ -24,7 +24,8 @@ class InvalidStreamSpecError(LedgerError):
 class StreamRefusedError(LedgerError):
     """JetStream refused to create or update a stream, and left it as it was.
 
-    Typically its subjects overlap with another stream's. The cause is the server's own answer.
+    Typically its subjects overlap with another stream's. The cause is the server's own answer, or nats-py's
+    when it could not even build the request.
     """
 
     code: ClassVar[str] = "stream_refused"
@@ -39,13 +40,19 @@ class StreamSpec:
     """A stream and the subjects it stores.
 
     JetStream fills in what a stream leaves out: one without subjects stores the subject of its own name, and
-    a zero age never expires. Both are refused here instead of defaulted.
+    a zero age never expires. Both are refused here instead of defaulted, and so is a window longer than the
+    age, which JetStream refuses.
     """
 
     name: str
     subjects: tuple[str, ...]
     duplicate_window: timedelta = timedelta(minutes=2)
-    """How long a repeated ``Nats-Msg-Id`` is recognized and dropped: the relay may publish an event twice."""
+    """How long a repeated ``Nats-Msg-Id`` is recognized and dropped: the relay may publish an event twice.
+
+    It must be longer than the longest gap between two attempts to publish the same event: the outbox relay's
+    retry ceiling plus its publish timeout (50 seconds at most). An event published again after the window
+    is stored twice.
+    """
     max_age: timedelta = timedelta(days=7)
     """How long an event stays in the stream, for consumers that were down and for replays."""
 
@@ -57,6 +64,12 @@ class StreamSpec:
         for field, value in (("duplicate_window", self.duplicate_window), ("max_age", self.max_age)):
             if value <= timedelta(0):
                 raise InvalidStreamSpecError(field=field, requirement="longer than zero", value=value)
+        if self.duplicate_window > self.max_age:
+            raise InvalidStreamSpecError(
+                field="duplicate_window",
+                requirement=f"at most max_age ({self.max_age})",
+                value=self.duplicate_window,
+            )
 
 
 DEAD_LETTERS: Final = StreamSpec(
@@ -97,7 +110,12 @@ async def ensure_stream(jetstream: StreamApi, spec: StreamSpec) -> None:
     """Create the stream with file storage, or bring an existing one's subjects and limits to ``spec``.
 
     Nothing else of an existing stream changes: its storage, retention and replicas are what whoever made it
-    chose, and starting a service must never move data. ``StreamRefusedError`` when JetStream refuses.
+    chose, and starting a service must never move data. ``StreamRefusedError`` when JetStream refuses, or
+    nats-py cannot build the request.
+
+    Specs only move forward. Replicas of different versions start during a rollout and each applies its own
+    spec over what the others declared, so a new spec must keep everything an older one declares valid (more
+    subjects, no shorter limits): otherwise an older replica restarting after a newer one shrinks the stream.
     """
     try:
         existing = await jetstream.stream_info(spec.name)
@@ -113,5 +131,5 @@ async def ensure_stream(jetstream: StreamApi, spec: StreamSpec) -> None:
     )
     try:
         await apply(config)
-    except APIError as error:
+    except (APIError, ValueError) as error:  # nats-py raises ValueError when it cannot serialize the config
         raise StreamRefusedError(spec.name) from error

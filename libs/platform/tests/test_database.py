@@ -24,7 +24,7 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError, ProgrammingError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import QueuePool
@@ -383,6 +383,22 @@ async def test_a_failing_callback_neither_hides_the_commit_nor_stops_the_others(
 
 
 # ── Ping and the pool ───────────────────────────────────────────────────────────
+
+
+BOUND_VALUE = "a-value-that-must-not-leak"
+
+
+async def fail_on_a_missing_table(database: Database, value: str) -> None:
+    async with database.transaction(ALPHA) as unit:
+        await unit.connection.execute(text("SELECT * FROM no_such_table WHERE name = :name"), {"name": value})
+
+
+async def test_a_failing_statement_does_not_echo_the_values_bound_to_it(database: Database) -> None:
+    """The text of an error ends up in logs: what was bound to the statement (a payload, a name) stays out."""
+    with pytest.raises(ProgrammingError) as failed:
+        await fail_on_a_missing_table(database, BOUND_VALUE)
+    assert "no_such_table" in str(failed.value)
+    assert BOUND_VALUE not in str(failed.value)
 
 
 async def test_ping(database: Database) -> None:
