@@ -90,6 +90,22 @@ async def test_an_answer_is_kept_for_its_ttl() -> None:
     assert source.asked == 2
 
 
+async def test_an_answer_is_kept_for_its_ttl_from_when_it_was_asked_for() -> None:
+    source, moment = Counting(), Moment()
+    source.grant(ALICE, COMPANY, READ)
+    source.hold = asyncio.Event()
+    cache = CachedPermissions(source, ttl=30.0, clock=moment)
+    slow = asyncio.create_task(cache.permissions(ALICE, COMPANY))
+    await source.answering.wait()
+    moment.now = 20.0  # the source took twenty seconds to answer
+    source.hold.set()
+    assert await slow == READ
+    source.hold = None
+    moment.now = 30.0  # thirty seconds after the question, ten after the answer
+    await cache.permissions(ALICE, COMPANY)
+    assert source.asked == 2
+
+
 async def test_answers_are_kept_per_principal_and_company() -> None:
     source = Counting()
     source.grant(ALICE, COMPANY, READ)
@@ -137,6 +153,8 @@ async def test_an_answer_fetched_before_a_change_is_not_kept_after_it() -> None:
 
 async def test_the_least_recently_used_answers_go_beyond_the_capacity() -> None:
     source = Counting()
+    for principal, company in ((ALICE, COMPANY), (BOB, COMPANY), (ALICE, OTHER_COMPANY)):
+        source.grant(principal, company, READ)
     cache = CachedPermissions(source, capacity=2)
     await cache.permissions(ALICE, COMPANY)
     await cache.permissions(BOB, COMPANY)
@@ -149,10 +167,58 @@ async def test_the_least_recently_used_answers_go_beyond_the_capacity() -> None:
     assert source.asked == 4
 
 
+async def test_companies_without_a_role_never_push_out_the_answers_of_others() -> None:
+    source = Counting()
+    source.grant(ALICE, COMPANY, READ)
+    cache = CachedPermissions(source, capacity=1, empty_capacity=2)
+    await cache.permissions(ALICE, COMPANY)
+    for _ in range(10):  # random company ids: no role in any of them
+        await cache.permissions(BOB, CompanyId(new_id()))
+    assert await cache.permissions(ALICE, COMPANY) == READ
+    assert source.asked == 11
+
+
+async def test_an_answer_without_a_role_is_kept_within_its_own_bound() -> None:
+    source = Counting()
+    cache = CachedPermissions(source, empty_capacity=2)
+    await cache.permissions(ALICE, COMPANY)
+    await cache.permissions(BOB, COMPANY)
+    await cache.permissions(ALICE, COMPANY)  # kept, and used again: Bob's is now the oldest
+    assert source.asked == 2
+    await cache.permissions(ALICE, OTHER_COMPANY)  # one too many: Bob's goes
+    await cache.permissions(BOB, COMPANY)
+    assert source.asked == 4
+
+
+async def test_an_answer_moves_between_the_bounds_as_the_role_comes_and_goes() -> None:
+    source, moment = Counting(), Moment()
+    cache = CachedPermissions(source, ttl=30.0, clock=moment)
+    assert await cache.permissions(ALICE, COMPANY) == frozenset()
+    source.grant(ALICE, COMPANY, READ)
+    cache.forget(ORGANIZATION, COMPANY, SubjectId("alice"))
+    assert await cache.permissions(ALICE, COMPANY) == READ
+    source.grant(ALICE, COMPANY, frozenset())
+    moment.now = 30.0
+    assert await cache.permissions(ALICE, COMPANY) == frozenset()
+    source.grant(ALICE, COMPANY, MANAGE)
+    moment.now = 60.0
+    assert await cache.permissions(ALICE, COMPANY) == MANAGE  # each answer moved between the two bounds
+    assert await cache.permissions(ALICE, COMPANY) == MANAGE
+    assert source.asked == 4
+
+
 @pytest.mark.parametrize(
-    ("ttl", "capacity", "option"),
-    [(0.0, 10, "ttl"), (float("inf"), 10, "ttl"), (float("nan"), 10, "ttl"), (30.0, 0, "capacity")],
+    ("ttl", "capacity", "empty_capacity", "option"),
+    [
+        (0.0, 10, 10, "ttl"),
+        (float("inf"), 10, 10, "ttl"),
+        (float("nan"), 10, 10, "ttl"),
+        (30.0, 0, 10, "capacity"),
+        (30.0, 10, 0, "empty_capacity"),
+    ],
 )
-def test_a_cache_that_cannot_work_is_refused(ttl: float, capacity: int, option: str) -> None:
+def test_a_cache_that_cannot_work_is_refused(
+    ttl: float, capacity: int, empty_capacity: int, option: str
+) -> None:
     with pytest.raises(InvalidAuthorizationOptionError, match=f"authorization option {option} must be"):
-        CachedPermissions(Counting(), ttl=ttl, capacity=capacity)
+        CachedPermissions(Counting(), ttl=ttl, capacity=capacity, empty_capacity=empty_capacity)

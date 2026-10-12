@@ -6,13 +6,16 @@ import httpx
 import pytest
 import structlog
 from fastapi import APIRouter, Depends, Request
+from fastapi.exceptions import HTTPException
 from hypothesis import given
 from hypothesis import strategies as st
 from pydantic import BaseModel, TypeAdapter
+from structlog.testing import capture_logs
 lazy from fastapi import FastAPI, Response
 lazy from prometheus_client import CollectorRegistry
 
 from ledger_kernel.access import Permission, Principal, SubjectId
+from ledger_kernel.errors import LedgerError
 from ledger_kernel.ids import CompanyId, new_id
 from ledger_kernel.pagination import encode_cursor
 from ledger_platform.authentication import TokenPolicy, TokenVerifier, organization_of
@@ -41,6 +44,7 @@ from ledger_testing.issuer import AUDIENCE, ISSUER, PROVIDER_ORGANIZATION, SUBJE
 lazy from ledger_kernel.ids import OrganizationId
 lazy from ledger_kernel.pagination import PageRequest
 lazy from ledger_platform.authorization import CompanyAccess
+lazy from ledger_platform.routes import InCompany
 lazy from ledger_platform.tracing import Tracing
 
 COMPANY: Final = CompanyId(new_id())
@@ -65,6 +69,24 @@ DOCUMENT: Final = TypeAdapter(Document)
 
 class Thing(BaseModel):
     name: str
+
+
+class BrokenError(Exception):
+    """A defect of a route."""
+
+    def __init__(self) -> None:
+        super().__init__("the route broke")
+
+
+def fail(how: str) -> None:
+    """Fail as a route can: a bug, a defect the platform names, or a server error it raises."""
+    match how:
+        case "bug":
+            raise BrokenError
+        case "internal":
+            raise LedgerError
+        case _:
+            raise HTTPException(503)
 
 
 @final
@@ -97,6 +119,19 @@ def applied(version: int, condition: IfMatch) -> dict[str, int]:
     return {"version": version}
 
 
+def add_defective_routes(routes: APIRouter, in_path: InCompany, in_header: InCompany) -> None:
+    """Routes that fail on the server's side, after the caller and its company are known."""
+
+    @routes.get("/companies/{company_id}/broken/{how}")
+    async def broken(how: str, access: Annotated[CompanyAccess, Depends(in_path)]) -> None:
+        del access
+        fail(how)
+
+    @routes.get("/companies/{company_id}/of-the-header")
+    async def ambiguous(access: Annotated[CompanyAccess, Depends(in_header)]) -> None:
+        del access
+
+
 def router(verifier: TokenVerifier, grants: Grants) -> APIRouter:
     routes = APIRouter()
     caller = authenticated(verifier)
@@ -119,6 +154,8 @@ def router(verifier: TokenVerifier, grants: Grants) -> APIRouter:
     @routes.get("/things")
     async def things_of_the_header(access: Annotated[CompanyAccess, Depends(in_header)]) -> dict[str, str]:
         return {"company": str(access.tenant.company), "organization": str(access.tenant.organization)}
+
+    add_defective_routes(routes, in_path, in_header)
 
     @routes.get("/pages")
     async def pages(page: Annotated[PageRequest, Depends(page_request)]) -> dict[str, object]:
@@ -336,6 +373,58 @@ async def test_the_company_can_come_in_a_header(
     assert (other.status_code, problem_code(other)) == (404, "company_not_found")
 
 
+async def test_the_company_header_is_sent_once(
+    client: httpx.AsyncClient, issuer: LocalIssuer, grants: Grants
+) -> None:
+    grants.grant(COMPANY, Permission.COMPANY_READ)
+    grants.grant(OTHER_COMPANY, Permission.COMPANY_READ)
+    headers = [
+        ("Authorization", f"Bearer {issuer.token()}"),
+        (COMPANY_HEADER, str(COMPANY)),
+        (COMPANY_HEADER, str(OTHER_COMPANY)),
+    ]
+    response = await client.get("/things", headers=headers)
+    assert (response.status_code, problem_code(response)) == (422, "invalid_header")
+    assert COMPANY_HEADER in response.text
+    assert grants.asked == 0
+
+
+async def test_a_route_that_has_its_company_in_the_path_cannot_take_it_from_a_header(
+    client: httpx.AsyncClient, issuer: LocalIssuer, grants: Grants
+) -> None:
+    grants.grant(COMPANY, Permission.COMPANY_READ)
+    headers = bearer(issuer.token()) | {COMPANY_HEADER: str(COMPANY)}
+    with capture_logs() as logs:
+        response = await client.get(f"/companies/{COMPANY}/of-the-header", headers=headers)
+    assert (response.status_code, problem_code(response)) == (500, "internal")
+    (logged,) = [log for log in logs if log["event"] == "http.unhandled_error"]
+    assert logged["code"] == "ambiguous_company"
+    assert grants.asked == 0
+
+
+@pytest.mark.parametrize(
+    ("how", "event"),
+    [
+        ("bug", "http.unhandled_error"),
+        ("internal", "http.unhandled_error"),
+        ("unavailable", "http.server_error"),
+    ],
+)
+async def test_the_log_of_a_server_failure_names_the_caller_and_its_company(
+    client: httpx.AsyncClient, issuer: LocalIssuer, grants: Grants, how: str, event: str
+) -> None:
+    grants.grant(COMPANY, Permission.COMPANY_READ)
+    with capture_logs() as logs:
+        response = await client.get(f"/companies/{COMPANY}/broken/{how}", headers=bearer(issuer.token()))
+    assert response.status_code >= 500
+    (logged,) = [log for log in logs if log["event"] == event]
+    assert (logged["organization_id"], logged["subject"], logged["company_id"]) == (
+        str(organization_of(PROVIDER_ORGANIZATION)),
+        SUBJECT,
+        str(COMPANY),
+    )
+
+
 async def test_the_company_is_never_looked_up_for_an_unauthenticated_caller(
     client: httpx.AsyncClient, grants: Grants
 ) -> None:
@@ -380,6 +469,19 @@ async def test_an_update_without_if_match_is_refused(client: httpx.AsyncClient) 
     assert (response.status_code, problem_code(response)) == (428, "precondition_required")
 
 
+async def test_if_match_may_come_in_several_lines(client: httpx.AsyncClient) -> None:
+    lines = [("If-Match", '"1"'), ("If-Match", '"2", "3"')]
+    response = await client.patch("/versions/3", headers=lines)
+    assert BODY.validate_json(response.content) == {"admitted": True}
+
+
+async def test_an_if_match_too_long_in_all_is_refused(client: httpx.AsyncClient) -> None:
+    line = ", ".join(f'"{version}"' for version in range(150))
+    assert len(line) < 1024
+    response = await client.patch("/versions/3", headers=[("If-Match", line), ("If-Match", line)])
+    assert (response.status_code, problem_code(response)) == (422, "invalid_header")
+
+
 @pytest.mark.parametrize(
     ("header", "admitted"),
     [
@@ -404,6 +506,7 @@ def test_if_match_reads_strong_tags_only() -> None:
     assert parse_if_match("*") == IfMatch(None)
     assert parse_if_match('"\N{ARABIC-INDIC DIGIT THREE}"') == IfMatch(frozenset())
     assert parse_if_match('"3') == IfMatch(frozenset())
+    assert parse_if_match('"03", "0", "00"') == IfMatch(frozenset({0}))  # one spelling per version
     assert IfMatch(None).admits(12)
 
 

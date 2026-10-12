@@ -255,7 +255,7 @@ layers = [
     "web | grpc_server | consumer | routes",
     "outbox | idempotency | authorization",
     "streams",
-    "database | tracing | health | logs | jetstream | authentication",
+    "database | tracing | health | logs | jetstream | authentication | request_fields",
     "settings | options | lifecycle | supervision",
 ]
 

@@ -20,9 +20,13 @@ lazy from ledger_kernel.clock import MonotonicClock
 lazy from ledger_kernel.ids import CompanyId, OrganizationId, Tenant
 
 DEFAULT_TTL: Final = 30.0
-"""Seconds an answer is kept: how long a revoked role may still work in another service, at most."""
+"""Seconds an answer is kept from when it was asked for: how long a revoked role may still work in another
+service, at most."""
 DEFAULT_CAPACITY: Final = 10_000
-"""How many answers are kept, the most recently used: a bound on the memory a flood of callers can take."""
+"""How many answers that grant something are kept, the most recently used."""
+DEFAULT_EMPTY_CAPACITY: Final = 1_000
+"""How many answers without a role are kept, apart: a caller asking about random company ids fills these
+only, and never pushes out the answers of others."""
 
 
 class PermissionDeniedError(ForbiddenError):
@@ -91,15 +95,47 @@ type _Key = tuple[OrganizationId, CompanyId, SubjectId]
 
 
 @final
-class CachedPermissions(PermissionSource):
-    """A ``PermissionSource`` that keeps answers ``ttl`` seconds, the ``capacity`` most recently used of them.
+class _Kept:
+    """Answers by whose they are, each with when it was asked for: the ``capacity`` most recently used."""
 
-    ``forget`` drops an answer at once, when identity announces a membership change. One fetched before a
-    ``forget`` and arriving after it is handed to its caller but not kept: it may be the old one. Two requests
-    that miss together ask the source twice; both answers are right.
+    __slots__ = ("_answers", "_capacity")
+
+    def __init__(self, capacity: int) -> None:
+        self._capacity = capacity
+        self._answers: OrderedDict[_Key, tuple[float, frozenset[Permission]]] = OrderedDict()
+
+    def fresh(self, key: _Key, since: float) -> frozenset[Permission] | None:
+        """The answer kept for ``key`` if it was asked for after ``since``, now the most recently used."""
+        kept = self._answers.get(key)
+        if kept is None or kept[0] <= since:
+            return None
+        self._answers.move_to_end(key)
+        return kept[1]
+
+    def keep(self, key: _Key, asked: float, answer: frozenset[Permission]) -> None:
+        """Keep ``answer``, asked for at ``asked``; the least recently used beyond the capacity go."""
+        self._answers[key] = (asked, answer)
+        self._answers.move_to_end(key)
+        while len(self._answers) > self._capacity:
+            self._answers.popitem(last=False)
+
+    def drop(self, key: _Key) -> None:
+        """Drop the answer kept for ``key``, if any."""
+        self._answers.pop(key, None)
+
+
+@final
+class CachedPermissions(PermissionSource):
+    """A ``PermissionSource`` that keeps answers ``ttl`` seconds from when they were asked for.
+
+    The ``capacity`` most recently used answers that grant something are kept, and apart from them the
+    ``empty_capacity`` most recently used answers without a role: a caller trying random company ids churns
+    the latter only. ``forget`` drops an answer at once, when identity announces a membership change. One
+    fetched before a ``forget`` and arriving after it is handed to its caller but not kept: it may be the old
+    one. Two requests that miss together ask the source twice; both answers are right.
     """
 
-    __slots__ = ("_answers", "_capacity", "_clock", "_epoch", "_source", "_ttl")
+    __slots__ = ("_clock", "_empty", "_epoch", "_granting", "_source", "_ttl")
 
     def __init__(
         self,
@@ -107,35 +143,40 @@ class CachedPermissions(PermissionSource):
         *,
         ttl: float = DEFAULT_TTL,
         capacity: int = DEFAULT_CAPACITY,
+        empty_capacity: int = DEFAULT_EMPTY_CAPACITY,
         clock: MonotonicClock = monotonic,
     ) -> None:
         require_seconds(InvalidAuthorizationOptionError, "ttl", ttl)
         require_at_least(InvalidAuthorizationOptionError, "capacity", capacity)
+        require_at_least(InvalidAuthorizationOptionError, "empty_capacity", empty_capacity)
         self._source = source
         self._ttl = ttl
-        self._capacity = capacity
         self._clock = clock
-        self._answers: OrderedDict[_Key, tuple[float, frozenset[Permission]]] = OrderedDict()
+        self._granting = _Kept(capacity)
+        self._empty = _Kept(empty_capacity)
+        """A key is kept in one of the two at most: an answer kept in one drops the other's."""
         self._epoch = 0
         """How many times something was forgotten: an answer fetched across a change is not kept."""
 
     @override
     async def permissions(self, principal: Principal, company: CompanyId) -> frozenset[Permission]:
         key = (principal.organization, company, principal.subject)
-        cached = self._answers.get(key)
-        if cached is not None and self._clock() - cached[0] < self._ttl:
-            self._answers.move_to_end(key)
-            return cached[1]
+        asked = self._clock()
+        for kept in (self._granting, self._empty):
+            answer = kept.fresh(key, asked - self._ttl)
+            if answer is not None:
+                return answer
         epoch = self._epoch
         answer = await self._source.permissions(principal, company)
         if epoch == self._epoch:  # nothing was forgotten while the source answered
-            self._answers[key] = (self._clock(), answer)
-            self._answers.move_to_end(key)
-            while len(self._answers) > self._capacity:
-                self._answers.popitem(last=False)
+            kept, other = (self._granting, self._empty) if answer else (self._empty, self._granting)
+            other.drop(key)
+            kept.keep(key, asked, answer)  # from when it was asked for: the ttl bounds its age, wait included
         return answer
 
     def forget(self, organization: OrganizationId, company: CompanyId, subject: SubjectId) -> None:
         """Drop what is kept about ``subject`` in ``company``, and keep no answer fetched before this."""
         self._epoch += 1
-        self._answers.pop((organization, company, subject), None)
+        key = (organization, company, subject)
+        self._granting.drop(key)
+        self._empty.drop(key)

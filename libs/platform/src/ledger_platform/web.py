@@ -9,7 +9,8 @@ stays out (a server error a route raises is logged with it, cut); a service that
 client raises a ``LedgerError``, whose message is built inside its class.
 
 A bug is logged once, by the chassis, and never reaches the ASGI server (which would log it again, message
-and all): see ``_Contained``.
+and all): see ``_Contained``. A failure's log line names the caller and its company when the route's
+dependencies learned them (``request_fields``).
 
 Each request is traced by FastAPI's own instrumentation into the provider the app is given, under its route
 template and continuing the caller's ``traceparent``: whatever the route does (an event it stores, say) is
@@ -41,6 +42,7 @@ lazy from prometheus_client import CollectorRegistry
 lazy from starlette.types import ASGIApp
 
 from ledger_kernel.errors import ErrorKind, LedgerError, described, truncate
+from ledger_platform.request_fields import remembered
 lazy from ledger_platform.health import Health
 
 PROBLEM_JSON: Final = "application/problem+json"
@@ -332,6 +334,7 @@ class _Contained:
                 method=scope["method"],
                 route=scope.get(_ROUTE, _UNMATCHED),
                 code=_INTERNAL,
+                **remembered(scope),
             )
 
 
@@ -401,13 +404,17 @@ def _logged(detail: object) -> str:
 
 
 def _report_defect(request: Request, error: Exception, code: str, labels: _RouteLabels) -> None:
-    """Log where a defect happened and what it was, never the request: it may carry credentials."""
+    """Log where a defect happened, whose request it was and what it was; never the request itself.
+
+    Whose: what the route's dependencies learned of the caller (``request_fields``), never its credentials.
+    """
     _logger.error(
         "http.unhandled_error",
         method=request.method,
         route=labels.of_scope(request.scope),
         code=code,
         exc_info=error,
+        **remembered(request.scope),
     )
 
 
@@ -447,6 +454,7 @@ def _answer_errors_as_problems(app: FastAPI, labels: _RouteLabels) -> None:
                 status=error.status_code,
                 code=code,
                 detail=_logged(error.detail),
+                **remembered(request.scope),
             )
         if not is_body_allowed_for_status_code(error.status_code):
             return Response(status_code=error.status_code, headers=error.headers)
