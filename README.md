@@ -111,10 +111,11 @@ from ledger.common.v1.money_pb2 import Money
 from ledger_contracts.envelope import Envelope
 from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, parse_id
 from ledger_platform.consumer import ConsumerSpec
-from ledger_platform.service import Events, Interfaces, Runtime, RuntimeDependency, Service, ServiceLimits
+from ledger_platform.service import Events, Interfaces, Service, ServiceLimits
 from ledger_platform.settings import ServiceSettings
 from ledger_platform.streams import StreamSpec
 lazy from ledger_platform.database import UnitOfWork
+lazy from ledger_platform.service import Runtime, RuntimeDependency
 
 
 class PaymentsSettings(ServiceSettings):
@@ -190,7 +191,9 @@ app = service.app  # any ASGI server runs it; its lifespan starts and stops the 
 The tenant comes from the URL only so that the example runs: where it really comes from, the gateway's verified
 claims, is the authorization context of milestone 2. `Money` is the only message in `ledger_contracts` so far;
 a service declares its own event messages (`ledger.events.<service>.v1.PaymentRecorded`) in `libs/contracts/proto`.
-`Runtime` is imported for real, not `lazy`, because FastAPI reads a route's annotations at run time.
+`Runtime` and `RuntimeDependency` are `lazy` imports although a route signature uses them: a lazy import
+resolves on first use, which is when FastAPI reads the signature (the types of a pydantic model's fields stay
+ordinary imports).
 
 The example runs no gRPC server, because `ledger_contracts` defines no service yet. With a `.proto` service and the
 code `poe proto` generates from it, the registration is one function, passed as `Interfaces(http=routes, grpc=register)`:

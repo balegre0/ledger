@@ -128,10 +128,6 @@ convention = "google"
 
 [tool.ruff.lint.flake8-type-checking]
 strict = true
-# FastAPI reads the annotations of a route at run time, and a route asks for the `Runtime` of its service in
-# one: it is imported as any name FastAPI reads is, which ruff (annotations are typing-only to it) would ask
-# to make lazy.
-exempt-modules = ["typing", "ledger_platform.service"]
 runtime-evaluated-base-classes = [
     "pydantic.BaseModel",
     "pydantic_settings.BaseSettings",
