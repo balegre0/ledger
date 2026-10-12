@@ -31,9 +31,10 @@ _ADDRESS: Final = TypeAdapter(tuple[str, int] | tuple[str, int, int, int])
 """An internet address as a socket reports it: host and port, plus flow and scope for IPv6."""
 
 
-def _answer_of(status: HTTPStatus, body: bytes) -> bytes:
+def _answer_of(status: HTTPStatus, body: bytes, encoding: str | None) -> bytes:
+    encoded = "" if encoding is None else f"Content-Encoding: {encoding}\r\n"
     head = (
-        f"HTTP/1.1 {status.value} {status.phrase}\r\nContent-Type: application/json\r\n"
+        f"HTTP/1.1 {status.value} {status.phrase}\r\nContent-Type: application/json\r\n{encoded}"
         f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
     )
     return head.encode("ascii") + body
@@ -51,9 +52,11 @@ class LocalIssuer:
         "_published",
         "audience",
         "delay",
+        "encoding",
         "failure",
         "fetches",
         "issuer",
+        "requests",
     )
 
     def __init__(self, *, issuer: str = ISSUER, audience: str = AUDIENCE) -> None:
@@ -65,6 +68,10 @@ class LocalIssuer:
         """What the endpoint answers instead of the keys while it is set."""
         self.delay = 0.0
         """Seconds the endpoint waits before it answers."""
+        self.encoding: str | None = None
+        """The ``Content-Encoding`` the endpoint says its answer has (the body is sent as given)."""
+        self.requests: list[bytes] = []
+        """The head of every request, as it arrived."""
         self._keys: dict[str, RSAKey] = {}
         self._published: list[str] = []
         self._handlers: set[asyncio.Task[None]] = set()
@@ -161,11 +168,11 @@ class LocalIssuer:
     async def _answer(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """Answer one request with the keys (or the failure), whatever was asked, then close."""
         with contextlib.suppress(ConnectionError, asyncio.IncompleteReadError):
-            await reader.readuntil(_END_OF_HEAD)
+            self.requests.append(await reader.readuntil(_END_OF_HEAD))
             self.fetches += 1
             await asyncio.sleep(self.delay)
             status, body = self.failure or (HTTPStatus.OK, self.published())
-            writer.write(_answer_of(status, body))
+            writer.write(_answer_of(status, body, self.encoding))
             await writer.drain()
         writer.close()
         with contextlib.suppress(ConnectionError):

@@ -3,59 +3,61 @@
 The gateway checks tokens too; a service checks them again (defense in depth) and reads from them who calls.
 A token is accepted only when all of this holds:
 
-* it is a JWS in compact form of at most ``MAX_TOKEN_LENGTH`` ASCII characters;
+* it is a JWS in compact form of at most ``MAX_TOKEN_LENGTH`` ASCII characters, whose header is well
+  formed (``crit``, when there, a list of the names of other headers);
 * its header names an algorithm the policy allows, all of them asymmetric (``none`` and the HMAC family
   cannot be configured, so a token "signed" with the public key as an HMAC secret is refused), and a key id
   (``kid``) the provider publishes, under which it publishes a key for that algorithm;
 * the signature verifies with that key: a key the token carries or points to (``jwk``, ``jku``, ``x5u``) is
   never used, nor fetched;
-* ``iss`` is the policy's issuer and ``aud`` holds its audience;
-* ``exp`` has not passed, and ``nbf`` and ``iat`` are not ahead, each give or take ``leeway`` seconds;
+* ``iss`` is the policy's issuer and ``aud`` (a text, or a list of texts) holds its audience;
+* ``exp``, ``nbf`` and ``iat`` are finite numbers; ``exp`` is ahead of now by more than ``leeway`` seconds
+  ago (``exp`` itself is exclusive, RFC 7519 section 4.1.4), and ``nbf`` and ``iat`` are at most ``leeway``
+  seconds ahead;
 * ``sub`` and the organization claim are there and well formed.
 
-Keys come from the provider's JWKS document and are kept for ``keys_ttl`` seconds. A token whose key id the
-copy lacks refreshes it at once (the provider rotated its keys), but never sooner than ``refresh_floor``
-seconds after the last attempt: a stream of tokens with invented key ids costs one fetch per floor, not one
-per token. Requests that find the keys stale together share one fetch, which none of them can cancel by going
-away. When a refresh fails, the keys already held keep working; with none at all a token cannot be checked
-and the request gets a 503.
+Keys come from the provider's JWKS document and are fresh for ``keys_ttl`` seconds. Past that, a token whose
+key is held is still answered at once while a refresh runs behind it (stale while revalidate): a provider that
+stalls slows no request whose key is known. A request waits for the refresh only when it cannot be answered
+without one: no key was ever obtained, the token's key id is not held (the provider rotated its keys), or the
+keys held are older than ``keys_max_age``. A refresh never starts sooner than ``refresh_floor`` seconds after
+the last one: a stream of tokens with invented key ids costs one fetch per floor, not one per token. Requests
+share the one refresh under way, which none of them can cancel by going away. When a refresh fails (including
+a document without a single usable key), the keys already held keep working; with none at all a token cannot
+be checked and the request gets a 503.
 
 A service fetches with ``HttpKeys``: one HTTP client for the service's run, a resource the service opens at
 start and closes at stop. ``fetch_keys``, a client per fetch, is for tools and tests that run no service.
-Either way the environment cannot steer the fetch (no proxy, CA bundle or ``.netrc`` from it) and no redirect
-is followed: the keys are where the configuration says.
+Either way the environment cannot steer the fetch (no proxy, CA bundle or ``.netrc`` from it), no redirect
+is followed (the keys are where the configuration says), and the document is asked for uncompressed and
+refused compressed, so ``MAX_KEYS_SIZE`` bounds the bytes received, not a bomb they would inflate to.
 
-A refused token is an ``InvalidTokenError`` that names the problem in a word (``expired``, ``audience``...).
-Neither the token nor its claims are ever echoed or logged.
+A refused token is an ``InvalidTokenError`` that names the problem in a word (``expired``, ``audience``...)
+and has no cause or context attached: neither the token nor its claims are ever echoed or logged.
 """
 
 import asyncio
 import base64
+import math
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from time import monotonic, time
-from typing import Annotated, ClassVar, Final, final, get_args
+from typing import Annotated, ClassVar, Final, Never, final, get_args
 from uuid import NAMESPACE_URL, uuid5
 lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Mapping
 
 import httpx
 import structlog
 from joserfc import jwt
-from joserfc.errors import (
-    BadSignatureError,
-    ExpiredTokenError,
-    InvalidClaimError,
-    JoseError,
-    KeyParameterError,
-    MissingClaimError,
-)
+from joserfc.errors import BadSignatureError, InvalidKeyCurveError, JoseError, KeyParameterError
 from joserfc.jwk import KeySet, KeySetSerialization
+from joserfc.jws import JWSRegistry
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, StringConstraints, TypeAdapter, ValidationError
 lazy from joserfc.jwk import Key
 
 from ledger_kernel.access import InvalidSubjectError, Principal, parse_subject
-from ledger_kernel.errors import LedgerError, UnauthenticatedError, UnavailableError
+from ledger_kernel.errors import LedgerError, UnauthenticatedError, UnavailableError, excerpt
 from ledger_kernel.ids import OrganizationId
 from ledger_platform.options import InvalidOptionError, require_seconds
 from ledger_platform.settings import TokenAlgorithm
@@ -67,7 +69,10 @@ MAX_TOKEN_LENGTH: Final = 8192
 """Longer than any access token Zitadel issues; a longer one is refused unread."""
 MAX_KEYS_SIZE: Final = 64 * 1024
 """The largest JWKS document read: a provider publishes a handful of keys."""
-MAX_LEEWAY: Final = 300.0
+MAX_LEEWAY: Final = 300
+MAX_HEADER_SIZE: Final = 2048
+"""The largest JOSE header verified, in bytes: room for a header that carries a key, so that such a token is
+refused for its signature, not for its size (joserfc's own limit is 512)."""
 ORGANIZATION_CLAIM: Final = "urn:zitadel:iam:user:resourceowner:id"
 """The caller's organization (asked for with the scope ``urn:zitadel:iam:user:resourceowner``)."""
 PROJECT_ROLES_CLAIM: Final = "urn:zitadel:iam:org:project:roles"
@@ -94,14 +99,6 @@ class TokenProblem(StrEnum):
     ISSUER = "issuer"
     AUDIENCE = "audience"
     CLAIMS = "claims"
-
-
-_PROBLEM_OF_CLAIM: Final[Mapping[str, TokenProblem]] = {
-    "iss": TokenProblem.ISSUER,
-    "aud": TokenProblem.AUDIENCE,
-    "nbf": TokenProblem.NOT_YET_VALID,
-    "iat": TokenProblem.NOT_YET_VALID,
-}
 
 
 class MissingTokenError(UnauthenticatedError):
@@ -155,6 +152,21 @@ class _KeysTooLargeError(ValueError):
         super().__init__(f"the JWKS document is larger than {MAX_KEYS_SIZE} bytes")
 
 
+class _KeysEncodedError(ValueError):
+    def __init__(self, encoding: str) -> None:
+        super().__init__(f"the JWKS document came encoded ({excerpt(encoding)}) though asked for as it is")
+
+
+class _NoKeysError(ValueError):
+    def __init__(self) -> None:
+        super().__init__("the JWKS document holds no key with an id")
+
+
+def _refuse(problem: TokenProblem) -> Never:
+    """Refuse the token for ``problem``, with nothing attached that could quote it."""
+    raise InvalidTokenError(problem) from None
+
+
 def organization_of(provider_organization: str) -> OrganizationId:
     """The ledger id of the provider's organization: derived, so every service computes the same one."""
     return OrganizationId(uuid5(_ORGANIZATIONS, provider_organization))
@@ -169,8 +181,11 @@ class TokenPolicy:
     audience: str
     keys_url: str
     algorithms: frozenset[str] = _RS256
-    leeway: float = 60.0
+    leeway: int = 60
     keys_ttl: float = 600.0
+    keys_max_age: float = 1200.0
+    """Keys older than this are refreshed before a request is answered with them (at least ``keys_ttl``; by
+    default twice its default)."""
     refresh_floor: float = 10.0
     fetch_timeout: float = 5.0
 
@@ -188,11 +203,12 @@ class TokenPolicy:
                 requirement=f"some of {', '.join(sorted(ASYMMETRIC_ALGORITHMS))}",
                 value=sorted(self.algorithms),
             )
-        if not 0 <= self.leeway <= MAX_LEEWAY:  # NaN included
+        if not 0 <= self.leeway <= MAX_LEEWAY:
             raise InvalidTokenOptionError(
                 option="leeway", requirement=f"between 0 and {MAX_LEEWAY} seconds", value=self.leeway
             )
         require_seconds(InvalidTokenOptionError, "keys_ttl", self.keys_ttl)
+        require_seconds(InvalidTokenOptionError, "keys_max_age", self.keys_max_age, floor=self.keys_ttl)
         require_seconds(InvalidTokenOptionError, "refresh_floor", self.refresh_floor)
         require_seconds(InvalidTokenOptionError, "fetch_timeout", self.fetch_timeout)
 
@@ -204,7 +220,7 @@ class TokenPolicy:
             audience=settings.token_audience,
             keys_url=settings.token_jwks_url,
             algorithms=frozenset(settings.token_algorithms),
-            leeway=float(settings.token_leeway_seconds),
+            leeway=settings.token_leeway_seconds,
         )
 
 
@@ -220,9 +236,13 @@ async def _fetch(client: httpx.AsyncClient, url: str) -> bytes:
     ``fetch_timeout``): a provider that drips its answer cannot hold a request for longer.
     """
     body = bytearray()
-    async with client.stream("GET", url, headers={"Accept": "application/json"}) as response:
+    asked = {"Accept": "application/json", "Accept-Encoding": "identity"}
+    async with client.stream("GET", url, headers=asked) as response:
         response.raise_for_status()
-        async for chunk in response.aiter_bytes():
+        encodings = response.headers.get_list("Content-Encoding", split_commas=True)
+        if any(encoding.strip().lower() != "identity" for encoding in encodings):
+            raise _KeysEncodedError(", ".join(encodings))
+        async for chunk in response.aiter_raw():
             body += chunk
             if len(body) > MAX_KEYS_SIZE:
                 raise _KeysTooLargeError
@@ -271,10 +291,23 @@ _JWKS: Final = TypeAdapter(KeySetSerialization)
 
 
 def _parse(document: bytes) -> dict[str, Key]:
-    """The keys of a JWKS document by id. A document without a key that can be read is an error."""
-    return {
-        key.kid: key for key in KeySet.import_key_set(_JWKS.validate_json(document)) if key.kid is not None
-    }
+    """The keys of a JWKS document by the id it publishes them under.
+
+    A key without an id is left out (joserfc would name it by its thumbprint, which no token carries), as is
+    one of a type joserfc does not know; a document without a single key left is an error.
+    """
+    published = _JWKS.validate_json(document)
+    named = {kid for key in published["keys"] if isinstance(kid := key.get("kid"), str)}
+    keys: dict[str, Key] = {}
+    for key in KeySet.import_key_set(published):
+        match key.kid:
+            case str() as kid if kid in named:
+                keys[kid] = key
+            case _:
+                pass
+    if not keys:
+        raise _NoKeysError
+    return keys
 
 
 @final
@@ -295,33 +328,44 @@ class PublishedKeys:
         self._refreshing: asyncio.Task[None] | None = None
 
     async def key(self, kid: str) -> Key | None:
-        """The published key ``kid`` or ``None``; ``TokenKeysUnavailableError`` while no key was ever had."""
-        if self._expired() or kid not in self._keys:
-            await self._refreshed()
+        """The published key ``kid`` or ``None``; ``TokenKeysUnavailableError`` while no key was ever had.
+
+        A held key is answered at once unless the keys are past ``keys_max_age``; past ``keys_ttl`` it sets
+        off a refresh it does not wait for.
+        """
+        age = self._age()
+        held = self._keys.get(kid)
+        if held is not None and age < self._policy.keys_max_age:
+            if age >= self._policy.keys_ttl:
+                self._refreshing_now()
+            return held
+        refreshing = self._refreshing_now()
+        if refreshing is not None:
+            await asyncio.shield(refreshing)
         if self._fetched_at is None:
             raise TokenKeysUnavailableError
         return self._keys.get(kid)
 
-    def _expired(self) -> bool:
+    def _age(self) -> float:
+        """Seconds since the keys held were fetched; infinite while none were."""
         fetched = self._fetched_at
-        return fetched is None or self._clock() - fetched >= self._policy.keys_ttl
+        return math.inf if fetched is None else self._clock() - fetched
 
-    async def _refreshed(self) -> None:
-        """Wait for the fetch under way, or for one started now if the floor allows it; else return at once.
+    def _refreshing_now(self) -> asyncio.Task[None] | None:
+        """The refresh under way, or one started now if the floor allows it; else ``None``.
 
-        The fetch runs in a task of its own that every request needing it waits for: requests that find the
-        copy stale together share it, and one of them going away (a client that hung up) cancels its wait,
-        never the fetch the others wait for.
+        The refresh runs in a task of its own: requests that need it wait for it together, and one of them
+        going away (a client that hung up) cancels its wait, never the refresh the others wait for.
         """
         refreshing = self._refreshing
         if refreshing is None:
             tried = self._tried_at
             now = self._clock()
             if tried is not None and now - tried < self._policy.refresh_floor:
-                return
+                return None
             self._tried_at = now
             refreshing = self._refreshing = asyncio.create_task(self._refresh(now))
-        await asyncio.shield(refreshing)
+        return refreshing
 
     async def _refresh(self, started: float) -> None:
         try:
@@ -342,6 +386,8 @@ class _Header(BaseModel):
 
     alg: str = Field(max_length=16)
     kid: str = Field(min_length=1, max_length=255)
+    crit: tuple[str, ...] = Field(default=(), min_length=1)
+    """Headers the token says must be understood: when there, a non-empty list of names (RFC 7515 4.1.11)."""
 
 
 _TEXT: Final = TypeAdapter(StrictStr)
@@ -350,6 +396,8 @@ _PROVIDER_ORGANIZATION: Final = TypeAdapter(
     Annotated[str, StringConstraints(strict=True, pattern=r"^[A-Za-z0-9_-]{1,64}$")]
 )
 """The organization claim: an id of the provider's, digits for Zitadel."""
+_AUDIENCES: Final = TypeAdapter(StrictStr | list[StrictStr])
+"""``aud``: one audience, or a list of them."""
 _OBJECT: Final = TypeAdapter(dict[str, object])
 _ROLES: Final = TypeAdapter(dict[str, dict[str, str]])
 
@@ -357,12 +405,34 @@ _ROLES: Final = TypeAdapter(dict[str, dict[str, str]])
 def _header_of(token: str) -> _Header:
     """The JOSE header of a compact JWS, read before anything is verified: which algorithm, which key."""
     if not token.isascii() or len(token) > MAX_TOKEN_LENGTH or token.count(".") != _DOTS:
-        raise InvalidTokenError(TokenProblem.MALFORMED)
+        _refuse(TokenProblem.MALFORMED)
     encoded = token.partition(".")[0]
     try:
         return _Header.model_validate_json(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
-    except ValueError as error:  # binascii.Error and ValidationError are both ValueErrors
-        raise InvalidTokenError(TokenProblem.MALFORMED) from error
+    except ValueError:  # binascii.Error and ValidationError are both ValueErrors
+        _refuse(TokenProblem.MALFORMED)
+
+
+def _registry(algorithm: str) -> JWSRegistry:
+    """What joserfc verifies with: ``algorithm`` alone, and headers up to ``MAX_HEADER_SIZE`` bytes."""
+    registry = JWSRegistry(algorithms=[algorithm])
+    registry.max_header_length = MAX_HEADER_SIZE
+    return registry
+
+
+def _numeric_date(claims: Mapping[str, object], name: str) -> float | None:
+    """The time claim ``name``, if there: a finite number of seconds (``true`` is no number), else refused."""
+    match claims.get(name):
+        case None:
+            return None
+        case bool():
+            _refuse(TokenProblem.CLAIMS)
+        case int() as seconds:
+            return seconds
+        case float() as seconds if math.isfinite(seconds):
+            return seconds
+        case _:
+            _refuse(TokenProblem.CLAIMS)
 
 
 def _granted_roles(claims: Mapping[str, object], names: tuple[str, ...], organization: str) -> Iterator[str]:
@@ -376,61 +446,76 @@ def _granted_roles(claims: Mapping[str, object], names: tuple[str, ...], organiz
 class TokenVerifier:
     """Turns a bearer token into the ``Principal`` it proves, or refuses it (see the module)."""
 
-    __slots__ = ("_claims", "_keys", "_policy", "_role_claims")
+    __slots__ = ("_clock", "_keys", "_policy", "_role_claims")
 
     def __init__(
         self, policy: TokenPolicy, *, keys: PublishedKeys | None = None, clock: Callable[[], float] = time
     ) -> None:
         self._policy = policy
         self._keys = PublishedKeys(policy) if keys is None else keys
-        self._claims = jwt.JWTClaimsRegistry(
-            now=lambda: int(clock()),
-            leeway=int(policy.leeway),
-            iss={"essential": True, "value": policy.issuer},
-            aud={"essential": True, "value": policy.audience},
-            exp={"essential": True},
-            sub={"essential": True},
-        )
+        self._clock = clock
         self._role_claims = (f"urn:zitadel:iam:org:project:{policy.audience}:roles", PROJECT_ROLES_CLAIM)
 
     async def verify(self, token: str) -> Principal:
         """The principal ``token`` proves, else ``InvalidTokenError`` (or ``TokenKeysUnavailableError``)."""
         header = _header_of(token)
         if header.alg not in self._policy.algorithms:
-            raise InvalidTokenError(TokenProblem.ALGORITHM)
+            _refuse(TokenProblem.ALGORITHM)
         key = await self._keys.key(header.kid)
         if key is None:
-            raise InvalidTokenError(TokenProblem.UNKNOWN_KEY)
-        return self._principal(self._verified_claims(token, key, header.alg))
+            _refuse(TokenProblem.UNKNOWN_KEY)
+        claims = self._signed_claims(token, key, header.alg)
+        self._check(claims)
+        return self._principal(claims)
 
-    def _verified_claims(self, token: str, key: Key, algorithm: str) -> dict[str, object]:
+    @staticmethod
+    def _signed_claims(token: str, key: Key, algorithm: str) -> dict[str, object]:
+        """The claims of ``token`` once its signature verifies with ``key``."""
         try:
-            decoded = jwt.decode(token, key, algorithms=[algorithm])
-        except BadSignatureError as error:
-            raise InvalidTokenError(TokenProblem.SIGNATURE) from error
-        except KeyParameterError as error:  # the key published under that id is not one for that algorithm
-            raise InvalidTokenError(TokenProblem.ALGORITHM) from error
-        except (JoseError, ValueError) as error:
-            raise InvalidTokenError(TokenProblem.MALFORMED) from error
+            decoded = jwt.decode(token, key, registry=_registry(algorithm))
+        except BadSignatureError:
+            _refuse(TokenProblem.SIGNATURE)
+        except KeyParameterError, InvalidKeyCurveError:  # the published key is not one for that algorithm
+            _refuse(TokenProblem.ALGORITHM)
+        except (
+            JoseError,
+            ValueError,
+            TypeError,
+        ):  # TypeError: a header joserfc reads before it checks its type
+            _refuse(TokenProblem.MALFORMED)
         try:
-            claims = _OBJECT.validate_python(decoded.claims)
-        except ValidationError as error:
-            raise InvalidTokenError(TokenProblem.MALFORMED) from error
+            return _OBJECT.validate_python(decoded.claims)
+        except ValidationError:
+            _refuse(TokenProblem.MALFORMED)
+
+    def _check(self, claims: Mapping[str, object]) -> None:
+        """Refuse claims of another issuer, for another audience, expired or not yet valid."""
+        if claims.get("iss") != self._policy.issuer:
+            _refuse(TokenProblem.ISSUER)
         try:
-            self._claims.validate(claims)
-        except ExpiredTokenError as error:
-            raise InvalidTokenError(TokenProblem.EXPIRED) from error
-        except (InvalidClaimError, MissingClaimError) as error:
-            raise InvalidTokenError(_PROBLEM_OF_CLAIM.get(error.claim, TokenProblem.CLAIMS)) from error
-        return claims
+            audiences = _AUDIENCES.validate_python(claims.get("aud"))
+        except ValidationError:
+            _refuse(TokenProblem.AUDIENCE)
+        if self._policy.audience not in ([audiences] if isinstance(audiences, str) else audiences):
+            _refuse(TokenProblem.AUDIENCE)
+        expires = _numeric_date(claims, "exp")
+        not_before = _numeric_date(claims, "nbf")
+        issued = _numeric_date(claims, "iat")
+        if expires is None:
+            _refuse(TokenProblem.CLAIMS)
+        now, leeway = self._clock(), self._policy.leeway
+        if now >= expires + leeway:
+            _refuse(TokenProblem.EXPIRED)
+        if any(moment is not None and moment > now + leeway for moment in (not_before, issued)):
+            _refuse(TokenProblem.NOT_YET_VALID)
 
     def _principal(self, claims: Mapping[str, object]) -> Principal:
         try:
             subject = parse_subject(_TEXT.validate_python(claims.get("sub")))
             organization = _PROVIDER_ORGANIZATION.validate_python(claims.get(ORGANIZATION_CLAIM))
             roles = frozenset(_granted_roles(claims, self._role_claims, organization))
-        except (ValidationError, InvalidSubjectError) as error:
-            raise InvalidTokenError(TokenProblem.CLAIMS) from error
+        except ValidationError, InvalidSubjectError:
+            _refuse(TokenProblem.CLAIMS)
         return Principal(
             subject=subject,
             organization=organization_of(organization),

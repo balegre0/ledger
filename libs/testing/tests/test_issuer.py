@@ -1,3 +1,4 @@
+import gzip
 from http import HTTPStatus
 
 import httpx
@@ -48,6 +49,15 @@ async def test_the_endpoint_answers_what_it_is_told_to() -> None:
         issuer.failure = (HTTPStatus.SERVICE_UNAVAILABLE, b"down")
         response = await client.get(issuer.keys_url)
     assert (response.status_code, response.content) == (503, b"down")
+
+
+async def test_the_endpoint_can_say_its_answer_is_encoded_and_keeps_every_request_head() -> None:
+    async with LocalIssuer.started() as issuer, httpx.AsyncClient() as client:
+        issuer.encoding = "gzip"
+        issuer.failure = (HTTPStatus.OK, gzip.compress(b"{}"))
+        response = await client.get(issuer.keys_url, headers={"X-Asked-By": "test"})
+    assert (response.headers["content-encoding"], response.content) == ("gzip", b"{}")
+    assert b"\r\nx-asked-by: test\r\n" in issuer.requests[0].lower()
 
 
 async def test_a_request_still_waiting_when_the_issuer_stops_is_dropped() -> None:

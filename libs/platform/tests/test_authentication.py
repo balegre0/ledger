@@ -1,18 +1,20 @@
 import asyncio
 import base64
+import gzip
 import json
 from http import HTTPStatus
 from time import time
 from typing import Final
 from uuid import NAMESPACE_URL, uuid5
-lazy from collections.abc import AsyncGenerator, Callable
+lazy from collections.abc import AsyncGenerator, Callable, MutableMapping
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 from joserfc import jws, jwt
-from joserfc.jwk import ECKey, OctKey
-from pydantic import SecretStr
+from joserfc.jwk import ECKey, OctKey, RSAKey
+from joserfc.jws import JWSRegistry
+from pydantic import SecretStr, TypeAdapter
 from structlog.testing import capture_logs
 
 from ledger_kernel.errors import ErrorKind
@@ -42,11 +44,21 @@ from ledger_testing.issuer import (
     SUBJECT,
     LocalIssuer,
 )
+from ledger_testing.waiting import eventually
 
 KEYS: Final = "http://keys.invalid/keys"
 OFFLINE: Final = LocalIssuer()
 """An issuer whose keys a fake fetch hands over: for property tests, which must not wait on sockets."""
 OFFLINE_POLICY: Final = TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=KEYS)
+TOKEN_CLAIMS: Final = TypeAdapter(dict[str, object])
+KEY_SET: Final = TypeAdapter(dict[str, list[dict[str, object]]])
+JSON_VALUES: Final = st.recursive(
+    st.none() | st.booleans() | st.integers() | st.floats() | st.text(max_size=16),
+    lambda inner: st.lists(inner, max_size=4) | st.dictionaries(st.text(max_size=8), inner, max_size=4),
+    max_leaves=8,
+)
+"""Any JSON value, nested."""
+REGISTERED_HEADERS: Final = ("crit", "b64", "jwk", "jku", "x5c", "x5u", "typ", "cty", "kid")
 UNREACHABLE_PROXY: Final = "http://127.0.0.1:1"
 """A proxy that refuses every connection: a fetch that went through it would fail."""
 
@@ -66,6 +78,19 @@ def segment(value: object) -> str:
 
 def encoded(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def signed(key: RSAKey, header: dict[str, object], payload: bytes) -> str:
+    """A token of ``header`` and ``payload`` as written, signed RS256 with ``key``, whatever they say."""
+    signing_input = f"{segment(header)}.{encoded(payload)}"
+    signature = JWSRegistry.algorithms["RS256"].sign(signing_input.encode(), key)
+    return f"{signing_input}.{encoded(signature)}"
+
+
+def payload_of(token: str) -> bytes:
+    """The payload of a token, as it was signed."""
+    raw = token.split(".")[1]
+    return base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
 
 
 def unsigned(header: dict[str, str]) -> str:
@@ -115,10 +140,25 @@ def verifier(policy: TokenPolicy, moment: Moment) -> TokenVerifier:
     return TokenVerifier(policy, keys=PublishedKeys(policy, clock=moment))
 
 
+async def logged(logs: list[MutableMapping[str, object]]) -> bool:
+    return bool(logs)
+
+
+async def unknown(verifier: TokenVerifier, token: str) -> bool:
+    """Whether ``verifier`` refuses ``token`` for its key id, which the keys it holds lack."""
+    try:
+        await verifier.verify(token)
+    except InvalidTokenError as error:
+        return error.problem is TokenProblem.UNKNOWN_KEY
+    return False
+
+
 async def refused(verifier: TokenVerifier, token: str) -> TokenProblem:
     with pytest.raises(InvalidTokenError) as caught:
         await verifier.verify(token)
     assert not token or token not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__  # no cause or context can quote the token or its claims
     return caught.value.problem
 
 
@@ -174,14 +214,14 @@ async def test_a_token_from_the_future_is_refused_beyond_the_leeway(
     assert await accepted(verifier, issuer.token(claims={claim: now() + 30}))
 
 
-async def test_the_leeway_holds_to_its_last_second_and_not_one_more(
+async def test_the_leeway_holds_up_to_its_edge_and_exp_is_exclusive(
     issuer: LocalIssuer, policy: TokenPolicy
 ) -> None:
     moment = now()
     stopped = TokenVerifier(policy, clock=lambda: moment)
-    leeway = int(policy.leeway)
-    assert await accepted(stopped, issuer.token(claims={"exp": moment - leeway}))
-    assert await refused(stopped, issuer.token(claims={"exp": moment - leeway - 1})) is TokenProblem.EXPIRED
+    leeway = policy.leeway
+    assert await accepted(stopped, issuer.token(claims={"exp": moment - leeway + 1}))
+    assert await refused(stopped, issuer.token(claims={"exp": moment - leeway})) is TokenProblem.EXPIRED
     assert await accepted(stopped, issuer.token(claims={"nbf": moment + leeway, "iat": moment + leeway}))
     for claim in ("nbf", "iat"):
         late = issuer.token(claims={claim: moment + leeway + 1})
@@ -189,10 +229,25 @@ async def test_the_leeway_holds_to_its_last_second_and_not_one_more(
 
 
 async def test_the_leeway_comes_from_the_policy(issuer: LocalIssuer, policy: TokenPolicy) -> None:
-    strict = TokenVerifier(
-        TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=policy.keys_url, leeway=0.0)
-    )
+    strict = TokenVerifier(TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=policy.keys_url, leeway=0))
     assert await refused(strict, issuer.token(claims={"exp": now() - 30})) is TokenProblem.EXPIRED
+
+
+async def test_a_time_may_have_a_fraction_of_a_second(issuer: LocalIssuer, verifier: TokenVerifier) -> None:
+    times = {"exp": now() + 60.5, "nbf": now() - 0.5, "iat": now() - 0.5}
+    assert await accepted(verifier, issuer.token(claims=times))
+
+
+@pytest.mark.parametrize("claim", ["exp", "nbf", "iat"])
+@pytest.mark.parametrize("value", [b"NaN", b"Infinity", b"-Infinity", b"true", b"1e400"])
+async def test_a_time_that_is_not_a_finite_number_is_refused(
+    issuer: LocalIssuer, verifier: TokenVerifier, claim: str, value: bytes
+) -> None:
+    claims = TOKEN_CLAIMS.validate_json(payload_of(issuer.token()))
+    claims[claim] = "@"
+    payload = json.dumps(claims).encode().replace(b'"@"', value)
+    token = jws.serialize_compact({"alg": "RS256", "kid": "key-1"}, payload, issuer.signing_key())
+    assert await refused(verifier, token) is TokenProblem.CLAIMS
 
 
 async def test_the_verifier_reads_the_time_from_its_clock(issuer: LocalIssuer, policy: TokenPolicy) -> None:
@@ -207,7 +262,13 @@ async def test_the_verifier_reads_the_time_from_its_clock(issuer: LocalIssuer, p
     ("claims", "problem"),
     [
         ({"iss": "https://impostor.example"}, TokenProblem.ISSUER),
+        ({"iss": 1}, TokenProblem.ISSUER),
+        ({"iss": [ISSUER]}, TokenProblem.ISSUER),
+        ({"iss": None}, TokenProblem.ISSUER),
         ({"aud": ["someone-else"]}, TokenProblem.AUDIENCE),
+        ({"aud": [AUDIENCE, 1]}, TokenProblem.AUDIENCE),
+        ({"aud": 1}, TokenProblem.AUDIENCE),
+        ({"aud": None}, TokenProblem.AUDIENCE),
         ({"exp": None}, TokenProblem.CLAIMS),
         ({"exp": "tomorrow"}, TokenProblem.CLAIMS),
         ({"sub": None}, TokenProblem.CLAIMS),
@@ -220,7 +281,13 @@ async def test_the_verifier_reads_the_time_from_its_clock(issuer: LocalIssuer, p
     ],
     ids=[
         "issuer",
+        "number-issuer",
+        "issuer-in-a-list",
+        "no-issuer",
         "audience",
+        "audience-beside-a-number",
+        "number-audience",
+        "no-audience",
         "no-exp",
         "text-exp",
         "no-sub",
@@ -336,11 +403,57 @@ async def test_keys_a_token_points_to_are_never_fetched(verifier: TokenVerifier,
     assert impostor.fetches == 0
 
 
-async def test_a_key_a_token_carries_is_never_trusted(policy: TokenPolicy) -> None:
-    own = ECKey.generate_key("P-256", {"kid": "key-1"}, private=True)
-    header = {"alg": "ES256", "kid": "key-1", "jwk": own.as_dict(private=False)}
-    forged = jwt.encode(header, {"iss": ISSUER, "aud": AUDIENCE, "sub": "1"}, own)
-    assert await refused(rsa_or_ec(policy), forged) is TokenProblem.ALGORITHM  # key-1 is an RSA key
+async def test_a_key_a_token_carries_is_never_trusted(issuer: LocalIssuer, verifier: TokenVerifier) -> None:
+    own = RSAKey.generate_key(2048, {"kid": "key-1"}, private=True)
+    header = {"alg": "RS256", "kid": "key-1", "jwk": own.as_dict(private=False)}
+    forged = jwt.encode(header, TOKEN_CLAIMS.validate_json(payload_of(issuer.token())), own)
+    assert await refused(verifier, forged) is TokenProblem.SIGNATURE
+
+
+async def test_a_published_key_on_another_curve_than_the_algorithm_s_is_refused() -> None:
+    own = ECKey.generate_key("P-256", {"kid": "ec"}, private=True)
+    other_curve = ECKey.generate_key("P-384", {"kid": "ec"}, private=True)
+
+    async def published(url: str) -> bytes:
+        del url
+        return json.dumps({"keys": [other_curve.as_dict(private=False)]}).encode()
+
+    es256 = TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=KEYS, algorithms=frozenset({"ES256"}))
+    verifier = TokenVerifier(es256, keys=PublishedKeys(es256, fetch=published))
+    token = jwt.encode({"alg": "ES256", "kid": "ec"}, {"iss": ISSUER}, own)
+    assert await refused(verifier, token) is TokenProblem.ALGORITHM
+
+
+@pytest.mark.parametrize(
+    "crit",
+    [1, None, True, 1.5, [1], [[1]], [], ["exp"], "typ"],
+    ids=[
+        "number",
+        "null",
+        "true",
+        "fraction",
+        "number-in-list",
+        "nested-list",
+        "empty",
+        "absent-name",
+        "text",
+    ],
+)
+async def test_a_critical_header_list_that_is_not_one_is_malformed(
+    issuer: LocalIssuer, verifier: TokenVerifier, crit: object
+) -> None:
+    header: dict[str, object] = {"alg": "RS256", "kid": "key-1", "crit": crit}
+    token = signed(issuer.signing_key(), header, payload_of(issuer.token()))
+    assert await refused(verifier, token) is TokenProblem.MALFORMED
+
+
+@given(st.sampled_from(REGISTERED_HEADERS), JSON_VALUES)
+async def test_no_value_of_a_registered_header_makes_the_verifier_fail_otherwise_than_by_refusing_it(
+    name: str, value: object
+) -> None:
+    token = signed(OFFLINE.signing_key(), {"alg": "RS256", "kid": "key-1", name: value}, b"{}")
+    with pytest.raises(InvalidTokenError):
+        await offline_verifier().verify(token)
 
 
 async def test_an_algorithm_the_published_key_does_not_fit_is_refused(
@@ -378,9 +491,13 @@ async def test_the_keys_are_fetched_once_and_kept(issuer: LocalIssuer, verifier:
 async def test_the_keys_are_fetched_again_once_they_are_old(
     issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
 ) -> None:
-    await verifier.verify(issuer.token())
+    old = issuer.token()
+    await verifier.verify(old)
     moment.now += policy.keys_ttl
-    await verifier.verify(issuer.token())
+    issuer.rotate()
+    issuer.retire("key-1")
+    assert await accepted(verifier, old)  # held, and only past its time to live: answered at once
+    await eventually(lambda: unknown(verifier, old))
     assert issuer.fetches == 2
 
 
@@ -405,7 +522,7 @@ async def test_a_key_the_copy_lacks_refreshes_it_but_no_more_than_once_per_floor
     assert issuer.fetches == 3
 
 
-async def test_a_retired_key_stops_working_at_the_next_refresh(
+async def test_a_retired_key_stops_working_once_the_refresh_it_set_off_completes(
     issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
 ) -> None:
     old = issuer.token()
@@ -413,7 +530,43 @@ async def test_a_retired_key_stops_working_at_the_next_refresh(
     issuer.rotate()
     issuer.retire("key-1")
     moment.now += policy.keys_ttl
+    assert await accepted(verifier, old)
+    await eventually(lambda: unknown(verifier, old))
+
+
+async def test_keys_past_their_ceiling_are_refreshed_before_the_request_is_answered(
+    issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
+) -> None:
+    old = issuer.token()
+    assert await accepted(verifier, old)
+    issuer.rotate()
+    issuer.retire("key-1")
+    moment.now += policy.keys_max_age
     assert await refused(verifier, old) is TokenProblem.UNKNOWN_KEY
+
+
+async def test_keys_past_their_ceiling_still_work_when_the_refresh_fails(
+    issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
+) -> None:
+    await verifier.verify(issuer.token())
+    issuer.failure = (HTTPStatus.SERVICE_UNAVAILABLE, b"")
+    moment.now += policy.keys_max_age
+    with capture_logs() as logs:
+        assert await accepted(verifier, issuer.token())
+    assert [log["event"] for log in logs] == ["tokens.keys_unavailable"]  # it waited for the refresh
+
+
+async def test_a_keys_document_without_a_key_with_an_id_keeps_the_keys_held(
+    issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
+) -> None:
+    await verifier.verify(issuer.token())
+    keys = KEY_SET.validate_json(issuer.published())["keys"]
+    nameless = [{name: value for name, value in key.items() if name != "kid"} for key in keys]
+    issuer.failure = (HTTPStatus.OK, json.dumps({"keys": nameless}).encode())
+    moment.now += policy.keys_max_age
+    with capture_logs() as logs:
+        assert await accepted(verifier, issuer.token())
+    assert [log["event"] for log in logs] == ["tokens.keys_unavailable"]
 
 
 async def test_without_keys_no_token_can_be_checked_and_the_provider_is_not_hammered(
@@ -438,7 +591,9 @@ async def test_the_keys_held_keep_working_while_the_provider_is_down(
     await verifier.verify(issuer.token())
     issuer.failure = (HTTPStatus.SERVICE_UNAVAILABLE, b"")
     moment.now += policy.keys_ttl
-    with capture_logs():
+    with capture_logs() as logs:
+        assert await accepted(verifier, issuer.token())
+        await eventually(lambda: logged(logs))
         assert await accepted(verifier, issuer.token())
     assert issuer.fetches == 2
 
@@ -460,6 +615,16 @@ async def test_a_keys_document_that_cannot_be_used_is_no_keys(
     issuer.failure = answer
     with capture_logs(), pytest.raises(TokenKeysUnavailableError):
         await verifier.verify(issuer.token())
+
+
+async def test_keys_are_asked_for_uncompressed_and_a_compressed_answer_is_no_keys(
+    issuer: LocalIssuer, verifier: TokenVerifier
+) -> None:
+    issuer.encoding = "gzip"
+    issuer.failure = (HTTPStatus.OK, gzip.compress(issuer.published()))
+    with capture_logs(), pytest.raises(TokenKeysUnavailableError):
+        await verifier.verify(issuer.token())
+    assert b"\r\naccept-encoding: identity\r\n" in issuer.requests[0].lower()
 
 
 async def test_a_provider_that_does_not_answer_in_time_is_no_keys(
@@ -486,9 +651,13 @@ async def test_a_service_fetches_with_one_client_held_for_its_run(
     keys = HttpKeys()
     async with keys.opened() as fetch:
         verifier = TokenVerifier(policy, keys=PublishedKeys(policy, fetch=fetch, clock=moment))
-        assert await accepted(verifier, issuer.token())
+        old = issuer.token()
+        assert await accepted(verifier, old)
+        issuer.rotate()
+        issuer.retire("key-1")
         moment.now += policy.keys_ttl
-        assert await accepted(verifier, issuer.token())
+        assert await accepted(verifier, old)
+        await eventually(lambda: unknown(verifier, old))
     assert issuer.fetches == 2
     with pytest.raises(KeysClientClosedError) as caught:
         await keys(issuer.keys_url)
@@ -520,17 +689,18 @@ async def test_a_flood_of_invented_key_ids_at_once_costs_one_fetch(
     assert issuer.fetches == 1
 
 
-async def test_the_keys_held_keep_working_while_the_provider_stalls(
-    issuer: LocalIssuer, moment: Moment, policy: TokenPolicy
+async def test_requests_with_a_key_held_never_wait_for_a_provider_that_stalls(
+    issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
 ) -> None:
-    impatient = TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=policy.keys_url, fetch_timeout=0.1)
-    verifier = TokenVerifier(impatient, keys=PublishedKeys(impatient, clock=moment))
     await verifier.verify(issuer.token())
     issuer.delay = 30.0
-    moment.now += impatient.keys_ttl
+    moment.now += policy.keys_ttl
     with capture_logs() as logs:
-        assert await accepted(verifier, issuer.token())
-    assert [log["event"] for log in logs] == ["tokens.keys_unavailable"]
+        async with asyncio.timeout(policy.fetch_timeout / 4), asyncio.TaskGroup() as group:
+            answers = [group.create_task(accepted(verifier, issuer.token())) for _ in range(20)]
+        assert all(answer.result() for answer in answers)
+        await eventually(lambda: logged(logs))  # the one refresh behind them gave up on its own
+    assert issuer.fetches == 2
 
 
 async def test_a_request_that_goes_away_does_not_cancel_the_fetch_others_wait_for() -> None:
@@ -564,7 +734,7 @@ def test_the_policy_comes_from_the_settings() -> None:
         token_jwks_url="http://localhost/keys",
         token_leeway_seconds=10,
     )
-    expected = TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url="http://localhost/keys", leeway=10.0)
+    expected = TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url="http://localhost/keys", leeway=10)
     assert TokenPolicy.of(settings) == expected
 
 
@@ -590,9 +760,16 @@ def test_the_policy_comes_from_the_settings() -> None:
             ),
             "algorithms",
         ),
-        (lambda: TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=KEYS, leeway=-1.0), "leeway"),
-        (lambda: TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=KEYS, leeway=301.0), "leeway"),
-        (lambda: TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=KEYS, leeway=float("nan")), "leeway"),
+        (lambda: TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=KEYS, leeway=-1), "leeway"),
+        (lambda: TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=KEYS, leeway=301), "leeway"),
+        (
+            lambda: TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=KEYS, keys_max_age=599.0),
+            "keys_max_age",
+        ),
+        (
+            lambda: TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=KEYS, keys_max_age=float("inf")),
+            "keys_max_age",
+        ),
         (lambda: TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=KEYS, keys_ttl=0.0), "keys_ttl"),
         (
             lambda: TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=KEYS, refresh_floor=float("inf")),
