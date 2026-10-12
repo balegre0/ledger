@@ -1,0 +1,53 @@
+# Infrastructure for local development. Services join it as they are built (milestone 2 onwards).
+#
+# What a service running on the host is configured with (the LEDGER_* variables of ServiceSettings):
+#   LEDGER_DATABASE_URL=postgresql+psycopg://ledger_app:ledger_app@127.0.0.1:5432/ledger
+#   LEDGER_NATS_URL=nats://127.0.0.1:4222
+# The same URLs reach a service that runs inside this network at the hosts `postgres` and `nats`.
+#
+# PostgreSQL's administrator is `postgres`. A service never connects as that role: a superuser bypasses
+# row-level security, and a database that ignored the policies would hide exactly the bugs they exist to
+# catch. postgres/init.sql creates the role services use, `ledger_app`, which owns the `ledger` database and
+# is no superuser (the platform's tests run as the same role). It runs only when the volume is first
+# created: after editing it, `docker compose down -v` starts over.
+#
+# Every image is pinned to an exact tag, not to a floating one.
+name: ledger
+
+services:
+  postgres:
+    # The tag the platform's tests run on: a service meets locally the PostgreSQL it will be tested against.
+    image: postgres:18.6
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports: ["127.0.0.1:5432:5432"]
+    volumes:
+      - postgres:/var/lib/postgresql
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/10-ledger.sql:ro
+    healthcheck:
+      # Healthy when a service could connect: over TCP (while the image runs its init scripts, PostgreSQL
+      # listens on a socket only), as the runtime role, to its own database. `pg_isready` would say yes
+      # before the init script has created either.
+      test: ["CMD-SHELL", "PGPASSWORD=ledger_app psql -h 127.0.0.1 -U ledger_app -d ledger -tAc 'SELECT 1'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  nats:
+    # The same server version the platform's tests run (nats:2.12.15), in its Alpine variant: the default
+    # image holds nothing but the server binary, and the healthcheck needs a shell and wget.
+    image: nats:2.12.15-alpine
+    command: ["--jetstream", "--store_dir=/data", "--http_port=8222"]
+    ports: ["127.0.0.1:4222:4222", "127.0.0.1:8222:8222"]
+    volumes: ["nats:/data"]
+    healthcheck:
+      # 200 only when the server is up and JetStream is enabled; the monitoring port answers either way.
+      test: ["CMD-SHELL", "wget -q --spider 'http://127.0.0.1:8222/healthz?js-enabled-only=true'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres: {}
+  nats: {}

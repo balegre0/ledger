@@ -42,3 +42,5 @@ jobs:
           fi
       - name: Format, lint, types x2, architecture, deps, spelling, tests
         run: uv run poe check
+      - name: Local infrastructure configuration
+        run: docker compose -f deploy/local/compose.yaml config --quiet
