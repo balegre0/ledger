@@ -9,6 +9,7 @@ lazy from collections.abc import Awaitable, Callable
 import structlog
 
 from ledger_kernel.errors import LedgerError
+from ledger_platform.options import InvalidOptionError, require_seconds
 lazy from ledger_kernel.clock import MonotonicClock
 
 type Check = Callable[[], Awaitable[object]]
@@ -19,6 +20,13 @@ type Alive = Callable[[], bool]
 _WEDGE_TIMEOUTS: Final = 10
 """How many timeouts a check may outlive before the process counts as wedged, unless told otherwise."""
 _logger = structlog.stdlib.get_logger(__name__)
+
+
+class InvalidHealthOptionError(InvalidOptionError):
+    """A health option that cannot work."""
+
+    code: ClassVar[str] = "invalid_health_option"
+    label: ClassVar[str] = "health option"
 
 
 class DuplicateCheckError(LedgerError):
@@ -66,6 +74,10 @@ class Health:
     service whose readiness is never probed is never told that a check hangs. ``clock`` is the monotonic
     time that ages a stuck check, and a test moves its own.
 
+    ``timeout`` and ``wedge_after`` are positive, finite numbers of seconds, and ``wedge_after`` is at least
+    ``timeout``: a check is left behind only once it outlives its time limit. ``InvalidHealthOptionError``
+    otherwise.
+
     Finished runs and finished stuck checks are dropped by the next ``run`` or ``wedged``, so that the
     traceback a late failure carries is not kept for the life of the process. No callback edits the tables,
     so no two of them can disagree about whose entry it is.
@@ -97,10 +109,13 @@ class Health:
         wedge_after: float | None = None,
         clock: MonotonicClock = monotonic,
     ) -> None:
+        require_seconds(InvalidHealthOptionError, "timeout", timeout)
+        wedge_after = _WEDGE_TIMEOUTS * timeout if wedge_after is None else wedge_after
+        require_seconds(InvalidHealthOptionError, "wedge_after", wedge_after, floor=timeout)
         self._checks: dict[str, Check] = {}
         self._timeout = timeout
         self._clock = clock
-        self._wedge_after = _WEDGE_TIMEOUTS * timeout if wedge_after is None else wedge_after
+        self._wedge_after = wedge_after
         self._flights: dict[str, asyncio.Task[bool]] = {}
         self._stuck: dict[str, _Stuck] = {}
         self._liveness: dict[str, Alive] = {}

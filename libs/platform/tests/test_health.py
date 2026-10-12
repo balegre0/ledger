@@ -2,12 +2,14 @@ import asyncio
 import contextlib
 import gc
 import weakref
+from math import inf, nan
 lazy from collections.abc import Callable
 
 import pytest
 from structlog.testing import capture_logs
 
-from ledger_platform.health import DuplicateCheckError, Health
+from ledger_kernel.errors import ErrorKind
+from ledger_platform.health import DuplicateCheckError, Health, InvalidHealthOptionError
 
 
 async def healthy() -> None:
@@ -415,3 +417,21 @@ async def test_a_check_that_cancels_itself_is_logged_once_and_then_only_in_passi
         ("health.check_cancelled", "error"),
         ("health.check_cancelled", "debug"),
     ]
+
+
+@pytest.mark.parametrize("timeout", [0.0, -1.0, nan, inf])
+def test_a_time_limit_that_is_not_a_positive_finite_number_of_seconds_is_refused(timeout: float) -> None:
+    with pytest.raises(InvalidHealthOptionError, match=r"^health option timeout must be a positive, finite"):
+        Health(timeout=timeout)
+
+
+@pytest.mark.parametrize("wedge_after", [0.0, -1.0, nan, inf, 1.9])
+def test_a_wedge_limit_that_is_not_at_least_the_time_limit_is_refused(wedge_after: float) -> None:
+    """A check is left behind only once it outlives its time limit: it cannot be wedged any sooner."""
+    with pytest.raises(InvalidHealthOptionError, match="wedge_after") as refused:
+        Health(timeout=2.0, wedge_after=wedge_after)
+    assert (refused.value.code, refused.value.kind) == ("invalid_health_option", ErrorKind.INTERNAL)
+
+
+def test_a_wedge_limit_of_the_time_limit_itself_is_accepted() -> None:
+    Health(timeout=2.0, wedge_after=2.0)
