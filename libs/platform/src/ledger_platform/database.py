@@ -77,10 +77,11 @@ rows (``OrganizationId``), such as its list of companies. ``None`` touches no pr
 
 
 class PlatformTable(DeclarativeBase):
-    """Tables the chassis adds to every service's database (outbox, inbox).
+    """Tables the chassis adds to every service's database (outbox, inbox, idempotency keys).
 
-    Each table registers in ``metadata`` when the module of its class is imported (``outbox``, ``consumer``),
-    so migrations create ``ledger_platform.schema.CHASSIS_METADATA`` instead, which has imported both.
+    Each table registers in ``metadata`` when the module of its class is imported (``outbox``, ``consumer``,
+    ``idempotency``), so migrations create ``ledger_platform.schema.CHASSIS_METADATA`` instead, which has
+    imported them all.
     """
 
     metadata: ClassVar[MetaData] = MetaData()

@@ -239,9 +239,10 @@ type = "layers"
 layers = ["ledger_platform", "ledger_contracts", "ledger_kernel"]
 
 # Inside the platform: the service assembles the adapters (HTTP, gRPC, consumers), which use messaging (the
-# outbox, which declares streams again when they vanish, over the streams), which uses the infrastructure, which
-# uses the foundations. Modules of one layer never import each other. The schema, which gathers the tables of the
-# outbox and of the consumers for migrations, sits below the service, whose readiness checks the tables exist.
+# outbox, which declares streams again when they vanish, over the streams) and the idempotency keys, which use the
+# infrastructure, which uses the foundations. Modules of one layer never import each other. The schema, which
+# gathers the tables of the outbox, the consumers and the idempotency keys for migrations, sits below the service,
+# whose readiness checks the tables exist.
 # Exhaustive: a new module must be given its layer here.
 [[tool.importlinter.contracts]]
 name = "Platform layers: service -> adapters -> messaging -> infrastructure -> foundations"
@@ -252,7 +253,7 @@ layers = [
     "service",
     "schema",
     "web | grpc_server | consumer",
-    "outbox",
+    "outbox | idempotency",
     "streams",
     "database | tracing | health | logs | jetstream | authentication",
     "settings | options | lifecycle | supervision",
