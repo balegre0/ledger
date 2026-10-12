@@ -22,8 +22,10 @@ lazy from nats.aio.client import Client
 from ledger.common.v1.money_pb2 import Money
 from ledger_contracts.envelope import Envelope
 from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
+from ledger_platform import outbox as outbox_module
 from ledger_platform.database import Database
 from ledger_platform.outbox import (
+    BACKLOG_EVERY,
     DEFAULT_MAX_PAYLOAD,
     MAX_BATCH,
     MAX_IDLE,
@@ -937,14 +939,20 @@ async def gauge_is(registry: CollectorRegistry, name: str, value: float) -> bool
     return registry.get_sample_value(name) == value
 
 
-async def test_the_relay_measures_the_backlog_after_a_pass_that_was_not_full(
+@pytest.fixture
+def quick_backlog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A relay that measures the backlog every fifth of a second: every fifteen, in production."""
+    monkeypatch.setattr(outbox_module, "BACKLOG_EVERY", 0.2)
+
+
+@pytest.mark.usefixtures("quick_backlog")
+async def test_the_relay_measures_the_backlog_after_its_first_pass_and_again_once_the_interval_is_over(
     database: Database,
     jetstream: JetStreamContext,
-    tracing: Tracing,
+    outbox: Outbox,
     registry: CollectorRegistry,
     eventually: Eventually,
 ) -> None:
-    outbox = Outbox(tracing=tracing, registry=registry)
     await commit(database, outbox, subject="quiet.a")
 
     async with relaying(outbox.run(database, jetstream, pace=RelayPace(idle=0.05))):
@@ -955,23 +963,34 @@ async def test_the_relay_measures_the_backlog_after_a_pass_that_was_not_full(
     assert sample(registry, "ledger_outbox_oldest_pending_timestamp_seconds") > 0
 
 
-async def test_the_relay_measures_the_backlog_at_most_once_per_idle_period(
+async def test_the_relay_measures_the_backlog_at_most_once_per_interval_however_often_it_polls(
     database: Database,
     jetstream: JetStreamContext,
     tracing: Tracing,
     registry: CollectorRegistry,
     eventually: Eventually,
 ) -> None:
+    """A count of the whole table every second, on every replica, costs more than a gauge is worth."""
     outbox = Outbox(tracing=tracing, registry=registry)
     await commit(database, outbox, subject="quiet.a")
 
-    async with relaying(outbox.run(database, jetstream, pace=RelayPace(idle=MAX_IDLE))):
+    async with relaying(outbox.run(database, jetstream, pace=RelayPace(idle=0.05, retry=0.05))):
         await eventually(partial(gauge_is, registry, "ledger_outbox_pending", 1))
-        await commit(database, outbox, subject="quiet.b")  # wakes the relay: another pass, no new measure
-        await eventually(partial(reached, registry, "ledger_outbox_publish_failed_total", 2))
-        await asyncio.sleep(0.1)
+        await commit(database, outbox, subject="quiet.b")  # passes every 50 ms from here on
+        await eventually(partial(reached, registry, "ledger_outbox_publish_failed_total", 6))
 
+    assert BACKLOG_EVERY == 15
     assert sample(registry, "ledger_outbox_pending") == 1
+
+
+async def test_the_oldest_event_is_found_through_an_index(database: Database) -> None:
+    """``min(stored_at)`` reads one end of ``ix_outbox_stored_at`` instead of the whole table."""
+    definitions = select(column("indexdef", String)).select_from(text("pg_indexes"))
+    async with database.transaction(None) as unit:
+        found = await unit.connection.execute(
+            definitions.where(column("indexname", String) == "ix_outbox_stored_at")
+        )
+        assert found.scalar_one().endswith("(stored_at)")
 
 
 async def test_the_events_that_are_due_are_read_through_an_index(database: Database) -> None:

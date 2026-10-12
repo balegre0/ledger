@@ -309,8 +309,8 @@ trailing metadata `ledger-error-code`, with generic details for a defect.
 template the code declared, never the client's path); `ledger_events_total` by consumer and outcome (`handled`,
 `duplicate`, `failed`, `rejected`, `malformed`); `ledger_outbox_pending`,
 `ledger_outbox_oldest_pending_timestamp_seconds` and the counters of publishes, failed publishes and failed
-passes; `ledger_worker_restarts_total`. The outbox gauges read the table, so every replica exports the same
-values: aggregate them with `max`, never `sum`. To alert on outbox lag: `ledger_outbox_pending > 0 and time() -
+passes; `ledger_worker_restarts_total`. The outbox gauges read the table (every 15 s, through an index on
+`stored_at`), so every replica exports the same values: aggregate them with `max`, never `sum`. To alert on outbox lag: `ledger_outbox_pending > 0 and time() -
 ledger_outbox_oldest_pending_timestamp_seconds > 60` (the timestamp is 0 when nothing waits).
 
 **Data that never leaves the process.**

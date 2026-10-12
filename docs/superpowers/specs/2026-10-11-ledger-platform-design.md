@@ -174,7 +174,8 @@ An event JetStream did not acknowledge stays in the table on a schedule of its o
 due, fresh events before retried ones, so a pile of stuck events cannot delay a new one. When an event
 finds no stream (someone deleted one while the service ran), the relay declares the service's streams
 again, at most every 30 s, and logs it. The backlog is
-measured, not guessed: gauges for the number of pending events and for when the oldest was stored, and
+measured, not guessed (every 15 s, outside the relay's transactions, the oldest event found through an
+index): gauges for the number of pending events and for when the oldest was stored, and
 counters for publishes, failed publishes and failed passes.
 
 **Inbox.** A consumer handles a message inside a transaction, scoped to the event's tenant so that row-level

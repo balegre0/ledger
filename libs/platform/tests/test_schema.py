@@ -19,7 +19,7 @@ def test_the_relay_s_index_is_part_of_the_schema() -> None:
         name: {index.name for index in table.indexes} for name, table in CHASSIS_METADATA.tables.items()
     }
 
-    assert indexes == {"outbox": {"ix_outbox_due"}, "inbox": set()}
+    assert indexes == {"outbox": {"ix_outbox_due", "ix_outbox_stored_at"}, "inbox": set()}
 
 
 def test_the_inbox_is_keyed_by_consumer_and_event() -> None:

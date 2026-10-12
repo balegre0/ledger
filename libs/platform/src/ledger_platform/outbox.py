@@ -89,6 +89,9 @@ inside the two-minute duplicate window of a stream by default."""
 DEFAULT_MAX_PAYLOAD: Final = 1024 * 1024
 """NATS's default ``max_payload``, which counts the headers of a message as well as its body. A service passes
 the one its connection reports."""
+BACKLOG_EVERY: Final = 15.0
+"""Seconds between two measures of the backlog by a relay: the gauges are a count of the whole table, on
+every replica, and a scrape every fifteen to thirty seconds reads no more often than that."""
 STREAMS_ENSURED_EVERY: Final = 30.0
 """The shortest time between two attempts of a relay to declare its service's streams again, when events find
 no stream: often enough to heal a stream deleted by mistake within a minute, seldom enough not to hammer a
@@ -262,6 +265,8 @@ Index("ix_outbox_due", _RETRIED, OutboxRecord.created_at, OutboxRecord.id, Outbo
 """The relay reads the due rows in ``(retried, created_at, id)`` order: the events never tried first. With
 ``next_attempt_at`` in the index PostgreSQL skips the rows that are not due without visiting them, and a
 pass starts where the fresh events are: hundreds of thousands of stuck rows cost a pass a few milliseconds."""
+Index("ix_outbox_stored_at", OutboxRecord.stored_at)
+"""The backlog's oldest event is one end of this index, not a read of the whole table."""
 _BACKLOG: Final = select(
     func.count(),
     type_coerce(
@@ -310,7 +315,8 @@ class Outbox:
     Metrics: counters of the events published, of the publishes JetStream did not acknowledge, and of the
     passes that failed as a whole (the database, not a publish); gauges of the number of events waiting and of
     the time the oldest was stored (a timestamp, so ``time() - x`` keeps growing while the relay is blind).
-    The gauges are read from the table, so every replica exports the same table-wide values: aggregate them
+    The gauges are read from the table, every ``BACKLOG_EVERY`` seconds, outside the passes' transactions,
+    so every replica exports the same table-wide values: aggregate them
     with ``max``, never ``sum``. To alert on lag: ``pending > 0 and time() - oldest_pending_timestamp_seconds
     > threshold``; the timestamp is 0 when nothing waits, and ``time() - 0`` alone would read as a lag of
     decades.
@@ -457,8 +463,8 @@ class Outbox:
         not; the events wait either way. A pass that failed as a whole, which means the database, is logged
         with its traceback and counted, and tried again after ``retry`` seconds, then twice that, up to
         ``MAX_RETRY_DELAY``; a pass that works starts the delays over. The backlog gauges are refreshed after
-        a pass, full or not, at most once per ``idle`` seconds. ``sleep`` waits between the attempts after a
-        failed pass.
+        a pass, full or not, after the first and then at most once per ``BACKLOG_EVERY`` seconds, however
+        often the relay polls. ``sleep`` waits between the attempts after a failed pass.
 
         Stops only when cancelled, even when a clean-up turns the cancellation into another error: that error
         ends the relay.
@@ -492,7 +498,7 @@ class Outbox:
                 await sleep(delay)
                 continue
             delays = _delays(retry)
-            if loop.time() - measured_at >= idle:
+            if loop.time() - measured_at >= BACKLOG_EVERY:
                 await self.measure_backlog(database)
                 measured_at = loop.time()
             if attempted < self._batch:
