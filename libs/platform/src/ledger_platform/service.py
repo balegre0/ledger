@@ -24,16 +24,17 @@ saying how many were not, never what was being sent.
 
 import asyncio
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from typing import ClassVar, Final, Never, final
-lazy from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
+lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Mapping, Sequence
+lazy from contextlib import AbstractAsyncContextManager
 
 import structlog
 from nats.aio.client import Client
 from nats.js import JetStreamContext
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-from prometheus_client import CollectorRegistry
+from prometheus_client import CollectorRegistry, GCCollector, PlatformCollector, ProcessCollector
 lazy import grpc
 lazy from fastapi import APIRouter, FastAPI
 lazy from opentelemetry.sdk.trace.export import SpanExporter
@@ -47,6 +48,7 @@ from ledger_platform.lifecycle import Lifecycle
 from ledger_platform.logs import Throttled, configure_logging
 from ledger_platform.options import InvalidOptionError, require_at_least, require_seconds
 from ledger_platform.outbox import DEFAULT_PUBLISH_TIMEOUT, Outbox
+from ledger_platform.schema import CHASSIS_METADATA
 from ledger_platform.streams import DEAD_LETTERS, ensure_stream
 from ledger_platform.supervision import Supervisor
 from ledger_platform.tracing import DEFAULT_SHUTDOWN_TIMEOUT, Tracing
@@ -55,6 +57,7 @@ lazy from ledger_platform.consumer import ConsumerSpec
 lazy from ledger_platform.database import DatabaseLimits
 lazy from ledger_platform.settings import ServiceSettings
 lazy from ledger_platform.streams import StreamSpec
+lazy from ledger_platform.supervision import Work
 
 _RECONNECT_WAIT: Final = 2
 """Seconds between two attempts to reach NATS: nats-py's own default, short enough for a blip."""
@@ -129,6 +132,15 @@ class _NatsDisconnectedError(UnavailableError):
         super().__init__("not connected to NATS")
 
 
+class _ChassisTablesMissingError(UnavailableError):
+    """The chassis's tables are not in the database: its first migration has not run."""
+
+    code: ClassVar[str] = "chassis_tables_missing"
+
+    def __init__(self, tables: Sequence[str]) -> None:
+        super().__init__(f"the database lacks the chassis's tables: {', '.join(tables)}")
+
+
 class _WorkerStoppedError(UnavailableError):
     """A background worker is no longer running."""
 
@@ -138,10 +150,19 @@ class _WorkerStoppedError(UnavailableError):
         super().__init__(f"background workers stopped: {', '.join(workers)}")
 
 
+class UnexpectedResourcesError(LedgerError):
+    """Code asked for the service's resources as a type they are not. A bug in the code that asks."""
+
+    code: ClassVar[str] = "unexpected_resources"
+
+    def __init__(self, *, held: object, asked: type[object]) -> None:
+        super().__init__(f"the service's resources are {type(held).__name__}, not {asked.__name__}")
+
+
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Runtime[S: ServiceSettings]:
-    """What a running service's routes, handlers and gRPC methods work with."""
+    """What a running service's routes, handlers, workers, checks and gRPC methods work with."""
 
     settings: S
     database: Database
@@ -152,6 +173,17 @@ class Runtime[S: ServiceSettings]:
     tracing: Tracing
     registry: CollectorRegistry
     """The registry ``/metrics`` exports, for metrics of the service's own."""
+    opened: object = None
+    """What ``Interfaces.resources`` yielded; read it typed with ``resources``."""
+
+    def resources[R](self, kind: type[R]) -> R:
+        """The service's resources (what ``Interfaces.resources`` yielded), as the ``kind`` they are.
+
+        ``UnexpectedResourcesError`` when they are not of that kind (or the service opened none).
+        """
+        if not isinstance(self.opened, kind):
+            raise UnexpectedResourcesError(held=self.opened, asked=kind)
+        return self.opened
 
 
 type RuntimeDependency[S: ServiceSettings] = Callable[[], Coroutine[object, object, Runtime[S]]]
@@ -165,6 +197,12 @@ type ConsumerFactory[S: ServiceSettings] = Callable[[Runtime[S]], Sequence[Consu
 """The consumers of a service, made once it runs, so that their handlers can use what it runs on."""
 type GrpcServices[S: ServiceSettings] = Callable[[Runtime[S], grpc.aio.Server], None]
 """Adds a service's gRPC services to its server, once it runs."""
+type ResourcesOpener[S: ServiceSettings] = Callable[[S], AbstractAsyncContextManager[object]]
+"""Opens what a service talks to beside the chassis (HTTP clients, gRPC channels), and closes it on exit."""
+type ReadinessCheck[S: ServiceSettings] = Callable[[Runtime[S]], Awaitable[object]]
+"""Returns when what it checks is ready, raises when not; handed the runtime of the running service."""
+type WorkerFactory[S: ServiceSettings] = Callable[[Runtime[S]], Mapping[str, Work]]
+"""The background workers of a service by name, made once it runs."""
 
 
 def _no_routes[S: ServiceSettings](runtime: RuntimeDependency[S]) -> Sequence[APIRouter]:
@@ -177,16 +215,34 @@ def _no_consumers[S: ServiceSettings](runtime: Runtime[S]) -> Sequence[ConsumerS
     return ()
 
 
+def _no_workers[S: ServiceSettings](runtime: Runtime[S]) -> Mapping[str, Work]:
+    del runtime
+    return {}
+
+
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Interfaces[S: ServiceSettings]:
-    """How clients reach a service: its HTTP routes and its gRPC services."""
+    """Where a service meets the rest of the system.
+
+    The HTTP routes and gRPC services clients reach, the resources it reaches others with, and the readiness
+    checks of those.
+    """
 
     http: HttpRoutes[S] = _no_routes
     """Called when the service is built, and complete then: a route added later is measured as
     ``unregistered``."""
     grpc: GrpcServices[S] | None = None
     """``None``: the service runs no gRPC server."""
+    resources: ResourcesOpener[S] | None = None
+    """An async context manager that opens what the service talks to beside the chassis (an HTTP client, gRPC
+    channels) and yields one object holding them, a dataclass of the service's own: entered at start after
+    NATS and the streams, and exited at stop after the gRPC server and the workers have stopped and before
+    NATS drains. Code reads it typed with ``runtime.resources(Kind)``. ``None``: the service opens nothing."""
+    checks: Mapping[str, ReadinessCheck[S]] = field(default_factory=dict[str, ReadinessCheck[S]])
+    """Readiness checks of the service's own, by name, beside the chassis's (``database``, ``nats``,
+    ``workers``, ``schema``, whose names they cannot take): each is handed the runtime and held to the same
+    time limit; while the service is not running it fails."""
 
 
 @final
@@ -197,6 +253,10 @@ class Events[S: ServiceSettings]:
     streams: Sequence[StreamSpec] = ()
     """The streams of the events it publishes, created or updated at start (``DEAD_LETTERS`` always is)."""
     consumers: ConsumerFactory[S] = _no_consumers
+    workers: WorkerFactory[S] = _no_workers
+    """Background workers of the service's own, by name, made once it runs: supervised like the relay and the
+    consumers (started again after a failure, for good after an ``InvalidOptionError``) and stopped with
+    them. A name the chassis uses (``outbox relay``, ``consumer <name>``) is refused at start."""
 
 
 @final
@@ -400,10 +460,16 @@ class Service[S: ServiceSettings]:
         self._runtime: Runtime[S] | None = None
         self._grpc_port: int | None = None
         self._started = False
+        ProcessCollector(registry=self._registry)
+        PlatformCollector(registry=self._registry)
+        GCCollector(registry=self._registry)
         health = Health()
         health.add("database", self._database_answers)
         health.add("nats", self._nats_is_connected)
         health.add("workers", self._no_worker_is_dead)
+        health.add("schema", self._chassis_tables_exist)
+        for name, check in self._interfaces.checks.items():
+            health.add(name, partial(self._check_with_runtime, check))
         health.add_liveness("workers", self._workers_live)
         self._app = create_app(
             info=ApiInfo(title=settings.service_name, version=version),
@@ -431,7 +497,10 @@ class Service[S: ServiceSettings]:
 
     @property
     def workers(self) -> tuple[asyncio.Task[Never], ...]:
-        """The background workers in the order they started: the outbox relay, then one per consumer."""
+        """The background workers in the order they started.
+
+        The outbox relay, one per consumer, then the service's own.
+        """
         return self._supervisor.workers
 
     @property
@@ -473,6 +542,8 @@ class Service[S: ServiceSettings]:
         jetstream = JetStreamContext(connection)
         for stream in (DEAD_LETTERS, *self._events.streams):
             await ensure_stream(jetstream, stream)
+        opener = self._interfaces.resources
+        opened = None if opener is None else await lifecycle.enter(opener(settings))
         outbox = Outbox(
             tracing=tracing,
             registry=self._registry,
@@ -487,6 +558,7 @@ class Service[S: ServiceSettings]:
             outbox=outbox,
             tracing=tracing,
             registry=self._registry,
+            opened=opened,
         )
         # One stop for every worker started from here on, before NATS drains and after gRPC stops.
         lifecycle.on_close(partial(self._supervisor.stop, limits.worker_stop_grace))
@@ -496,6 +568,8 @@ class Service[S: ServiceSettings]:
         for spec in self._events.consumers(runtime):
             consumer = Consumer(spec, database=database, tracing=tracing, metrics=metrics)
             _ = self._supervisor.start(f"consumer {spec.name}", partial(consumer.run, jetstream))
+        for name, work in self._events.workers(runtime).items():
+            _ = self._supervisor.start(name, work)
         services = self._interfaces.grpc
         if services is not None:
             self._grpc_port = await lifecycle.enter(
@@ -517,6 +591,14 @@ class Service[S: ServiceSettings]:
 
     async def _database_answers(self) -> None:
         await self.runtime().database.ping()
+
+    async def _chassis_tables_exist(self) -> None:
+        missing = await self.runtime().database.missing_tables(tuple(CHASSIS_METADATA.tables))
+        if missing:
+            raise _ChassisTablesMissingError(missing)
+
+    async def _check_with_runtime(self, check: ReadinessCheck[S]) -> None:
+        await check(self.runtime())
 
     async def _nats_is_connected(self) -> None:
         if not self.runtime().nats.is_connected:

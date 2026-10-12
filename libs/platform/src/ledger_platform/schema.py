@@ -1,8 +1,8 @@
 """The tables the chassis owns, which the migrations of every service create: ``outbox`` and ``inbox``.
 
 A service's first migration creates ``CHASSIS_METADATA`` beside the service's own tables. The chassis writes
-no table by itself, and a service started without them reports ready while the relay fails at every pass and
-no event leaves.
+no table by itself, and a service started without them is not ready (its ``schema`` check fails): the relay
+would fail at every pass and no event would leave.
 
 A table is registered when the module of its class is imported, and the classes sit with the code that uses
 them: ``OutboxRecord`` in ``outbox``, ``InboxRecord`` in ``consumer``. ``PlatformTable.metadata`` is therefore

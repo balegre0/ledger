@@ -438,7 +438,8 @@ company can certify while another runs in production.
 - **Health:** every service serves HTTP `/livez`, `/readyz` and `/metrics`. Kubernetes probes use each
   service's HTTP `/livez` and `/readyz` (gRPC health is not needed: every service serves HTTP).
   `/readyz` runs the service's named checks (database, on a connection outside the pool so that a busy pool
-  never takes a replica out of rotation; NATS; background workers) concurrently, each held
+  never takes a replica out of rotation; NATS; background workers; the chassis's tables, so that a service
+  on an unmigrated database is not ready; and the service's own) concurrently, each held
   to a time limit, and answers 503 if any fails; overlapping probes share one run of each check. A failing
   check is logged in full when it starts failing, not on every probe; NATS errors during an outage are
   logged once a minute. `/livez`

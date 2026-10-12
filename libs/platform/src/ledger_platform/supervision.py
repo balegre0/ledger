@@ -20,13 +20,14 @@ import asyncio
 import random
 from math import ceil, log2
 from time import monotonic
-from typing import Final, Never, final
+from typing import ClassVar, Final, Never, final
 lazy from collections.abc import Callable, Coroutine
 
 import structlog
 from prometheus_client import Counter
 lazy from prometheus_client import CollectorRegistry
 
+from ledger_kernel.errors import LedgerError
 lazy from ledger_kernel.clock import MonotonicClock, Sleep
 
 FIRST_RESTART_DELAY: Final = 1.0
@@ -45,6 +46,15 @@ type Work = Callable[[], Coroutine[object, object, Never]]
 """Starts a run of a worker: a coroutine that never returns."""
 type Draw = Callable[[], float]
 """A number drawn at random in ``[0, 1)``. A test passes its own."""
+
+
+class DuplicateWorkerError(LedgerError):
+    """Two workers started under one name: their logs and their metrics could not be told apart."""
+
+    code: ClassVar[str] = "duplicate_worker"
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"a worker named {name!r} already runs")
 
 
 def restart_delay(in_a_row: int, draw: float) -> float:
@@ -107,7 +117,12 @@ class Supervisor:
         return tuple(self._workers)
 
     def start(self, name: str, work: Work) -> asyncio.Task[Never]:
-        """Run ``work`` as the worker ``name`` until it is stopped, starting it again after each failure."""
+        """Run ``work`` as the worker ``name`` until it is stopped, starting it again after each failure.
+
+        ``DuplicateWorkerError`` when a worker of that name was started already.
+        """
+        if any(worker.get_name() == name for worker in self._workers):
+            raise DuplicateWorkerError(name)
         self._restarts.labels(name)
         worker = asyncio.create_task(self._keep(name, work), name=name)
         worker.add_done_callback(self._ended)

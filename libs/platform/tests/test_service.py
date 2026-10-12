@@ -3,15 +3,16 @@ import contextlib
 import inspect
 import logging
 import socket
+import sys
 from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from functools import partial
 from math import inf, nan
 from time import monotonic
-from typing import Annotated, Final, Literal, Protocol, TypedDict, final, override
+from typing import Annotated, Final, Literal, Never, Protocol, TypedDict, final, override
 from urllib.parse import urlsplit
-lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
 
 import grpc
 import httpx
@@ -40,6 +41,7 @@ from ledger_contracts.envelope import Envelope
 from ledger_platform.consumer import ConsumerRefusedError, ConsumerSpec
 from ledger_platform.database import DatabaseLimits
 from ledger_platform.grpc_server import GrpcBindError, serve_grpc
+from ledger_platform.health import DuplicateCheckError
 from ledger_platform.outbox import DEFAULT_MAX_PAYLOAD, EventTooLargeError, InvalidOutboxOptionError
 from ledger_platform.service import (
     Events,
@@ -50,9 +52,11 @@ from ledger_platform.service import (
     ServiceAlreadyStartedError,
     ServiceLimits,
     ServiceNotRunningError,
+    UnexpectedResourcesError,
 )
 from ledger_platform.settings import ServiceSettings
 from ledger_platform.streams import StreamSpec, ensure_stream
+from ledger_platform.supervision import DuplicateWorkerError
 lazy from ledger_platform.consumer import ConsumerApi, Handler
 lazy from ledger_platform.database import Database, UnitOfWork
 lazy from ledger_platform.service import Runtime, RuntimeDependency
@@ -72,7 +76,7 @@ RNC: Final = "00112345678"
 TRACE_ID: Final = "0af7651916cd43dd8448eb211c80319c"
 TRACEPARENT: Final = f"00-{TRACE_ID}-b7ad6b7169203331-01"
 TRACE_SERVICE: Final = "opentelemetry.proto.collector.trace.v1.TraceService"
-ALL_READY: Final = {"database": True, "nats": True, "workers": True}
+ALL_READY: Final = {"database": True, "nats": True, "workers": True, "schema": True}
 TIMEOUT: Final = 5.0
 WINDING_DOWN: Final = 0.3
 """Seconds a held handler takes to stop once cancelled: a stop that did not wait for it would not see it."""
@@ -561,7 +565,10 @@ async def test_before_it_starts_the_service_is_not_ready_and_its_routes_answer_5
     payments = Payments(configured(database_url, nats_url))
     transport = httpx.ASGITransport(app=payments.service.app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        assert await readiness(client) == (503, {"database": False, "nats": False, "workers": False})
+        assert await readiness(client) == (
+            503,
+            {"database": False, "nats": False, "workers": False, "schema": False},
+        )
         response = await client.post("/payments")
     assert (response.status_code, PROBLEM.validate_json(response.content)["code"]) == (
         503,
@@ -577,7 +584,10 @@ async def test_a_database_that_refuses_the_service_makes_it_not_ready(
     assert refused != database_url
     service = bare(refused, nats_url)
     async with running(service) as client:
-        assert await readiness(client) == (503, {"database": False, "nats": True, "workers": True})
+        assert await readiness(client) == (
+            503,
+            {"database": False, "nats": True, "workers": True, "schema": False},
+        )
 
 
 async def test_a_worker_that_something_else_cancelled_is_dead_and_the_service_neither_ready_nor_live(
@@ -590,7 +600,10 @@ async def test_a_worker_that_something_else_cancelled_is_dead_and_the_service_ne
         relay = payments.service.workers[0]
         relay.cancel()
         await asyncio.wait((relay,))
-        assert await readiness(client) == (503, {"database": True, "nats": True, "workers": False})
+        assert await readiness(client) == (
+            503,
+            {"database": True, "nats": True, "workers": False, "schema": True},
+        )
         assert await liveness(client) == (503, ["workers"])
 
 
@@ -614,7 +627,12 @@ async def test_a_misconfigured_worker_is_not_restarted_and_the_service_is_neithe
                 worker for worker in payments.service.workers if worker.get_name() == "consumer orphan"
             )
             await asyncio.wait((orphan,), timeout=TIMEOUT)
-            assert (await readiness(client))[1] == {"database": True, "nats": True, "workers": False}
+            assert (await readiness(client))[1] == {
+                "database": True,
+                "nats": True,
+                "workers": False,
+                "schema": True,
+            }
             assert await liveness(client) == (503, ["workers"])
             registry = payments.service.runtime().registry
             assert (
@@ -1069,7 +1087,10 @@ async def test_a_consumer_that_cannot_reach_jetstream_as_it_starts_is_restarted_
                     return any(entry["event"] == "worker.restarting" for entry in logs)
 
                 await within(4 * TIMEOUT, restarting)
-                assert await readiness(client) == (503, {"database": True, "nats": False, "workers": True})
+                assert await readiness(client) == (
+                    503,
+                    {"database": True, "nats": False, "workers": True, "schema": True},
+                )
                 assert await liveness(client) == (200, [])
 
                 await proxy.restore()
@@ -1221,3 +1242,180 @@ async def test_a_stop_in_which_every_part_hangs_ends_within_the_sum_of_its_limit
         with pytest.raises(grpc.aio.AioRpcError):
             await in_flight
     assert stopped_in < limits.stop_budget + 2  # the pool and the rest take milliseconds
+
+
+# ── Extension points: workers, checks, resources ────────────────────────────────
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class Clients:
+    """What a service opens beside the chassis: here, one stand-in for an HTTP client."""
+
+    dgii: str
+
+
+@final
+class Extended:
+    """A service with a worker of its own, a readiness check of its own and resources of its own."""
+
+    def __init__(self, settings: ServiceSettings, *, healthy: bool = True, fail_once: bool = False) -> None:
+        self.happened: list[str] = []
+        self.ticks = 0
+        self.checked: list[Runtime[ServiceSettings]] = []
+        self.healthy = healthy
+        self._fail_once = fail_once
+        self.service = Service(
+            settings=settings,
+            version="1.0",
+            interfaces=Interfaces(
+                http=self._routes, resources=self._open, checks={"dgii": self._dgii_answers}
+            ),
+            events=Events(workers=self._workers),
+        )
+
+    @asynccontextmanager
+    async def _open(self, settings: ServiceSettings) -> AsyncGenerator[Clients]:
+        self.happened.append("resources opened")
+        try:
+            yield Clients(dgii=f"client of {settings.service_name}")
+        finally:
+            self.happened.append("resources closed")
+
+    async def _dgii_answers(self, runtime: Runtime[ServiceSettings]) -> None:
+        self.checked.append(runtime)
+        if not self.healthy:
+            raise ConnectionError
+
+    def _workers(
+        self, runtime: Runtime[ServiceSettings]
+    ) -> dict[str, Callable[[], Coroutine[object, object, Never]]]:
+        del runtime
+        return {"ticker": self._tick}
+
+    async def _tick(self) -> Never:
+        self.ticks += 1
+        if self._fail_once and self.ticks == 1:
+            raise TickFailedError
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.happened.append("worker stopped")
+        raise AssertionError  # never reached: the wait above ends only by cancellation
+
+    def _routes(self, runtime: RuntimeDependency[ServiceSettings]) -> Sequence[APIRouter]:
+        router = APIRouter()
+
+        @router.get("/dgii")
+        async def dgii(current: Annotated[Runtime[ServiceSettings], Depends(runtime)]) -> str:
+            return current.resources(Clients).dgii
+
+        return (router,)
+
+
+class TickFailedError(Exception):
+    def __init__(self) -> None:
+        super().__init__("the first tick fails")
+
+
+async def test_a_service_s_own_worker_runs_supervised_and_stops_before_its_resources_close(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    del infrastructure
+    extended = Extended(configured(database_url, nats_url), fail_once=True)
+    async with running(extended.service):
+        registry = extended.service.runtime().registry
+        await within(4 * TIMEOUT, partial(restarted, registry, "ticker"))
+        assert [worker.get_name() for worker in extended.service.workers] == ["outbox relay", "ticker"]
+    assert extended.ticks == 2
+    assert extended.happened == ["resources opened", "worker stopped", "resources closed"]
+
+
+async def test_routes_reach_the_resources_typed_and_a_wrong_type_is_refused(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    del infrastructure
+    extended = Extended(configured(database_url, nats_url))
+    async with running(extended.service) as client:
+        response = await client.get("/dgii")
+        assert response.json() == "client of payments"
+        with pytest.raises(UnexpectedResourcesError, match=r"^the service's resources are Clients, not int$"):
+            extended.service.runtime().resources(int)
+
+
+async def test_a_service_without_resources_has_none_to_hand(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    del infrastructure
+    service = bare(database_url, nats_url)
+    async with running(service):
+        with pytest.raises(
+            UnexpectedResourcesError, match=r"^the service's resources are NoneType, not Clients$"
+        ):
+            service.runtime().resources(Clients)
+
+
+@pytest.mark.parametrize("healthy", [True, False])
+async def test_a_service_s_own_check_is_part_of_its_readiness_and_is_handed_the_runtime(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext, *, healthy: bool
+) -> None:
+    del infrastructure
+    extended = Extended(configured(database_url, nats_url), healthy=healthy)
+    transport = httpx.ASGITransport(app=extended.service.app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as before:
+        assert (await readiness(before))[1]["dgii"] is False  # not running: nothing to check with
+    async with running(extended.service) as client:
+        status, checks = await readiness(client)
+        assert (status == 200, checks) == (healthy, ALL_READY | {"dgii": healthy})
+        assert extended.checked == [extended.service.runtime()]
+
+
+def test_a_check_of_the_service_cannot_take_the_name_of_one_of_the_chassis(database_url: str) -> None:
+    with pytest.raises(DuplicateCheckError, match="'database'"):
+        Service(
+            settings=configured(database_url, "nats://localhost:4222"),
+            version="1.0",
+            interfaces=Interfaces(checks={"database": partial(asyncio.sleep, 0)}),
+        )
+
+
+async def test_a_worker_cannot_take_the_name_of_one_of_the_chassis(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    del infrastructure
+
+    async def forever() -> Never:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    service = Service(
+        settings=configured(database_url, nats_url),
+        version="1.0",
+        events=Events(workers=lambda _: {"outbox relay": forever}),
+    )
+    with pytest.raises(DuplicateWorkerError, match=r"^a worker named 'outbox relay' already runs$"):
+        async with running(service):
+            pass
+
+
+async def test_a_database_without_the_chassis_tables_is_not_ready(
+    database_url: str, nats_url: str, jetstream: JetStreamContext
+) -> None:
+    """Migrations not run: the relay would fail at every pass while the service answered ready."""
+    del jetstream
+    service = bare(database_url, nats_url)
+    async with running(service) as client:
+        assert await readiness(client) == (503, ALL_READY | {"schema": False})
+
+
+async def test_the_metrics_of_the_process_are_exported(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    del infrastructure
+    service = bare(database_url, nats_url)
+    async with running(service) as client:
+        metrics = (await client.get("/metrics")).text
+    assert "\npython_info{" in metrics
+    assert "\npython_gc_objects_collected_total{" in metrics
+    if sys.platform == "linux":  # the process collector reads /proc
+        assert "\nprocess_resident_memory_bytes " in metrics

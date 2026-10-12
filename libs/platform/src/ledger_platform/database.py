@@ -13,12 +13,12 @@ from functools import partial
 from math import ceil
 from types import BuiltinFunctionType, FunctionType, MethodType
 from typing import ClassVar, Final, final
-lazy from collections.abc import AsyncGenerator, Callable
+lazy from collections.abc import AsyncGenerator, Callable, Sequence
 
 import psycopg
 import structlog
 from psycopg.pq import TransactionStatus
-from sqlalchemy import MetaData, text
+from sqlalchemy import MetaData, Text, func, select, text, type_coerce
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import DeclarativeBase
@@ -430,6 +430,16 @@ class Database:
         finally:
             after_commit = callbacks.close()  # rolled back or committed, the unit takes no more callbacks
         _run(after_commit)  # reached only when the transaction committed
+
+    async def missing_tables(self, names: Sequence[str]) -> tuple[str, ...]:
+        """Which of the tables ``names`` the database lacks (``to_regclass``, by the search path).
+
+        On a connection of its own, like ``ping``: for a readiness check, never waiting for the pool.
+        """
+        found = select(*(type_coerce(func.to_regclass(name), Text) for name in names))
+        async with self._probe.connect() as connection:
+            row = (await connection.execute(found)).one()
+        return tuple(name for name, table in zip(names, row, strict=True) if table is None)
 
     async def ping(self) -> None:
         """Raises unless PostgreSQL answers, on a connection of its own, closed after.

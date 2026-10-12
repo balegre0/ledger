@@ -71,16 +71,17 @@ first created, so after editing it run `down -v`.
 
 ## The chassis in one page
 
-A service is its settings, its routes, its consumers and, if it has one, its gRPC services, handed to a
-`Service`. The chassis does the rest: the PostgreSQL pool, the NATS connection, the streams, the outbox relay,
-the consumer workers, the gRPC server, health, metrics, traces and logs, started and stopped in a fixed order.
+A service is its settings, its routes, its consumers and, if it has any, its gRPC services, background workers,
+resources (the clients it reaches others with) and readiness checks, handed to a `Service`. The chassis does the
+rest: the PostgreSQL pool, the NATS connection, the streams, the resources, the outbox relay, the consumer and
+service workers, the gRPC server, health, metrics, traces and logs, started and stopped in a fixed order.
 
 ### A minimal service
 
 The service's first migration creates the chassis's tables, `outbox` and `inbox` (`CHASSIS_METADATA` in
 `ledger_platform.schema`), and puts every tenant table under `tenant_isolation`. The chassis creates no table
-itself, and the service must find them there when it starts: without them it reports ready while the relay fails
-at every pass and no event leaves. Until Alembic arrives (milestone 2) a migration is a script:
+itself: without them the service starts but is not ready (its `schema` check fails), since the relay would fail at
+every pass and no event would leave. Until Alembic arrives (milestone 2) a migration is a script:
 
 ```python
 from sqlalchemy import text
@@ -213,10 +214,10 @@ status of the error's kind (see below).
 |---|---|
 | `ServiceSettings` | Subclass it for a service's own settings. Every field is a `LEDGER_*` environment variable (table below). A missing or invalid value, and any `LEDGER_*` variable that is not a setting (a misspelled name), stop the start with every problem listed; secrets are `SecretStr` and never in a `repr`, a log or an error |
 | `Service(settings=, version=, interfaces=, events=, limits=)` | Assembles everything. `service.app` is the FastAPI application to serve; its lifespan runs the service. `service.runtime()`, `service.workers` and `service.grpc_port` are for code outside the routes. A service starts once (`ServiceAlreadyStartedError`) |
-| `Interfaces(http=, grpc=)` | `http` is a factory `(RuntimeDependency[S]) -> Sequence[APIRouter]`, called once when the service is built; the routes must be complete then. `grpc` is `(Runtime[S], grpc.aio.Server) -> None`, which adds the generated servicers, such as `add_<Service>Servicer_to_server(servicer, server)`; `None` runs no gRPC server. Methods must be `async def` (coroutines or async generators) to have their errors mapped |
-| `Events(streams=, consumers=)` | `streams` are the `StreamSpec`s the service publishes to; every start creates a missing one (file storage) or widens an existing one to hold the spec (its subjects added, the longer of each limit kept: a stream only grows), and always `DEAD_LETTERS`; one deleted while the service runs is declared again by the relay when an event finds no stream (at most every 30 s). `consumers` is `(Runtime[S]) -> Sequence[ConsumerSpec]`, called once the service runs |
+| `Interfaces(http=, grpc=, resources=, checks=)` | `http` is a factory `(RuntimeDependency[S]) -> Sequence[APIRouter]`, called once when the service is built; the routes must be complete then. `grpc` is `(Runtime[S], grpc.aio.Server) -> None`, which adds the generated servicers, such as `add_<Service>Servicer_to_server(servicer, server)`; `None` runs no gRPC server. Methods must be `async def` (coroutines or async generators) to have their errors mapped and their calls timed. `resources` is `(S) -> AbstractAsyncContextManager[object]`, typically an `@asynccontextmanager` that opens the service's clients (an HTTP client, gRPC channels) and yields one dataclass of its own holding them: entered at start after NATS and the streams, exited at stop after the gRPC server and the workers and before NATS drains; code reads it typed with `runtime.resources(Clients)` (`UnexpectedResourcesError` for another type). One typed object composed by the service keeps the surface to one hook and one accessor, and its own `async with` orders the closing. `checks` maps names to `async (Runtime[S]) -> object`, readiness checks beside the chassis's (whose names they cannot take) |
+| `Events(streams=, consumers=)` | `streams` are the `StreamSpec`s the service publishes to; every start creates a missing one (file storage) or widens an existing one to hold the spec (its subjects added, the longer of each limit kept: a stream only grows), and always `DEAD_LETTERS`; one deleted while the service runs is declared again by the relay when an event finds no stream (at most every 30 s). `consumers` is `(Runtime[S]) -> Sequence[ConsumerSpec]`, called once the service runs. `workers` is `(Runtime[S]) -> Mapping[str, Work]`: background coroutines of the service's own by name, supervised like the relay and the consumers and stopped with them (a name the chassis uses is refused, `DuplicateWorkerError`) |
 | `ServiceLimits(database=, pool_size=, publish_timeout=, nats_connect_timeout=, grpc_stop_grace=, worker_stop_grace=, nats_drain_timeout=, span_flush_timeout=)` | Every wait has a limit. `DatabaseLimits`: connect 5 s, statement 30 s, lock 5 s, idle in transaction 60 s, wait for a pooled connection 10 s, connection recycled after 30 min. `pool_size` 10 (as many again for bursts). `publish_timeout` 5 s, at most half the idle-in-transaction timeout (checked). `nats_connect_timeout` 60 s: the first connection is retried that long, then the start fails; once connected NATS is reconnected for as long as it takes, and its errors meanwhile are logged once a minute (the first at once). The stop: `grpc_stop_grace` 8 s, `worker_stop_grace` 8 s, `nats_drain_timeout` 4 s, `span_flush_timeout` 4 s; `stop_budget`, their sum (24 s), bounds a stop whatever hangs |
-| `Runtime[S]` | What a running service works with: `settings`, `database`, `nats`, `jetstream`, `outbox`, `tracing`, `registry` (the metrics registry `/metrics` exports). A route asks for it with `Annotated[Runtime[S], Depends(runtime)]`; a consumer factory and the gRPC registration are handed it. While the service is not running, routes answer 503 `service_not_running` |
+| `Runtime[S]` | What a running service works with: `settings`, `database`, `nats`, `jetstream`, `outbox`, `tracing`, `registry` (the metrics registry `/metrics` exports) and `resources(Kind)`. A route asks for it with `Annotated[Runtime[S], Depends(runtime)]`; the consumer and worker factories, the checks and the gRPC registration are handed it. While the service is not running, routes answer 503 `service_not_running` |
 | `database.transaction(tenant)` | One PostgreSQL transaction scoped to a `Tenant` (or `None`: no tenant). `unit.connection` is for repositories, `outbox.add(unit, envelope, subject=)` stores an event in the same transaction, `unit.after_commit(callback)` runs once it has committed. It commits only if every statement succeeded: a database error caught and ignored inside it raises `AbortedTransactionError` at the exit instead of losing the work silently |
 | `Envelope`, `Outbox` | An event is a protobuf message in a CloudEvents 1.0 envelope carried as NATS headers (`ce-id`, `ce-type` = the message's full name, `ce-source`, `ce-time`, `ce-subject` = company id, `ce-organizationid`, `traceparent`). `Envelope.wrap(message, source=, tenant=)` makes one, `envelope.unwrap(Message)` reads the payload back. `Outbox.add` refuses an event no relay could ever publish (a subject NATS cannot route, a message over its size limit) inside the caller's transaction |
 | `ConsumerSpec(name=, stream=, subject=, handler=, max_deliver=, backoff=, ack_wait=)` | A durable JetStream pull consumer. `handler` is `async (Envelope, UnitOfWork) -> None`; the unit is the event's own transaction, scoped to its tenant, so the handler's writes commit together with the event's claim in `inbox`. The spec is the configuration: starting the consumer creates it or brings it to the spec. Its subject and its ack policy never change in place; a service that needs another subject gives the consumer a new name (`payments-settle-v2`). A stream that does not exist yet is no mistake: the consumer logs `consumer.stream_missing` and binds once its stream is there |
@@ -287,14 +288,15 @@ trailing metadata `ledger-error-code`, with generic details for a defect.
 **Probes.** `/livez`, `/readyz` and `/metrics` are outside the OpenAPI document.
 
 - `/readyz` runs the checks `database` (a query, on a connection of its own: a pool that requests keep busy never
-  takes a replica out of rotation), `nats` (the connection is up) and `workers` (none is dead)
+  takes a replica out of rotation), `nats` (the connection is up), `workers` (none is dead), `schema` (the chassis's
+  tables exist, `to_regclass`, on the same kind of connection) and the service's own `checks`
   concurrently, each held to 2 seconds, and answers 200 `ready` or 503 `not_ready` with the result of each.
   Overlapping probes share one run of each check. A check that starts failing is logged once with its traceback,
   then at debug level while it stays failing, and `health.check_recovered` when it passes again.
 - `/livez` does not consult the dependencies, so a PostgreSQL outage does not restart every pod. It answers 503
   `unrecoverable` only when the process cannot recover by itself: a check has outlived ten time limits and will
   not stop, or a background worker is dead for good.
-- Workers (the outbox relay, one per consumer) are supervised. One that fails is logged with its traceback and
+- Workers (the outbox relay, one per consumer, and the service's own) are supervised. One that fails is logged with its traceback and
   started again after 1 s, then 2 s, up to a minute, each delay shortened at random by up to a fifth so that
   replicas do not come back together; a run of a minute starts the delays over; `ledger_worker_restarts_total`
   counts the restarts. A worker waiting to start again is not dead: JetStream unable to serve a consumer for a
@@ -321,6 +323,7 @@ trailing metadata `ledger-error-code`, with generic details for a defect.
 | `ledger_outbox_pending`, `ledger_outbox_oldest_pending_timestamp_seconds` | | The outbox backlog, read from the table every 15 s (through an index on `stored_at`) |
 | `ledger_outbox_published_total`, `ledger_outbox_publish_failed_total`, `ledger_outbox_failed_passes_total` | | The relay |
 | `ledger_worker_restarts_total` | `worker` | Supervised restarts |
+| `process_*`, `python_info`, `python_gc_*` | | prometheus-client's standard process, platform and garbage-collector collectors, under their usual names (dashboards expect them) |
 
 The outbox gauges read the table, so every replica exports the same values: aggregate them with `max`, never
 `sum`. To alert on outbox lag: `ledger_outbox_pending > 0 and time() - ledger_outbox_oldest_pending_timestamp_seconds
@@ -383,8 +386,6 @@ Milestone 2 (identity) and later:
   errors.
 - Alembic migrations, tested up and down in CI. Today a migration is a script, and `outbox` and `inbox`
   (`ledger_platform.schema`) belong in every service's first one.
-- A readiness check that the chassis's tables exist. Today `/readyz` does not look: milestone 2 adds the migrations
-  and the check.
 - An entry point that serves `service.app` (the stack's choice is Granian), and a Dockerfile per service.
 - Pagination primitives, with the first list endpoint.
 
