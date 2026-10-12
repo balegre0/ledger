@@ -7,6 +7,11 @@ than the code and the title unless the error was written to be read: the ``detai
 is boilerplate the title already says, or whatever its author typed (possibly built from the request), so it
 stays out (a server error a route raises is logged with it, cut); a service that has something to tell a
 client raises a ``LedgerError``, whose message is built inside its class.
+
+Each request is traced by FastAPI's own instrumentation into the provider the app is given, under its route
+template and continuing the caller's ``traceparent``: whatever the route does (an event it stores, say) is
+part of that trace. A failure is recorded by its type. The rest of FastAPI's telemetry stays off (see
+``_telemetry``).
 """
 
 import re
@@ -27,6 +32,8 @@ from prometheus_client import CONTENT_TYPE_LATEST, Histogram, generate_latest
 from pydantic import TypeAdapter
 from starlette.exceptions import HTTPException
 lazy from fastapi import APIRouter, Request
+lazy from fastapi.telemetry import TelemetryConfig
+lazy from opentelemetry.trace import TracerProvider
 lazy from prometheus_client import CollectorRegistry
 
 from ledger_kernel.errors import ErrorKind, LedgerError, described, truncate
@@ -117,6 +124,19 @@ class ApiInfo:
 
     title: str
     version: str
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Observability:
+    """What the app tells about itself: whether it is ready, its metrics and its traces."""
+
+    health: Health
+    """The checks ``/readyz`` runs (and whose stuck ones ``/livez`` reports)."""
+    registry: CollectorRegistry
+    """What ``/metrics`` exports; the app adds the duration of every request to it."""
+    tracer_provider: TracerProvider
+    """Where the span of every request goes: the service's own provider, never whichever is process-wide."""
 
 
 class _ValidationIssue(TypedDict):
@@ -396,22 +416,38 @@ def _add_operational_routes(app: FastAPI, health: Health, registry: CollectorReg
         return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
 
 
+def _telemetry(provider: TracerProvider) -> TelemetryConfig:
+    """FastAPI's own OpenTelemetry, kept to the one thing the chassis wants of it: the span of each request.
+
+    Into ``provider``, so that a service's spans never depend on which provider is process-wide. FastAPI's
+    logs stay off: they would record every unhandled exception a second time, its message and traceback
+    included, beside the chassis's own log line. Its metrics stay off: Prometheus measures every request
+    already. And it never adds exporters from the environment (``FASTAPI_OTEL_AUTO_CONFIGURE``): they would
+    export past the redaction the chassis gives every exporter of its own.
+    """
+    return {"tracer_provider": provider, "logs": False, "metrics": False, "auto_configure": False}
+
+
 def create_app(
     *,
     info: ApiInfo,
-    health: Health,
-    registry: CollectorRegistry,
+    observability: Observability,
     lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]],
     routers: Sequence[APIRouter] = (),
 ) -> FastAPI:
-    """A FastAPI application with ``routers`` plus ``/livez``, ``/readyz`` and ``/metrics``.
+    """A FastAPI application with ``routers`` plus ``/livez``, ``/readyz`` and ``/metrics``, traced.
 
     Raises ``AmbiguousRouteError`` when one route is mounted under two different templates. Routes must be
     complete before this returns: a route added afterwards, to the app or to a router already included, is
     measured as ``unregistered`` (and logged once), never under a path that may lack a prefix.
     """
-    app = FastAPI(title=info.title, version=info.version, lifespan=lifespan)
-    _add_operational_routes(app, health, registry)
+    app = FastAPI(
+        title=info.title,
+        version=info.version,
+        lifespan=lifespan,
+        telemetry=_telemetry(observability.tracer_provider),
+    )
+    _add_operational_routes(app, observability.health, observability.registry)
     for router in routers:
         app.include_router(router)
     labels = _RouteLabels.of(app)
@@ -419,7 +455,7 @@ def create_app(
         "http_request_duration_seconds",
         "Time to answer an HTTP request.",
         ["method", "route", "status"],
-        registry=registry,
+        registry=observability.registry,
     )
     app.add_middleware(_Measure, duration=duration, labels=labels)
     _answer_errors_as_problems(app, labels)

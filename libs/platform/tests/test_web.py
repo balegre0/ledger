@@ -10,9 +10,12 @@ import httpx
 import pytest
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
+from opentelemetry.trace import SpanKind, StatusCode, format_span_id, format_trace_id
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 from structlog.testing import capture_logs
 lazy from fastapi import FastAPI
+lazy from opentelemetry.sdk.trace import ReadableSpan
+lazy from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 lazy from prometheus_client import CollectorRegistry
 
 from ledger_kernel.errors import (
@@ -25,7 +28,12 @@ from ledger_kernel.errors import (
     described,
 )
 from ledger_platform.health import Health
-from ledger_platform.web import PROBLEM_JSON, AmbiguousRouteError, ApiInfo, create_app
+from ledger_platform.web import PROBLEM_JSON, AmbiguousRouteError, ApiInfo, Observability, create_app
+lazy from ledger_platform.tracing import Tracing
+
+TRACE_ID: Final = "0af7651916cd43dd8448eb211c80319c"
+CALLER_SPAN_ID: Final = "b7ad6b7169203331"
+TRACEPARENT: Final = f"00-{TRACE_ID}-{CALLER_SPAN_ID}-01"
 
 
 class MissingItemError(NotFoundError):
@@ -225,11 +233,16 @@ def health() -> Health:
     return Health(timeout=0.05)
 
 
-def build(health: Health, registry: CollectorRegistry, *routers: APIRouter) -> FastAPI:
+@pytest.fixture
+def observability(health: Health, registry: CollectorRegistry, tracing: Tracing) -> Observability:
+    """The test's own health checks, metrics and spans (``exporter`` holds the finished ones)."""
+    return Observability(health=health, registry=registry, tracer_provider=tracing.provider)
+
+
+def build(observability: Observability, *routers: APIRouter) -> FastAPI:
     return create_app(
         info=ApiInfo(title="test", version="1.0"),
-        health=health,
-        registry=registry,
+        observability=observability,
         lifespan=lifespan,
         routers=routers,
     )
@@ -243,8 +256,8 @@ async def serving(app: FastAPI) -> AsyncGenerator[httpx.AsyncClient]:
 
 
 @pytest.fixture
-def app(health: Health, registry: CollectorRegistry) -> FastAPI:
-    return build(health, registry, router)
+def app(observability: Observability) -> FastAPI:
+    return build(observability, router)
 
 
 @pytest.fixture
@@ -257,13 +270,31 @@ async def metrics_of(client: httpx.AsyncClient) -> str:
     return (await client.get("/metrics")).text
 
 
+def server_span(exporter: InMemorySpanExporter) -> ReadableSpan:
+    """The span of the one request a test made, as FastAPI recorded it."""
+    (span,) = [span for span in exporter.get_finished_spans() if span.kind is SpanKind.SERVER]
+    return span
+
+
+async def start_and_stop(app: FastAPI) -> None:
+    """Run the lifespan of ``app`` as a server does, in ASGI messages."""
+    from_server: asyncio.Queue[MutableMapping[str, object]] = asyncio.Queue()
+    to_server: asyncio.Queue[MutableMapping[str, object]] = asyncio.Queue()
+    running = asyncio.create_task(app({"type": "lifespan"}, from_server.get, to_server.put))
+    await from_server.put({"type": "lifespan.startup"})
+    assert await to_server.get() == {"type": "lifespan.startup.complete"}
+    await from_server.put({"type": "lifespan.shutdown"})
+    assert await to_server.get() == {"type": "lifespan.shutdown.complete"}
+    await running
+
+
 async def test_liveness_needs_nothing(client: httpx.AsyncClient) -> None:
     response = await client.get("/livez")
     assert (response.status_code, response.json()) == (200, {"status": "ok"})
 
 
 async def test_liveness_fails_while_a_check_is_wedged_and_recovers_when_it_ends(
-    registry: CollectorRegistry,
+    registry: CollectorRegistry, tracing: Tracing
 ) -> None:
     release, ended = asyncio.Event(), asyncio.Event()
     now = [0.0]
@@ -277,7 +308,8 @@ async def test_liveness_fails_while_a_check_is_wedged_and_recovers_when_it_ends(
     health = Health(timeout=0.02, wedge_after=30, clock=lambda: now[0])
     health.add("nats", stubborn)
     try:
-        async with serving(build(health, registry, router)) as client:
+        observability = Observability(health=health, registry=registry, tracer_provider=tracing.provider)
+        async with serving(build(observability, router)) as client:
             assert (await client.get("/readyz")).status_code == 503
             assert (await client.get("/livez")).status_code == 200
             now[0] = 31
@@ -579,9 +611,7 @@ async def test_a_status_that_forbids_a_body_has_none(client: httpx.AsyncClient) 
     assert response.headers["x-reason"] == "test"
 
 
-async def test_included_routes_are_measured_by_their_full_template(
-    health: Health, registry: CollectorRegistry
-) -> None:
+async def test_included_routes_are_measured_by_their_full_template(observability: Observability) -> None:
     accounts, entries, api = APIRouter(), APIRouter(), APIRouter(prefix="/api")
 
     @accounts.get("/{item_id}")
@@ -594,7 +624,7 @@ async def test_included_routes_are_measured_by_their_full_template(
 
     api.include_router(accounts, prefix="/accounts")
     api.include_router(entries, prefix="/entries")
-    async with serving(build(health, registry, api)) as client:
+    async with serving(build(observability, api)) as client:
         await client.get("/api/accounts/1")
         await client.get("/api/entries/2")
         await client.get("/api/entries/3")
@@ -603,9 +633,7 @@ async def test_included_routes_are_measured_by_their_full_template(
     assert 'route="/api/entries/{item_id}",status="200"} 2.0' in metrics
 
 
-async def test_a_route_reachable_under_two_templates_is_refused(
-    health: Health, registry: CollectorRegistry
-) -> None:
+async def test_a_route_reachable_under_two_templates_is_refused(observability: Observability) -> None:
     child, api = APIRouter(), APIRouter()
 
     @child.get("/{item_id}")
@@ -615,7 +643,7 @@ async def test_a_route_reachable_under_two_templates_is_refused(
     api.include_router(child, prefix="/old")
     api.include_router(child, prefix="/new")
     with pytest.raises(AmbiguousRouteError, match=r"/old/{item_id}.*/new/{item_id}"):
-        build(health, registry, api)
+        build(observability, api)
 
 
 @pytest.mark.parametrize("kind", ["mapping", "list", "number"])
@@ -644,10 +672,10 @@ async def test_a_detail_that_is_not_text_is_logged_bounded_and_the_answer_is_unc
 
 
 async def test_a_route_added_after_the_app_was_built_is_unregistered_and_said_so_once(
-    health: Health, registry: CollectorRegistry
+    observability: Observability,
 ) -> None:
     included = APIRouter()
-    app = build(health, registry, included)
+    app = build(observability, included)
 
     @included.get("/on-the-router/{number}", include_in_schema=False)
     async def on_the_router(number: int) -> dict[str, int]:
@@ -754,15 +782,7 @@ async def test_a_server_error_raised_by_a_route_is_logged_and_a_client_error_is_
 async def test_the_lifespan_reaches_the_app_through_its_middleware(app: FastAPI) -> None:
     """What a server does at start and stop, spoken in ASGI: the middleware passes it on untouched."""
     events.clear()
-    from_server: asyncio.Queue[MutableMapping[str, object]] = asyncio.Queue()
-    to_server: asyncio.Queue[MutableMapping[str, object]] = asyncio.Queue()
-    running = asyncio.create_task(app({"type": "lifespan"}, from_server.get, to_server.put))
-    await from_server.put({"type": "lifespan.startup"})
-    assert await to_server.get() == {"type": "lifespan.startup.complete"}
-    assert events == ["start"]
-    await from_server.put({"type": "lifespan.shutdown"})
-    assert await to_server.get() == {"type": "lifespan.shutdown.complete"}
-    await running
+    await start_and_stop(app)
     assert events == ["start", "stop"]
 
 
@@ -776,3 +796,46 @@ async def test_the_lifespan_is_the_one_given(app: FastAPI) -> None:
 async def test_operational_routes_are_not_in_the_public_schema(client: httpx.AsyncClient) -> None:
     document = OPENAPI_DOCUMENT.validate_json((await client.get("/openapi.json")).content)
     assert set(document["paths"]) == {"/items/{item_id}", "/items", "/errors/{kind}", "/crash"}
+
+
+async def test_a_request_is_traced_under_its_route_continuing_the_caller_s_trace(
+    client: httpx.AsyncClient, exporter: InMemorySpanExporter
+) -> None:
+    """The span of a request is the parent of what its route does: an event it stores carries the trace."""
+    await client.get("/items/7", headers={"traceparent": TRACEPARENT})
+    span = server_span(exporter)
+    assert span.name == "GET /items/{item_id}"
+    assert span.context is not None
+    assert span.parent is not None
+    assert format_trace_id(span.context.trace_id) == TRACE_ID
+    assert format_span_id(span.parent.span_id) == CALLER_SPAN_ID
+
+
+async def test_a_bug_is_traced_by_its_type_alone_and_logged_once(
+    client: httpx.AsyncClient, exporter: InMemorySpanExporter
+) -> None:
+    with capture_logs() as logs:
+        await client.get("/crash")
+    span = server_span(exporter)
+    assert span.status.status_code is StatusCode.ERROR
+    assert span.status.description is None
+    assert span.attributes is not None
+    assert span.attributes["error.type"] == "ZeroDivisionError"
+    assert [recorded.events for recorded in exporter.get_finished_spans()] == [
+        () for _ in exporter.get_finished_spans()
+    ]
+    assert [entry["event"] for entry in logs] == ["http.unhandled_error"]
+
+
+async def test_the_environment_cannot_attach_exporters_of_its_own(
+    observability: Observability, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """FastAPI adds OTLP exporters to the provider when ``FASTAPI_OTEL_AUTO_CONFIGURE`` asks for them, past
+    the redaction the chassis gives every exporter of its own; the app never does.
+
+    FastAPI's exporters are not installed in this workspace, so an attempt would be logged as a failure.
+    """
+    monkeypatch.setenv("FASTAPI_OTEL_AUTO_CONFIGURE", "true")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
+    await start_and_stop(build(observability, router))
+    assert [record.getMessage() for record in caplog.records if record.name.startswith("fastapi")] == []
