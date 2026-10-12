@@ -44,18 +44,21 @@ class _UnsupportedNatsUrlError(ValueError):
 
 
 def _names_a_nats_server(url: str) -> bool:
-    """Whether ``url`` has a NATS scheme, a host and, if any, a port from 1 to 65535.
+    """Whether ``url`` has a NATS scheme, in lower case, a host and, if any, a port from 1 to 65535.
 
     What nats-py itself refuses (``Client._parse_server_uri`` in 2.16: no host, the host ``none``, a port that
     is no number in range) fails before its client is set up, and a client in that state cannot even be
-    closed: such a URL is refused here, with the settings.
+    closed: such a URL is refused here, with the settings. So is a scheme in capitals, which ``urlsplit``
+    would read as the same: nats-py looks for ``nats://`` as written and takes ``NATS://nats:4222`` for a
+    host and port of its own (the host ``nats``, port 4222 by default), whatever the URL says.
     """
     try:
         parts = urlsplit(url)
         port = parts.port
     except ValueError:  # a port that is no number, or out of range
         return False
-    return parts.scheme in _NATS_SCHEMES and parts.hostname not in _NO_HOST and port != 0
+    scheme_as_written = url.partition(":")[0]
+    return scheme_as_written in _NATS_SCHEMES and parts.hostname not in _NO_HOST and port != 0
 
 
 @final

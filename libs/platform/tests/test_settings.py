@@ -200,6 +200,8 @@ def test_the_database_url_must_use_the_psycopg_driver_and_stays_secret(
         "nats://nats:0",
         "nats://none:4222",
         "tls://app:s3cret@NONE:4443",
+        "NATS://nats:4222",
+        "Tls://app:s3cret@nats:4443",
     ],
     ids=[
         "no-scheme",
@@ -212,6 +214,8 @@ def test_the_database_url_must_use_the_psycopg_driver_and_stays_secret(
         "port-0",
         "host-none",
         "host-none-in-capitals",
+        "scheme-in-capitals",
+        "scheme-capitalized",
     ],
 )
 def test_the_nats_url_must_name_a_nats_server_and_stays_unshown(
@@ -221,7 +225,8 @@ def test_the_nats_url_must_name_a_nats_server_and_stays_unshown(
 
     nats-py's ``_parse_server_uri`` (2.16) refuses a URL without a host or whose host is ``none``, and one
     whose port is no number in range; the chassis also refuses another scheme than ``nats`` or ``tls``, and
-    port 0.
+    port 0. nats-py looks for ``nats://`` as written: ``NATS://nats:4222`` would reach the host ``nats`` on
+    its default port, whatever the URL says, so a scheme in capitals is refused too.
     """
     set_environment(monkeypatch, VALID | {"LEDGER_NATS_URL": url})
     with pytest.raises(ValidationError) as refused:

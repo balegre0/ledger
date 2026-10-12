@@ -227,7 +227,7 @@ status of the error's kind (see below).
 |---|---|---|
 | `LEDGER_SERVICE_NAME` | required | `^[a-z][a-z0-9-]{1,30}$`; names the service in logs, spans, metrics, and its PostgreSQL and NATS connections |
 | `LEDGER_DATABASE_URL` | required | `postgresql+psycopg://user:password@host:5432/db`; no other driver is accepted. A secret |
-| `LEDGER_NATS_URL` | `nats://localhost:4222` | `nats://` or `tls://`. A secret |
+| `LEDGER_NATS_URL` | `nats://localhost:4222` | `nats://` or `tls://`, in lower case (nats-py reads `NATS://` as a host), with a host. A secret |
 | `LEDGER_ENVIRONMENT` | `local` | `local`, `test`, `staging` or `production`; stamped on every log record |
 | `LEDGER_LOG_LEVEL`, `LEDGER_LOG_FORMAT` | `INFO`, `console` | `DEBUG`, `INFO`, `WARNING` or `ERROR`; `console` or `json` |
 | `LEDGER_GRPC_PORT` | `50051` | The gRPC server binds it on every interface, without TLS (the mesh does mTLS); `0` is any free port, and `service.grpc_port` says which |
