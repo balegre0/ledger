@@ -48,7 +48,8 @@ pyright = { cmd = "basedpyright", help = "Type check #1: basedpyright, mode 'all
 mypy-kernel = { cmd = "mypy libs/kernel" }
 mypy-contracts = { cmd = "mypy libs/contracts" }
 mypy-platform = { cmd = "mypy libs/platform" }
-mypy = { sequence = ["mypy-kernel", "mypy-contracts", "mypy-platform"], help = "Type check #2, one package at a time (each has its own tests)" }
+mypy-workspace = { cmd = "mypy tests" }
+mypy = { sequence = ["mypy-kernel", "mypy-contracts", "mypy-platform", "mypy-workspace"], help = "Type check #2, one package at a time (each has its own tests), then the workspace's own tests" }
 types = { sequence = ["pyright", "mypy"], help = "Both type checkers" }
 arch = { cmd = "lint-imports", help = "Architecture contracts (import-linter)" }
 deps-kernel = { cmd = "deptry libs/kernel/src --config libs/kernel/pyproject.toml" }
@@ -112,7 +113,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"libs/*/tests/**" = [
+"{libs/*/tests,tests}/**" = [
     "S101",    # assert is the point of a test
     "D",       # test names are the documentation
     "PLR2004", # magic values are fine in assertions
@@ -145,7 +146,7 @@ exclude = ["*.md"]  # ruff 0.17 formats Python blocks inside Markdown; the docs 
 # ── Type checker #1: basedpyright ───────────────────────────────────────────────
 [tool.basedpyright]
 pythonVersion = "3.15"
-include = ["libs", "conftest.py"]
+include = ["libs", "tests", "conftest.py"]
 exclude = ["libs/contracts/src/ledger", "**/.venv", "**/__pycache__"]
 typeCheckingMode = "all"
 failOnWarnings = true
@@ -193,7 +194,7 @@ warn_required_dynamic_aliases = true
 # ── Tests ───────────────────────────────────────────────────────────────────────
 [tool.pytest]
 minversion = "9.0"
-testpaths = ["libs"]
+testpaths = ["libs", "tests"]
 addopts = [
     "--strict-markers",
     "--strict-config",

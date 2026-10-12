@@ -365,7 +365,7 @@ The outbox gauges read the table, so every replica exports the same values: aggr
 | `deps` | deptry | No unused, missing or transitive dependency, per package |
 | `spell` | typos | Spelling, in code and documents |
 | `proto-lint` | buf `STANDARD`, in Docker | Protobuf style and structure |
-| `test` | pytest, hypothesis, testcontainers | A real PostgreSQL 18.6 and NATS 2.12.15; 100 % branch coverage; warnings are errors; random order |
+| `test` | pytest, hypothesis, testcontainers | A real PostgreSQL 18.6 and NATS 2.12.15; 100 % branch coverage; warnings are errors; random order. `tests/test_workspace.py` fails when a package under `libs/` or `services/` is missing from coverage's `source_pkgs`, import-linter's `root_packages`, the per-package mypy and deptry tasks or pytest's `testpaths` |
 
 CI (`.github/workflows/ci.yml`) also installs with `uv sync --locked`, regenerates the protobuf code and fails on
 a diff, runs `buf breaking` against `main` on pull requests, and checks that the local stack's configuration is
