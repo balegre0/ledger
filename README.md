@@ -77,44 +77,44 @@ the consumer workers, the gRPC server, health, metrics, traces and logs, started
 
 ### A minimal service
 
-The service's first migration creates the chassis's tables (`outbox` and `inbox`, in `PlatformTable.metadata`)
-and puts every tenant table under `tenant_isolation`. The chassis creates no table itself, and a service must
-find its tables there when it starts. Until Alembic arrives (milestone 2) a migration is a script:
+The service's first migration creates the chassis's tables, `outbox` and `inbox` (`CHASSIS_METADATA` in
+`ledger_platform.schema`), and puts every tenant table under `tenant_isolation`. The chassis creates no table
+itself, and the service must find them there when it starts: without them it reports ready while the relay fails
+at every pass and no event leaves. Until Alembic arrives (milestone 2) a migration is a script:
 
 ```python
 from sqlalchemy import text
 
-from ledger_platform.database import Database, PlatformTable, tenant_isolation
+from ledger_platform.database import Database, tenant_isolation
+from ledger_platform.schema import CHASSIS_METADATA  # it imports the outbox and the consumers, whose tables these are
 
 async with Database.open(url) as database, database.engine.begin() as connection:
-    await connection.run_sync(PlatformTable.metadata.create_all)  # outbox and inbox
+    await connection.run_sync(CHASSIS_METADATA.create_all)  # outbox and inbox
     await connection.run_sync(PAYMENTS.metadata.create_all)
     for statement in tenant_isolation(PAYMENTS):  # enable, force and create the policy
         await connection.execute(text(statement))
 ```
 
-The service itself (this code was run against the local stack, and type-checks in basedpyright and mypy under this
-repository's configuration):
+The service itself (this code was run against the local stack, and passes this repository's lint and both type
+checkers once it sits in a package):
 
 ```python
 """payments: records payments and announces each one as an event."""
 
 from typing import Annotated
 lazy from collections.abc import Sequence
-lazy from uuid import UUID
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import Boolean, Column, MetaData, Table, Text, Uuid, false, insert, update
 
 from ledger.common.v1.money_pb2 import Money
 from ledger_contracts.envelope import Envelope
-from ledger_kernel.ids import CompanyId, OrganizationId, Tenant
+from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, parse_id
 from ledger_platform.consumer import ConsumerSpec
-from ledger_platform.service import Events, Interfaces, Service
+from ledger_platform.service import Events, Interfaces, Runtime, RuntimeDependency, Service, ServiceLimits
 from ledger_platform.settings import ServiceSettings
 from ledger_platform.streams import StreamSpec
 lazy from ledger_platform.database import UnitOfWork
-lazy from ledger_platform.service import Runtime, RuntimeDependency
 
 
 class PaymentsSettings(ServiceSettings):
@@ -142,18 +142,21 @@ def routes(runtime: RuntimeDependency[PaymentsSettings]) -> Sequence[APIRouter]:
 
     @router.post("/organizations/{organization}/companies/{company}/payments", status_code=202)
     async def record(
-        organization: UUID,
-        company: UUID,
+        organization: str,
+        company: str,
         amount: str,
         current: Annotated[Runtime[PaymentsSettings], Depends(runtime)],
     ) -> dict[str, str]:
-        tenant = Tenant(OrganizationId(organization), CompanyId(company))
+        tenant = Tenant(OrganizationId(parse_id(organization)), CompanyId(parse_id(company)))  # else a 422
         payment = Money(amount=amount, currency=current.settings.currency)
         event = Envelope.wrap(payment, source="payments", tenant=tenant)
         async with current.database.transaction(tenant) as unit:
             await unit.connection.execute(
                 insert(PAYMENTS).values(
-                    id=event.id, organization_id=organization, company_id=company, amount=amount
+                    id=event.id,
+                    organization_id=tenant.organization,
+                    company_id=tenant.company,
+                    amount=amount,
                 )
             )
             await current.outbox.add(unit, event, subject=RECORDED)  # commits with the row, or not at all
@@ -179,6 +182,7 @@ service = Service(
     version="0.1.0",
     interfaces=Interfaces(http=routes),
     events=Events(streams=(STREAM,), consumers=consumers),
+    limits=ServiceLimits(nats_connect_timeout=30.0),  # every wait has a limit; this one is not the default
 )
 app = service.app  # any ASGI server runs it; its lifespan starts and stops the whole service
 ```
@@ -186,6 +190,19 @@ app = service.app  # any ASGI server runs it; its lifespan starts and stops the 
 The tenant comes from the URL only so that the example runs: where it really comes from, the gateway's verified
 claims, is the authorization context of milestone 2. `Money` is the only message in `ledger_contracts` so far;
 a service declares its own event messages (`ledger.events.<service>.v1.PaymentRecorded`) in `libs/contracts/proto`.
+`Runtime` is imported for real, not `lazy`, because FastAPI reads a route's annotations at run time.
+
+The example runs no gRPC server, because `ledger_contracts` defines no service yet. With a `.proto` service and the
+code `poe proto` generates from it, the registration is one function, passed as `Interfaces(http=routes, grpc=register)`:
+
+```python
+def register(runtime: Runtime[PaymentsSettings], server: grpc.aio.Server) -> None:
+    """Adds the service's gRPC services once it runs; ``runtime`` is what its methods work with."""
+    add_PaymentsQueryServicer_to_server(PaymentsQuery(runtime), server)  # a generated function, and a servicer
+```
+
+The server listens on `LEDGER_GRPC_PORT`; an `async def` method that raises a `LedgerError` ends its call with the
+status of the error's kind (see below).
 
 ### The parts
 
@@ -228,9 +245,14 @@ the backoff (1 s, 10 s, 1 min, 5 min, then 10 min) until `max_deliver` (10) deli
 succeed, an unreadable envelope or a handler error of kind `INVALID`, is terminated at once. JetStream's
 `MAX_DELIVERIES` and `MSG_TERMINATED` advisories are kept in the `DEAD_LETTERS` stream for 30 days, and name the
 stream and the sequence of the message to inspect. This covers the database: an effect outside PostgreSQL (a call
-to another system) is not undone by a rollback and must be idempotent itself. Nothing is promised about the order
-of unrelated events; events carry the version of their aggregate, and a handler that needs the order fails the
-delivery (with an error that is not of kind `INVALID`) and is retried.
+to another system) is not undone by a rollback and must be idempotent itself.
+
+**Not promised: order.** The chassis keeps no order between unrelated events (a retried event follows the ones
+published after it, and replicas take batches in turn). A service that needs the order within an aggregate should
+carry the aggregate's version in its event payloads, and a handler that sees a gap should fail the delivery with
+an error that is not of kind `INVALID` (that kind terminates the event), so that it is retried after its backoff,
+by when the missing event should have arrived. That is a convention of the service's events, not something the
+chassis provides.
 
 **Fail-closed tenancy.** `database.transaction(tenant)` sets the transaction-local settings
 `ledger.organization_id` and `ledger.company_id`. A table under `tenant_isolation` shows and accepts only the rows
@@ -252,9 +274,10 @@ the relay reads across tenants and the inbox is claimed before the handler runs.
 
 HTTP failures are RFC 9457 `application/problem+json`, the framework's own 404 and 405 included:
 `{"type": "urn:ledger:error:<code>", "title", "status", "code", "detail"?}`. Clients match on `code`, which is
-stable; the message may change. A request that breaks the schema is a 422 `invalid_request` listing at most 20
-problems (where and of which type, never the value) and how many were left out. A bug answers a bare `internal`
-and the log gets the details. gRPC carries the code in the trailing metadata `ledger-error-code`, with generic
+stable; the message may change. A request that breaks the schema is a 422 `invalid_request` whose body also has
+`"errors"`, at most 20 entries of `{"location", "type", "message"}` (where it went wrong and of which type, never
+the value), and `"omitted_errors"`, how many were left out. A bug answers a bare `internal` and the log gets the
+details. gRPC carries the code in the trailing metadata `ledger-error-code`, with generic
 details for a defect.
 
 **Probes.** `/livez`, `/readyz` and `/metrics` are outside the OpenAPI document.
@@ -309,9 +332,9 @@ values, and it reaches the service's log through the exception (never a span).
 | Task | Tool | What it enforces |
 |---|---|---|
 | `format-check` | ruff format | Formatting (Markdown is left as written) |
-| `lint` | ruff, `select = ["ALL"]` | Every rule, less the few that conflict with each other or the formatter |
+| `lint` | ruff, `select = ["ALL"]` | Every rule except six: `D203` and `D213` (they conflict with `D211` and `D212`), `COM812` (the formatter), `CPY001` (no copyright header), `D105` and `D107` (docstrings of magic methods and of `__init__`). Tests also set aside `S101`, `S105`, `S106`, `S603`, `PLR2004`, `INP001` and the docstring rules (`D`) |
 | `suppressions` | `git grep` | No `# noqa`, `# type: ignore`, `# pyright:`, `# mypy:`, `# ruff:` or coverage pragma in any Python file outside the generated protobuf code |
-| `types` | basedpyright (`all`) and mypy `--strict` plus the optional error codes | Strict typing in two checkers, per package, warnings failing |
+| `types` | basedpyright (`all`, warnings fail), once over `libs`; mypy `--strict` plus the optional error codes, once per package | Strict typing in two checkers |
 | `arch` | import-linter | `platform` to `contracts` to `kernel`; the kernel is standard library only; contracts know the wire, not the infrastructure; production code never imports test tooling; layers inside `platform` |
 | `deps` | deptry | No unused, missing or transitive dependency, per package |
 | `spell` | typos | Spelling, in code and documents |
@@ -335,8 +358,10 @@ Milestone 2 (identity) and later:
 - Tracing of SQL and gRPC calls (FastAPI's request spans exist).
 - gRPC client helpers: deadlines, propagation of identity, and the mapping of `ledger-error-code` back to domain
   errors.
-- Alembic migrations, tested up and down in CI. Today a migration is a script, and `outbox` and `inbox` belong in
-  every service's first one.
+- Alembic migrations, tested up and down in CI. Today a migration is a script, and `outbox` and `inbox`
+  (`ledger_platform.schema`) belong in every service's first one.
+- A readiness check that the chassis's tables exist. Today `/readyz` does not look: milestone 2 adds the migrations
+  and the check.
 - An entry point that serves `service.app` (the stack's choice is Granian), and a Dockerfile per service.
 - Pagination primitives, with the first list endpoint.
 
@@ -350,5 +375,6 @@ Operations, before production:
   count the events terminated, and an event that exhausts `max_deliver` is not counted separately.
 - Streams and consumers are declared by the services, and a declaration must keep everything the older versions
   still running need (more subjects, no shorter limits): an older replica that restarts applies its own
-  declaration over the newer one, and a shorter `max_age` makes JetStream delete messages at once. That rule is
-  the author's to keep; the chassis does not enforce it.
+  declaration over the newer one. A `StreamSpec` keeps events for `max_age` (7 days by default; `DEAD_LETTERS`, 30)
+  and recognizes a republished one within `duplicate_window` (2 minutes by default), so a shorter `max_age` makes
+  JetStream delete messages at once. That rule is the author's to keep; the chassis does not enforce it.
