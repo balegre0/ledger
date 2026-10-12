@@ -17,7 +17,8 @@ from testcontainers.community.postgres import PostgresContainer
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.wait_strategies import LogMessageWaitStrategy
 
-from ledger_platform.database import Database, PlatformTable
+from ledger_platform.database import Database
+from ledger_platform.schema import CHASSIS_METADATA
 from ledger_platform.tracing import Tracing
 
 POSTGRES_IMAGE = "postgres:18.6"
@@ -78,10 +79,10 @@ async def database(database_url: str) -> AsyncGenerator[Database]:
     """The chassis's tables, created for one test and dropped after it."""
     async with Database.open(database_url, pool_size=2) as opened:
         async with opened.engine.begin() as connection:
-            await connection.run_sync(PlatformTable.metadata.create_all)
+            await connection.run_sync(CHASSIS_METADATA.create_all)
         yield opened
         async with opened.engine.begin() as connection:
-            await connection.run_sync(PlatformTable.metadata.drop_all)
+            await connection.run_sync(CHASSIS_METADATA.drop_all)
 
 
 def nats_server(*arguments: str) -> DockerContainer:

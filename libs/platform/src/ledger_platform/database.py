@@ -67,7 +67,11 @@ mypy refuses the ``Any`` of that default wherever it is spelled out; ``object`` 
 
 
 class PlatformTable(DeclarativeBase):
-    """Tables the chassis adds to every service's database (outbox, inbox)."""
+    """Tables the chassis adds to every service's database (outbox, inbox).
+
+    Each table registers in ``metadata`` when the module of its class is imported (``outbox``, ``consumer``),
+    so migrations create ``ledger_platform.schema.CHASSIS_METADATA`` instead, which has imported both.
+    """
 
     metadata: ClassVar[MetaData] = MetaData()
 

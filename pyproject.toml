@@ -118,6 +118,7 @@ ignore = [
     "PLR2004", # magic values are fine in assertions
     "S105",    # fake credentials are not secrets
     "S106",
+    "S603",    # a test may run this interpreter on code of its own
     "INP001",  # tests are not a package: each package's tests/ is its own root
 ]
 "conftest.py" = ["INP001"]
@@ -127,6 +128,10 @@ convention = "google"
 
 [tool.ruff.lint.flake8-type-checking]
 strict = true
+# FastAPI reads the annotations of a route at run time, and a route asks for the `Runtime` of its service in
+# one: it is imported as any name FastAPI reads is, which ruff (annotations are typing-only to it) would ask
+# to make lazy.
+exempt-modules = ["typing", "ledger_platform.service"]
 runtime-evaluated-base-classes = [
     "pydantic.BaseModel",
     "pydantic_settings.BaseSettings",
@@ -233,14 +238,15 @@ layers = ["ledger_platform", "ledger_contracts", "ledger_kernel"]
 
 # Inside the platform: the service assembles the adapters (HTTP, gRPC, consumers), which use messaging (the
 # outbox, streams), which uses the infrastructure, which uses the foundations. Modules of one layer never import
-# each other. Exhaustive: a new module must be given its layer here.
+# each other. The schema, which gathers the tables of the outbox and of the consumers for migrations, is at the
+# service's level: it imports both, and nothing imports it. Exhaustive: a new module must be given its layer here.
 [[tool.importlinter.contracts]]
 name = "Platform layers: service -> adapters -> messaging -> infrastructure -> foundations"
 type = "layers"
 containers = ["ledger_platform"]
 exhaustive = true
 layers = [
-    "service",
+    "service | schema",
     "web | grpc_server | consumer",
     "outbox | streams",
     "database | tracing | health | logs",
