@@ -135,6 +135,16 @@ async def drained(database: Database) -> bool:
     return await pending(database) == 0
 
 
+async def pending_is(database: Database, count: int) -> bool:
+    """Whether the outbox holds ``count`` events: what is left once the relay's pass has committed.
+
+    The relay publishes and waits for the acknowledgements inside the transaction that deletes the rows, so
+    JetStream holds an event before the outbox lets go of it. A test that stops the relay on seeing the event
+    in JetStream can roll that transaction back, and the rows are still there.
+    """
+    return await pending(database) == count
+
+
 async def unlocked(database: Database, count: int) -> bool:
     """Whether exactly ``count`` pending events are free of locks: what a pass skipping locked rows finds."""
     async with database.transaction(None) as unit:
@@ -609,6 +619,7 @@ async def test_a_failing_event_does_not_block_the_relay(
 
     async with relaying(outbox.run(database, jetstream, idle=MAX_IDLE, retry=0.05)):
         await eventually(partial(delivered, jetstream, 5))
+        await eventually(partial(pending_is, database, 1))  # the commit that removes the five has happened
 
     assert await pending(database) == 1
     assert sample(registry, "ledger_outbox_publish_failed_total") >= 1
@@ -821,6 +832,7 @@ async def test_stuck_events_in_numbers_beyond_a_batch_do_not_hold_back_healthy_o
 
     async with relaying(outbox.run(database, jetstream, idle=MAX_IDLE, retry=MAX_RETRY_DELAY)):
         await eventually(partial(delivered, jetstream, 3))
+        await eventually(partial(pending_is, database, 5))  # the commit that removes the three has happened
 
     assert await pending(database) == 5
     assert sample(registry, "ledger_outbox_failed_passes_total") == 0
