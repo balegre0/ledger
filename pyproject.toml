@@ -131,6 +131,7 @@ runtime-evaluated-base-classes = [
     "pydantic.BaseModel",
     "pydantic_settings.BaseSettings",
     "sqlalchemy.orm.DeclarativeBase",
+    "ledger_platform.database.PlatformTable",  # SQLAlchemy reads the annotations of its tables at runtime
 ]
 
 [tool.ruff.lint.isort]

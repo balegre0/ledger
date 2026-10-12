@@ -1,16 +1,22 @@
-"""Fixtures of the platform's tests: a real PostgreSQL (a later task adds NATS)."""
+"""Fixtures of the platform's tests: a real PostgreSQL and a real NATS server with JetStream."""
 
 import logging
-lazy from collections.abc import AsyncGenerator, Iterator
+lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 
 import psycopg
 import pytest
 import structlog
+from nats.aio.client import Client
+from nats.js import JetStreamContext
 from testcontainers.community.postgres import PostgresContainer
+from testcontainers.core.container import DockerContainer
+from testcontainers.core.wait_strategies import LogMessageWaitStrategy
 
 from ledger_platform.database import Database, PlatformTable
 
 POSTGRES_IMAGE = "postgres:18.6"
+NATS_IMAGE = "nats:2.12.15"
+NATS_PORT = 4222
 
 
 def use_the_plain_baseline() -> None:
@@ -69,3 +75,48 @@ async def database(database_url: str) -> AsyncGenerator[Database]:
         yield opened
         async with opened.engine.begin() as connection:
             await connection.run_sync(PlatformTable.metadata.drop_all)
+
+
+@pytest.fixture(scope="session")
+def nats_url() -> Iterator[str]:
+    """A real NATS server with JetStream."""
+    server = (
+        DockerContainer(NATS_IMAGE)
+        .with_command("-js")
+        .with_exposed_ports(NATS_PORT)
+        .waiting_for(LogMessageWaitStrategy("Server is ready"))
+    )
+    with server as container:
+        yield f"nats://{container.get_container_host_ip()}:{container.get_exposed_port(NATS_PORT)}"
+
+
+@pytest.fixture
+async def connect(nats_url: str) -> AsyncGenerator[Callable[[], Awaitable[Client]]]:
+    """Opens connections to NATS; every one a test opened is closed after it.
+
+    ``Client`` and ``JetStreamContext`` are built directly: nats-py's ``connect()`` and ``jetstream()`` take
+    ``**options`` without a type, which strict type checking refuses to call.
+    """
+    opened: list[Client] = []
+
+    async def open_connection() -> Client:
+        client = Client()
+        await client.connect(nats_url)
+        opened.append(client)
+        return client
+
+    yield open_connection
+    for client in opened:
+        await client.close()
+
+
+@pytest.fixture
+async def jetstream(connect: Callable[[], Awaitable[Client]]) -> AsyncGenerator[JetStreamContext]:
+    """A JetStream client; every stream a test created is deleted after it."""
+    context = JetStreamContext(await connect())
+    try:
+        yield context
+    finally:
+        for info in await context.streams_info():
+            if info.config.name is not None:
+                await context.delete_stream(info.config.name)
