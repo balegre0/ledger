@@ -1,6 +1,5 @@
 import asyncio
 import contextlib
-import re
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -867,25 +866,42 @@ async def test_a_new_name_with_the_new_subject_is_a_consumer_of_its_own_that_sta
     assert (await streams.consumer_info("EVENTS", f"{NAME}-v2")).config.filter_subject == "events.>"
 
 
-async def test_a_consumer_whose_configuration_cannot_change_is_refused_and_left_alone(
-    streams: JetStreamContext, make: ConsumerFactory
+async def test_a_consumer_whose_ack_policy_would_change_is_refused_and_left_alone(
+    streams: JetStreamContext,
 ) -> None:
-    """Someone created it with another ack policy, which JetStream never lets anyone change."""
+    """Someone created it with another ack policy, which JetStream never lets anyone change: the chassis
+    refuses without asking (JetStream's own answer, 10012, is a wrapper that also carries passing trouble)."""
     config = ConsumerConfig(
         name=NAME, durable_name=NAME, ack_policy=AckPolicy.NONE, filter_subject="events.>"
     )
     await Counting(streams).add_consumer("EVENTS", config)
+    counting = Counting(streams)
 
-    async with asyncio.timeout(5):  # a consumer that went on would run for ever
-        with pytest.raises(ConsumerRefusedError) as refused:
-            await make(Recorder()).run(streams)
+    with pytest.raises(ConsumerRefusedError) as refused:
+        await ensure_consumer(counting, spec(Recorder()))
 
-    assert (refused.value.consumer, refused.value.stream) == (NAME, "EVENTS")
-    assert "ack_policy" in refused.value.fields
-    named = rf"consumer '{NAME}' of stream 'EVENTS' cannot change [a-z_, ]*ack_policy[a-z_, ]*"
-    assert re.fullmatch(rf"{named}: .+", str(refused.value))
-    assert isinstance(refused.value.__cause__, APIError)
+    assert (refused.value.consumer, refused.value.stream, refused.value.fields) == (
+        NAME,
+        "EVENTS",
+        ("ack_policy",),
+    )
+    assert str(refused.value) == (
+        f"consumer '{NAME}' of stream 'EVENTS' cannot change ack_policy: JetStream never changes the ack"
+        f" policy of a consumer: give the consumer a new name, such as '{NAME}-v2'"
+    )
+    assert refused.value.__cause__ is None
+    assert counting.writes == 0
     assert (await streams.consumer_info("EVENTS", NAME)).config.ack_policy == "none"
+
+
+async def test_a_consumer_whose_subject_and_ack_policy_would_change_names_both(
+    streams: JetStreamContext,
+) -> None:
+    config = ConsumerConfig(name=NAME, durable_name=NAME, ack_policy=AckPolicy.ALL, filter_subject="events.a")
+    await Counting(streams).add_consumer("EVENTS", config)
+    with pytest.raises(ConsumerRefusedError) as refused:
+        await ensure_consumer(streams, spec(Recorder()))
+    assert refused.value.fields == ("ack_policy", "filter_subject")
 
 
 async def test_a_new_consumer_is_created_as_the_spec_says(streams: JetStreamContext) -> None:
@@ -912,21 +928,21 @@ async def test_a_consumer_that_is_as_the_spec_says_is_not_written_again(streams:
     assert api.writes == 2
 
 
-async def test_a_consumer_of_a_missing_stream_is_refused_with_the_answer_of_jetstream(
+async def test_a_consumer_of_a_stream_that_does_not_exist_yet_says_so_and_binds_once_it_does(
     jetstream: JetStreamContext,
 ) -> None:
-    with pytest.raises(
-        ConsumerRefusedError, match=f"consumer '{NAME}' of stream 'EVENTS' cannot be created"
-    ) as refused:
+    """No configuration mistake: whoever publishes to the stream creates it when it starts, maybe later. The
+    error goes on as it came, for the supervisor to try again."""
+    with capture_logs() as logs, pytest.raises(JetStreamNotFoundError) as missing:
         await ensure_consumer(jetstream, spec(Recorder()))
+    assert missing.value.err_code == 10059
+    assert logs == [
+        {"event": "consumer.stream_missing", "log_level": "warning", "consumer": NAME, "stream": "EVENTS"}
+    ]
 
-    assert isinstance(refused.value.__cause__, JetStreamNotFoundError)
-    assert (refused.value.code, refused.value.consumer, refused.value.stream) == (
-        "consumer_refused",
-        NAME,
-        "EVENTS",
-    )
-    assert refused.value.fields == ()
+    await ensure_stream(jetstream, STREAM)
+    await ensure_consumer(jetstream, spec(Recorder()))
+    assert await bound(jetstream)
 
 
 @pytest.mark.parametrize(
@@ -1171,12 +1187,12 @@ TRANSIENT: Final = {
     "10119 consumer offline": ServerError(code=500, err_code=10119),
     "10005 no suitable peers": BadRequestError(code=400, err_code=10005),
     "10202 member change in progress": BadRequestError(code=400, err_code=10202),
+    "10012 create failed": ServerError(code=500, err_code=10012),
+    "10059 stream not found": JetStreamNotFoundError(code=404, err_code=10059),
 }
-"""What JetStream answers while it cannot serve for now (nats-server 2.12.15, server/errors.json)."""
+"""What JetStream answers while it cannot serve for now (nats-server 2.12.15, server/errors.json). 10012 wraps
+whatever went wrong, passing trouble included; 10059 is a stream whose service has not started yet."""
 REFUSALS: Final = {
-    "10012 immutable field": ServerError(
-        code=500, err_code=10012, description="ack policy can not be updated"
-    ),
     "10013 name in use": BadRequestError(
         code=400, err_code=10013, description="consumer name already in use"
     ),
@@ -1188,9 +1204,6 @@ REFUSALS: Final = {
     "10132 name mismatch": BadRequestError(code=400, err_code=10132, description="name mismatch"),
     "10148 already exists": BadRequestError(code=400, err_code=10148, description="already exists"),
     "10149 does not exist": BadRequestError(code=400, err_code=10149, description="does not exist"),
-    "10059 stream not found": JetStreamNotFoundError(
-        code=404, err_code=10059, description="stream not found"
-    ),
 }
 """What JetStream answers to a consumer it will never accept as configured (same source)."""
 

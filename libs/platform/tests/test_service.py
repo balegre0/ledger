@@ -16,6 +16,7 @@ import grpc
 import httpx
 import pytest
 from fastapi import APIRouter, Depends
+from nats.js.api import AckPolicy, ConsumerConfig
 from nats.js.errors import NotFoundError
 from opentelemetry import trace
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
@@ -49,8 +50,8 @@ from ledger_platform.service import (
     ServiceNotRunningError,
 )
 from ledger_platform.settings import ServiceSettings
-from ledger_platform.streams import StreamSpec
-lazy from ledger_platform.consumer import Handler
+from ledger_platform.streams import StreamSpec, ensure_stream
+lazy from ledger_platform.consumer import ConsumerApi, Handler
 lazy from ledger_platform.database import Database, UnitOfWork
 lazy from ledger_platform.service import Runtime, RuntimeDependency
 
@@ -59,6 +60,9 @@ SUBJECT: Final = "service-test.paid"
 LEDGER: Final = "payments-ledger"
 AUDIT: Final = "payments-audit"
 ORPHAN: Final = "orphan"
+LATE: Final = "payments-late"
+LATER: Final = StreamSpec(name="LATER", subjects=("later.>",))
+"""A stream another service declares, which starts after this one."""
 SECRET: Final = "Key (tax_id)=(001-1234567-8) already exists"
 """What a database error says: personal data that must never leave the process in a span."""
 RNC: Final = "00112345678"
@@ -177,9 +181,9 @@ class Payments:
         self._hold = hold
         self._while_starting = while_starting
         self._specs = tuple(
-            # a consumer of a stream nobody declared: JetStream refuses it, and its worker stops for good
-            ConsumerSpec(name=ORPHAN, stream="NOWHERE", subject="nowhere.>", handler=ignore)
-            if name == ORPHAN
+            # a consumer of a stream another service creates, maybe later
+            ConsumerSpec(name=name, stream=LATER.name, subject="later.>", handler=self._keeper(name))
+            if name == LATE
             else ConsumerSpec(
                 name=name, stream=STREAM.name, subject="service-test.>", handler=self._keeper(name)
             )
@@ -262,10 +266,6 @@ class Payments:
             ),
         }
         server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler("test.Payments", methods),))
-
-
-async def ignore(envelope: Envelope, unit: UnitOfWork) -> None:
-    del envelope, unit
 
 
 @final
@@ -426,6 +426,12 @@ async def running[S: ServiceSettings](service: Service[S]) -> AsyncGenerator[htt
         yield client
 
 
+async def created_by_someone_else(api: ConsumerApi, config: ConsumerConfig) -> None:
+    """A durable consumer of the test stream, made outside the chassis: nats-py's own ``add_consumer`` leaves
+    the rest of its parameters untyped, the protocol does not."""
+    await api.add_consumer(STREAM.name, config)
+
+
 async def readiness(client: httpx.AsyncClient) -> tuple[int, dict[str, bool]]:
     response = await client.get("/readyz")
     return response.status_code, READINESS.validate_json(response.content)["checks"]
@@ -579,9 +585,16 @@ async def test_a_worker_that_something_else_cancelled_is_dead_and_the_service_ne
 async def test_a_misconfigured_worker_is_not_restarted_and_the_service_is_neither_ready_nor_live(
     database_url: str, nats_url: str, infrastructure: JetStreamContext
 ) -> None:
-    """A consumer JetStream refuses (here, of a stream nobody declared) fails the same way however often it
-    starts: the process asks for a restart, and a misconfiguration shows as a crash loop."""
-    del infrastructure
+    """A consumer that can never be brought to its spec (here, someone created it with another ack policy,
+    which JetStream never changes) fails the same way however often it starts: the process asks for a
+    restart, and a misconfiguration shows as a crash loop."""
+    await ensure_stream(infrastructure, STREAM)
+    await created_by_someone_else(
+        infrastructure,
+        ConsumerConfig(
+            name=ORPHAN, durable_name=ORPHAN, ack_policy=AckPolicy.NONE, filter_subject="service-test.>"
+        ),
+    )
     payments = Payments(configured(database_url, nats_url), consumers=(LEDGER, ORPHAN))
     with capture_logs() as logs:
         async with running(payments.service) as client:
@@ -599,6 +612,35 @@ async def test_a_misconfigured_worker_is_not_restarted_and_the_service_is_neithe
     assert isinstance(failure.pop("exc_info"), ConsumerRefusedError)
     assert failure == {"event": "worker.failed", "log_level": "error", "worker": "consumer orphan"}
     assert [entry for entry in logs if entry["event"] == "worker.restarting"] == []
+
+
+async def test_a_consumer_whose_stream_appears_later_waits_for_it_without_failing_a_probe(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    """The stream belongs to a service that starts later: a passing absence, not a misconfiguration. The
+    consumer says so, is started again after its delay, and binds once the stream is there."""
+    payments = Payments(configured(database_url, nats_url), consumers=(LATE,))
+    with capture_logs() as logs:
+        async with running(payments.service) as client:
+
+            async def missing() -> bool:
+                return any(entry["event"] == "consumer.stream_missing" for entry in logs)
+
+            await within(TIMEOUT, missing)
+            assert await readiness(client) == (200, ALL_READY)
+            assert await liveness(client) == (200, [])
+
+            await ensure_stream(infrastructure, LATER)
+            await infrastructure.publish("later.paid", paid().data, headers=paid().headers())
+            await within(4 * TIMEOUT, partial(payments.got, LATE, 1))
+    (warning, *_) = [entry for entry in logs if entry["event"] == "consumer.stream_missing"]
+    assert warning == {
+        "event": "consumer.stream_missing",
+        "log_level": "warning",
+        "consumer": LATE,
+        "stream": LATER.name,
+    }
+    assert [entry for entry in logs if entry["event"] == "worker.failed"] == []
 
 
 async def test_without_otlp_and_grpc_the_service_still_runs(

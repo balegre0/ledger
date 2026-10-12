@@ -1,10 +1,13 @@
+from dataclasses import replace
 from datetime import timedelta
-from typing import final, override
+from typing import Final, final, override
 lazy from collections.abc import Callable
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 from nats.js.api import RetentionPolicy, StorageType, StreamConfig, StreamInfo, StreamState
-from nats.js.errors import APIError, NotFoundError
+from nats.js.errors import APIError, BadRequestError, NotFoundError, ServerError, ServiceUnavailableError
 lazy from nats.js import JetStreamContext
 
 from ledger_platform.streams import (
@@ -50,28 +53,60 @@ async def test_the_defaults_keep_two_minutes_of_duplicates_for_a_week(jetstream:
     assert config.max_age == timedelta(days=7).total_seconds()
 
 
-async def test_an_existing_stream_gets_the_new_subjects_and_limits(jetstream: JetStreamContext) -> None:
+async def test_an_existing_stream_gains_the_new_subjects_and_longer_limits(
+    jetstream: JetStreamContext,
+) -> None:
     await ensure_stream(jetstream, STREAM)
     await ensure_stream(
         jetstream,
         StreamSpec(
             name="TEST",
             subjects=("test.>", "more.>"),
-            duplicate_window=timedelta(minutes=1),
-            max_age=timedelta(days=1),
+            duplicate_window=timedelta(minutes=5),
+            max_age=timedelta(days=30),
         ),
     )
     config = await configuration(jetstream, "TEST")
     assert config.subjects == ["test.>", "more.>"]
-    assert config.duplicate_window == timedelta(minutes=1).total_seconds()
-    assert config.max_age == timedelta(days=1).total_seconds()
+    assert config.duplicate_window == timedelta(minutes=5).total_seconds()
+    assert config.max_age == timedelta(days=30).total_seconds()
 
 
-async def test_ensuring_a_stream_twice_changes_nothing(jetstream: JetStreamContext) -> None:
+async def test_an_older_spec_never_shrinks_a_stream(jetstream: JetStreamContext) -> None:
+    """An older replica restarting during a rollout applies its own spec after a newer one: the stream keeps
+    every subject and the longer limits, so no event is dropped and none expires early."""
+    newer = StreamSpec(
+        name="TEST",
+        subjects=("test.>", "more.>"),
+        duplicate_window=timedelta(minutes=5),
+        max_age=timedelta(days=30),
+    )
+    older = StreamSpec(name="TEST", subjects=("test.>", "old.>"), duplicate_window=timedelta(minutes=1))
+    await ensure_stream(jetstream, newer)
+    await jetstream.publish("more.created", b"kept")
+    await ensure_stream(jetstream, older)
+    info = await jetstream.stream_info("TEST")
+    assert info.config.subjects == ["test.>", "more.>", "old.>"]
+    assert info.config.duplicate_window == timedelta(minutes=5).total_seconds()
+    assert info.config.max_age == timedelta(days=30).total_seconds()
+    assert info.state.messages == 1
+
+
+async def test_a_stream_that_never_expires_keeps_never_expiring(jetstream: JetStreamContext) -> None:
+    """Someone made it keep its events for ever (a zero age): no spec of a service shortens that."""
+    await created_by_someone_else(jetstream, StreamConfig(name="TEST", subjects=["test.>"], max_age=0))
+    await ensure_stream(jetstream, STREAM)
+    assert (await configuration(jetstream, "TEST")).max_age == 0
+
+
+async def test_a_stream_that_holds_its_spec_already_is_not_written(jetstream: JetStreamContext) -> None:
     await ensure_stream(jetstream, STREAM)
     before = await configuration(jetstream, "TEST")
-    await ensure_stream(jetstream, STREAM)
+    counting = Counting(jetstream)
+    await ensure_stream(counting, STREAM)
+    await ensure_stream(counting, replace(STREAM, max_age=timedelta(days=1)))  # an older, shorter spec
     assert await configuration(jetstream, "TEST") == before
+    assert counting.writes == 0
 
 
 async def test_what_the_spec_does_not_own_is_left_as_it_is(jetstream: JetStreamContext) -> None:
@@ -197,3 +232,148 @@ async def test_a_request_nats_py_cannot_build_is_a_refused_stream_too(api: Strea
     with pytest.raises(StreamRefusedError, match="'TEST'") as refused:
         await ensure_stream(api, STREAM)
     assert isinstance(refused.value.__cause__, ValueError)
+
+
+@final
+class Counting(StreamApi):
+    """JetStream, counting the streams it was asked to write."""
+
+    def __init__(self, api: StreamApi) -> None:
+        self._api = api
+        self.writes = 0
+
+    @override
+    async def stream_info(self, name: str) -> StreamInfo:
+        return await self._api.stream_info(name)
+
+    @override
+    async def add_stream(self, config: StreamConfig) -> StreamInfo:
+        self.writes += 1
+        return await self._api.add_stream(config)
+
+    @override
+    async def update_stream(self, config: StreamConfig) -> StreamInfo:
+        self.writes += 1
+        return await self._api.update_stream(config)
+
+
+@final
+class Answering(StreamApi):
+    """JetStream that answers every write with ``error``, the stream existing or not."""
+
+    def __init__(self, error: APIError, *, exists: bool) -> None:
+        self._error = error
+        self._exists = exists
+
+    @override
+    async def stream_info(self, name: str) -> StreamInfo:
+        if not self._exists:
+            raise NotFoundError
+        return StreamInfo(
+            config=StreamConfig(name=name, subjects=["other.>"]), state=StreamState(0, 0, 0, 0, 0)
+        )
+
+    @override
+    async def add_stream(self, config: StreamConfig) -> StreamInfo:
+        raise self._error
+
+    @override
+    async def update_stream(self, config: StreamConfig) -> StreamInfo:
+        raise self._error
+
+
+TRANSIENT: Final = {
+    "no responders": ServiceUnavailableError(),
+    "10008 temporarily unavailable": ServiceUnavailableError(code=503, err_code=10008),
+    "10023 insufficient resources": ServiceUnavailableError(code=503, err_code=10023),
+    "10009 no leader": ServerError(code=500, err_code=10009),
+    "10058 created meanwhile with another configuration": BadRequestError(code=400, err_code=10058),
+    "10069 update failed": ServerError(code=500, err_code=10069),
+    "10202 member change in progress": BadRequestError(code=400, err_code=10202),
+}
+"""What JetStream answers while it cannot serve for now (nats-server 2.12.15, server/errors.json): the start
+fails, and the next one tries again. 10058 is a replica of another version creating the stream at the same
+moment: the next attempt finds it and updates it."""
+REFUSALS: Final = {
+    "10065 subjects overlap": BadRequestError(code=400, err_code=10065, description="subjects overlap"),
+    "10052 invalid configuration": ServerError(code=500, err_code=10052, description="invalid"),
+    "10027 too many streams": BadRequestError(code=400, err_code=10027, description="maximum streams"),
+    "10002 account resources": BadRequestError(code=400, err_code=10002, description="resource limits"),
+    "10113 max bytes required": BadRequestError(code=400, err_code=10113, description="max bytes"),
+}
+"""What JetStream answers to a stream configuration it will never accept (same source)."""
+
+
+@pytest.mark.parametrize("exists", [True, False], ids=["on update", "on create"])
+@pytest.mark.parametrize("answer", TRANSIENT.values(), ids=TRANSIENT.keys())
+async def test_a_jetstream_that_cannot_serve_for_now_is_no_refusal_and_its_error_goes_on(
+    answer: APIError, *, exists: bool
+) -> None:
+    with pytest.raises(APIError) as raised:
+        await ensure_stream(Answering(answer, exists=exists), STREAM)
+    assert raised.value is answer
+
+
+@pytest.mark.parametrize("exists", [True, False], ids=["on update", "on create"])
+@pytest.mark.parametrize("answer", REFUSALS.values(), ids=REFUSALS.keys())
+async def test_a_configuration_jetstream_will_never_accept_is_a_refused_stream(
+    answer: APIError, *, exists: bool
+) -> None:
+    with pytest.raises(StreamRefusedError, match="'TEST'") as refused:
+        await ensure_stream(Answering(answer, exists=exists), STREAM)
+    assert refused.value.__cause__ is answer
+
+
+@final
+class InMemory(StreamApi):
+    """One stream's configuration, kept as JetStream keeps it."""
+
+    def __init__(self) -> None:
+        self.config: StreamConfig | None = None
+
+    @override
+    async def stream_info(self, name: str) -> StreamInfo:
+        if self.config is None:
+            raise NotFoundError
+        return StreamInfo(config=self.config, state=StreamState(0, 0, 0, 0, 0))
+
+    @override
+    async def add_stream(self, config: StreamConfig) -> StreamInfo:
+        self.config = config
+        return StreamInfo(config=config, state=StreamState(0, 0, 0, 0, 0))
+
+    @override
+    async def update_stream(self, config: StreamConfig) -> StreamInfo:
+        return await self.add_stream(config)
+
+
+SUBJECTS: Final = ("a.>", "b.>", "c.>", "d.>")
+
+
+def declared(subjects: list[str], window: int, beyond_the_window: int) -> StreamSpec:
+    return StreamSpec(
+        name="TEST",
+        subjects=tuple(subjects),
+        duplicate_window=timedelta(seconds=window),
+        max_age=timedelta(seconds=window + beyond_the_window),
+    )
+
+
+specs = st.builds(
+    declared,
+    st.lists(st.sampled_from(SUBJECTS), min_size=1, max_size=4, unique=True),
+    st.integers(min_value=1, max_value=600),
+    st.integers(min_value=0, max_value=10_000),
+)
+
+
+@given(st.lists(specs, min_size=1, max_size=6))
+async def test_whatever_order_the_specs_come_in_the_stream_holds_them_all(applied: list[StreamSpec]) -> None:
+    """The law of a rollout: every subject any spec declared, and the longest of every limit."""
+    stream = InMemory()
+    for spec in applied:
+        await ensure_stream(stream, spec)
+    assert stream.config is not None
+    assert set(stream.config.subjects or ()) == {subject for spec in applied for subject in spec.subjects}
+    assert stream.config.max_age == max(spec.max_age for spec in applied).total_seconds()
+    assert stream.config.duplicate_window == max(spec.duplicate_window for spec in applied).total_seconds()

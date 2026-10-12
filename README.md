@@ -214,12 +214,12 @@ status of the error's kind (see below).
 | `ServiceSettings` | Subclass it for a service's own settings. Every field is a `LEDGER_*` environment variable (table below). A missing or invalid value, and any `LEDGER_*` variable that is not a setting (a misspelled name), stop the start with every problem listed; secrets are `SecretStr` and never in a `repr`, a log or an error |
 | `Service(settings=, version=, interfaces=, events=, limits=)` | Assembles everything. `service.app` is the FastAPI application to serve; its lifespan runs the service. `service.runtime()`, `service.workers` and `service.grpc_port` are for code outside the routes. A service starts once (`ServiceAlreadyStartedError`) |
 | `Interfaces(http=, grpc=)` | `http` is a factory `(RuntimeDependency[S]) -> Sequence[APIRouter]`, called once when the service is built; the routes must be complete then. `grpc` is `(Runtime[S], grpc.aio.Server) -> None`, which adds the generated servicers, such as `add_<Service>Servicer_to_server(servicer, server)`; `None` runs no gRPC server. Methods must be `async def` (coroutines or async generators) to have their errors mapped |
-| `Events(streams=, consumers=)` | `streams` are the `StreamSpec`s the service publishes to; every start creates a missing one (file storage) or brings its subjects and limits to the spec, and always `DEAD_LETTERS`. `consumers` is `(Runtime[S]) -> Sequence[ConsumerSpec]`, called once the service runs |
+| `Events(streams=, consumers=)` | `streams` are the `StreamSpec`s the service publishes to; every start creates a missing one (file storage) or widens an existing one to hold the spec (its subjects added, the longer of each limit kept: a stream only grows), and always `DEAD_LETTERS`. `consumers` is `(Runtime[S]) -> Sequence[ConsumerSpec]`, called once the service runs |
 | `ServiceLimits(database=, publish_timeout=, nats_connect_timeout=, worker_stop_grace=)` | Every wait has a limit. `DatabaseLimits`: connect 5 s, statement 30 s, lock 5 s, idle in transaction 60 s, wait for a pooled connection 10 s, connection recycled after 30 min. `publish_timeout` 5 s, at most half the idle-in-transaction timeout (checked). `nats_connect_timeout` 60 s: the first connection is retried that long, then the start fails; once connected NATS is reconnected for as long as it takes. `worker_stop_grace` 10 s |
 | `Runtime[S]` | What a running service works with: `settings`, `database`, `nats`, `jetstream`, `outbox`, `tracing`, `registry` (the metrics registry `/metrics` exports). A route asks for it with `Annotated[Runtime[S], Depends(runtime)]`; a consumer factory and the gRPC registration are handed it. While the service is not running, routes answer 503 `service_not_running` |
 | `database.transaction(tenant)` | One PostgreSQL transaction scoped to a `Tenant` (or `None`: no tenant). `unit.connection` is for repositories, `outbox.add(unit, envelope, subject=)` stores an event in the same transaction, `unit.after_commit(callback)` runs once it has committed. It commits only if every statement succeeded: a database error caught and ignored inside it raises `AbortedTransactionError` at the exit instead of losing the work silently |
 | `Envelope`, `Outbox` | An event is a protobuf message in a CloudEvents 1.0 envelope carried as NATS headers (`ce-id`, `ce-type` = the message's full name, `ce-source`, `ce-time`, `ce-subject` = company id, `ce-organizationid`, `traceparent`). `Envelope.wrap(message, source=, tenant=)` makes one, `envelope.unwrap(Message)` reads the payload back. `Outbox.add` refuses an event no relay could ever publish (a subject NATS cannot route, a message over its size limit) inside the caller's transaction |
-| `ConsumerSpec(name=, stream=, subject=, handler=, max_deliver=, backoff=, ack_wait=)` | A durable JetStream pull consumer. `handler` is `async (Envelope, UnitOfWork) -> None`; the unit is the event's own transaction, scoped to its tenant, so the handler's writes commit together with the event's claim in `inbox`. The spec is the configuration: starting the consumer creates it or brings it to the spec. Its subject never changes in place; a service that needs another subject gives the consumer a new name (`payments-settle-v2`) |
+| `ConsumerSpec(name=, stream=, subject=, handler=, max_deliver=, backoff=, ack_wait=)` | A durable JetStream pull consumer. `handler` is `async (Envelope, UnitOfWork) -> None`; the unit is the event's own transaction, scoped to its tenant, so the handler's writes commit together with the event's claim in `inbox`. The spec is the configuration: starting the consumer creates it or brings it to the spec. Its subject and its ack policy never change in place; a service that needs another subject gives the consumer a new name (`payments-settle-v2`). A stream that does not exist yet is no mistake: the consumer logs `consumer.stream_missing` and binds once its stream is there |
 | `tenant_isolation(table)` | The DDL (a tuple of statements) for a migration that enables and forces row-level security on a table with `organization_id` and `company_id` columns, and creates the policy. `tenant_isolation_removal(table)` undoes it for a downgrade |
 | Errors | Raise a `LedgerError` subclass: `InvalidInputError`, `NotFoundError`, `ConflictError`, `ForbiddenError`, `UnavailableError`, or your own with a stable `code`. Its message is built inside the class (`raise PaymentTooLargeError(limit)`), and `excerpt()` quotes at most 40 characters of an input |
 
@@ -296,9 +296,11 @@ trailing metadata `ledger-error-code`, with generic details for a defect.
   started again after 1 s, then 2 s, up to a minute, each delay shortened at random by up to a fifth so that
   replicas do not come back together; a run of a minute starts the delays over; `ledger_worker_restarts_total`
   counts the restarts. A worker waiting to start again is not dead: JetStream unable to serve a consumer for a
-  moment fails neither probe, and NATS being unreachable fails the `nats` check alone. A worker that fails on a
-  configuration mistake (JetStream refuses the consumer's configuration, an option that cannot work) is not
-  started again: both probes fail, the orchestrator restarts the pod and the mistake shows as a crash loop.
+  moment fails neither probe, and NATS being unreachable fails the `nats` check alone; neither does a consumer whose
+  stream does not exist yet (its publisher may start later). A worker that fails on a configuration mistake
+  (JetStream refuses the consumer's configuration for good, the consumer's subject or ack policy would have to
+  change, an option cannot work) is not started again: both probes fail, the orchestrator restarts the pod and
+  the mistake shows as a crash loop.
 - Stopping goes the other way: the gRPC server stops taking calls and lets those in flight finish (10 s), the
   workers are cancelled and awaited together within one `worker_stop_grace`, NATS drains, the pool closes and the
   pending spans are exported.
@@ -380,8 +382,9 @@ Operations, before production:
 - A retention job for `inbox` rows, which are never deleted.
 - Alerting on dead letters: nothing exports the size of `DEAD_LETTERS`; the `rejected` and `malformed` outcomes
   count the events terminated, and an event that exhausts `max_deliver` is not counted separately.
-- Streams and consumers are declared by the services, and a declaration must keep everything the older versions
-  still running need (more subjects, no shorter limits): an older replica that restarts applies its own
-  declaration over the newer one. A `StreamSpec` keeps events for `max_age` (7 days by default; `DEAD_LETTERS`, 30)
-  and recognizes a republished one within `duplicate_window` (2 minutes by default), so a shorter `max_age` makes
-  JetStream delete messages at once. That rule is the author's to keep; the chassis does not enforce it.
+- Streams only grow: a start adds the subjects its `StreamSpec` declares and keeps the longer of each limit
+  (`max_age`, 7 days by default and 30 for `DEAD_LETTERS`; `duplicate_window`, 2 minutes), so an older replica that
+  restarts during a rollout can never drop a newer subject or have JetStream delete events early. Shrinking a stream
+  (a subject nobody publishes any more, a shorter `max_age`) is an operations step, taken with the `nats` command
+  line once no running version declares the old spec. A consumer's `max_deliver` and `ack_wait` still follow the
+  latest start, so a new value must suit the older versions still running.

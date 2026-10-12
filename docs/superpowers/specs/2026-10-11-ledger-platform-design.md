@@ -110,12 +110,14 @@ A service may depend on `libs/*`, never on another service. import-linter enforc
 
 - Streams per producing service (`IDENTITY`, `INVOICING`, `FISCAL_DO`...), subjects
   `<service>.<aggregate>.<event>`: `invoicing.document.issued`, `fiscal.document.accepted`. The service
-  that publishes declares its streams; every start creates a missing one (file storage) or applies the
-  starting replica's own declaration of subjects and limits over what is there. Replicas of two versions
-  run side by side during a rollout, so a declaration must keep everything the older versions still
-  running need (more subjects, no shorter limits): an older replica that restarts reverts the stream to its
-  own declaration, and a shorter `max_age` makes JetStream delete messages at once. Moving forward only is
-  a rule for the authors of a declaration; the code does not enforce it.
+  that publishes declares its streams; every start creates a missing one (file storage) or widens the one
+  that is there: it gains the subjects of the starting replica's declaration and keeps the longer of each
+  limit (`max_age`, `duplicate_window`). Replicas of two versions run side by side during a rollout, so a
+  stream only grows: an older replica that restarts can never drop a newer subject or make JetStream delete
+  messages early with a shorter `max_age`. Shrinking a stream is a deliberate operations step, once no running
+  version declares the old spec. Only JetStream's configuration refusals (subjects that overlap another
+  stream's, an invalid configuration) are errors of the declaration; JetStream unable to serve for now fails
+  the start, and the next start tries again.
 - Envelope: CloudEvents 1.0 attributes in NATS headers (`ce-specversion`, `ce-id`, `ce-type`, `ce-source`,
   `ce-time`, `ce-subject` = company id, `ce-organizationid` = organization id (both absent for
   platform-wide events), `traceparent`, `content-type: application/protobuf`), payload as a versioned
@@ -144,8 +146,10 @@ A service may depend on `libs/*`, never on another service. import-linter enforc
   pending messages), and as with streams the latest start wins, so a new value must suit the older versions
   still running. The filter subject does not change in place: one durable consumer serves every replica of
   every version during a rollout, so widening it would hand new events to old replicas that cannot read them
-  (they would be terminated) and narrowing it would skip them for good. A service that needs another subject
-  names its consumer anew (`invoicing-projections-v2`), which starts over with the whole stream. `ack_wait`
+  (they would be terminated) and narrowing it would skip them for good. Nor does the ack policy, which
+  JetStream never changes. A service that needs another subject names its consumer anew
+  (`invoicing-projections-v2`), which starts over with the whole stream. A stream that does not exist yet is
+  no configuration mistake (its publisher may start later): the consumer logs it and binds once it exists. `ack_wait`
   defaults to twice what one claim and one statement can take at the database's default limits (70 s); a
   handler may outlast it, and the inbox makes the second delivery harmless.
 - Ordering: only per aggregate matters. The platform promises no order across events (a retried event
@@ -436,8 +440,9 @@ company can certify while another runs in production.
   and while it waits it fails neither probe, so a worker failing for a moment (JetStream unable to serve its
   consumer) never takes the HTTP API out of rotation; NATS itself being unreachable does, through the
   readiness check of the connection. A worker that fails on a configuration mistake (JetStream refuses the
-  consumer's configuration, by one of the error codes nats-server gives such a refusal, or an option cannot
-  work) is not started again: `/readyz` and `/livez` both fail, the orchestrator restarts the pod, and the
+  consumer's configuration, by one of the error codes nats-server gives such a refusal; its subject or its
+  ack policy would have to change; an option cannot work) is not started again; a stream that does not exist
+  yet is not such a mistake: `/readyz` and `/livez` both fail, the orchestrator restarts the pod, and the
   mistake shows as a crash loop. A stop gives all the workers one grace together.
 - **SLOs:** API availability 99.9 %; p95 `POST /v1/invoices` < 300 ms (excluding DGII); 99 % of
   documents reach a final DGII state within 5 minutes when DGII is up.

@@ -30,10 +30,14 @@ rollout the replicas run different versions. Widening the subject would hand the
 replicas that may not read them (their handler raises an error of kind ``INVALID``: the events are terminated
 into the dead letters and the new version never sees them); narrowing it, as an old replica restarting after a
 new one does, would skip the events of the new kind for good. So a changed subject is refused with a
-``ConsumerRefusedError``, as is a field JetStream cannot change (the ack policy, say), and a service that
-needs a new subject gives its consumer a new name: a versioned one, such as ``invoicing-projections-v2``. The
-new consumer starts with the whole stream (its inbox rows are its own), and the old one is deleted when no
-replica of the old version runs any more.
+``ConsumerRefusedError``, without a word to JetStream, as is a changed ack policy (JetStream never changes
+one), and a service that needs a new subject gives its consumer a new name: a versioned one, such as
+``invoicing-projections-v2``. The new consumer starts with the whole stream (its inbox rows are its own), and
+the old one is deleted when no replica of the old version runs any more.
+
+A stream that does not exist (yet) is no configuration mistake: whoever publishes to it creates it when it
+starts, maybe a moment later. The consumer logs ``consumer.stream_missing`` and fails like any NATS error; the
+service's supervisor runs it again after a growing delay, and it binds once the stream is there.
 
 A consumer that is stopped (a deploy, a scale-down) rolls back the handling it was in, and gives the
 messages of its batch it had not settled back to JetStream at once, so that the next consumer does not wait
@@ -60,7 +64,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import ClassVar, Final, Never, Protocol, final
 from uuid import UUID
-lazy from collections.abc import Awaitable, Callable
+lazy from collections.abc import Awaitable, Callable, Mapping
 
 import structlog
 from nats.errors import Error as NatsError
@@ -79,6 +83,7 @@ from ledger_contracts.envelope import Envelope, MalformedEventError
 from ledger_kernel.clock import utc_now
 from ledger_kernel.errors import ErrorKind, LedgerError
 from ledger_platform.database import DEFAULT_LIMITS, PlatformTable
+from ledger_platform.jetstream import is_refusal
 from ledger_platform.options import (
     InvalidOptionError,
     is_positive_and_finite,
@@ -104,92 +109,16 @@ MAX_NAME_LENGTH: Final = 255
 """The longest name NATS accepts for a consumer."""
 _NAME: Final = re.compile(r"(?:(?![.*>/\\])[!-~])+", re.ASCII)
 """Visible ASCII without ``.``, ``*``, ``>``, ``/`` or a backslash: what NATS accepts as a consumer's name."""
-_REFUSALS: Final = frozenset(
-    {
-        # The request, or the account it is made for (status 400).
-        10002,  # JSAccountResourcesExceededErr
-        10003,  # JSBadRequestErr
-        10025,  # JSInvalidJSONErr
-        10026,  # JSMaximumConsumersLimitErr
-        10133,  # JSReplicasCountCannotBeNegative
-        10157,  # JSPedanticErrF
-        # The stream the consumer reads does not exist (404).
-        10059,  # JSStreamNotFoundErr
-        # A field of the existing consumer that cannot change, such as its ack policy (500).
-        10012,  # JSConsumerCreateErrF
-        # The consumer's own configuration: every JSConsumer... error of status 400.
-        10013,  # JSConsumerNameExistErr
-        10016,  # JSConsumerDurableNameNotInSubjectErr
-        10017,  # JSConsumerDurableNameNotMatchSubjectErr
-        10018,  # JSConsumerDurableNameNotSetErr
-        10019,  # JSConsumerEphemeralWithDurableInSubjectErr
-        10020,  # JSConsumerEphemeralWithDurableNameErr
-        10078,  # JSConsumerConfigRequiredErr
-        10079,  # JSConsumerDeliverToWildcardsErr
-        10080,  # JSConsumerPushMaxWaitingErr
-        10081,  # JSConsumerDeliverCycleErr
-        10082,  # JSConsumerMaxPendingAckPolicyRequiredErr
-        10083,  # JSConsumerSmallHeartbeatErr
-        10084,  # JSConsumerPullRequiresAckErr
-        10085,  # JSConsumerPullNotDurableErr
-        10086,  # JSConsumerPullWithRateLimitErr
-        10087,  # JSConsumerMaxWaitingNegativeErr
-        10088,  # JSConsumerHBRequiresPushErr
-        10089,  # JSConsumerFCRequiresPushErr
-        10090,  # JSConsumerDirectRequiresPushErr
-        10091,  # JSConsumerDirectRequiresEphemeralErr
-        10092,  # JSConsumerOnMappedErr
-        10093,  # JSConsumerFilterNotSubsetErr
-        10094,  # JSConsumerInvalidPolicyErrF
-        10095,  # JSConsumerInvalidSamplingErrF
-        10098,  # JSConsumerWQRequiresExplicitAckErr
-        10099,  # JSConsumerWQMultipleUnfilteredErr
-        10100,  # JSConsumerWQConsumerNotUniqueErr
-        10101,  # JSConsumerWQConsumerNotDeliverAllErr
-        10102,  # JSConsumerNameTooLongErrF
-        10103,  # JSConsumerBadDurableNameErr
-        10105,  # JSConsumerExistingActiveErr
-        10106,  # JSConsumerReplacementWithDifferentNameErr
-        10107,  # JSConsumerDescriptionTooLongErrF
-        10108,  # JSConsumerWithFlowControlNeedsHeartbeats
-        10112,  # JSConsumerInvalidDeliverSubject
-        10114,  # JSConsumerMaxRequestBatchNegativeErr
-        10115,  # JSConsumerMaxRequestExpiresTooSmall
-        10116,  # JSConsumerMaxDeliverBackoffErr
-        10121,  # JSConsumerMaxPendingAckExcessErrF
-        10125,  # JSConsumerMaxRequestBatchExceededF
-        10126,  # JSConsumerReplicasExceedsStream
-        10127,  # JSConsumerNameContainsPathSeparatorsErr
-        10131,  # JSConsumerCreateFilterSubjectMismatchErr
-        10132,  # JSConsumerCreateDurableAndNameMismatch
-        10134,  # JSConsumerReplicasShouldMatchStream
-        10135,  # JSConsumerMetadataLengthErrF
-        10136,  # JSConsumerDuplicateFilterSubjects
-        10137,  # JSConsumerMultipleFiltersNotAllowed
-        10138,  # JSConsumerOverlappingSubjectFilters
-        10139,  # JSConsumerEmptyFilter
-        10148,  # JSConsumerAlreadyExists
-        10149,  # JSConsumerDoesNotExist
-        10153,  # JSConsumerInactiveThresholdExcess
-        10159,  # JSConsumerPriorityPolicyWithoutGroup
-        10160,  # JSConsumerInvalidPriorityGroupErr
-        10161,  # JSConsumerEmptyGroupName
-        10162,  # JSConsumerInvalidGroupNameErr
-        10178,  # JSConsumerPushWithPriorityGroupErr
-        10181,  # JSConsumerAckPolicyInvalidErr
-        10182,  # JSConsumerReplayPolicyInvalidErr
-        10183,  # JSConsumerAckWaitNegativeErr
-        10184,  # JSConsumerBackOffNegativeErr
-        10196,  # JSConsumerPriorityGroupWithPolicyNone
-        10197,  # JSConsumerPinnedTTLWithoutPriorityPolicyNone
-    }
-)
-"""The ``err_code`` of JetStream's answers to a consumer it will never create or update as configured, from
-``server/errors.json`` of nats-server v2.12.15. Any other answer means JetStream cannot serve for now: every
-503 (no responders, 10008 temporarily unavailable, 10004 incomplete results, 10023 insufficient resources),
-the other 500s (10009 no leader, 10007 not assigned, 10118 and 10119 offline) and the cluster's own 400s
-(10005 no suitable peers, 10202 membership changing). Those are not refusals: the error goes on, and the
-consumer is tried again."""
+_UNCHANGEABLE: Final[Mapping[str, str]] = {
+    "ack_policy": "JetStream never changes the ack policy of a consumer",
+    "filter_subject": (
+        "one durable consumer serves every replica, whichever version it runs, so its subject cannot change"
+        " in place"
+    ),
+}
+"""The fields of an existing consumer the chassis refuses to change, and why, without asking JetStream."""
+_STREAM_NOT_FOUND: Final = 10059
+"""JetStream's ``err_code`` for a stream that does not exist (JSStreamNotFoundErr)."""
 _logger = structlog.stdlib.get_logger(__name__)
 
 type Handler = Callable[[Envelope, UnitOfWork], Awaitable[None]]
@@ -355,12 +284,12 @@ class ConsumerSpec:
 class ConsumerRefusedError(LedgerError):
     """JetStream refused the configuration of a durable consumer for good, and left the consumer as it was.
 
-    Or the chassis refused before asking: the subject of an existing consumer never changes (see
-    ``ensure_consumer``). Typically a field of the existing consumer that nobody can change (its ack policy),
-    or a stream that does not exist. Only an answer no retry can change is one (``_REFUSALS``): JetStream
-    unable to serve for now (no responders, no leader) raises its own error instead. ``fields`` are the fields
-    of the consumer that were to change; none when the consumer was to be created. The cause, when JetStream
-    was asked, is the server's own answer, or nats-py's when it could not build the request.
+    Or the chassis refused before asking: the subject and the ack policy of an existing consumer never
+    change (see ``ensure_consumer``). Only an answer no retry can change is a refusal (see
+    ``ledger_platform.jetstream``): JetStream unable to serve for now (no responders, no leader, no such
+    stream yet) raises its own error instead. ``fields`` are the fields of the consumer that were to change;
+    none when the consumer was to be created. The cause, when JetStream was asked, is the server's own
+    answer, or nats-py's when it could not build the request.
     """
 
     code: ClassVar[str] = "consumer_refused"
@@ -419,11 +348,13 @@ async def ensure_consumer(jetstream: ConsumerApi, spec: ConsumerSpec) -> None:
 
     A consumer that is already as the spec says is not written. ``max_deliver`` and ``ack_wait`` of an
     existing one are updated in place, which is safe while messages are pending (JetStream keeps the state of
-    the consumer). Its subject is not: ``ConsumerRefusedError`` naming ``filter_subject``, without a word to
-    JetStream, because a durable consumer serves every replica whichever version it runs (see the module's
-    note): a new subject needs a new name, such as ``invoicing-projections-v2``. ``ConsumerRefusedError`` too
-    when JetStream refuses the configuration (``_REFUSALS``), or nats-py cannot build the request. Any other
-    answer of JetStream (unavailable, no leader) is raised as it came: it may well work next time.
+    the consumer). Its subject and its ack policy are not: ``ConsumerRefusedError`` naming them, without a
+    word to JetStream, because a durable consumer serves every replica whichever version it runs (see the
+    module's note) and JetStream never changes an ack policy: a new subject needs a new name, such as
+    ``invoicing-projections-v2``. ``ConsumerRefusedError`` too when JetStream refuses the configuration for
+    good (``ledger_platform.jetstream``), or nats-py cannot build the request. Any other answer of JetStream
+    (unavailable, no leader, no such stream yet) is raised as it came: it may well work next time. A missing
+    stream is logged as ``consumer.stream_missing`` first.
 
     Specs of the fields that change in place only move forward, as streams do: replicas of different versions
     start during a rollout and each applies its own spec over what the others declared, so an older replica
@@ -436,15 +367,14 @@ async def ensure_consumer(jetstream: ConsumerApi, spec: ConsumerSpec) -> None:
         fields: tuple[str, ...] = ()
     else:
         fields = _changes(current, wanted)
-        if "filter_subject" in fields:
+        unchangeable = tuple(field for field in fields if field in _UNCHANGEABLE)
+        if unchangeable:
+            why = "; ".join(_UNCHANGEABLE[field] for field in unchangeable)
             raise ConsumerRefusedError(
                 consumer=spec.name,
                 stream=spec.stream,
-                fields=("filter_subject",),
-                reason=(
-                    "one durable consumer serves every replica, whichever version it runs, so its subject "
-                    f"cannot change in place: give the new subject a new name, such as '{spec.name}-v2'"
-                ),
+                fields=unchangeable,
+                reason=f"{why}: give the consumer a new name, such as '{spec.name}-v2'",
             )
         if not fields:
             return
@@ -455,7 +385,9 @@ async def ensure_consumer(jetstream: ConsumerApi, spec: ConsumerSpec) -> None:
             consumer=spec.name, stream=spec.stream, fields=fields, reason=None
         ) from error
     except APIError as error:
-        if error.err_code not in _REFUSALS:
+        if error.err_code == _STREAM_NOT_FOUND:
+            _logger.warning("consumer.stream_missing", consumer=spec.name, stream=spec.stream)
+        if not is_refusal(error):
             raise
         raise ConsumerRefusedError(
             consumer=spec.name, stream=spec.stream, fields=fields, reason=error.description

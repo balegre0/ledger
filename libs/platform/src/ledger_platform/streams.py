@@ -1,4 +1,11 @@
-"""JetStream streams: declared by the services that publish to them, created or updated at start."""
+"""JetStream streams: declared by the services that publish to them, created or widened at start.
+
+A stream only grows. Replicas of different versions start during a rollout, and each ensures its own spec over
+what the others declared: an existing stream keeps every subject any of them declared and the longest of each
+limit, so an older replica restarting after a newer one can never drop the newer subjects or have JetStream
+delete events early. Shrinking a stream (a subject no version publishes any more, a shorter ``max_age``) is
+an operations step, taken with the ``nats`` command line once no replica declares the old spec.
+"""
 
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass, replace
@@ -10,6 +17,7 @@ from nats.js.errors import APIError, NotFoundError
 lazy from nats.js.api import StreamInfo
 
 from ledger_kernel.errors import LedgerError
+from ledger_platform.jetstream import is_refusal
 from ledger_platform.options import InvalidOptionError
 
 
@@ -21,10 +29,11 @@ class InvalidStreamSpecError(InvalidOptionError):
 
 
 class StreamRefusedError(LedgerError):
-    """JetStream refused to create or update a stream, and left it as it was.
+    """JetStream refused the configuration of a stream for good, and left the stream as it was.
 
-    Typically its subjects overlap with another stream's. The cause is the server's own answer, or nats-py's
-    when it could not even build the request.
+    Typically its subjects overlap with another stream's. Only an answer no retry can change is one
+    (``ledger_platform.jetstream``): JetStream unable to serve for now raises its own error instead. The
+    cause is the server's own answer, or nats-py's when it could not even build the request.
     """
 
     code: ClassVar[str] = "stream_refused"
@@ -107,30 +116,56 @@ class StreamApi(Protocol, metaclass=ABCMeta):
         """Replace the configuration of the stream ``config`` names."""
 
 
-async def ensure_stream(jetstream: StreamApi, spec: StreamSpec) -> None:
-    """Create the stream with file storage, or bring an existing one's subjects and limits to ``spec``.
+def _longest_age(held: float | None, declared: timedelta) -> float:
+    """The longer of two ages in seconds: none (or zero, JetStream's word for it) is the longest of all."""
+    return 0.0 if not held else max(held, declared.total_seconds())
 
-    Nothing else of an existing stream changes: its storage, retention and replicas are what whoever made it
-    chose, and starting a service must never move data. ``StreamRefusedError`` when JetStream refuses, or
-    nats-py cannot build the request.
 
-    Specs only move forward. Replicas of different versions start during a rollout and each applies its own
-    spec over what the others declared, so a new spec must keep everything an older one declares valid (more
-    subjects, no shorter limits): otherwise an older replica restarting after a newer one shrinks the stream.
-    """
-    try:
-        existing = await jetstream.stream_info(spec.name)
-    except NotFoundError:
-        apply, base = jetstream.add_stream, StreamConfig(name=spec.name, storage=StorageType.FILE)
-    else:
-        apply, base = jetstream.update_stream, existing.config
-    config = replace(
-        base,
+def _created(spec: StreamSpec) -> StreamConfig:
+    return StreamConfig(
+        name=spec.name,
+        storage=StorageType.FILE,
         subjects=list(spec.subjects),
         duplicate_window=spec.duplicate_window.total_seconds(),
         max_age=spec.max_age.total_seconds(),
     )
+
+
+def _widened(held: StreamConfig, spec: StreamSpec) -> StreamConfig:
+    """``held`` with every subject of ``spec`` added and each limit at the longer of the two."""
+    subjects = list(held.subjects or ())
+    return replace(
+        held,
+        subjects=subjects + [subject for subject in spec.subjects if subject not in subjects],
+        duplicate_window=max(held.duplicate_window or 0.0, spec.duplicate_window.total_seconds()),
+        max_age=_longest_age(held.max_age, spec.max_age),
+    )
+
+
+async def ensure_stream(jetstream: StreamApi, spec: StreamSpec) -> None:
+    """Create the stream with file storage, or widen an existing one to hold ``spec`` too (see the module).
+
+    An existing stream gains the subjects of ``spec`` it lacks, and the longer of its own limits and those of
+    ``spec``; one that holds them all already is not written. Nothing else of it changes: its storage,
+    retention and replicas are what whoever made it chose, and starting a service must never move data.
+
+    ``StreamRefusedError`` when JetStream refuses the configuration for good, or nats-py cannot build the
+    request. Any other answer (JetStream unable to serve for now) is raised as it came: it may well work next
+    time.
+    """
+    try:
+        existing = await jetstream.stream_info(spec.name)
+    except NotFoundError:
+        apply, config = jetstream.add_stream, _created(spec)
+    else:
+        apply, config = jetstream.update_stream, _widened(existing.config, spec)
+        if config == existing.config:
+            return
     try:
         await apply(config)
-    except (APIError, ValueError) as error:  # nats-py raises ValueError when it cannot serialize the config
+    except ValueError as error:  # nats-py raises it when it cannot serialize the config
+        raise StreamRefusedError(spec.name) from error
+    except APIError as error:
+        if not is_refusal(error):
+            raise
         raise StreamRefusedError(spec.name) from error

@@ -245,7 +245,7 @@ layers = [
     "service | schema",
     "web | grpc_server | consumer",
     "outbox | streams",
-    "database | tracing | health | logs",
+    "database | tracing | health | logs | jetstream",
     "settings | options | lifecycle | supervision",
 ]
 
