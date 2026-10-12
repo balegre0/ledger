@@ -81,7 +81,7 @@ COMPANY = literal_column("current_setting('ledger.company_id')", Text)
 ADVISORY = TypeAdapter(dict[str, object])
 
 type Eventually = Callable[[Callable[[], Awaitable[bool]]], Awaitable[None]]
-"""The ``eventually`` fixture of conftest.py."""
+"""The ``eventually`` fixture of conftest.py (basedpyright cannot resolve an import of a conftest)."""
 
 
 class NeverValidError(InvalidInputError):
@@ -180,7 +180,7 @@ class Unserializable(ConsumerApi):
         return ConsumerInfo(
             name=consumer,
             stream_name=stream,
-            config=ConsumerConfig(name=consumer, durable_name=consumer),
+            config=ConsumerConfig(name=consumer, durable_name=consumer, filter_subject="events.>"),
             created=datetime(2026, 1, 1, tzinfo=UTC),
         )
 
@@ -769,26 +769,86 @@ async def test_an_idle_consumer_keeps_polling(
         await eventually(partial(received, recorder, 1))
 
 
-async def test_a_deployed_spec_takes_effect_on_the_existing_consumer(
+async def test_a_changed_max_deliver_ack_wait_and_backoff_take_effect_on_the_existing_consumer(
     streams: JetStreamContext, make: ConsumerFactory, eventually: Eventually
 ) -> None:
-    """A new version widens the subject and changes ``max_deliver`` and ``ack_wait``: all of it applies."""
-    published_before = money()
-    await publish(streams, published_before, "events.deleted")
-    async with running(make(Recorder(), subject="events.created", max_deliver=3, ack_wait=7.0), streams):
+    """A new version of the service changes what its consumer does about failures: all of it applies."""
+    async with running(make(Recorder(), max_deliver=3, backoff=(60.0,), ack_wait=7.0), streams):
         await eventually(partial(bound, streams))
     created = (await streams.consumer_info("EVENTS", NAME)).config
-    assert (created.durable_name, created.ack_policy) == (NAME, "explicit")
-    assert (created.filter_subject, created.max_deliver, created.ack_wait) == ("events.created", 3, 7.0)
+    assert (created.durable_name, created.ack_policy, created.filter_subject) == (
+        NAME,
+        "explicit",
+        "events.>",
+    )
+    assert (created.max_deliver, created.ack_wait) == (3, 7.0)
 
-    recorder = Recorder()
-    new_kind = money()
-    await publish(streams, new_kind, "events.deleted")
-    async with running(make(recorder, subject="events.>", max_deliver=5, ack_wait=9.0), streams):
-        await eventually(partial(received, recorder, 1))
+    recorder = Recorder(failures=1)
+    await publish(streams, money())
+    async with running(make(recorder, max_deliver=5, backoff=(0.05,), ack_wait=9.0), streams):
+        await eventually(partial(received, recorder, 1))  # the failed delivery was back after 0.05 s, not 60
     updated = (await streams.consumer_info("EVENTS", NAME)).config
-    assert (updated.filter_subject, updated.max_deliver, updated.ack_wait) == ("events.>", 5, 9.0)
-    assert recorder.received == [new_kind]  # a wider subject covers what is published from then on
+    assert (updated.max_deliver, updated.ack_wait) == (5, 9.0)
+
+
+async def test_updating_the_other_fields_leaves_the_pending_messages_alone(
+    streams: JetStreamContext, make: ConsumerFactory, eventually: Eventually
+) -> None:
+    """A message is being handled when the consumer is updated: JetStream keeps its state, and the message."""
+    gated = Gated()
+    await publish(streams, money())
+    async with running(make(gated), streams):
+        await eventually(partial(handling, gated))
+
+        await ensure_consumer(streams, spec(Recorder(), max_deliver=4, ack_wait=40.0))
+
+        info = await streams.consumer_info("EVENTS", NAME)
+        assert (info.config.max_deliver, info.config.ack_wait) == (4, 40.0)
+        assert info.num_ack_pending == 1
+        gated.open.set()
+        await eventually(partial(acknowledged, streams, 1))
+    assert gated.calls == 1
+
+
+async def test_a_changed_subject_is_refused_and_the_existing_consumer_is_left_alone(
+    streams: JetStreamContext, make: ConsumerFactory, eventually: Eventually
+) -> None:
+    """One durable consumer serves every replica: widening its subject in place would hand the events of a new
+    kind to replicas that cannot read them, and narrowing it (an old replica restarting) would skip them."""
+    async with running(make(Recorder(), subject="events.created", max_deliver=3), streams):
+        await eventually(partial(bound, streams))
+    before = (await streams.consumer_info("EVENTS", NAME)).config
+
+    async with asyncio.timeout(5):  # a consumer that went on would run for ever
+        with pytest.raises(ConsumerRefusedError) as refused:
+            await make(Recorder(), subject="events.>", max_deliver=5, ack_wait=9.0).run(streams)
+
+    assert (refused.value.consumer, refused.value.stream, refused.value.fields) == (
+        NAME,
+        "EVENTS",
+        ("filter_subject",),
+    )
+    assert f"a new name, such as '{NAME}-v2'" in str(refused.value)
+    assert (await streams.consumer_info("EVENTS", NAME)).config == before  # not even the other fields
+
+
+async def test_a_new_name_with_the_new_subject_is_a_consumer_of_its_own_that_starts_with_the_stream(
+    streams: JetStreamContext, make: ConsumerFactory, eventually: Eventually
+) -> None:
+    first, second = money(), money()
+    await publish(streams, first, "events.created")
+    created_only = Recorder()
+    async with running(make(created_only, subject="events.created"), streams):
+        await eventually(partial(received, created_only, 1))
+    await publish(streams, second, "events.deleted")
+
+    everything = Recorder()
+    async with running(make(everything, name=f"{NAME}-v2", subject="events.>"), streams):
+        await eventually(partial(received, everything, 2))
+
+    assert sorted(envelope.id for envelope in everything.received) == sorted([first.id, second.id])
+    assert (await streams.consumer_info("EVENTS", NAME)).config.filter_subject == "events.created"
+    assert (await streams.consumer_info("EVENTS", f"{NAME}-v2")).config.filter_subject == "events.>"
 
 
 async def test_a_consumer_whose_configuration_cannot_change_is_refused_and_left_alone(
@@ -806,8 +866,8 @@ async def test_a_consumer_whose_configuration_cannot_change_is_refused_and_left_
 
     assert (refused.value.consumer, refused.value.stream) == (NAME, "EVENTS")
     assert "ack_policy" in refused.value.fields
-    named = rf"change [a-z_, ]*ack_policy[a-z_, ]* of consumer '{NAME}' of stream 'EVENTS'"
-    assert re.fullmatch(rf"JetStream refused to {named}: .+", str(refused.value))
+    named = rf"consumer '{NAME}' of stream 'EVENTS' cannot change [a-z_, ]*ack_policy[a-z_, ]*"
+    assert re.fullmatch(rf"{named}: .+", str(refused.value))
     assert isinstance(refused.value.__cause__, APIError)
     assert (await streams.consumer_info("EVENTS", NAME)).config.ack_policy == "none"
 
@@ -839,7 +899,9 @@ async def test_a_consumer_that_is_as_the_spec_says_is_not_written_again(streams:
 async def test_a_consumer_of_a_missing_stream_is_refused_with_the_answer_of_jetstream(
     jetstream: JetStreamContext,
 ) -> None:
-    with pytest.raises(ConsumerRefusedError, match=f"create consumer '{NAME}' of stream 'EVENTS'") as refused:
+    with pytest.raises(
+        ConsumerRefusedError, match=f"consumer '{NAME}' of stream 'EVENTS' cannot be created"
+    ) as refused:
         await ensure_consumer(jetstream, spec(Recorder()))
 
     assert isinstance(refused.value.__cause__, JetStreamNotFoundError)
@@ -922,14 +984,6 @@ async def test_stopping_a_consumer_mid_handler_rolls_back_and_hands_the_whole_ba
     assert sorted(envelope.id for envelope in successor.received) == sorted(
         envelope.id for envelope in events
     )
-
-
-async def test_stopping_a_consumer_that_is_waiting_for_events_leaves_nothing_unacknowledged(
-    streams: JetStreamContext, make: ConsumerFactory, eventually: Eventually
-) -> None:
-    async with running(make(Recorder()), streams):
-        await eventually(partial(bound, streams))
-    assert (await streams.consumer_info("EVENTS", NAME)).num_ack_pending == 0
 
 
 async def test_a_delivery_that_arrives_while_the_first_is_still_being_handled_is_a_duplicate(

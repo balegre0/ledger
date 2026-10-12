@@ -20,11 +20,20 @@ traceback of a handler's exception says whatever that exception says. A failure 
 database could not be reached, the claim waited too long for a lock) is logged as ``consumer.claim_failed``,
 one of the handler as ``consumer.handler_failed``.
 
-The spec is the configuration: ``Consumer.run`` creates the durable consumer in JetStream if it is missing,
-and brings an existing one to the spec (its subject, ``max_deliver`` and ``ack_wait``), as ``ensure_stream``
-does for a stream. A consumer JetStream cannot change (its ack policy, say) is refused by name. A subject
-widened by a new version covers the events published from then on; JetStream does not go back for the older
-ones.
+The spec is the configuration: ``Consumer.run`` creates the durable consumer in JetStream if it is missing
+and brings an existing one to the spec, as ``ensure_stream`` does for a stream. ``max_deliver`` and
+``ack_wait`` change in place, and that is safe while messages are pending: JetStream keeps the consumer's
+state (its position, the messages awaiting an acknowledgement, their delivery counts).
+
+The subject does not change in place. One durable consumer serves every replica of a service, and during a
+rollout the replicas run different versions. Widening the subject would hand the events of a new kind to old
+replicas that may not read them (their handler raises an error of kind ``INVALID``: the events are terminated
+into the dead letters and the new version never sees them); narrowing it, as an old replica restarting after a
+new one does, would skip the events of the new kind for good. So a changed subject is refused with a
+``ConsumerRefusedError``, as is a field JetStream cannot change (the ack policy, say), and a service that
+needs a new subject gives its consumer a new name: a versioned one, such as ``invoicing-projections-v2``. The
+new consumer starts with the whole stream (its inbox rows are its own), and the old one is deleted when no
+replica of the old version runs any more.
 
 A consumer that is stopped (a deploy, a scale-down) rolls back the handling it was in, and gives the
 messages of its batch it had not settled back to JetStream at once, so that the next consumer does not wait
@@ -213,9 +222,10 @@ class ConsumerSpec:
     """A durable JetStream consumer and what it does with each event.
 
     ``Consumer.run`` brings the consumer in JetStream to this spec when it starts (``ensure_consumer``), so a
-    new version of a service that changes the subject, ``max_deliver`` or ``ack_wait`` takes effect on the
-    consumer it finds. ``backoff`` is not part of the consumer in JetStream: each negative acknowledgement
-    carries its own delay, so it always is the running version's.
+    new version of a service that changes ``max_deliver`` or ``ack_wait`` takes effect on the consumer it
+    finds. ``backoff`` is not part of the consumer in JetStream: each negative acknowledgement carries its own
+    delay, so it always is the running version's. The ``subject`` and the ``name`` go together: a consumer
+    that exists under a name keeps its subject, and a new subject needs a new name.
     """
 
     name: str
@@ -225,8 +235,10 @@ class ConsumerSpec:
     stream: str
     """The stream the consumer reads."""
     subject: str
-    """Which of the stream's subjects it takes (a filter, wildcards allowed). Widening it later covers the
-    events published from then on, not the older ones."""
+    """Which of the stream's subjects it takes (a filter, wildcards allowed). It cannot change under the same
+    ``name``: ``ensure_consumer`` refuses, because one durable consumer serves all the replicas of a service,
+    old versions included. A service that needs another subject names its consumer anew, such as
+    ``invoicing-projections-v2``; the new one starts with the whole stream."""
     handler: Handler
     """What to do with each event that is not a duplicate. An error it raises fails the delivery."""
     max_deliver: int = DEFAULT_MAX_DELIVER
@@ -257,9 +269,11 @@ class ConsumerSpec:
 class ConsumerRefusedError(LedgerError):
     """JetStream refused to create or update a durable consumer, and left it as it was.
 
-    Typically a field of the existing consumer that nobody can change (its ack policy), or a stream that does
-    not exist. ``fields`` are the fields of the consumer the update tried to change; none when the consumer
-    was to be created. The cause is the server's own answer, or nats-py's when it could not build the request.
+    Or the chassis refused before asking: the subject of an existing consumer never changes (see
+    ``ensure_consumer``). Typically a field of the existing consumer that nobody can change (its ack policy),
+    or a stream that does not exist. ``fields`` are the fields of the consumer that were to change; none when
+    the consumer was to be created. The cause, when JetStream was asked, is the server's own answer, or
+    nats-py's when it could not build the request.
     """
 
     code: ClassVar[str] = "consumer_refused"
@@ -269,9 +283,9 @@ class ConsumerRefusedError(LedgerError):
     fields: tuple[str, ...]
 
     def __init__(self, *, consumer: str, stream: str, fields: tuple[str, ...], reason: str | None) -> None:
-        what = f"change {', '.join(fields)} of" if fields else "create"
+        what = f"change {', '.join(fields)}" if fields else "be created"
         why = "" if reason is None else f": {reason}"
-        super().__init__(f"JetStream refused to {what} consumer {consumer!r} of stream {stream!r}{why}")
+        super().__init__(f"consumer {consumer!r} of stream {stream!r} cannot {what}{why}")
         self.consumer = consumer
         self.stream = stream
         self.fields = fields
@@ -316,12 +330,16 @@ def _changes(current: ConsumerConfig, wanted: ConsumerConfig) -> tuple[str, ...]
 async def ensure_consumer(jetstream: ConsumerApi, spec: ConsumerSpec) -> None:
     """Create the durable consumer ``spec`` describes, or bring an existing one to it.
 
-    A consumer that is already as the spec says is not written. ``ConsumerRefusedError`` when JetStream
-    refuses, or nats-py cannot build the request.
+    A consumer that is already as the spec says is not written. ``max_deliver`` and ``ack_wait`` of an
+    existing one are updated in place, which is safe while messages are pending (JetStream keeps the state of
+    the consumer). Its subject is not: ``ConsumerRefusedError`` naming ``filter_subject``, without a word to
+    JetStream, because a durable consumer serves every replica whichever version it runs (see the module's
+    note): a new subject needs a new name, such as ``invoicing-projections-v2``. ``ConsumerRefusedError`` too
+    when JetStream refuses, or nats-py cannot build the request.
 
-    Specs only move forward, as streams do: replicas of different versions start during a rollout and each
-    applies its own spec over what the others declared, so an older replica restarting after a newer one
-    undoes the change until it is replaced too.
+    Specs of the fields that change in place only move forward, as streams do: replicas of different versions
+    start during a rollout and each applies its own spec over what the others declared, so an older replica
+    restarting after a newer one undoes the change until it is replaced too.
     """
     wanted = _configuration(spec)
     try:
@@ -330,6 +348,16 @@ async def ensure_consumer(jetstream: ConsumerApi, spec: ConsumerSpec) -> None:
         fields: tuple[str, ...] = ()
     else:
         fields = _changes(current, wanted)
+        if "filter_subject" in fields:
+            raise ConsumerRefusedError(
+                consumer=spec.name,
+                stream=spec.stream,
+                fields=("filter_subject",),
+                reason=(
+                    "one durable consumer serves every replica, whichever version it runs, so its subject "
+                    f"cannot change in place: give the new subject a new name, such as '{spec.name}-v2'"
+                ),
+            )
         if not fields:
             return
     try:

@@ -44,7 +44,7 @@ STREAM = StreamSpec(name="TEST", subjects=("test.>",))
 TRACEPARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 
 type Eventually = Callable[[Callable[[], Awaitable[bool]]], Awaitable[None]]
-"""The ``eventually`` fixture of conftest.py."""
+"""The ``eventually`` fixture of conftest.py (basedpyright cannot resolve an import of a conftest)."""
 
 
 def event() -> Envelope:
