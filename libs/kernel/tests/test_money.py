@@ -314,3 +314,51 @@ def test_rounding_is_idempotent_and_within_half_a_cent(a: Money) -> None:
     rounded = a.rounded()
     assert rounded.rounded() == rounded
     assert (rounded - a).amount.copy_abs() <= Decimal("0.005")
+
+
+@pytest.mark.parametrize(
+    ("amount", "text"),
+    [
+        (Decimal("1E+5"), "100000"),
+        (Decimal("1.2E+3"), "1200"),
+        (Decimal("-7E+2"), "-700"),
+        (Decimal("0E+3"), "0"),
+        (Decimal("-0E+3"), "0"),
+        (Decimal("123456789012345678.50"), "123456789012345678.50"),
+    ],
+    ids=["one-e-five", "fraction-of-a-power", "negative", "zero", "minus-zero", "no-exponent"],
+)
+def test_a_positive_exponent_is_written_out(amount: Decimal, text: str) -> None:
+    """``str`` of a Decimal with a positive exponent prints ``1E+5``: no invoice may show that."""
+    money = Money(amount, Currency.DOP)
+    assert str(money.amount) == text
+    assert money.amount.as_tuple() == Decimal(text).as_tuple()
+    assert money == Money.of(text, Currency.DOP)
+
+
+def test_arithmetic_never_leaves_a_positive_exponent() -> None:
+    assert str((dop("100") * Decimal("1E+3")).amount) == "100000"
+    assert str((Money(Decimal("5E+2"), Currency.DOP) + dop("0")).amount) == "500"
+    assert str((-Money(Decimal("5E+2"), Currency.DOP)).amount) == "-500"
+
+
+@pytest.mark.parametrize("text", ["1.50", "0.001", "-12.340", "7"])
+def test_the_scale_of_an_amount_without_a_positive_exponent_is_kept(text: str) -> None:
+    assert Money.of(text, Currency.DOP).amount.as_tuple() == Decimal(text).as_tuple()
+
+
+@given(
+    coefficient=st.integers(min_value=-(10**12), max_value=10**12),
+    exponent=st.integers(min_value=-24, max_value=5),
+)
+def test_an_amount_keeps_its_value_and_is_written_without_a_positive_exponent(
+    coefficient: int, exponent: int
+) -> None:
+    amount = Decimal(coefficient).scaleb(exponent)
+    money = Money(amount, Currency.DOP)
+    assert money.amount == amount
+    stored = money.amount.as_tuple().exponent
+    assert isinstance(stored, int)
+    assert stored == min(exponent, 0)
+    if money.amount.adjusted() >= -6:  # Decimal writes anything smaller in exponent form whatever its scale
+        assert "E" not in str(money.amount)

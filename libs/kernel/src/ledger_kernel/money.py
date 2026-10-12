@@ -38,6 +38,8 @@ _ROUNDING: Final = Context(prec=_PRECISION, rounding=ROUND_HALF_UP, traps=list(_
 _AMOUNT_TYPES: Final[frozenset[type[object]]] = frozenset({str, int, Decimal})
 _FACTOR_TYPES: Final[frozenset[type[object]]] = frozenset({int, Decimal})
 _DECIMAL_TYPES: Final[frozenset[type[object]]] = frozenset({Decimal})
+_WHOLE: Final = Decimal(1)
+"""The exponent of a whole number written out: what an amount with a positive exponent is brought to."""
 
 
 class Currency(StrEnum):
@@ -145,7 +147,10 @@ class Money:
     its value would fit.
 
     Whichever way a ``Money`` is made (``of``, ``zero``, arithmetic or the constructor) it holds a ``Decimal``
-    and a ``Currency`` exactly, and zero is never signed: ``-0.00`` becomes ``0.00``, keeping its scale.
+    and a ``Currency`` exactly, and zero is never signed: ``-0.00`` becomes ``0.00``, keeping its scale. A
+    positive exponent is written out (``1E+5`` becomes ``100000``), so ``str`` of an amount never prints one;
+    the scale of an amount with a fractional part is kept. ``str`` still writes an amount below 10^-6 in
+    exponent form (``1E-7``), as ``Decimal`` does: ``format(amount, "f")`` never does.
     """
 
     amount: Decimal
@@ -155,6 +160,10 @@ class Money:
         _require_type(self.amount, _DECIMAL_TYPES)
         _require_currency(self.currency)
         _require_representable(self.amount)
+        exponent = self.amount.as_tuple().exponent
+        if isinstance(exponent, int) and exponent > 0:
+            # Exact: a positive exponent means a whole number, which has fewer than 19 digits.
+            object.__setattr__(self, "amount", self.amount.quantize(_WHOLE, context=_EXACT))
         if self.amount.is_zero():
             # Frozen, so `object.__setattr__`: a signed zero would print as "-0.00" in a tax document.
             object.__setattr__(self, "amount", self.amount.copy_abs())
