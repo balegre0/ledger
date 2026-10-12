@@ -39,4 +39,4 @@ build-backend = "uv_build"
 
 [tool.deptry.per_rule_ignores]
 # Scaffolding: a name leaves this list in the task whose module starts importing it.
-DEP002 = ["grpcio", "opentelemetry-exporter-otlp-proto-grpc", "nats-py", "opentelemetry-sdk", "opentelemetry-api", "ledger-contracts"]
+DEP002 = ["grpcio", "opentelemetry-exporter-otlp-proto-grpc", "nats-py", "ledger-contracts"]
