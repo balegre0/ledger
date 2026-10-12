@@ -108,7 +108,7 @@ def test_anything_else_is_refused(text: str) -> None:
 def test_a_huge_input_is_refused_without_echo() -> None:
     with pytest.raises(InvalidTaxIdError) as caught:
         TaxId.parse("1" * 100_000)
-    assert len(str(caught.value)) < 80
+    assert len(str(caught.value)) < 120
 
 
 def test_the_text_read_is_capped_at_twenty_characters() -> None:
@@ -120,8 +120,60 @@ def test_the_text_read_is_capped_at_twenty_characters() -> None:
 def test_a_refusal_is_a_short_client_error() -> None:
     with pytest.raises(InvalidTaxIdError) as caught:
         TaxId.parse("12345678")
-    assert str(caught.value) == "not an RNC or cédula: '12345678'"
+    assert str(caught.value) == (
+        "not an RNC or cédula: 'text' has neither the 9 digits of an RNC nor the 11 of a cédula"
+        " (str, 8 characters)"
+    )
     assert (caught.value.kind, caught.value.code) == (ErrorKind.INVALID, "invalid_tax_id")
+
+
+@pytest.mark.parametrize(
+    ("text", "problem"),
+    [
+        ("12345678", "has neither the 9 digits of an RNC nor the 11 of a cédula (str, 8 characters)"),
+        ("1018500431", "has neither the 9 digits of an RNC nor the 11 of a cédula (str, 10 characters)"),
+        ("10185004a", "holds other characters than ASCII digits, hyphens and spaces (str, 9 characters)"),
+        ("1" * 21, "is longer than 20 characters (str, 21 characters)"),
+    ],
+    ids=["too-few", "too-many", "a-letter", "too-long"],
+)
+def test_a_refused_text_is_described_by_its_length_and_problem_never_by_its_digits(
+    text: str, problem: str
+) -> None:
+    """A tax id is personal data, and nearly right is still one: the message never repeats a digit of it."""
+    with pytest.raises(InvalidTaxIdError) as caught:
+        TaxId.parse(text)
+    assert str(caught.value) == f"not an RNC or cédula: 'text' {problem}"
+    for digits in ("1234", "0185", "111"):
+        assert digits not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("digits", "kind", "problem"),
+    [
+        ("123", TaxIdKind.RNC, "does not have the number of digits of its kind (str, 3 characters)"),
+        ("10185004a", TaxIdKind.RNC, "holds other characters than ASCII digits (str, 9 characters)"),
+    ],
+    ids=["wrong-count", "a-letter"],
+)
+def test_a_refused_construction_never_repeats_the_digits(digits: str, kind: TaxIdKind, problem: str) -> None:
+    with pytest.raises(InvalidTaxIdError) as caught:
+        TaxId(digits, kind)
+    assert str(caught.value) == f"not an RNC or cédula: 'digits' {problem}"
+
+
+@pytest.mark.parametrize(
+    ("text", "shown"),
+    [
+        ("101850043", "TaxId(kind='rnc', digits='******043')"),
+        ("001-1391820-5", "TaxId(kind='cedula', digits='********205')"),
+    ],
+)
+def test_the_repr_of_a_tax_id_shows_its_kind_and_last_three_digits_only(text: str, shown: str) -> None:
+    """``repr`` reaches logs and tracebacks; ``str`` is the number itself, for the documents that carry it."""
+    tax_id = TaxId.parse(text)
+    assert repr(tax_id) == shown
+    assert str(tax_id) == tax_id.digits
 
 
 @pytest.mark.parametrize(("digits", "kind"), [("123", TaxIdKind.RNC), ("101850043", TaxIdKind.CEDULA)])
@@ -148,7 +200,7 @@ def test_a_tax_id_holds_nothing_but_ascii_digits(digits: str, kind: TaxIdKind) -
 def test_a_huge_digit_string_is_refused_without_echo() -> None:
     with pytest.raises(InvalidTaxIdError) as caught:
         TaxId("1" * 100_000, TaxIdKind.RNC)
-    assert len(str(caught.value)) < 80
+    assert len(str(caught.value)) < 120
 
 
 # The entry points take the JSON a client sent: `json.loads` hands over whatever was sent, whatever the
@@ -180,7 +232,8 @@ def test_a_wrong_type_is_named_with_its_argument_and_not_blamed_on_the_digits(
 ) -> None:
     with pytest.raises(InvalidTaxIdError) as caught:
         entry_point("101850043")
-    assert str(caught.value) == f"not an RNC or cédula: {field}='int: 101850043'"
+    assert str(caught.value) == f"not an RNC or cédula: '{field}' is not of the type it needs (int)"
+    assert "101850043" not in str(caught.value)
 
 
 @pytest.mark.parametrize(
@@ -206,7 +259,7 @@ def test_the_kind_must_be_a_tax_id_kind(digits: str, payload: str) -> None:
 def test_a_wrong_kind_is_named_as_the_kind_and_not_blamed_on_the_digits() -> None:
     with pytest.raises(InvalidTaxIdError) as caught:
         construct_with_kind('"rnc"')
-    assert str(caught.value) == "not an RNC or cédula: kind='str: rnc'"
+    assert str(caught.value) == "not an RNC or cédula: 'kind' is not of the type it needs (str, 3 characters)"
     assert caught.value.code == "invalid_tax_id"
 
 
@@ -214,14 +267,14 @@ def test_a_wrong_kind_is_a_short_client_error() -> None:
     with pytest.raises(InvalidTaxIdError) as caught:
         construct_with_kind(json.dumps("X" * 10_000))
     assert (caught.value.kind, caught.value.code) == (ErrorKind.INVALID, "invalid_tax_id")
-    assert len(str(caught.value)) < 80
+    assert len(str(caught.value)) < 120
 
 
 @pytest.mark.parametrize("entry_point", [construct, parse], ids=["constructor", "parse"])
 def test_a_huge_wrong_type_is_refused_without_echo(entry_point: Callable[[str], None]) -> None:
     with pytest.raises(InvalidTaxIdError) as caught:
         entry_point("[" + "1," * 100_000 + "1]")
-    assert len(str(caught.value)) < 100
+    assert len(str(caught.value)) < 120
 
 
 def test_a_number_too_big_to_print_is_refused_not_raised() -> None:
@@ -229,7 +282,7 @@ def test_a_number_too_big_to_print_is_refused_not_raised() -> None:
     build = operator.methodcaller("__call__", 10**5000, TaxIdKind.RNC)
     with pytest.raises(InvalidTaxIdError) as caught:
         build(TaxId)
-    assert len(str(caught.value)) < 100
+    assert len(str(caught.value)) < 120
 
 
 def test_a_parsed_tax_id_holds_exactly_the_types_it_promises() -> None:

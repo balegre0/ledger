@@ -3,6 +3,11 @@
 DGII accepts a cédula wherever an RNC is asked for. Check digits are reported, not enforced: DGII has
 issued real numbers whose check digit does not match, so whether a number exists is for DGII's registry
 to say, consulted by the services that need it.
+
+A tax id is personal data (a cédula names a person), and a text that is nearly one usually is one with a
+typo: neither an error nor ``repr`` ever shows its digits. An error says which argument, what is wrong and
+the type and length of what arrived; ``repr`` shows the kind and the last three digits. ``str`` is the
+number itself, for the documents that must carry it.
 """
 
 from dataclasses import dataclass
@@ -10,12 +15,14 @@ from enum import StrEnum
 from typing import ClassVar, Final, Literal, final, override
 lazy from collections.abc import Callable, Mapping
 
-from ledger_kernel.errors import InvalidInputError, described, excerpt
+from ledger_kernel.errors import InvalidInputError
 
 _RNC_WEIGHTS: Final = (7, 9, 8, 6, 5, 4, 3, 2)
 _MAX_TEXT: Final = 20
 """Longest text read: 11 digits and their separators with room to spare; a longer one is refused unread."""
 _LUHN_MAX_DIGIT: Final = 9
+_SHOWN_DIGITS: Final = 3
+"""How many of its last digits the ``repr`` of a tax id shows."""
 
 
 class TaxIdKind(StrEnum):
@@ -26,21 +33,39 @@ class TaxIdKind(StrEnum):
 
 
 type TaxIdField = Literal["text", "digits", "kind"]
-"""The arguments that are refused for their type: what ``parse`` reads, and what the constructor holds."""
+"""The argument an error names: what ``parse`` reads, and what the constructor holds."""
+
+
+class TaxIdProblem(StrEnum):
+    """Why a value is not an RNC or a cédula, said without repeating it."""
+
+    WRONG_TYPE = "is not of the type it needs"
+    TOO_LONG = f"is longer than {_MAX_TEXT} characters"
+    NOT_DIGITS = "holds other characters than ASCII digits, hyphens and spaces"
+    """Text to read: only digits and the separators ``parse`` ignores."""
+    NOT_ASCII_DIGITS = "holds other characters than ASCII digits"
+    """The digits a ``TaxId`` holds: nothing else."""
+    WRONG_COUNT = "has neither the 9 digits of an RNC nor the 11 of a cédula"
+    WRONG_COUNT_FOR_KIND = "does not have the number of digits of its kind"
+
+
+def _shape(value: object) -> str:
+    """All an error may say of a value that was to be a tax id: its type, and the length of a text."""
+    kind = type(value).__name__
+    return f"{kind}, {len(value)} characters" if isinstance(value, str) else kind
 
 
 class InvalidTaxIdError(InvalidInputError):
-    """Text that is neither an RNC nor a cédula, or an argument that is not of the type it needs.
+    """A value that is neither an RNC nor a cédula, or an argument that is not of the type it needs.
 
-    For the second case ``text`` describes what arrived (see ``described``) and ``field`` says which argument
-    it was, so a wrong ``kind`` is not read as wrong digits.
+    The message names the argument (``text`` for ``parse``; ``digits`` or ``kind`` for the constructor), the
+    problem, and the type and length of what arrived, never a character of it.
     """
 
     code: ClassVar[str] = "invalid_tax_id"
 
-    def __init__(self, text: str, *, field: TaxIdField | None = None) -> None:
-        shown = excerpt(text) if field is None else f"{field}={excerpt(text)}"
-        super().__init__(f"not an RNC or cédula: {shown}")
+    def __init__(self, problem: TaxIdProblem, *, field: TaxIdField, value: object) -> None:
+        super().__init__(f"not an RNC or cédula: {field!r} {problem} ({_shape(value)})")
 
 
 def _require_type(value: object, expected: type[object], field: TaxIdField) -> None:
@@ -50,7 +75,7 @@ def _require_type(value: object, expected: type[object], field: TaxIdField) -> N
     Exact, because the text ``"rnc"`` equals ``TaxIdKind.RNC`` and hashes like it.
     """
     if type(value) is not expected:
-        raise InvalidTaxIdError(described(value), field=field)
+        raise InvalidTaxIdError(TaxIdProblem.WRONG_TYPE, field=field, value=value)
 
 
 def _is_ascii_digits(text: str) -> bool:
@@ -88,12 +113,13 @@ _CHECK_DIGIT_MATCHES: Final[Mapping[TaxIdKind, Callable[[str], bool]]] = {
 
 
 @final
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class TaxId:
     """An RNC or a cédula, digits only.
 
     Whichever way a ``TaxId`` is made (``parse`` or the constructor) it holds a ``str`` of ASCII digits and
-    a ``TaxIdKind`` exactly, and the number of digits is the one the kind has.
+    a ``TaxIdKind`` exactly, and the number of digits is the one the kind has. Its ``repr`` masks all but
+    the last three digits; ``str`` is the whole number.
     """
 
     digits: str
@@ -102,19 +128,23 @@ class TaxId:
     def __post_init__(self) -> None:
         _require_type(self.digits, str, "digits")
         _require_type(self.kind, TaxIdKind, "kind")
-        if len(self.digits) != _LENGTH[self.kind] or not _is_ascii_digits(self.digits):
-            raise InvalidTaxIdError(self.digits)
+        if len(self.digits) != _LENGTH[self.kind]:
+            raise InvalidTaxIdError(TaxIdProblem.WRONG_COUNT_FOR_KIND, field="digits", value=self.digits)
+        if not _is_ascii_digits(self.digits):
+            raise InvalidTaxIdError(TaxIdProblem.NOT_ASCII_DIGITS, field="digits", value=self.digits)
 
     @classmethod
     def parse(cls, text: str) -> TaxId:
         """Read an RNC or a cédula; hyphens and spaces are ignored and the digit count picks the kind."""
         _require_type(text, str, "text")
         if len(text) > _MAX_TEXT:
-            raise InvalidTaxIdError(text)
+            raise InvalidTaxIdError(TaxIdProblem.TOO_LONG, field="text", value=text)
         digits = text.replace("-", "").replace(" ", "")
         kind = _KIND_BY_LENGTH.get(len(digits))
-        if kind is None or not _is_ascii_digits(digits):
-            raise InvalidTaxIdError(text)
+        if kind is None:
+            raise InvalidTaxIdError(TaxIdProblem.WRONG_COUNT, field="text", value=text)
+        if not _is_ascii_digits(digits):
+            raise InvalidTaxIdError(TaxIdProblem.NOT_DIGITS, field="text", value=text)
         return cls(digits, kind)
 
     @property
@@ -125,3 +155,8 @@ class TaxId:
     @override
     def __str__(self) -> str:
         return self.digits
+
+    @override
+    def __repr__(self) -> str:
+        masked = "*" * (len(self.digits) - _SHOWN_DIGITS) + self.digits[-_SHOWN_DIGITS:]
+        return f"TaxId(kind={self.kind.value!r}, digits={masked!r})"
