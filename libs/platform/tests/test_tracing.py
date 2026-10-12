@@ -6,22 +6,24 @@ lazy from collections.abc import Sequence
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import NonRecordingSpan, SpanContext, SpanKind, StatusCode, TraceFlags, use_span
 from structlog.testing import capture_logs
 lazy from opentelemetry.sdk.trace import ReadableSpan
-lazy from opentelemetry.sdk.trace.export import SpanExportResult
 
 from ledger_contracts.envelope import Envelope
 from ledger_kernel.clock import utc_now
 from ledger_kernel.ids import new_id
-from ledger_platform.tracing import Tracing
+from ledger_platform.tracing import RedactingSpanExporter, Tracing
 
 TRACEPARENT: Final = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 SENSITIVE: Final = "Key (tax_id)=(001-1234567-8) already exists"
 """What a database error says: personal data that must never leave the process in a span."""
+QUERY: Final = "rnc=00112345678&page=2"
+"""What a client puts in a query string: a national id, here."""
 
 
 @final
@@ -67,6 +69,61 @@ class UnreachableExporter(SpanExporter):
     @override
     def shutdown(self) -> None:
         raise ConnectionError
+
+
+@final
+class DelegationProbe(SpanExporter):
+    """Records what it is asked and answers as told: a wrapper is seen to pass questions and answers on."""
+
+    def __init__(self, *, result: SpanExportResult, flushed: bool) -> None:
+        self.exported: list[Sequence[ReadableSpan]] = []
+        self.flushes: list[int] = []
+        self.shutdowns = 0
+        self._result = result
+        self._flushed = flushed
+
+    @override
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        self.exported.append(spans)
+        return self._result
+
+    @override
+    def shutdown(self) -> None:
+        self.shutdowns += 1
+
+    @override
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        self.flushes.append(timeout_millis)
+        return self._flushed
+
+
+def redacting(exporter: SpanExporter) -> Tracing:
+    """A tracing whose finished spans go through ``RedactingSpanExporter`` to ``exporter`` at once."""
+    provider = TracerProvider(shutdown_on_exit=False)
+    provider.add_span_processor(SimpleSpanProcessor(RedactingSpanExporter(exporter)))
+    return Tracing(provider)
+
+
+def work(tracing: Tracing, *, record_exception: bool, set_status_on_exception: bool) -> None:
+    """Fails inside a span opened the OpenTelemetry way, as a service's code or an instrumentation does: by
+    default the exception is recorded with its message and traceback, and the status describes it."""
+    with tracing.tracer.start_as_current_span(
+        "work", record_exception=record_exception, set_status_on_exception=set_status_on_exception
+    ):
+        raise PoisonError(SENSITIVE)
+
+
+def fail_in_a_span(
+    tracing: Tracing, *, record_exception: bool = True, set_status_on_exception: bool = True
+) -> None:
+    with pytest.raises(PoisonError):
+        work(tracing, record_exception=record_exception, set_status_on_exception=set_status_on_exception)
+
+
+def answer_a_query(tracing: Tracing) -> None:
+    """A request span as FastAPI records it: the route, and the query string as the client sent it."""
+    with tracing.tracer.start_as_current_span("GET /customers") as span:
+        span.set_attributes({"http.route": "/customers", "url.query": QUERY})
 
 
 def event_carrying(traceparent: str | None) -> Envelope:
@@ -265,3 +322,114 @@ def test_an_exporter_that_fails_to_stop_is_logged_and_does_not_fail_the_shutdown
         tracing.shutdown()
     assert logs == [{"event": "tracing.shutdown_failed", "log_level": "error", "exc_info": True}]
     tracing.shutdown()
+
+
+def test_an_exported_exception_keeps_its_type_and_loses_its_message_and_traceback(
+    exporter: InMemorySpanExporter,
+) -> None:
+    fail_in_a_span(redacting(exporter), set_status_on_exception=False)
+    (span,) = exporter.get_finished_spans()
+    (event,) = span.events
+    assert event.name == "exception"
+    assert event.attributes is not None
+    assert event.attributes["exception.type"] == f"{PoisonError.__module__}.PoisonError"
+    assert "exception.message" not in event.attributes
+    assert "exception.stacktrace" not in event.attributes
+    assert "tax_id" not in span.to_json()
+
+
+def test_a_failed_span_leaves_with_its_status_and_without_its_description(
+    exporter: InMemorySpanExporter,
+) -> None:
+    fail_in_a_span(redacting(exporter), record_exception=False)
+    (span,) = exporter.get_finished_spans()
+    assert span.status.status_code is StatusCode.ERROR
+    assert span.status.description is None
+    assert span.events == ()
+
+
+def test_the_query_string_a_client_sent_never_leaves_in_a_span(exporter: InMemorySpanExporter) -> None:
+    answer_a_query(redacting(exporter))
+    (span,) = exporter.get_finished_spans()
+    assert span.attributes == {"http.route": "/customers"}
+
+
+def test_a_redacted_span_is_otherwise_the_span_that_was_recorded(exporter: InMemorySpanExporter) -> None:
+    recorded = InMemorySpanExporter()
+    provider = TracerProvider(shutdown_on_exit=False)
+    provider.add_span_processor(SimpleSpanProcessor(recorded))
+    provider.add_span_processor(SimpleSpanProcessor(RedactingSpanExporter(exporter)))
+    tracing = Tracing(provider)
+    with tracing.tracer.start_as_current_span("parent"):
+        fail_in_a_span(tracing)
+    original = next(span for span in recorded.get_finished_spans() if span.name == "work")
+    redacted = next(span for span in exporter.get_finished_spans() if span.name == "work")
+    assert redacted is not original
+    assert (redacted.context, redacted.parent, redacted.kind) == (
+        original.context,
+        original.parent,
+        original.kind,
+    )
+    assert (redacted.start_time, redacted.end_time) == (original.start_time, original.end_time)
+    assert redacted.resource is original.resource
+    assert redacted.instrumentation_scope == original.instrumentation_scope
+    assert redacted.links == original.links
+    assert [(event.name, event.timestamp) for event in redacted.events] == [
+        (event.name, event.timestamp) for event in original.events
+    ]
+
+
+def test_a_span_with_nothing_to_hide_is_handed_on_as_it_is(exporter: InMemorySpanExporter) -> None:
+    recorded = InMemorySpanExporter()
+    provider = TracerProvider(shutdown_on_exit=False)
+    provider.add_span_processor(SimpleSpanProcessor(recorded))
+    provider.add_span_processor(SimpleSpanProcessor(RedactingSpanExporter(exporter)))
+    with provider.get_tracer("test").start_as_current_span("work") as span:
+        span.set_attribute("http.route", "/customers")
+        span.add_event("retried", {"attempt": 2})
+    assert exporter.get_finished_spans() == recorded.get_finished_spans()
+
+
+@pytest.mark.parametrize("result", list(SpanExportResult))
+def test_the_redacting_exporter_answers_what_the_one_it_wraps_answers(result: SpanExportResult) -> None:
+    probe = DelegationProbe(result=result, flushed=False)
+    assert RedactingSpanExporter(probe).export([]) is result
+    assert probe.exported == [[]]
+
+
+@pytest.mark.parametrize("flushed", [True, False])
+def test_the_redacting_exporter_flushes_and_stops_the_one_it_wraps(*, flushed: bool) -> None:
+    probe = DelegationProbe(result=SpanExportResult.SUCCESS, flushed=flushed)
+    redacting_exporter = RedactingSpanExporter(probe)
+    assert redacting_exporter.force_flush(1234) is flushed
+    redacting_exporter.shutdown()
+    assert (probe.flushes, probe.shutdowns) == ([1234], 1)
+
+
+def test_every_exporter_a_tracing_is_created_with_gets_redacted_spans(exporter: InMemorySpanExporter) -> None:
+    tracing = Tracing.create(service_name="invoicing", exporter=exporter)
+    fail_in_a_span(tracing)
+    answer_a_query(tracing)
+    tracing.shutdown()
+    exported = "".join(span.to_json() for span in exporter.get_finished_spans())
+    assert [span.name for span in exporter.get_finished_spans()] == ["work", "GET /customers"]
+    assert "tax_id" not in exported
+    assert "00112345678" not in exported
+
+
+def test_the_first_tracing_made_process_wide_stays_so_without_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """OpenTelemetry takes one process-wide provider and warns about every later attempt to set another.
+
+    Which provider holds the place depends on which test ran first. That it is an SDK provider, that it does
+    not change, and that nobody is warned does not.
+    """
+    first = Tracing(TracerProvider(shutdown_on_exit=False))
+    second = Tracing(TracerProvider(shutdown_on_exit=False))
+    first.register_globally()
+    registered = trace.get_tracer_provider()
+    second.register_globally()
+    assert isinstance(registered, TracerProvider)
+    assert trace.get_tracer_provider() is registered
+    assert [record for record in caplog.records if record.name.startswith("opentelemetry")] == []
