@@ -17,8 +17,9 @@ brings it back, so the orchestrator restarts the process, and a misconfiguration
 
 The first connection to NATS is retried for ``ServiceLimits.nats_connect_timeout`` seconds, then the
 start fails (and the process exits). Once connected, NATS is reconnected for as long as it takes: the outbox
-keeps the events meanwhile and the consumers wait. Each failed attempt, disconnection and reconnection is
-logged, never what was being sent.
+keeps the events meanwhile and the consumers wait. A disconnection and a reconnection are logged, and so are
+the errors of the attempts in between: the first at once, then one a minute (``NATS_ERRORS_LOGGED_EVERY``)
+saying how many were not, never what was being sent.
 """
 
 import asyncio
@@ -43,7 +44,7 @@ from ledger_platform.database import DEFAULT_LIMITS, Database
 from ledger_platform.grpc_server import serve_grpc
 from ledger_platform.health import Health
 from ledger_platform.lifecycle import Lifecycle
-from ledger_platform.logs import configure_logging
+from ledger_platform.logs import Throttled, configure_logging
 from ledger_platform.options import InvalidOptionError, require_seconds
 from ledger_platform.outbox import DEFAULT_PUBLISH_TIMEOUT, Outbox
 from ledger_platform.streams import DEAD_LETTERS, ensure_stream
@@ -70,6 +71,8 @@ DEFAULT_NATS_CONNECT_TIMEOUT: Final = 60.0
 """Seconds the first connection to NATS is retried before the start fails: long enough for NATS to start
 alongside the service, short enough that a wrong address shows as a crash loop."""
 DEFAULT_WORKER_STOP_GRACE: Final = 10.0
+NATS_ERRORS_LOGGED_EVERY: Final = 60.0
+"""Seconds between two log lines of the errors of a connection to NATS that stays unreachable."""
 """Seconds the workers are given to stop, all together, like the gRPC server's grace: a handler may be
 finishing a statement."""
 _logger = structlog.stdlib.get_logger(__name__)
@@ -239,22 +242,29 @@ def _exporter(settings: ServiceSettings) -> SpanExporter | None:
 
 @final
 class _ConnectionLog:
-    """What happens to a connection to NATS, in the service's log: what failed, never what was being sent."""
+    """What happens to a connection to NATS, in the service's log: what failed, never what was being sent.
 
-    __slots__ = ("_client",)
+    While NATS is unreachable every attempt to reconnect fails: the first error is logged, then one a minute
+    (``NATS_ERRORS_LOGGED_EVERY``) saying how many were not, and the reconnection says how many were left
+    out since.
+    """
+
+    __slots__ = ("_client", "_errors")
 
     def __init__(self, client: Client) -> None:
         self._client = client
+        self._errors = Throttled(_logger, "nats.error", every=NATS_ERRORS_LOGGED_EVERY)
 
     async def failed(self, error: Exception) -> None:
-        _logger.warning("nats.error", error=error_type(error), detail=truncate(str(error), _DETAIL_LIMIT))
+        self._errors.warning(error=error_type(error), detail=truncate(str(error), _DETAIL_LIMIT))
 
     async def disconnected(self) -> None:
         if not self._client.is_closed:  # closing it on purpose says nothing worth a warning
             _logger.warning("nats.disconnected")
 
     async def reconnected(self) -> None:
-        _logger.info("nats.reconnected")
+        unlogged = self._errors.settle()
+        _logger.info("nats.reconnected", **({"unlogged_errors": unlogged} if unlogged else {}))
 
 
 async def _connect(client: Client, settings: ServiceSettings, limit: float) -> None:

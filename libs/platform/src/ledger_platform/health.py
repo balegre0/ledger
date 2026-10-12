@@ -70,12 +70,25 @@ class Health:
     traceback a late failure carries is not kept for the life of the process. No callback edits the tables,
     so no two of them can disagree about whose entry it is.
 
+    A check that starts failing is logged in full (its traceback included), once; while it keeps failing,
+    each probe logs a line at debug level only, and the first probe it passes again logs
+    ``health.check_recovered``.
+
     The liveness probe also asks the parts registered with ``add_liveness``, which are not readiness checks:
     a part that is gone for good (a background worker stopped by a configuration mistake) makes ``dead``
     name it, and nothing but a restart of the process brings it back.
     """
 
-    __slots__ = ("_checks", "_clock", "_flights", "_liveness", "_stuck", "_timeout", "_wedge_after")
+    __slots__ = (
+        "_checks",
+        "_clock",
+        "_failing",
+        "_flights",
+        "_liveness",
+        "_stuck",
+        "_timeout",
+        "_wedge_after",
+    )
 
     def __init__(
         self,
@@ -91,6 +104,7 @@ class Health:
         self._flights: dict[str, asyncio.Task[bool]] = {}
         self._stuck: dict[str, _Stuck] = {}
         self._liveness: dict[str, Alive] = {}
+        self._failing: set[str] = set()
 
     def add(self, name: str, check: Check) -> None:
         """Register ``check`` under ``name``."""
@@ -141,23 +155,41 @@ class Health:
         stuck = self._stuck.get(name)
         if stuck is not None and not stuck.task.done():
             stuck.task.cancel()  # again: the last cancellation may have reached a check that was not looking
-            _logger.warning("health.check_still_running", check=name)
+            self._failed(name, "health.check_still_running")
             return False
         started = self._clock()
         task = asyncio.create_task(_call(check))
         done, _ = await asyncio.wait((task,), timeout=self._timeout)
         if not done:
             self._leave(name, _Stuck(task, started))
-            _logger.error("health.check_timed_out", check=name)
+            self._failed(name, "health.check_timed_out")
             return False
         if task.cancelled():  # the check raised CancelledError on its own; nobody cancelled this task
-            _logger.error("health.check_cancelled", check=name)
+            self._failed(name, "health.check_cancelled")
             return False
         error = task.exception()
         if error is not None:
-            _logger.error("health.check_failed", check=name, exc_info=error)
+            self._failed(name, "health.check_failed", error)
             return False
+        if name in self._failing:
+            self._failing.discard(name)
+            _logger.info("health.check_recovered", check=name)
         return True
+
+    def _failed(self, name: str, event: str, error: BaseException | None = None) -> None:
+        """Log that ``name`` failed: in full when it was passing, at debug level while it stays failing.
+
+        In full is an error with the traceback, if any. An outage probed every few seconds by every prober is
+        one such line, not a flood.
+        """
+        if name in self._failing:
+            _logger.debug(event, check=name)
+        elif error is None:
+            self._failing.add(name)
+            _logger.error(event, check=name)
+        else:
+            self._failing.add(name)
+            _logger.error(event, check=name, exc_info=error)
 
     def _forget_the_finished(self) -> None:
         """Drop the runs and the stuck checks that have ended; nothing is edited while a probe awaits."""

@@ -10,10 +10,11 @@ from pydantic import BaseModel, JsonValue, SecretStr, TypeAdapter, ValidationErr
 from sqlalchemy import Column, MetaData, Table, Text, insert
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError, StatementError
+from structlog.testing import capture_logs
 lazy from structlog.typing import EventDict
 
 from ledger_platform.database import Database
-from ledger_platform.logs import configure_logging
+from ledger_platform.logs import Throttled, configure_logging
 from ledger_platform.settings import LogFormat, ServiceSettings
 
 type Level = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
@@ -341,3 +342,42 @@ def test_an_exception_of_another_type_keeps_its_message(capsys: pytest.CaptureFi
     """Ours, or a library's that carries no data: what it says is what the reader needs."""
     shown = exception_values(logged(KeyError("payments-ledger"), LogFormat.JSON, capsys))
     assert shown == {"KeyError": "'payments-ledger'"}
+
+
+# ── Warnings that recur ─────────────────────────────────────────────────────────
+
+
+def test_a_recurring_warning_is_logged_once_per_interval_and_says_how_many_were_not() -> None:
+    now = [0.0]
+    errors = Throttled(
+        structlog.stdlib.get_logger("ledger.test"), "nats.error", every=60, clock=lambda: now[0]
+    )
+    with capture_logs() as logs:
+        errors.warning(error="ConnectionRefusedError")  # the first: at once
+        for second in (2.0, 4.0, 59.9):
+            now[0] = second
+            errors.warning(error="ConnectionRefusedError")  # within the minute: counted
+        now[0] = 60.0
+        errors.warning(error="TimeoutError")  # a minute on: logged, with how many were not
+        now[0] = 61.0
+        errors.warning(error="TimeoutError")
+    assert logs == [
+        {"event": "nats.error", "log_level": "warning", "error": "ConnectionRefusedError"},
+        {"event": "nats.error", "log_level": "warning", "error": "TimeoutError", "repeated": 3},
+    ]
+
+
+def test_settling_says_how_many_went_unlogged_and_the_next_warning_is_logged_at_once() -> None:
+    now = [0.0]
+    errors = Throttled(
+        structlog.stdlib.get_logger("ledger.test"), "nats.error", every=60, clock=lambda: now[0]
+    )
+    with capture_logs() as logs:
+        errors.warning()
+        errors.warning()
+        errors.warning()
+        assert errors.settle() == 2  # the outage is over
+        assert errors.settle() == 0
+        now[0] = 1.0
+        errors.warning()  # a new outage
+    assert [entry["event"] for entry in logs] == ["nats.error", "nats.error"]

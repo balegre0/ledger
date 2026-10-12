@@ -742,6 +742,7 @@ async def test_the_relay_and_the_consumers_resume_when_nats_comes_back(
     assert str(envelope.id) == PAID.validate_json(response.content)["id"]
     events = [entry["event"] for entry in logs]
     assert events.index("nats.disconnected") < events.index("nats.reconnected")
+    assert events.count("nats.error") <= 1  # an outage of seconds: the first error, then a minute of silence
 
 
 async def test_a_service_whose_nats_is_unreachable_still_stops(

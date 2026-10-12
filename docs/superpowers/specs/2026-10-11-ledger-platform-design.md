@@ -438,7 +438,9 @@ company can certify while another runs in production.
   service's HTTP `/livez` and `/readyz` (gRPC health is not needed: every service serves HTTP).
   `/readyz` runs the service's named checks (database, on a connection outside the pool so that a busy pool
   never takes a replica out of rotation; NATS; background workers) concurrently, each held
-  to a time limit, and answers 503 if any fails; overlapping probes share one run of each check. `/livez`
+  to a time limit, and answers 503 if any fails; overlapping probes share one run of each check. A failing
+  check is logged in full when it starts failing, not on every probe; NATS errors during an outage are
+  logged once a minute. `/livez`
   does not consult the dependencies, so that a PostgreSQL outage does not restart every pod: it answers 503 only
   when the process cannot recover by itself, that is, when a check has outlived ten time limits and will not
   stop, or a background worker stopped for good. Workers are supervised: one that fails is started again

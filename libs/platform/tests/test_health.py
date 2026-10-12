@@ -5,6 +5,7 @@ import weakref
 lazy from collections.abc import Callable
 
 import pytest
+from structlog.testing import capture_logs
 
 from ledger_platform.health import DuplicateCheckError, Health
 
@@ -349,3 +350,68 @@ def test_a_liveness_name_is_used_once() -> None:
     health.add_liveness("workers", lambda: True)
     with pytest.raises(DuplicateCheckError, match="workers"):
         health.add_liveness("workers", lambda: True)
+
+
+async def test_a_failing_check_is_logged_in_full_when_it_starts_failing_and_briefly_while_it_stays_so() -> (
+    None
+):
+    """An outage is probed every few seconds by every prober: one traceback says why, not one per probe."""
+    failing = [True]
+
+    async def database() -> None:
+        if failing[0]:
+            raise ConnectionError
+
+    health = Health()
+    health.add("database", database)
+    with capture_logs() as logs:
+        for _ in range(3):
+            await health.run()
+        failing[0] = False
+        await health.run()
+        await health.run()
+        failing[0] = True
+        await health.run()
+    first, *during, recovered, again = logs
+    assert isinstance(first.pop("exc_info"), ConnectionError)
+    assert first == {"event": "health.check_failed", "log_level": "error", "check": "database"}
+    assert during == [{"event": "health.check_failed", "log_level": "debug", "check": "database"}] * 2
+    assert recovered == {"event": "health.check_recovered", "log_level": "info", "check": "database"}
+    assert isinstance(again.pop("exc_info"), ConnectionError)
+
+
+async def test_a_check_that_hangs_is_logged_once_as_timed_out_and_then_only_in_passing() -> None:
+    release = asyncio.Event()
+
+    async def hangs() -> None:
+        await release.wait()
+
+    health = Health(timeout=0.02)
+    health.add("nats", hangs)
+    try:
+        with capture_logs() as logs:
+            for _ in range(3):
+                await health.run()
+    finally:
+        release.set()
+        await asyncio.sleep(0)
+    assert [(entry["event"], entry["log_level"]) for entry in logs] == [
+        ("health.check_timed_out", "error"),
+        ("health.check_timed_out", "debug"),
+        ("health.check_timed_out", "debug"),
+    ]
+
+
+async def test_a_check_that_cancels_itself_is_logged_once_and_then_only_in_passing() -> None:
+    async def cancels_itself() -> None:
+        raise asyncio.CancelledError
+
+    health = Health()
+    health.add("odd", cancels_itself)
+    with capture_logs() as logs:
+        await health.run()
+        await health.run()
+    assert [(entry["event"], entry["log_level"]) for entry in logs] == [
+        ("health.check_cancelled", "error"),
+        ("health.check_cancelled", "debug"),
+    ]
