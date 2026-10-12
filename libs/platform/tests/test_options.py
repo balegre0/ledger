@@ -8,6 +8,7 @@ from hypothesis import strategies as st
 from ledger_kernel.errors import ErrorKind
 from ledger_platform.consumer import InvalidConsumerOptionError
 from ledger_platform.database import InvalidDatabaseOptionError
+from ledger_platform.grpc_server import InvalidGrpcOptionError
 from ledger_platform.options import (
     InvalidOptionError,
     is_positive_and_finite,
@@ -41,6 +42,7 @@ def test_a_value_is_cut_short_and_never_echoed_whole() -> None:
         (InvalidOutboxOptionError, "invalid_outbox_option", "outbox option"),
         (InvalidStreamSpecError, "invalid_stream_spec", "stream"),
         (InvalidConsumerOptionError, "invalid_consumer_option", "consumer option"),
+        (InvalidGrpcOptionError, "invalid_grpc_option", "gRPC option"),
     ],
 )
 def test_every_module_keeps_its_own_code_and_label(
