@@ -94,8 +94,7 @@ class InvalidTextLimitError(LedgerError):
     error.
     """
 
-    code: ClassVar[str] = "invalid_excerpt_limit"
-    """Named for the function that came first; a code is API and does not follow a rename."""
+    code: ClassVar[str] = "invalid_text_limit"
 
     def __init__(self, limit: int) -> None:
         super().__init__(f"a text limit must be at least {_MIN_LIMIT}, not {limit}")

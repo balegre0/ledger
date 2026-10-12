@@ -105,7 +105,7 @@ def test_the_limit_can_be_chosen() -> None:
 def test_a_limit_below_one_is_a_programming_error(text: str, limit: int) -> None:
     with pytest.raises(InvalidTextLimitError, match=f"at least 1, not {limit}") as caught:
         excerpt(text, limit=limit)
-    assert (caught.value.kind, caught.value.code) == (ErrorKind.INTERNAL, "invalid_excerpt_limit")
+    assert (caught.value.kind, caught.value.code) == (ErrorKind.INTERNAL, "invalid_text_limit")
     assert not isinstance(caught.value, InvalidInputError)
 
 
