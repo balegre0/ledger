@@ -24,8 +24,8 @@ from ledger_kernel.errors import (
     UnauthenticatedError,
     UnavailableError,
 )
+from ledger_platform.grpc_client import ERROR_CODE_KEY
 from ledger_platform.grpc_server import (
-    ERROR_CODE_KEY,
     GrpcBindError,
     GuardInterceptor,
     InvalidGrpcOptionError,

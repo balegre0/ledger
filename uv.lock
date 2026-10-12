@@ -666,6 +666,7 @@ version = "0.1.0"
 source = { editable = "libs/testing" }
 dependencies = [
     { name = "joserfc" },
+    { name = "ledger-kernel" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
     { name = "structlog" },
@@ -675,6 +676,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "joserfc", specifier = ">=1.7.5" },
+    { name = "ledger-kernel", editable = "libs/kernel" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.6" },
     { name = "pydantic", specifier = ">=2.14.1" },
     { name = "structlog", specifier = ">=26.1.0" },

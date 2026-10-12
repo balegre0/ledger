@@ -33,9 +33,9 @@ from prometheus_client import Histogram
 lazy from prometheus_client import CollectorRegistry
 
 from ledger_kernel.errors import ErrorKind, LedgerError
+from ledger_platform.grpc_client import ERROR_CODE_KEY
 from ledger_platform.options import InvalidOptionError, require_seconds
 
-ERROR_CODE_KEY: Final = "ledger-error-code"
 _STATUS: Final[Mapping[ErrorKind, grpc.StatusCode]] = {
     ErrorKind.INVALID: grpc.StatusCode.INVALID_ARGUMENT,
     ErrorKind.NOT_FOUND: grpc.StatusCode.NOT_FOUND,

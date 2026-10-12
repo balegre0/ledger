@@ -252,10 +252,10 @@ exhaustive = true
 layers = [
     "service",
     "schema",
-    "web | grpc_server | consumer | routes",
+    "web | grpc_server | consumer | routes | identity_client",
     "outbox | idempotency | authorization",
     "streams",
-    "database | tracing | health | logs | jetstream | authentication | request_fields",
+    "database | tracing | health | logs | jetstream | authentication | request_fields | grpc_client",
     "settings | options | lifecycle | supervision",
 ]
 

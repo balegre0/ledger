@@ -4,12 +4,16 @@ version = "0.1.0"
 description = "What the tests of every ledger package share: real PostgreSQL and NATS, a local OpenID provider, the logging baseline."
 requires-python = ">=3.15"
 dependencies = [
+    "ledger-kernel",
     "joserfc>=1.7.5",
     "psycopg[binary]>=3.3.6",
     "pydantic>=2.14.1",
     "structlog>=26.1.0",
     "testcontainers>=4.15.0",
 ]
+
+[tool.uv.sources]
+ledger-kernel = { workspace = true }
 
 [build-system]
 requires = ["uv_build>=0.13.0,<0.14.0"]
