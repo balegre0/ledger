@@ -30,6 +30,7 @@ from sqlalchemy import (
     select,
     text,
 )
+from sqlalchemy import event as sqlalchemy_event
 from sqlalchemy.exc import DBAPIError
 from structlog.testing import capture_logs
 lazy from nats.aio.client import Client
@@ -1229,3 +1230,42 @@ async def test_a_configuration_jetstream_will_never_accept_is_refused_with_its_a
     assert (
         str(refused.value) == f"consumer '{NAME}' of stream 'EVENTS' cannot be created: {answer.description}"
     )
+
+
+class RollbackFailedError(Exception):
+    """What a clean-up raises when it fails: the cancellation it was cleaning up after becomes its context."""
+
+    def __init__(self) -> None:
+        super().__init__("the rollback failed")
+
+
+def fail_rollback(connection: object) -> None:
+    """SQLAlchemy's ``rollback`` event: the rollback of a transaction fails before it reaches PostgreSQL."""
+    del connection
+    raise RollbackFailedError
+
+
+async def test_a_stop_that_a_clean_up_turned_into_another_error_ends_the_consumer(
+    database: Database, streams: JetStreamContext, make: ConsumerFactory, eventually: Eventually
+) -> None:
+    """Stopped mid-handler, the consumer rolls the handling back, and the rollback fails: the stop arrives as
+    that error. It is no failed handling to retry: the consumer ends, and gives its batch back."""
+    gated = Gated()
+    await publish(streams, money())
+    worker = asyncio.create_task(make(gated).run(streams, poll=0.2))
+    try:
+        await eventually(partial(handling, gated))
+        sqlalchemy_event.listen(database.engine.sync_engine, "rollback", fail_rollback)
+        try:
+            worker.cancel()
+            await asyncio.wait((worker,), timeout=5)  # never cancels the worker again, unlike awaiting it
+        finally:
+            sqlalchemy_event.remove(database.engine.sync_engine, "rollback", fail_rollback)
+        assert worker.done(), "the consumer went on after it was stopped"
+        assert isinstance(worker.exception(), RollbackFailedError)
+    finally:
+        worker.cancel()
+        await asyncio.wait((worker,), timeout=5)
+    successor = Recorder()
+    async with running(make(successor), streams):
+        await eventually(partial(received, successor, 1))  # given back at once: not after ack_wait (30 s)

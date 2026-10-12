@@ -32,6 +32,7 @@ from uuid import UUID
 lazy from collections.abc import Iterator, Mapping, Sequence
 
 import structlog
+from nats.errors import Error as NatsError
 from nats.js.errors import NoStreamResponseError
 from prometheus_client import Counter, Gauge
 from sqlalchemy import (
@@ -57,7 +58,8 @@ lazy from sqlalchemy import Update
 from ledger_kernel.errors import ErrorKind, LedgerError, error_type, excerpt
 from ledger_platform.database import PlatformTable
 from ledger_platform.options import InvalidOptionError, require_at_least, require_seconds
-from ledger_platform.streams import ensure_stream
+from ledger_platform.streams import StreamRefusedError, ensure_stream
+from ledger_platform.supervision import being_cancelled
 lazy from ledger_contracts.envelope import Envelope
 lazy from ledger_kernel.clock import Sleep
 lazy from ledger_platform.database import Database, UnitOfWork
@@ -221,7 +223,7 @@ async def _declare_again(jetstream: JetStreamContext, streams: Sequence[StreamSp
     try:
         for spec in streams:
             await ensure_stream(jetstream, spec)
-    except Exception:
+    except StreamRefusedError, NatsError:
         _logger.exception("outbox.streams_not_ensured", streams=names)
     else:
         _logger.warning("outbox.streams_ensured", streams=names)
@@ -455,8 +457,11 @@ class Outbox:
         not; the events wait either way. A pass that failed as a whole, which means the database, is logged
         with its traceback and counted, and tried again after ``retry`` seconds, then twice that, up to
         ``MAX_RETRY_DELAY``; a pass that works starts the delays over. The backlog gauges are refreshed after
-        a pass, full or not, at most once per ``idle`` seconds. Stops only when cancelled. ``sleep`` waits
-        between the attempts after a failed pass.
+        a pass, full or not, at most once per ``idle`` seconds. ``sleep`` waits between the attempts after a
+        failed pass.
+
+        Stops only when cancelled, even when a clean-up turns the cancellation into another error: that error
+        ends the relay.
         """
         idle, retry = pace.idle, pace.retry
         delays = _delays(retry)
@@ -479,6 +484,8 @@ class Outbox:
                     ensured_at = loop.time()
                     await _declare_again(jetstream, streams)
             except Exception:
+                if being_cancelled():  # a stop that a clean-up turned into another error
+                    raise
                 self._failed_passes.inc()
                 delay = next(delays)
                 _logger.exception("outbox.relay_failed", retry_in=delay)
@@ -505,6 +512,8 @@ class Outbox:
             async with database.transaction(None) as unit:
                 waiting, oldest = (await unit.connection.execute(_BACKLOG)).one()
         except Exception:
+            if being_cancelled():  # a stop that a clean-up turned into another error
+                raise
             _logger.exception("outbox.backlog_unreadable")
         else:
             self._pending.set(waiting)

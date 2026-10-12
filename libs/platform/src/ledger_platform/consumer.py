@@ -90,6 +90,7 @@ from ledger_platform.options import (
     require_at_least,
     require_seconds,
 )
+from ledger_platform.supervision import being_cancelled
 lazy from ledger_kernel.clock import Clock
 lazy from ledger_platform.database import Database, UnitOfWork
 lazy from ledger_platform.tracing import Tracing
@@ -427,7 +428,9 @@ class Consumer:
 
         First brings the durable consumer to the spec (``ensure_consumer``: ``ConsumerRefusedError`` when
         JetStream refuses). A handler's failure never ends the loop. What does: an error of NATS itself (a
-        request that timed out during an outage, the stream gone, the connection closed) and a cancellation.
+        request that timed out during an outage, the stream gone, the connection closed) and a cancellation,
+        even one that a clean-up turned into another error (a rollback on a broken connection): that error
+        ends the loop instead of counting as a failed handling.
         The service's supervisor (``ledger_platform.supervision``) logs such an error and runs the consumer
         again after a growing delay, binding it anew; a ``ConsumerRefusedError`` is a configuration mistake no
         new run can fix, so the consumer stays stopped and the process reports itself not live, to be
@@ -489,6 +492,8 @@ class Consumer:
             with self._tracing.consuming(f"consume {self._spec.name}", envelope.traceparent):
                 outcome = await self._claim_and_handle(envelope, progress)
         except Exception as error:  # a handler may raise anything; a cancellation is no Exception
+            if being_cancelled():  # a stop that a clean-up (the rollback) turned into another error
+                raise
             fields = self._fields(message, envelope)
             if isinstance(error, LedgerError) and error.kind is ErrorKind.INVALID:
                 _logger.exception("consumer.event_rejected", code=error.code, **fields)

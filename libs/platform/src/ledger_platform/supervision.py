@@ -58,8 +58,13 @@ def restart_delay(in_a_row: int, draw: float) -> float:
     return backoff * (1 - RESTART_JITTER * draw)
 
 
-def _being_cancelled() -> bool:
-    """Whether the task running this has been asked to stop."""
+def being_cancelled() -> bool:
+    """Whether the task running this has been asked to stop.
+
+    For a loop that catches every ``Exception`` to carry on: a clean-up that failed while the task was being
+    cancelled (a rollback on a broken connection) turns the cancellation into its own error, and such a loop
+    must end on it all the same, by raising it again.
+    """
     current = asyncio.current_task()
     return current is not None and current.cancelling() > 0
 
@@ -140,7 +145,7 @@ class Supervisor:
                 raise
             except Exception as error:  # a worker may fail with anything; a cancellation is no Exception
                 # A clean-up that turned a stop into another error: the worker is stopped all the same.
-                if _being_cancelled():
+                if being_cancelled():
                     raise
                 if self._clock() - started >= HEALTHY_RUN:
                     in_a_row = 0

@@ -14,7 +14,7 @@ import pytest
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js import JetStreamContext
 from prometheus_client import CollectorRegistry
-from sqlalchemy import DateTime, String, column, delete, func, select, text, type_coerce, update
+from sqlalchemy import Boolean, DateTime, String, column, delete, func, select, text, type_coerce, update
 from sqlalchemy.event import listen, remove
 from structlog.testing import capture_logs
 lazy from nats.aio.client import Client
@@ -22,6 +22,7 @@ lazy from nats.aio.client import Client
 from ledger.common.v1.money_pb2 import Money
 from ledger_contracts.envelope import Envelope
 from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
+from ledger_platform.database import Database
 from ledger_platform.outbox import (
     DEFAULT_MAX_PAYLOAD,
     MAX_BATCH,
@@ -39,7 +40,6 @@ from ledger_platform.outbox import (
     RelayPace,
 )
 from ledger_platform.streams import StreamSpec, ensure_stream
-lazy from ledger_platform.database import Database
 lazy from ledger_platform.tracing import Tracing
 
 STREAM = StreamSpec(name="TEST", subjects=("test.>",))
@@ -1133,3 +1133,79 @@ async def test_a_missing_stream_is_told_apart_from_other_failures(
     with pytest.raises(PublishFailedError) as nowhere:
         await outbox.relay_once(database, jetstream)
     assert nowhere.value.missing_stream
+
+
+class RollbackFailedError(Exception):
+    """What a clean-up raises when it fails: the cancellation it was cleaning up after becomes its context."""
+
+    def __init__(self) -> None:
+        super().__init__("the rollback failed")
+
+
+def fail_rollback(connection: object) -> None:
+    """SQLAlchemy's ``rollback`` event: the rollback of a transaction fails before it reaches PostgreSQL."""
+    del connection
+    raise RollbackFailedError
+
+
+@asynccontextmanager
+async def failing_rollbacks(database: Database) -> AsyncGenerator[None]:
+    listen(database.engine.sync_engine, "rollback", fail_rollback)
+    try:
+        yield
+    finally:
+        remove(database.engine.sync_engine, "rollback", fail_rollback)
+
+
+async def test_a_stop_that_a_clean_up_turned_into_another_error_ends_the_relay(
+    database: Database,
+    jetstream: JetStreamContext,
+    connect: Callable[[], Awaitable[Client]],
+    outbox: Outbox,
+    eventually: Eventually,
+) -> None:
+    """Stopped while it waits for JetStream, the relay rolls its pass back, and the rollback fails: the stop
+    arrives as that error. The relay ends all the same, instead of logging a failed pass and going on."""
+    await commit(database, outbox, subject="quiet.silent")
+    await silent(await connect(), "quiet.silent")
+    relay = asyncio.create_task(outbox.run(database, jetstream, pace=RelayPace(idle=MAX_IDLE)))
+    try:
+        await eventually(partial(unlocked, database, 0))  # the relay holds the event, waiting for an ack
+        with capture_logs() as logs:
+            async with failing_rollbacks(database):
+                relay.cancel()
+                await asyncio.wait((relay,), timeout=5)  # never cancels the relay again, unlike awaiting it
+        assert relay.done(), "the relay went on after it was stopped"
+        assert isinstance(relay.exception(), RollbackFailedError)
+        assert logs == []
+    finally:
+        relay.cancel()
+        await asyncio.wait((relay,), timeout=5)
+
+
+async def waiting_for_a_lock(database: Database) -> bool:
+    async with database.transaction(None) as unit:
+        waiting = (
+            select(func.count()).select_from(text("pg_locks")).where(column("granted", Boolean).is_(False))
+        )
+        return (await unit.connection.execute(waiting)).scalar_one() > 0
+
+
+async def test_a_stop_that_a_clean_up_turned_into_another_error_is_no_unreadable_backlog(
+    database_url: str, database: Database, outbox: Outbox, eventually: Eventually
+) -> None:
+    """Stopped while it waits to read the backlog: the error the clean-up raised goes on, not into a log line
+    that would claim the backlog could not be read."""
+    async with (
+        Database.open(database_url, pool_size=1) as measuring_with,
+        database.transaction(None) as holder,
+    ):
+        await holder.connection.execute(text("LOCK TABLE outbox IN ACCESS EXCLUSIVE MODE"))
+        measuring = asyncio.create_task(outbox.measure_backlog(measuring_with))
+        await eventually(partial(waiting_for_a_lock, database))
+        with capture_logs() as logs:
+            async with failing_rollbacks(measuring_with):
+                measuring.cancel()
+                with pytest.raises(RollbackFailedError):
+                    await measuring
+    assert logs == []
