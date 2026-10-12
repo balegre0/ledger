@@ -16,7 +16,9 @@ from sqlalchemy import (
     Table,
     Text,
     Uuid,
+    column,
     delete,
+    func,
     insert,
     literal_column,
     select,
@@ -125,6 +127,17 @@ async def libpq_parameters(database: Database) -> dict[str, str]:
         driver = (await connection.get_raw_connection()).driver_connection
         assert isinstance(driver, psycopg.AsyncConnection)
         return driver.info.get_parameters()
+
+
+async def sessions_named(database: Database, application_name: str) -> int:
+    """How many sessions PostgreSQL holds for ``application_name``."""
+    named = (
+        select(func.count())
+        .select_from(text("pg_stat_activity"))
+        .where(column("application_name", Text) == application_name)
+    )
+    async with database.transaction(None) as unit:
+        return (await unit.connection.execute(named)).scalar_one()
 
 
 async def setting(database: Database, name: str) -> str:
@@ -412,9 +425,15 @@ async def test_ping_fails_when_postgresql_cannot_serve_the_database(database_url
             await unserved.ping()
 
 
+async def touch(database: Database) -> None:
+    """A transaction that does nothing but take a connection of the pool, and give it back."""
+    async with database.transaction(None):
+        pass
+
+
 async def test_leaving_the_context_closes_the_pool(database_url: str) -> None:
     async with Database.open(database_url, pool_size=1) as opened:
-        await opened.ping()
+        await touch(opened)
         pool = opened.engine.pool
         assert isinstance(pool, QueuePool)
         assert pool.checkedin() == 1
@@ -426,7 +445,7 @@ async def test_the_pool_is_closed_when_the_body_fails(database_url: str) -> None
 
     async def ping_then_fail() -> None:
         async with Database.open(database_url, pool_size=1) as opened:
-            await opened.ping()
+            await touch(opened)
             pool = opened.engine.pool
             assert isinstance(pool, QueuePool)
             pools.append(pool)
@@ -461,7 +480,28 @@ async def test_a_full_pool_makes_the_caller_wait_only_for_the_pool_timeout(datab
         small.engine.connect(),  # the pool and its one overflow
     ):
         with pytest.raises(PoolTimeoutError):
-            await asyncio.wait_for(small.ping(), timeout=5)  # the default pool timeout is ten seconds
+            await asyncio.wait_for(touch(small), timeout=5)  # the default pool timeout is ten seconds
+
+
+async def test_a_ping_does_not_wait_for_a_full_pool(database_url: str) -> None:
+    """Readiness asks whether PostgreSQL answers, not whether the pool has a connection to spare: a service
+    whose requests hold every connection is busy, not broken, and must not leave the rotation for it."""
+    async with (
+        Database.open(database_url, pool_size=1) as busy,
+        busy.engine.connect(),
+        busy.engine.connect(),  # the pool and its one overflow
+    ):
+        await asyncio.wait_for(busy.ping(), timeout=2)  # the pool would make it wait ten seconds
+        pool = busy.engine.pool
+        assert isinstance(pool, QueuePool)
+        assert (pool.checkedout(), pool.checkedin()) == (2, 0)  # the ping took none of the pool's
+
+
+async def test_a_ping_leaves_no_connection_behind(database: Database, database_url: str) -> None:
+    async with Database.open(database_url, pool_size=1, application_name="ledger-ping") as pinging:
+        for _ in range(3):
+            await pinging.ping()
+        assert await sessions_named(database, "ledger-ping") == 0
 
 
 async def test_a_connection_is_replaced_once_it_is_older_than_the_pool_recycle(database_url: str) -> None:
@@ -560,7 +600,7 @@ async def test_a_statement_that_outlives_the_statement_timeout_is_cancelled(data
         with pytest.raises(DBAPIError) as caught:
             await sleep_in_postgres(impatient, 5)
         assert sqlstate(caught.value) == "57014"  # query_canceled
-        await impatient.ping()  # the session survives the cancelled statement
+        await touch(impatient)  # the session survives the cancelled statement
 
 
 async def lock_every_note(database: Database) -> None:
@@ -594,7 +634,7 @@ async def test_a_session_idle_in_a_transaction_is_ended_by_postgresql(database_u
     async with Database.open(database_url, pool_size=1, limits=limits) as impatient:
         with pytest.raises(DBAPIError):
             await stall_in_a_transaction(impatient)
-        await impatient.ping()  # the pool replaced the connection that PostgreSQL ended
+        await touch(impatient)  # the pool replaced the connection that PostgreSQL ended
 
 
 async def open_it(url: str, *, pool_size: int = 1) -> None:
@@ -627,7 +667,7 @@ async def test_an_engine_of_another_driver_is_refused_whoever_builds_the_databas
     engine = create_async_engine("postgresql+asyncpg://someone:secret@db.internal/ledger", module=stand_in)
     try:
         with pytest.raises(InvalidDatabaseOptionError, match="url driver must be"):
-            Database(engine)
+            Database(engine, probe=engine)
     finally:
         await engine.dispose()
 

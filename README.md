@@ -286,7 +286,8 @@ trailing metadata `ledger-error-code`, with generic details for a defect.
 
 **Probes.** `/livez`, `/readyz` and `/metrics` are outside the OpenAPI document.
 
-- `/readyz` runs the checks `database` (a query), `nats` (the connection is up) and `workers` (none is dead)
+- `/readyz` runs the checks `database` (a query, on a connection of its own: a pool that requests keep busy never
+  takes a replica out of rotation), `nats` (the connection is up) and `workers` (none is dead)
   concurrently, each held to 2 seconds, and answers 200 `ready` or 503 `not_ready` with the result of each.
   Overlapping probes share one run of each check.
 - `/livez` does not consult the dependencies, so a PostgreSQL outage does not restart every pod. It answers 503

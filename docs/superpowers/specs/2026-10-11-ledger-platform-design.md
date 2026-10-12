@@ -434,7 +434,8 @@ company can certify while another runs in production.
   bodies or keys, and never the local variables of a traceback's frames.
 - **Health:** every service serves HTTP `/livez`, `/readyz` and `/metrics`. Kubernetes probes use each
   service's HTTP `/livez` and `/readyz` (gRPC health is not needed: every service serves HTTP).
-  `/readyz` runs the service's named checks (database, NATS, background workers) concurrently, each held
+  `/readyz` runs the service's named checks (database, on a connection outside the pool so that a busy pool
+  never takes a replica out of rotation; NATS; background workers) concurrently, each held
   to a time limit, and answers 503 if any fails; overlapping probes share one run of each check. `/livez`
   does not consult the dependencies, so that a PostgreSQL outage does not restart every pod: it answers 503 only
   when the process cannot recover by itself, that is, when a check has outlived ten time limits and will not

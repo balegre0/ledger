@@ -22,6 +22,7 @@ from sqlalchemy import MetaData, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
 lazy from sqlalchemy import Column, Table
 lazy from sqlalchemy.engine import URL
 lazy from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -336,13 +337,20 @@ def _server_options(limits: DatabaseLimits) -> str:
 
 @final
 class Database:
-    """A service's PostgreSQL database, reached through SQLAlchemy's asynchronous psycopg driver."""
+    """A service's PostgreSQL database, reached through SQLAlchemy's asynchronous psycopg driver.
 
-    __slots__ = ("_engine",)
+    ``engine`` pools the connections of the service's work; ``probe`` is an engine of the same database
+    without a pool (``NullPool``), on which ``ping`` opens a connection of its own each time. ``open`` builds
+    both.
+    """
 
-    def __init__(self, engine: AsyncEngine) -> None:
+    __slots__ = ("_engine", "_probe")
+
+    def __init__(self, engine: AsyncEngine, *, probe: AsyncEngine) -> None:
         _require_psycopg(engine.url)
+        _require_psycopg(probe.url)
         self._engine = engine
+        self._probe = probe
 
     @classmethod
     @asynccontextmanager
@@ -370,6 +378,11 @@ class Database:
         parsed = make_url(url)
         _require_psycopg(parsed)
         _leave_the_owned_parameters_out(parsed)
+        connect_args = {
+            "application_name": application_name,
+            "connect_timeout": ceil(limits.connect_timeout / _SECOND),
+            "options": _server_options(limits),
+        }
         engine = create_async_engine(
             url,
             pool_size=pool_size,
@@ -378,16 +391,14 @@ class Database:
             pool_recycle=limits.pool_recycle // _SECOND,
             pool_pre_ping=True,
             hide_parameters=True,
-            connect_args={
-                "application_name": application_name,
-                "connect_timeout": ceil(limits.connect_timeout / _SECOND),
-                "options": _server_options(limits),
-            },
+            connect_args=connect_args,
         )
+        probe = create_async_engine(url, poolclass=NullPool, hide_parameters=True, connect_args=connect_args)
         try:
-            yield cls(engine)
+            yield cls(engine, probe=probe)
         finally:
             await engine.dispose()
+            await probe.dispose()
 
     @property
     def engine(self) -> AsyncEngine:
@@ -419,6 +430,10 @@ class Database:
         _run(after_commit)  # reached only when the transaction committed
 
     async def ping(self) -> None:
-        """Raises unless PostgreSQL answers."""
-        async with self._engine.connect() as connection:
+        """Raises unless PostgreSQL answers, on a connection of its own, closed after.
+
+        Never one of the pool's: a pool that every request holds is a busy service, not a broken one, and a
+        readiness check that waited for it would take every replica out of rotation at the worst moment.
+        """
+        async with self._probe.connect() as connection:
             await connection.execute(_PING)
