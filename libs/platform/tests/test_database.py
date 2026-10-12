@@ -43,10 +43,12 @@ from ledger_platform.database import (
     DatabaseLimits,
     InvalidDatabaseOptionError,
     MissingTenantColumnError,
+    organization_isolation,
+    organization_isolation_removal,
     tenant_isolation,
     tenant_isolation_removal,
 )
-lazy from ledger_platform.database import AnyTable, UnitOfWork
+lazy from ledger_platform.database import AnyTable, Scope, UnitOfWork
 
 metadata = MetaData()
 notes = Table(
@@ -899,3 +901,137 @@ async def test_a_table_named_oddly_is_isolated_all_the_same(database: Database, 
         async with database.transaction(BETA) as unit:
             beta = (await unit.connection.execute(select(oddly_named.c.id))).all()
     assert (len(alpha), len(beta)) == (1, 0)
+
+
+# ── Organization-owned rows ─────────────────────────────────────────────────────
+
+directory = Table(
+    "directory",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("organization_id", Uuid(), nullable=False),
+    Column("name", Text, nullable=False),
+)
+
+
+@pytest.fixture
+async def shared(database: Database) -> AsyncGenerator[Database]:
+    """``directory`` created and put under ``organization_isolation``."""
+    async with created(database, directory):
+        await apply(database, organization_isolation(directory))
+        yield database
+
+
+def entry(organization: OrganizationId, name: str) -> Insert:
+    return insert(directory).values(id=new_id(), organization_id=organization, name=name)
+
+
+async def enter(database: Database, scope: Scope | None, organization: OrganizationId, name: str) -> None:
+    async with database.transaction(scope) as unit:
+        await unit.connection.execute(entry(organization, name))
+
+
+async def names(database: Database, scope: Scope | None) -> list[str]:
+    async with database.transaction(scope) as unit:
+        return list(
+            (await unit.connection.execute(select(directory.c.name).order_by(directory.c.name))).scalars()
+        )
+
+
+async def test_an_organization_sees_its_own_rows_from_any_of_its_companies(shared: Database) -> None:
+    await enter(shared, ORGANIZATION, ORGANIZATION, "first")
+    await enter(shared, ALPHA, ORGANIZATION, "second")
+    assert await names(shared, ORGANIZATION) == ["first", "second"]
+    assert await names(shared, ALPHA) == ["first", "second"]
+    assert await names(shared, BETA) == ["first", "second"]
+
+
+async def test_another_organization_sees_none_of_them(shared: Database) -> None:
+    await enter(shared, ORGANIZATION, ORGANIZATION, "first")
+    assert await names(shared, OTHER_ORGANIZATION) == []
+    assert await names(shared, Tenant(OTHER_ORGANIZATION, ALPHA.company)) == []
+
+
+async def test_without_a_scope_no_organization_row_is_visible_or_writable(shared: Database) -> None:
+    await enter(shared, ORGANIZATION, ORGANIZATION, "first")
+    assert await names(shared, None) == []
+    with pytest.raises(DBAPIError, match="row-level security"):
+        await enter(shared, None, ORGANIZATION, "orphan")
+
+
+async def test_an_organization_cannot_write_rows_of_another(shared: Database) -> None:
+    with pytest.raises(DBAPIError, match="row-level security"):
+        await enter(shared, ORGANIZATION, OTHER_ORGANIZATION, "intruder")
+
+
+async def test_an_organization_cannot_hand_its_rows_to_another(shared: Database) -> None:
+    await enter(shared, ORGANIZATION, ORGANIZATION, "first")
+    with pytest.raises(DBAPIError, match="row-level security"):
+        async with shared.transaction(ORGANIZATION) as unit:
+            await unit.connection.execute(update(directory).values(organization_id=OTHER_ORGANIZATION))
+
+
+async def test_an_organization_scope_sees_no_company_owned_row(isolated: Database) -> None:
+    await write(isolated, ALPHA, "alpha 1")
+    async with isolated.transaction(ORGANIZATION) as unit:
+        visible = list((await unit.connection.execute(select(notes.c.body))).scalars())
+    assert visible == []
+    with pytest.raises(DBAPIError, match="row-level security"):
+        async with isolated.transaction(ORGANIZATION) as unit:
+            await unit.connection.execute(note(ALPHA, "no company in scope"))
+
+
+async def test_an_organization_scope_sets_the_organization_and_no_company(database: Database) -> None:
+    organization = literal_column("current_setting('ledger.organization_id')", Text)
+    company = literal_column("current_setting('ledger.company_id')", Text)
+    async with database.transaction(ORGANIZATION) as unit:
+        carried = (await unit.connection.execute(select(organization, company))).one()
+    assert carried == (str(ORGANIZATION), "")
+
+
+@pytest.mark.parametrize("scope", [ALPHA, ORGANIZATION, None], ids=["tenant", "organization", "none"])
+async def test_a_unit_knows_the_scope_it_was_opened_with(database: Database, scope: Scope | None) -> None:
+    async with database.transaction(scope) as unit:
+        assert unit.scope == scope
+
+
+def test_the_organization_policy_binds_the_organization_in_both_directions() -> None:
+    enable, force, drop, policy = organization_isolation(table_named("directory"))
+    assert enable == "ALTER TABLE directory ENABLE ROW LEVEL SECURITY"
+    assert force == "ALTER TABLE directory FORCE ROW LEVEL SECURITY"
+    assert drop == "DROP POLICY IF EXISTS organization_isolation ON directory"
+    rule = "organization_id = NULLIF(current_setting('ledger.organization_id', true), '')::uuid"
+    assert policy == f"CREATE POLICY organization_isolation ON directory USING ({rule}) WITH CHECK ({rule})"
+
+
+def test_the_organization_column_can_be_another_and_is_quoted_when_it_must_be() -> None:
+    *_, plain = organization_isolation(table_named("organizations"), column="id")
+    assert "USING (id = NULLIF(current_setting('ledger.organization_id', true), '')::uuid)" in plain
+    odd = Table("odd", MetaData(), Column("Owner Org", Uuid()))
+    *_, quoted = organization_isolation(odd, column="Owner Org")
+    assert 'USING ("Owner Org" = NULLIF(' in quoted
+
+
+def test_organization_isolation_names_the_column_a_table_lacks() -> None:
+    with pytest.raises(
+        MissingTenantColumnError, match="'other' is missing the tenant columns organization_id"
+    ):
+        organization_isolation(Table("other", MetaData(), Column("id", Uuid())))
+
+
+def test_the_organization_policy_removal_undoes_it_step_by_step() -> None:
+    assert organization_isolation_removal(table_named("directory")) == (
+        "DROP POLICY IF EXISTS organization_isolation ON directory",
+        "ALTER TABLE directory NO FORCE ROW LEVEL SECURITY",
+        "ALTER TABLE directory DISABLE ROW LEVEL SECURITY",
+    )
+
+
+async def test_removing_the_organization_policy_opens_the_table_and_it_can_be_put_back(
+    shared: Database,
+) -> None:
+    await enter(shared, ORGANIZATION, ORGANIZATION, "first")
+    await apply(shared, organization_isolation_removal(directory))
+    assert await names(shared, None) == ["first"]
+    await apply(shared, organization_isolation(directory))
+    assert await names(shared, None) == []

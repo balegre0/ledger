@@ -1,8 +1,10 @@
 """PostgreSQL: one transaction per unit of work, with the tenant enforced by row-level security.
 
-Every transaction sets ``ledger.organization_id`` and ``ledger.company_id`` (transaction-local). Tables
-protected by ``tenant_isolation`` show and accept only the rows of that organization and company; without a
-tenant they show nothing and accept nothing (fail closed). A transaction commits only if every statement in
+Every transaction sets ``ledger.organization_id`` and ``ledger.company_id`` (transaction-local) from its
+scope: a company of an organization (``Tenant``), or an organization alone (``OrganizationId``). Tables
+protected by ``tenant_isolation`` show and accept only the rows of that organization and company; tables an
+organization owns as a whole, protected by ``organization_isolation``, the rows of that organization. Without
+a scope they show nothing and accept nothing (fail closed). A transaction commits only if every statement in
 it succeeded, and what runs after the commit can no longer change the outcome.
 """
 
@@ -29,8 +31,9 @@ lazy from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 lazy from sqlalchemy.sql.base import ReadOnlyColumnCollection
 
 from ledger_kernel.errors import LedgerError
+from ledger_kernel.ids import Tenant
 from ledger_platform.options import InvalidOptionError, require_at_least
-lazy from ledger_kernel.ids import Tenant
+lazy from ledger_kernel.ids import OrganizationId
 
 _DRIVERS: Final = ("postgresql+psycopg", "postgresql+psycopg_async")
 """The only driver, in the two spellings SQLAlchemy has for its asynchronous use (one dialect, one
@@ -47,6 +50,8 @@ _PING: Final = text("SELECT 1")
 _TENANT_COLUMNS: Final = ("organization_id", "company_id")
 """Each is also the name of a setting: ``ledger.organization_id``, ``ledger.company_id``."""
 _POLICY: Final = "tenant_isolation"
+_ORGANIZATION_POLICY: Final = "organization_isolation"
+_ORGANIZATION_SETTING: Final = "organization_id"
 _IDENTIFIERS: Final = make_url(f"{_DRIVERS[0]}://").get_dialect()().identifier_preparer
 """Quotes a name exactly when PostgreSQL needs it quoted: DDL is text, so the names in it must be safe.
 
@@ -65,6 +70,10 @@ type AnyTable = Table[ReadOnlyColumnCollection[str, Column[object]]]
 SQLAlchemy 2.1 gives a bare ``Table`` the default ``Table[ReadOnlyColumnCollection[str, Column[Any]]]``, and
 mypy refuses the ``Any`` of that default wherever it is spelled out; ``object`` accepts the same tables.
 """
+
+type Scope = Tenant | OrganizationId
+"""Whose rows a transaction may touch: one company of an organization (``Tenant``), or an organization's own
+rows (``OrganizationId``), such as its list of companies. ``None`` touches no protected row at all."""
 
 
 class PlatformTable(DeclarativeBase):
@@ -196,9 +205,9 @@ def _leave_the_owned_parameters_out(url: URL) -> None:
             )
 
 
-def _matches_the_session(column: str) -> str:
-    """``column`` equals what ``Database.transaction`` set; no setting, or an empty one, matches nothing."""
-    return f"{column} = NULLIF(current_setting('ledger.{column}', true), '')::uuid"
+def _matches(column: str, setting: str) -> str:
+    """``column`` equals the ``ledger.<setting>`` the transaction set; no or empty setting matches nothing."""
+    return f"{_IDENTIFIERS.quote(column)} = NULLIF(current_setting('ledger.{setting}', true), '')::uuid"
 
 
 def tenant_isolation(table: AnyTable) -> tuple[str, ...]:
@@ -216,7 +225,7 @@ def tenant_isolation(table: AnyTable) -> tuple[str, ...]:
     if missing:
         raise MissingTenantColumnError(table.name, missing)
     name = _IDENTIFIERS.format_table(table)
-    rule = " AND ".join(_matches_the_session(column) for column in _TENANT_COLUMNS)
+    rule = " AND ".join(_matches(column, column) for column in _TENANT_COLUMNS)
     return (
         f"ALTER TABLE {name} ENABLE ROW LEVEL SECURITY",
         f"ALTER TABLE {name} FORCE ROW LEVEL SECURITY",
@@ -230,6 +239,37 @@ def tenant_isolation_removal(table: AnyTable) -> tuple[str, ...]:
     name = _IDENTIFIERS.format_table(table)
     return (
         f"DROP POLICY IF EXISTS {_POLICY} ON {name}",
+        f"ALTER TABLE {name} NO FORCE ROW LEVEL SECURITY",
+        f"ALTER TABLE {name} DISABLE ROW LEVEL SECURITY",
+    )
+
+
+def organization_isolation(table: AnyTable, *, column: str = _ORGANIZATION_SETTING) -> tuple[str, ...]:
+    """DDL (for a migration) that shows and accepts only the current organization's rows of ``table``.
+
+    For a table an organization owns as a whole (its companies, its memberships): a transaction scoped to the
+    organization, or to any of its companies, sees all of its rows and no other organization's; without a
+    scope, none. ``column`` holds the organization's id (``id`` for the table of organizations itself).
+    Running the DDL again replaces the policy. Like ``tenant_isolation``'s, the policy is permissive: another
+    permissive policy on the same table would widen it.
+    """
+    if column not in table.c:
+        raise MissingTenantColumnError(table.name, (column,))
+    name = _IDENTIFIERS.format_table(table)
+    rule = _matches(column, _ORGANIZATION_SETTING)
+    return (
+        f"ALTER TABLE {name} ENABLE ROW LEVEL SECURITY",
+        f"ALTER TABLE {name} FORCE ROW LEVEL SECURITY",
+        f"DROP POLICY IF EXISTS {_ORGANIZATION_POLICY} ON {name}",
+        f"CREATE POLICY {_ORGANIZATION_POLICY} ON {name} USING ({rule}) WITH CHECK ({rule})",
+    )
+
+
+def organization_isolation_removal(table: AnyTable) -> tuple[str, ...]:
+    """DDL (for a migration's downgrade) that undoes ``organization_isolation``; harmless without it."""
+    name = _IDENTIFIERS.format_table(table)
+    return (
+        f"DROP POLICY IF EXISTS {_ORGANIZATION_POLICY} ON {name}",
         f"ALTER TABLE {name} NO FORCE ROW LEVEL SECURITY",
         f"ALTER TABLE {name} DISABLE ROW LEVEL SECURITY",
     )
@@ -262,6 +302,15 @@ class _Callbacks:
         return taken
 
 
+def _settings_of(scope: Scope | None) -> dict[str, str]:
+    """What ``ledger.organization_id`` and ``ledger.company_id`` are set to for ``scope``; empty if absent."""
+    if scope is None:
+        return {"organization": "", "company": ""}
+    if isinstance(scope, Tenant):
+        return {"organization": str(scope.organization), "company": str(scope.company)}
+    return {"organization": str(scope), "company": ""}
+
+
 @final
 class UnitOfWork:
     """One open transaction: state changes, outbox and inbox commit together or not at all.
@@ -269,11 +318,21 @@ class UnitOfWork:
     Built by ``Database.transaction``, which closes it when the transaction ends and runs its callbacks.
     """
 
-    __slots__ = ("_after_commit", "_connection")
+    __slots__ = ("_after_commit", "_connection", "_scope")
 
-    def __init__(self, connection: AsyncConnection, after_commit: _Callbacks) -> None:
+    def __init__(self, connection: AsyncConnection, after_commit: _Callbacks, scope: Scope | None) -> None:
         self._connection = connection
         self._after_commit = after_commit
+        self._scope = scope
+
+    @property
+    def scope(self) -> Scope | None:
+        """Whose rows the transaction may touch, as ``Database.transaction`` was given it.
+
+        For repositories that name the same tenant in their statements: row-level security enforces the scope,
+        and the application filters by it as well (tenancy is checked twice, §2).
+        """
+        return self._scope
 
     @property
     def connection(self) -> AsyncConnection:
@@ -410,23 +469,19 @@ class Database:
         return self._engine
 
     @asynccontextmanager
-    async def transaction(self, tenant: Tenant | None) -> AsyncGenerator[UnitOfWork]:
-        """A transaction scoped to ``tenant``: commits on normal exit, rolls back on an exception.
+    async def transaction(self, scope: Scope | None) -> AsyncGenerator[UnitOfWork]:
+        """A transaction scoped to ``scope``: commits on normal exit, rolls back on an exception.
 
-        It never reports a commit that did not happen: if a statement failed and the caller went on, the
-        exit raises ``AbortedTransactionError`` and the callbacks do not run.
+        A ``Tenant`` scopes it to one company of an organization, an ``OrganizationId`` to the rows the
+        organization owns as a whole, ``None`` to no protected row. It never reports a commit that did not
+        happen: if a statement failed and the caller went on, the exit raises ``AbortedTransactionError`` and
+        the callbacks do not run.
         """
         callbacks = _Callbacks()
         try:
             async with self._engine.begin() as connection:
-                await connection.execute(
-                    _SET_TENANT,
-                    {
-                        "organization": "" if tenant is None else str(tenant.organization),
-                        "company": "" if tenant is None else str(tenant.company),
-                    },
-                )
-                yield UnitOfWork(connection, callbacks)
+                await connection.execute(_SET_TENANT, _settings_of(scope))
+                yield UnitOfWork(connection, callbacks, scope)
                 if not await _is_committable(connection):
                     raise AbortedTransactionError
         finally:
