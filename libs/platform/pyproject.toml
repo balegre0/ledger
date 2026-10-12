@@ -40,4 +40,4 @@ build-backend = "uv_build"
 [tool.deptry.per_rule_ignores]
 # Scaffolding: a name leaves this list in the task whose module starts importing it. Only psycopg stays for good:
 # SQLAlchemy loads it from the postgresql+psycopg:// URL and nothing imports it.
-DEP002 = ["psycopg", "grpcio", "opentelemetry-exporter-otlp-proto-grpc", "nats-py", "sqlalchemy", "opentelemetry-sdk", "opentelemetry-api", "ledger-contracts"]
+DEP002 = ["psycopg", "grpcio", "opentelemetry-exporter-otlp-proto-grpc", "nats-py", "opentelemetry-sdk", "opentelemetry-api", "ledger-contracts"]

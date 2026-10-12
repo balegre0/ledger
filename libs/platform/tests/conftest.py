@@ -1,10 +1,16 @@
-"""Fixtures of the platform's tests. Later tasks add real PostgreSQL and NATS here."""
+"""Fixtures of the platform's tests: a real PostgreSQL (a later task adds NATS)."""
 
 import logging
-lazy from collections.abc import Iterator
+lazy from collections.abc import AsyncGenerator, Iterator
 
+import psycopg
 import pytest
 import structlog
+from testcontainers.community.postgres import PostgresContainer
+
+from ledger_platform.database import Database, PlatformTable
+
+POSTGRES_IMAGE = "postgres:18.6"
 
 
 def use_the_plain_baseline() -> None:
@@ -37,3 +43,29 @@ def restore_logging() -> Iterator[None]:
     root.setLevel(level)
     use_the_plain_baseline()
     structlog.contextvars.clear_contextvars()
+
+
+@pytest.fixture(scope="session")
+def database_url() -> Iterator[str]:
+    """A real PostgreSQL; the app connects as ``ledger_app``, which owns the database but is no superuser.
+
+    A superuser bypasses row-level security, and so does a table owner unless the table forces it: the tests
+    must run as the kind of role a service runs as.
+    """
+    with PostgresContainer(POSTGRES_IMAGE, driver=None) as container:
+        with psycopg.connect(container.get_connection_url(), autocommit=True) as admin:
+            admin.execute("CREATE ROLE ledger_app LOGIN PASSWORD 'app-password'")
+            admin.execute("CREATE DATABASE ledger OWNER ledger_app")
+        host, port = container.get_container_host_ip(), container.get_exposed_port(5432)
+        yield f"postgresql+psycopg://ledger_app:app-password@{host}:{port}/ledger"
+
+
+@pytest.fixture
+async def database(database_url: str) -> AsyncGenerator[Database]:
+    """The chassis's tables, created for one test and dropped after it."""
+    async with Database.open(database_url, pool_size=2) as opened:
+        async with opened.engine.begin() as connection:
+            await connection.run_sync(PlatformTable.metadata.create_all)
+        yield opened
+        async with opened.engine.begin() as connection:
+            await connection.run_sync(PlatformTable.metadata.drop_all)
