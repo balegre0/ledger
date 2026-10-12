@@ -188,7 +188,7 @@ class InboxRecord(PlatformTable):
 
 
 class Outcome(StrEnum):
-    """What became of a delivery; the ``outcome`` label of ``ledger_events_total``."""
+    """What became of a delivery; the ``outcome`` label of ``ledger_consumer_deliveries_total``."""
 
     HANDLED = "handled"
     DUPLICATE = "duplicate"
@@ -203,7 +203,7 @@ class Outcome(StrEnum):
 
 @final
 class ConsumerMetrics:
-    """The counter ``ledger_events_total{consumer, outcome}``, one per registry and shared by its consumers.
+    """The counter ``ledger_consumer_deliveries_total{consumer, outcome}``, one per registry, shared.
 
     A registry refuses a second counter of the same name, so a service builds one ``ConsumerMetrics`` and
     hands it to every ``Consumer``; the ``consumer`` label tells them apart.
@@ -213,7 +213,7 @@ class ConsumerMetrics:
 
     def __init__(self, registry: CollectorRegistry) -> None:
         self._events = Counter(
-            "ledger_events",
+            "ledger_consumer_deliveries",
             "Event deliveries consumed, by consumer and outcome.",
             ["consumer", "outcome"],
             registry=registry,

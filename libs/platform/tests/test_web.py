@@ -469,7 +469,7 @@ async def test_requests_are_measured_by_route_template(client: httpx.AsyncClient
     await client.get("/nowhere")
     metrics = (await client.get("/metrics")).text
     assert (
-        'http_request_duration_seconds_count{method="GET",route="/items/{item_id}",status="200"} 1.0'
+        '\nledger_http_request_duration_seconds_count{method="GET",route="/items/{item_id}",status="200"} 1.0'
         in metrics
     )
     assert 'route="unmatched",status="404"' in metrics
@@ -478,7 +478,10 @@ async def test_requests_are_measured_by_route_template(client: httpx.AsyncClient
 async def test_a_request_whose_handler_raises_is_still_measured(client: httpx.AsyncClient) -> None:
     await client.get("/crash")
     metrics = (await client.get("/metrics")).text
-    assert 'http_request_duration_seconds_count{method="GET",route="/crash",status="500"} 1.0' in metrics
+    assert (
+        '\nledger_http_request_duration_seconds_count{method="GET",route="/crash",status="500"} 1.0'
+        in metrics
+    )
 
 
 async def test_a_response_that_breaks_after_it_began_is_measured_as_failed(
@@ -486,7 +489,10 @@ async def test_a_response_that_breaks_after_it_began_is_measured_as_failed(
 ) -> None:
     await exchange(app, "/stream")
     metrics = (await client.get("/metrics")).text
-    assert 'http_request_duration_seconds_count{method="GET",route="/stream",status="500"} 1.0' in metrics
+    assert (
+        '\nledger_http_request_duration_seconds_count{method="GET",route="/stream",status="500"} 1.0'
+        in metrics
+    )
 
 
 async def test_a_bug_never_reaches_the_server_and_is_logged_once(app: FastAPI) -> None:
@@ -528,10 +534,10 @@ async def test_methods_nobody_defined_share_one_label(client: httpx.AsyncClient)
     await client.request("BREW", "/items/7")
     await client.request("POUR", "/items/7")
     metrics = (await client.get("/metrics")).text
-    assert (
-        'http_request_duration_seconds_count{method="other",route="/items/{item_id}",status="405"} 2.0'
-        in metrics
+    measured = (
+        'ledger_http_request_duration_seconds_count{method="other",route="/items/{item_id}",status="405"}'
     )
+    assert f"\n{measured} 2.0" in metrics
 
 
 async def test_a_ledger_error_is_a_problem_document(client: httpx.AsyncClient) -> None:

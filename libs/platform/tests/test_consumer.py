@@ -309,7 +309,9 @@ async def running(
 
 
 def outcome(registry: CollectorRegistry, name: str, consumer: str = NAME) -> float | None:
-    return registry.get_sample_value("ledger_events_total", {"consumer": consumer, "outcome": name})
+    return registry.get_sample_value(
+        "ledger_consumer_deliveries_total", {"consumer": consumer, "outcome": name}
+    )
 
 
 async def received(recorder: Recorder, count: int) -> bool:

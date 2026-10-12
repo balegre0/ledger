@@ -432,7 +432,9 @@ class Service[S: ServiceSettings]:
         services = self._interfaces.grpc
         if services is not None:
             self._grpc_port = await lifecycle.enter(
-                serve_grpc(port=settings.grpc_port, register=partial(services, runtime))
+                serve_grpc(
+                    port=settings.grpc_port, register=partial(services, runtime), registry=self._registry
+                )
             )
         return runtime
 

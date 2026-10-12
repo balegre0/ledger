@@ -519,7 +519,7 @@ def create_app(
         app.include_router(router)
     labels = _RouteLabels.of(app)
     duration = Histogram(
-        "http_request_duration_seconds",
+        "ledger_http_request_duration_seconds",
         "Time to answer an HTTP request.",
         ["method", "route", "status"],
         registry=observability.registry,

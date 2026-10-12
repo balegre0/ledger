@@ -421,12 +421,14 @@ company can certify while another runs in production.
   arrives with the first service (milestone 2).
 - **Metrics:** Prometheus: RED metrics per endpoint and RPC, outbox lag, consumer lag, DLQ size,
   workflow states, DGII latency and error rate per environment, certificates expiring. The chassis
-  exports the HTTP request duration by method, route template and status (labels are bounded:
-  the route is a template the code declared, never the client's path); the outbox backlog (events
-  pending, and the time the oldest was stored, so that lag keeps growing while a relay is blind) with
-  counters of publishes, failed publishes and failed passes; and consumer deliveries by consumer and
-  outcome (handled, duplicate, failed, rejected, malformed). The outbox gauges read the table, so every
-  replica exports the same values: aggregate them with `max`, never `sum`.
+  exports, under names that all start with `ledger_`, the HTTP request duration by method, route
+  template and status (labels are bounded: the route is a template the code declared, never the client's
+  path; `ledger_http_request_duration_seconds`); the gRPC call duration by method and status code
+  (`ledger_grpc_request_duration_seconds`); the outbox backlog (events pending, and the time the oldest
+  was stored, so that lag keeps growing while a relay is blind) with counters of publishes, failed
+  publishes and failed passes; and consumer deliveries by consumer and outcome (handled, duplicate,
+  failed, rejected, malformed; `ledger_consumer_deliveries_total`). The outbox gauges read the table, so
+  every replica exports the same values: aggregate them with `max`, never `sum`.
 - **Logs:** structlog, JSON in production and readable in a terminal, with the standard-library loggers
   going through the same pipeline. Every record carries the service and the environment, and
   request-scoped fields (trace id, company id) will merge in from context variables once the request

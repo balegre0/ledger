@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import socket
 from dataclasses import dataclass
 from math import inf, isfinite, nan
@@ -9,6 +10,7 @@ import grpc
 import pytest
 from hypothesis import example, given
 from hypothesis import strategies as st
+from prometheus_client import CollectorRegistry
 from pydantic import TypeAdapter
 from structlog.testing import capture_logs
 
@@ -23,8 +25,8 @@ from ledger_kernel.errors import (
 )
 from ledger_platform.grpc_server import (
     ERROR_CODE_KEY,
-    ErrorInterceptor,
     GrpcBindError,
+    GuardInterceptor,
     InvalidGrpcOptionError,
     serve_grpc,
 )
@@ -40,6 +42,8 @@ BROKEN: Final = b"broken"
 BUG: Final = b"bug"
 ABORT: Final = b"abort"
 GONE: Final = b"gone"
+CHOSEN: Final = b"chosen"
+"""The method sets a status of its own and returns."""
 
 type Context = grpc.aio.ServicerContext[bytes, bytes]
 type Call = Callable[[int, bytes], Awaitable[list[bytes]]]
@@ -85,6 +89,8 @@ class BrokenInvariantError(LedgerError):
 
 async def misbehave(request: bytes, context: Context) -> None:
     """What the test server's methods do with each request: nothing, or fail the way ``request`` says."""
+    if request == CHOSEN:
+        context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
     if request == ABORT:
         await context.abort(grpc.StatusCode.ALREADY_EXISTS, "taken", trailing_metadata=((HINT_KEY, "retry"),))
     if request == THING:
@@ -184,6 +190,13 @@ def channel_to(port: int) -> grpc.aio.Channel:
     return grpc.aio.insecure_channel(f"127.0.0.1:{port}")
 
 
+async def call_named(port: int, method: str) -> bytes:
+    async with channel_to(port) as channel:
+        return await channel.unary_unary(method, request_serializer=bytes, response_deserializer=bytes)(
+            b"x", timeout=TIMEOUT
+        )
+
+
 async def call_unary(port: int, payload: bytes) -> list[bytes]:
     async with channel_to(port) as channel:
         method = channel.unary_unary("/test.Echo/Say", request_serializer=bytes, response_deserializer=bytes)
@@ -233,8 +246,8 @@ EVERY_CALL = pytest.mark.parametrize("call", CALLS.values(), ids=CALLS.keys())
 
 
 @pytest.fixture
-async def port() -> AsyncGenerator[int]:
-    async with serve_grpc(port=0, register=register) as bound:
+async def port(registry: CollectorRegistry) -> AsyncGenerator[int]:
+    async with serve_grpc(port=0, register=register, registry=registry) as bound:
         yield bound
 
 
@@ -387,7 +400,7 @@ async def test_a_synchronous_method_is_left_untouched() -> None:
         del details
         return handler
 
-    guarded = await ErrorInterceptor().intercept_service(
+    guarded = await GuardInterceptor(CollectorRegistry()).intercept_service(
         continuation, Details("/test.Echo/SayWithoutWaiting")
     )
     assert guarded is handler
@@ -436,10 +449,10 @@ async def call_waiting(port: int) -> bytes:
         return await method(b"done", timeout=TIMEOUT)
 
 
-async def test_a_call_in_flight_finishes_within_the_grace() -> None:
+async def test_a_call_in_flight_finishes_within_the_grace(registry: CollectorRegistry) -> None:
     started, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
     async with serve_grpc(
-        port=0, register=register_waiting(started, release, cancelled), grace=TIMEOUT
+        port=0, register=register_waiting(started, release, cancelled), registry=registry, grace=TIMEOUT
     ) as bound:
         call = asyncio.create_task(call_waiting(bound))
         async with asyncio.timeout(TIMEOUT):
@@ -449,11 +462,11 @@ async def test_a_call_in_flight_finishes_within_the_grace() -> None:
     assert not cancelled.is_set()
 
 
-async def test_a_call_that_outlives_the_grace_is_cancelled_and_is_no_bug() -> None:
+async def test_a_call_that_outlives_the_grace_is_cancelled_and_is_no_bug(registry: CollectorRegistry) -> None:
     started, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
     with capture_logs() as logs:
         async with serve_grpc(
-            port=0, register=register_waiting(started, release, cancelled), grace=0.1
+            port=0, register=register_waiting(started, release, cancelled), registry=registry, grace=0.1
         ) as bound:
             call = asyncio.create_task(call_waiting(bound))
             async with asyncio.timeout(TIMEOUT):
@@ -470,7 +483,7 @@ async def test_a_call_that_outlives_the_grace_is_cancelled_and_is_no_bug() -> No
 @example(number=65536)
 def test_a_port_outside_the_range_is_refused_at_once(number: int) -> None:
     with pytest.raises(InvalidGrpcOptionError, match=r"^gRPC option port must be between 0 and 65535, not "):
-        serve_grpc(port=number, register=register)
+        serve_grpc(port=number, register=register, registry=CollectorRegistry())
 
 
 @given(seconds=st.floats().filter(lambda value: not (value > 0 and isfinite(value))))
@@ -481,7 +494,7 @@ def test_a_grace_that_is_not_a_positive_finite_time_is_refused_at_once(seconds: 
     with pytest.raises(
         InvalidGrpcOptionError, match=r"^gRPC option grace must be a positive, finite number "
     ):
-        serve_grpc(port=0, register=register, grace=seconds)
+        serve_grpc(port=0, register=register, registry=CollectorRegistry(), grace=seconds)
 
 
 @given(
@@ -492,7 +505,7 @@ def test_a_grace_that_is_not_a_positive_finite_time_is_refused_at_once(seconds: 
 @example(number=65535, seconds=1e300)
 def test_every_port_and_every_positive_finite_grace_is_accepted(number: int, seconds: float) -> None:
     """Accepted as options: nothing is bound until the server is entered."""
-    serve_grpc(port=number, register=register, grace=seconds)
+    serve_grpc(port=number, register=register, registry=CollectorRegistry(), grace=seconds)
 
 
 def occupy_a_port() -> socket.socket:
@@ -511,7 +524,80 @@ async def test_a_port_that_is_taken_is_a_startup_error() -> None:
     with occupy_a_port() as taken:
         number = port_of(taken)
         with pytest.raises(GrpcBindError, match=rf"^the gRPC server could not bind port {number}$") as caught:
-            async with serve_grpc(port=number, register=register):
+            async with serve_grpc(port=number, register=register, registry=CollectorRegistry()):
                 pass
     assert isinstance(caught.value.__cause__, RuntimeError)
     assert caught.value.code == "grpc_bind_failed"
+
+
+def duration_count(registry: CollectorRegistry, rpc: str, code: str) -> float | None:
+    return registry.get_sample_value("ledger_grpc_request_duration_seconds_count", {"rpc": rpc, "code": code})
+
+
+@pytest.mark.parametrize(
+    ("payload", "code"),
+    [
+        (b"hello", "OK"),
+        (THING, "NOT_FOUND"),
+        (BUG, "INTERNAL"),
+        (BROKEN, "INTERNAL"),
+        (ABORT, "ALREADY_EXISTS"),
+        (GONE, "UNKNOWN"),
+    ],
+    ids=["answered", "ledger-error", "bug", "internal-error", "aborted-by-the-method", "grpc-error"],
+)
+async def test_every_call_is_timed_by_method_and_status(
+    port: int, registry: CollectorRegistry, payload: bytes, code: str
+) -> None:
+    with capture_logs(), contextlib.suppress(grpc.aio.AioRpcError):
+        await call_unary(port, payload)
+    assert duration_count(registry, "/test.Echo/Say", code) == 1
+
+
+async def test_a_streaming_call_is_timed_whole(port: int, registry: CollectorRegistry) -> None:
+    assert await call_unary_stream(port, b"x") == [b"x", b"x"]
+    assert duration_count(registry, "/test.Stream/Repeat", "OK") == 1
+
+
+async def test_a_status_the_method_set_itself_is_the_one_measured(
+    port: int, registry: CollectorRegistry
+) -> None:
+    with pytest.raises(grpc.aio.AioRpcError) as caught:
+        await call_unary(port, CHOSEN)
+    assert caught.value.code() == grpc.StatusCode.RESOURCE_EXHAUSTED
+    assert duration_count(registry, "/test.Echo/Say", "RESOURCE_EXHAUSTED") == 1
+
+
+async def test_calls_that_reach_no_asynchronous_method_are_not_timed(
+    port: int, registry: CollectorRegistry
+) -> None:
+    """An unknown method is the client's to name (each name would be a series); a synchronous one runs on a
+    thread, outside the guard."""
+    async with channel_to(port) as channel:
+        with contextlib.suppress(grpc.aio.AioRpcError):
+            await channel.unary_unary(
+                "/test.Echo/Nothing", request_serializer=bytes, response_deserializer=bytes
+            )(b"", timeout=TIMEOUT)
+    await call_named(port, "/test.Echo/SayWithoutWaiting")
+    measured = [
+        sample.labels
+        for metric in registry.collect()
+        for sample in metric.samples
+        if sample.name == "ledger_grpc_request_duration_seconds_count"
+    ]
+    assert measured == []
+
+
+async def test_a_call_cancelled_at_the_end_of_the_grace_is_timed_as_cancelled(
+    registry: CollectorRegistry,
+) -> None:
+    started, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    async with serve_grpc(
+        port=0, register=register_waiting(started, release, cancelled), registry=registry, grace=0.1
+    ) as bound:
+        call = asyncio.create_task(call_waiting(bound))
+        async with asyncio.timeout(TIMEOUT):
+            await started.wait()
+    with pytest.raises(grpc.aio.AioRpcError):
+        await call
+    assert duration_count(registry, "/test.Wait/For", "CANCELLED") == 1

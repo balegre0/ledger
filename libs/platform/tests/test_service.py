@@ -24,6 +24,7 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
     ExportTraceServiceResponse,
 )
 from opentelemetry.sdk.trace import TracerProvider
+from prometheus_client import CollectorRegistry
 from pydantic import SecretStr, TypeAdapter
 from sqlalchemy import Text, literal_column, select
 from structlog.testing import capture_logs
@@ -31,7 +32,6 @@ lazy from nats.aio.client import Client
 lazy from nats.js import JetStreamContext
 lazy from opentelemetry.proto.common.v1.common_pb2 import KeyValue
 lazy from opentelemetry.proto.trace.v1.trace_pb2 import Span
-lazy from prometheus_client import CollectorRegistry
 
 from ledger.common.v1.money_pb2 import Money
 from ledger_contracts.envelope import Envelope
@@ -454,7 +454,12 @@ async def nats_is(client: httpx.AsyncClient, *, connected: bool) -> bool:
 
 async def handled(registry: CollectorRegistry, consumer: str) -> bool:
     """Whether ``consumer`` has handled an event: counted once its transaction committed."""
-    return registry.get_sample_value("ledger_events_total", {"consumer": consumer, "outcome": "handled"}) == 1
+    return (
+        registry.get_sample_value(
+            "ledger_consumer_deliveries_total", {"consumer": consumer, "outcome": "handled"}
+        )
+        == 1
+    )
 
 
 async def bound(jetstream: JetStreamContext, consumer: str) -> bool:
@@ -911,7 +916,7 @@ async def test_spans_reach_the_collector_without_exception_messages_paths_or_que
 ) -> None:
     del infrastructure
     collector = Collector()
-    async with serve_grpc(port=0, register=collector.register) as port:
+    async with serve_grpc(port=0, register=collector.register, registry=CollectorRegistry()) as port:
         payments = Payments(configured(database_url, nats_url, otlp_endpoint=f"http://127.0.0.1:{port}"))
         async with running(payments.service) as client:
             failed = await client.get("/settle", params={"rnc": RNC})

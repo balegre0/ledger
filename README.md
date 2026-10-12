@@ -306,13 +306,20 @@ trailing metadata `ledger-error-code`, with generic details for a defect.
   workers are cancelled and awaited together within one `worker_stop_grace`, NATS drains, the pool closes and the
   pending spans are exported.
 
-**Metrics** (`/metrics`, Prometheus): `http_request_duration_seconds` by method, route template and status (the
-template the code declared, never the client's path); `ledger_events_total` by consumer and outcome (`handled`,
-`duplicate`, `failed`, `rejected`, `malformed`); `ledger_outbox_pending`,
-`ledger_outbox_oldest_pending_timestamp_seconds` and the counters of publishes, failed publishes and failed
-passes; `ledger_worker_restarts_total`. The outbox gauges read the table (every 15 s, through an index on
-`stored_at`), so every replica exports the same values: aggregate them with `max`, never `sum`. To alert on outbox lag: `ledger_outbox_pending > 0 and time() -
-ledger_outbox_oldest_pending_timestamp_seconds > 60` (the timestamp is 0 when nothing waits).
+**Metrics** (`/metrics`, Prometheus). Every name the chassis defines starts with `ledger_`:
+
+| Metric | Labels | What |
+|---|---|---|
+| `ledger_http_request_duration_seconds` | `method`, `route`, `status` | Each HTTP request; `route` is the template the code declared, never the client's path |
+| `ledger_grpc_request_duration_seconds` | `rpc`, `code` | Each call of an asynchronous gRPC method (`/package.Service/Method`, `OK`, `NOT_FOUND`...) |
+| `ledger_consumer_deliveries_total` | `consumer`, `outcome` | Each delivery: `handled`, `duplicate`, `failed`, `rejected`, `malformed` |
+| `ledger_outbox_pending`, `ledger_outbox_oldest_pending_timestamp_seconds` | | The outbox backlog, read from the table every 15 s (through an index on `stored_at`) |
+| `ledger_outbox_published_total`, `ledger_outbox_publish_failed_total`, `ledger_outbox_failed_passes_total` | | The relay |
+| `ledger_worker_restarts_total` | `worker` | Supervised restarts |
+
+The outbox gauges read the table, so every replica exports the same values: aggregate them with `max`, never
+`sum`. To alert on outbox lag: `ledger_outbox_pending > 0 and time() - ledger_outbox_oldest_pending_timestamp_seconds
+> 60` (the timestamp is 0 when nothing waits).
 
 **Data that never leaves the process.**
 
