@@ -1,9 +1,27 @@
+from typing import Final
+lazy from collections.abc import Mapping
+
 import pytest
 from pydantic import ValidationError
 
 from ledger_platform.settings import LogFormat, ServiceSettings
 
 URL = "postgresql+psycopg://app:s3cret@db:5432/ledger"
+VALID: Final = {"LEDGER_SERVICE_NAME": "invoicing", "LEDGER_DATABASE_URL": URL}
+
+
+class BillingSettings(ServiceSettings):
+    invoice_prefix: str = "INV"
+
+
+def set_environment(monkeypatch: pytest.MonkeyPatch, variables: Mapping[str, str]) -> None:
+    for name, value in variables.items():
+        monkeypatch.setenv(name, value)
+
+
+def problems(error: ValidationError) -> set[str]:
+    """Where each problem is: a field, or the name of an environment variable nobody declared."""
+    return {str(detail["loc"][0]) for detail in error.errors(include_input=False)}
 
 
 def test_settings_come_from_ledger_environment_variables(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -73,6 +91,97 @@ def test_settings_do_not_change_after_the_start(monkeypatch: pytest.MonkeyPatch)
         setattr(settings, field, 9000)
 
 
-def test_unknown_settings_are_refused() -> None:
-    with pytest.raises(ValidationError):
+def test_an_unknown_key_in_given_values_is_refused() -> None:
+    with pytest.raises(ValidationError) as refused:
         ServiceSettings.model_validate({"service_name": "invoicing", "database_url": URL, "http_prot": 9000})
+    assert problems(refused.value) == {"http_prot"}
+
+
+def test_a_misspelled_variable_stops_the_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_environment(monkeypatch, VALID | {"LEDGER_HTTP_PROT": "9000"})
+    with pytest.raises(ValidationError) as refused:
+        ServiceSettings()
+    assert problems(refused.value) == {"LEDGER_HTTP_PROT"}
+
+
+def test_every_problem_is_listed_at_once_and_no_value_is_echoed(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_environment(
+        monkeypatch,
+        {
+            "LEDGER_SERVICE_NAME": "invoicing",
+            "LEDGER_DB_URL": URL,
+            "LEDGER_LOGLEVEL": "staging",
+            "LEDGER_HTTP_PROT": "9000",
+        },
+    )
+    with pytest.raises(ValidationError) as refused:
+        ServiceSettings()
+    assert problems(refused.value) == {
+        "LEDGER_DB_URL",
+        "LEDGER_LOGLEVEL",
+        "LEDGER_HTTP_PROT",
+        "database_url",
+    }
+    assert "s3cret" not in str(refused.value)
+
+
+def test_a_subclass_accepts_the_variables_of_its_own_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_environment(monkeypatch, VALID | {"LEDGER_INVOICE_PREFIX": "BIL"})
+    assert BillingSettings().invoice_prefix == "BIL"
+
+
+def test_a_variable_is_unknown_to_a_class_that_does_not_declare_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_environment(monkeypatch, VALID | {"LEDGER_INVOICE_PREFIX": "BIL"})
+    with pytest.raises(ValidationError) as refused:
+        ServiceSettings()
+    assert problems(refused.value) == {"LEDGER_INVOICE_PREFIX"}
+
+
+def test_a_subclass_refuses_a_misspelling_of_its_own_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_environment(monkeypatch, VALID | {"LEDGER_INVOICE_PREFX": "BIL"})
+    with pytest.raises(ValidationError) as refused:
+        BillingSettings()
+    assert problems(refused.value) == {"LEDGER_INVOICE_PREFX"}
+
+
+def test_variables_that_are_not_ledger_prefixed_are_not_ours(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_environment(monkeypatch, VALID | {"HTTP_PROT": "x", "OTHER_LEDGER_NAME": "y", "LEDGERISH_NAME": "z"})
+    assert ServiceSettings().service_name == "invoicing"
+
+
+def test_variable_names_are_matched_without_regard_to_case(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_environment(
+        monkeypatch,
+        {"ledger_service_name": "invoicing", "Ledger_Database_Url": URL, "ledger_http_port": "9000"},
+    )
+    settings = ServiceSettings()
+    assert (settings.service_name, settings.http_port) == ("invoicing", 9000)
+
+
+def test_a_misspelled_variable_is_refused_in_any_case(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_environment(monkeypatch, VALID | {"Ledger_Http_Prot": "9000"})
+    with pytest.raises(ValidationError) as refused:
+        ServiceSettings()
+    assert {name.lower() for name in problems(refused.value)} == {"ledger_http_prot"}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://app:s3cret@db/ledger",
+        "postgresql+psycopg2://app:s3cret@db/ledger",
+        "postgresql+asyncpg://app:s3cret@db/ledger",
+        "mysql+pymysql://app:s3cret@db/ledger",
+        "app:s3cret@db/ledger",
+    ],
+    ids=["no-driver", "psycopg2", "asyncpg", "mysql", "no-scheme"],
+)
+def test_the_database_url_must_use_the_psycopg_driver_and_stays_secret(
+    monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    set_environment(monkeypatch, VALID | {"LEDGER_DATABASE_URL": url})
+    with pytest.raises(ValidationError) as refused:
+        ServiceSettings()
+    assert problems(refused.value) == {"database_url"}
+    assert "postgresql+psycopg://" in str(refused.value)
+    assert "s3cret" not in str(refused.value)
