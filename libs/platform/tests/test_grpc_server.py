@@ -4,7 +4,7 @@ import socket
 from dataclasses import dataclass
 from math import inf, isfinite, nan
 from typing import ClassVar, Final
-lazy from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
+lazy from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
 import grpc
 import pytest
@@ -506,6 +506,43 @@ def test_a_grace_that_is_not_a_positive_finite_time_is_refused_at_once(seconds: 
 def test_every_port_and_every_positive_finite_grace_is_accepted(number: int, seconds: float) -> None:
     """Accepted as options: nothing is bound until the server is entered."""
     serve_grpc(port=number, register=register, registry=CollectorRegistry(), grace=seconds)
+
+
+class StartFailedError(Exception):
+    def __init__(self) -> None:
+        super().__init__("the server would not start")
+
+
+async def test_a_server_that_cannot_start_is_stopped(
+    registry: CollectorRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bound and registered, then ``start`` raises: nothing may be left listening."""
+    servers: list[grpc.aio.Server] = []
+    stopped: list[float | None] = []
+    make = grpc.aio.server
+
+    def failing_server(*, interceptors: Sequence[grpc.aio.ServerInterceptor]) -> grpc.aio.Server:
+        server = make(interceptors=interceptors)
+        real_stop = server.stop
+
+        async def start() -> None:
+            raise StartFailedError
+
+        async def stop(grace: float | None) -> None:
+            stopped.append(grace)
+            await real_stop(grace)
+
+        monkeypatch.setattr(server, "start", start)
+        monkeypatch.setattr(server, "stop", stop)
+        servers.append(server)
+        return server
+
+    monkeypatch.setattr(grpc.aio, "server", failing_server)
+    with pytest.raises(StartFailedError):
+        async with serve_grpc(port=0, register=register, registry=registry, grace=0.5):
+            pass
+    assert len(servers) == 1
+    assert stopped == [0.5]
 
 
 def occupy_a_port() -> socket.socket:

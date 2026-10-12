@@ -11,14 +11,18 @@ from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import ClassVar, Final, Protocol, final
+lazy from collections.abc import Awaitable, Callable
 
 from nats.js.api import StorageType, StreamConfig
 from nats.js.errors import APIError, NotFoundError
 lazy from nats.js.api import StreamInfo
 
-from ledger_kernel.errors import LedgerError
+from ledger_kernel.errors import LedgerError, UnavailableError
 from ledger_platform.jetstream import is_refusal
 from ledger_platform.options import InvalidOptionError
+
+MAX_ATTEMPTS: Final = 4
+"""How many times ``ensure_stream`` writes a stream before it gives up on it being settled."""
 
 
 class InvalidStreamSpecError(InvalidOptionError):
@@ -40,6 +44,15 @@ class StreamRefusedError(LedgerError):
 
     def __init__(self, name: str) -> None:
         super().__init__(f"JetStream refused the configuration of stream {name!r}")
+
+
+class StreamNotSettledError(UnavailableError):
+    """The stream kept losing what ``ensure_stream`` wrote: other replicas wrote it over and over."""
+
+    code: ClassVar[str] = "stream_not_settled"
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"stream {name!r} was overwritten by others {MAX_ATTEMPTS} times in a row")
 
 
 @final
@@ -149,23 +162,38 @@ async def ensure_stream(jetstream: StreamApi, spec: StreamSpec) -> None:
     ``spec``; one that holds them all already is not written. Nothing else of it changes: its storage,
     retention and replicas are what whoever made it chose, and starting a service must never move data.
 
+    JetStream updates a stream without asking what it was before, so replicas of different versions that
+    start together can each write a configuration built from the stream as it was, the later one dropping
+    what the earlier added. Each write is therefore followed by reading the stream back, and repeated while
+    the stream lacks something of ``spec``: after at most ``MAX_ATTEMPTS`` writes, ``StreamNotSettledError``.
+    Whatever the other replica lost, it finds out the same way when it reads its own stream back.
+
     ``StreamRefusedError`` when JetStream refuses the configuration for good, or nats-py cannot build the
     request. Any other answer (JetStream unable to serve for now) is raised as it came: it may well work next
     time.
     """
-    try:
-        existing = await jetstream.stream_info(spec.name)
-    except NotFoundError:
-        apply, config = jetstream.add_stream, _created(spec)
-    else:
-        apply, config = jetstream.update_stream, _widened(existing.config, spec)
-        if config == existing.config:
-            return
+    for _ in range(MAX_ATTEMPTS):
+        try:
+            existing = await jetstream.stream_info(spec.name)
+        except NotFoundError:
+            apply, config = jetstream.add_stream, _created(spec)
+        else:
+            apply, config = jetstream.update_stream, _widened(existing.config, spec)
+            if config == existing.config:
+                return
+        await _write(apply, config, spec.name)
+    raise StreamNotSettledError(spec.name)
+
+
+async def _write(
+    apply: Callable[[StreamConfig], Awaitable[StreamInfo]], config: StreamConfig, name: str
+) -> None:
+    """Send ``config``; a refusal that no retry changes is a ``StreamRefusedError``."""
     try:
         await apply(config)
     except ValueError as error:  # nats-py raises it when it cannot serialize the config
-        raise StreamRefusedError(spec.name) from error
+        raise StreamRefusedError(name) from error
     except APIError as error:
         if not is_refusal(error):
             raise
-        raise StreamRefusedError(spec.name) from error
+        raise StreamRefusedError(name) from error

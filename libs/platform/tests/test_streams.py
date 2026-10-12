@@ -10,10 +10,13 @@ from nats.js.api import RetentionPolicy, StorageType, StreamConfig, StreamInfo, 
 from nats.js.errors import APIError, BadRequestError, NotFoundError, ServerError, ServiceUnavailableError
 lazy from nats.js import JetStreamContext
 
+from ledger_kernel.errors import ErrorKind
 from ledger_platform.streams import (
     DEAD_LETTERS,
+    MAX_ATTEMPTS,
     InvalidStreamSpecError,
     StreamApi,
+    StreamNotSettledError,
     StreamRefusedError,
     StreamSpec,
     ensure_stream,
@@ -377,3 +380,63 @@ async def test_whatever_order_the_specs_come_in_the_stream_holds_them_all(applie
     assert set(stream.config.subjects or ()) == {subject for spec in applied for subject in spec.subjects}
     assert stream.config.max_age == max(spec.max_age for spec in applied).total_seconds()
     assert stream.config.duplicate_window == max(spec.duplicate_window for spec in applied).total_seconds()
+
+
+@final
+class Overwriting(StreamApi):
+    """JetStream with a second replica that read the stream before every write of ours and writes after it.
+
+    Its write is built from the stream as it was, so it lands over ours without ours: ``times`` writes of
+    ours are overwritten this way.
+    """
+
+    def __init__(self, held: StreamConfig, *, times: int) -> None:
+        self._stream = InMemory()
+        self._stream.config = held
+        self._stale = held
+        self._times = times
+        self.writes = 0
+
+    @property
+    def config(self) -> StreamConfig:
+        assert self._stream.config is not None
+        return self._stream.config
+
+    def other_replica_declares(self, *subjects: str) -> None:
+        self._stale = replace(self._stale, subjects=[*(self._stale.subjects or ()), *subjects])
+
+    @override
+    async def stream_info(self, name: str) -> StreamInfo:
+        return await self._stream.stream_info(name)
+
+    @override
+    async def add_stream(self, config: StreamConfig) -> StreamInfo:
+        raise AssertionError  # the stream exists
+
+    @override
+    async def update_stream(self, config: StreamConfig) -> StreamInfo:
+        self.writes += 1
+        info = await self._stream.update_stream(config)
+        if self._times:
+            self._times -= 1
+            await self._stream.update_stream(self._stale)
+        return info
+
+
+async def test_a_write_overwritten_by_a_replica_that_read_before_it_is_made_again() -> None:
+    """Two versions start at once, both read the stream, both write: the later write is built from the old
+    stream and drops what the earlier added. Reading the stream back shows it, and the loser writes again."""
+    stream = Overwriting(StreamConfig(name="TEST", subjects=["a.>"]), times=1)
+    stream.other_replica_declares("b.>")
+    await ensure_stream(stream, StreamSpec(name="TEST", subjects=("a.>", "c.>")))
+    assert set(stream.config.subjects or ()) == {"a.>", "b.>", "c.>"}
+    assert stream.writes == 2
+
+
+async def test_a_stream_that_keeps_being_overwritten_is_given_up_on_after_a_few_writes() -> None:
+    stream = Overwriting(StreamConfig(name="TEST", subjects=["a.>"]), times=MAX_ATTEMPTS + 5)
+    with pytest.raises(StreamNotSettledError, match="'TEST'") as unsettled:
+        await ensure_stream(stream, StreamSpec(name="TEST", subjects=("a.>", "c.>")))
+    assert stream.writes == MAX_ATTEMPTS
+    assert unsettled.value.code == "stream_not_settled"
+    assert unsettled.value.kind is ErrorKind.UNAVAILABLE

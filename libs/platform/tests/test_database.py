@@ -28,7 +28,7 @@ from sqlalchemy import (
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError, ProgrammingError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import QueuePool
 from structlog.testing import capture_logs
 lazy from sqlalchemy import Insert
@@ -454,6 +454,31 @@ async def test_the_pool_is_closed_when_the_body_fails(database_url: str) -> None
     with pytest.raises(LookupError):
         await ping_then_fail()
     assert pools[0].checkedin() == 0
+
+
+class DisposeFailedError(Exception):
+    def __init__(self) -> None:
+        super().__init__("the first engine would not dispose")
+
+
+async def test_both_engines_are_disposed_even_when_the_first_cannot_be(
+    database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    disposed: list[AsyncEngine] = []
+    real = AsyncEngine.dispose
+
+    async def dispose(self: AsyncEngine, *, close: bool = True) -> None:
+        disposed.append(self)
+        await real(self, close=close)
+        if len(disposed) == 1:
+            raise DisposeFailedError
+
+    monkeypatch.setattr(AsyncEngine, "dispose", dispose)
+    with pytest.raises(DisposeFailedError):
+        async with Database.open(database_url, pool_size=1) as opened:
+            await touch(opened)
+    assert len(disposed) == 2
+    assert disposed[0] is not disposed[1]
 
 
 async def test_a_connection_that_postgresql_ended_is_replaced_before_it_is_used(

@@ -23,7 +23,7 @@ saying how many were not, never what was being sent.
 """
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from typing import ClassVar, Final, Never, final
@@ -78,6 +78,9 @@ DEFAULT_GRPC_STOP_GRACE: Final = 8.0
 DEFAULT_WORKER_STOP_GRACE: Final = 8.0
 """Seconds the workers are given to stop, all together, like the gRPC server's grace: a handler may be
 finishing a statement."""
+DEFAULT_RESOURCES_CLOSE_TIMEOUT: Final = 1.0
+"""Seconds the service's own resources are given to close: an HTTP client or a gRPC channel closes in
+milliseconds, so one that takes longer is hung."""
 DEFAULT_NATS_DRAIN_TIMEOUT: Final = 4.0
 """Seconds the connection to NATS is given to drain (what it buffered goes out) before it is closed."""
 NATS_ERRORS_LOGGED_EVERY: Final = 60.0
@@ -271,10 +274,10 @@ class ServiceLimits:
     the timeout (positive, at most ``MAX_PUBLISH_TIMEOUT``) when the service starts.
 
     A stop takes at most ``stop_budget`` seconds, whatever hangs: the gRPC grace, the workers' grace, the
-    NATS drain and the span flush, one after the other (closing the pool takes milliseconds). Kubernetes kills
-    a pod ``terminationGracePeriodSeconds`` after it asked it to stop (30 by default), and the ASGI server
-    drains its HTTP requests before the chassis's stop begins: that grace must exceed the server's own drain
-    plus ``stop_budget`` (24 seconds by default).
+    resources' close, the NATS drain and the span flush, one after the other (closing the pool takes
+    milliseconds). Kubernetes kills a pod ``terminationGracePeriodSeconds`` after it asked it to stop (30 by
+    default), and the ASGI server drains its HTTP requests before the chassis's stop begins: that grace must
+    exceed the server's own drain plus ``stop_budget`` (25 seconds by default).
     """
 
     database: DatabaseLimits = DEFAULT_LIMITS
@@ -288,6 +291,9 @@ class ServiceLimits:
     """Seconds the gRPC calls in flight are given to finish when the service stops; then they are cut."""
     worker_stop_grace: float = DEFAULT_WORKER_STOP_GRACE
     """Seconds the workers are given to stop, together; one that takes longer is logged and left behind."""
+    resources_close_timeout: float = DEFAULT_RESOURCES_CLOSE_TIMEOUT
+    """Seconds the service's own resources are given to close; one that takes longer is logged and
+    abandoned (``resources.close_abandoned``)."""
     nats_drain_timeout: float = DEFAULT_NATS_DRAIN_TIMEOUT
     """Seconds the connection to NATS is given to drain; then it is closed."""
     span_flush_timeout: float = DEFAULT_SHUTDOWN_TIMEOUT
@@ -299,6 +305,7 @@ class ServiceLimits:
             "nats_connect_timeout": self.nats_connect_timeout,
             "grpc_stop_grace": self.grpc_stop_grace,
             "worker_stop_grace": self.worker_stop_grace,
+            "resources_close_timeout": self.resources_close_timeout,
             "nats_drain_timeout": self.nats_drain_timeout,
             "span_flush_timeout": self.span_flush_timeout,
         }
@@ -320,7 +327,11 @@ class ServiceLimits:
     def stop_budget(self) -> float:
         """The longest a stop takes, in seconds, whatever hangs (see the class)."""
         return (
-            self.grpc_stop_grace + self.worker_stop_grace + self.nats_drain_timeout + self.span_flush_timeout
+            self.grpc_stop_grace
+            + self.worker_stop_grace
+            + self.resources_close_timeout
+            + self.nats_drain_timeout
+            + self.span_flush_timeout
         )
 
 
@@ -417,6 +428,38 @@ async def _finish(draining: asyncio.Task[None]) -> None:
     await asyncio.gather(draining, return_exceptions=True)
 
 
+async def _open_resources[R](
+    lifecycle: Lifecycle, resources: AbstractAsyncContextManager[R], limit: float
+) -> R:
+    """Enter ``resources`` now; at the stop, leave them within ``limit`` seconds.
+
+    A close that hangs would hold the whole stop (the pool, NATS and the spans come after it): past ``limit``
+    it is cancelled, logged as ``resources.close_abandoned``, and left behind if it ignores the cancellation.
+    A close that fails within the limit fails the stop, like any other part's.
+    """
+    stack = AsyncExitStack()
+    opened = await stack.enter_async_context(resources)
+    lifecycle.on_close(partial(_close_within, stack, limit))
+    return opened
+
+
+async def _close_within(resources: AsyncExitStack, limit: float) -> None:
+    closing = asyncio.create_task(resources.aclose())
+    _, unfinished = await asyncio.wait((closing,), timeout=limit)
+    if unfinished:
+        closing.add_done_callback(_note_abandoned_close)
+        closing.cancel()
+        _logger.error("resources.close_abandoned", timeout=limit)
+        return
+    await closing
+
+
+def _note_abandoned_close(closing: asyncio.Task[None]) -> None:
+    """How an abandoned close ended, when it did: its error is taken and logged, not reported as lost."""
+    if not closing.cancelled() and (error := closing.exception()) is not None:
+        _logger.warning("resources.close_failed_after_abandon", exc_info=error)
+
+
 @final
 class Service[S: ServiceSettings]:
     """One service process: the FastAPI app whose lifespan starts and stops everything else (see the module).
@@ -432,6 +475,7 @@ class Service[S: ServiceSettings]:
         "_limits",
         "_registry",
         "_runtime",
+        "_schema_ready",
         "_settings",
         "_started",
         "_supervisor",
@@ -460,6 +504,7 @@ class Service[S: ServiceSettings]:
         self._runtime: Runtime[S] | None = None
         self._grpc_port: int | None = None
         self._started = False
+        self._schema_ready = False
         ProcessCollector(registry=self._registry)
         PlatformCollector(registry=self._registry)
         GCCollector(registry=self._registry)
@@ -543,7 +588,11 @@ class Service[S: ServiceSettings]:
         for stream in (DEAD_LETTERS, *self._events.streams):
             await ensure_stream(jetstream, stream)
         opener = self._interfaces.resources
-        opened = None if opener is None else await lifecycle.enter(opener(settings))
+        opened = (
+            None
+            if opener is None
+            else await _open_resources(lifecycle, opener(settings), limits.resources_close_timeout)
+        )
         outbox = Outbox(
             tracing=tracing,
             registry=self._registry,
@@ -593,9 +642,18 @@ class Service[S: ServiceSettings]:
         await self.runtime().database.ping()
 
     async def _chassis_tables_exist(self) -> None:
-        missing = await self.runtime().database.missing_tables(tuple(CHASSIS_METADATA.tables))
+        """Look for the tables until they are there.
+
+        Then never again: no migration drops them, and every probe would otherwise open a connection of its
+        own to ask.
+        """
+        database = self.runtime().database  # raises while the service is not running
+        if self._schema_ready:
+            return
+        missing = await database.missing_tables(tuple(CHASSIS_METADATA.tables))
         if missing:
             raise _ChassisTablesMissingError(missing)
+        self._schema_ready = True
 
     async def _check_with_runtime(self, check: ReadinessCheck[S]) -> None:
         await check(self.runtime())

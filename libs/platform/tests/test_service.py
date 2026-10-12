@@ -12,7 +12,7 @@ from math import inf, nan
 from time import monotonic
 from typing import Annotated, Final, Literal, Never, Protocol, TypedDict, final, override
 from urllib.parse import urlsplit
-lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
+lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, MutableMapping, Sequence
 
 import grpc
 import httpx
@@ -39,7 +39,7 @@ lazy from opentelemetry.proto.trace.v1.trace_pb2 import Span
 from ledger.common.v1.money_pb2 import Money
 from ledger_contracts.envelope import Envelope
 from ledger_platform.consumer import ConsumerRefusedError, ConsumerSpec
-from ledger_platform.database import DatabaseLimits
+from ledger_platform.database import Database, DatabaseLimits
 from ledger_platform.grpc_server import GrpcBindError, serve_grpc
 from ledger_platform.health import DuplicateCheckError
 from ledger_platform.outbox import DEFAULT_MAX_PAYLOAD, EventTooLargeError, InvalidOutboxOptionError
@@ -58,7 +58,7 @@ from ledger_platform.settings import ServiceSettings
 from ledger_platform.streams import StreamSpec, ensure_stream
 from ledger_platform.supervision import DuplicateWorkerError
 lazy from ledger_platform.consumer import ConsumerApi, Handler
-lazy from ledger_platform.database import Database, UnitOfWork
+lazy from ledger_platform.database import UnitOfWork
 lazy from ledger_platform.service import Runtime, RuntimeDependency
 
 STREAM: Final = StreamSpec(name="SERVICE_TEST", subjects=("service-test.>",))
@@ -834,6 +834,7 @@ WAITS: Final[dict[str, Callable[[float], ServiceLimits]]] = {
     "nats_connect_timeout": lambda seconds: ServiceLimits(nats_connect_timeout=seconds),
     "grpc_stop_grace": lambda seconds: ServiceLimits(grpc_stop_grace=seconds),
     "worker_stop_grace": lambda seconds: ServiceLimits(worker_stop_grace=seconds),
+    "resources_close_timeout": lambda seconds: ServiceLimits(resources_close_timeout=seconds),
     "nats_drain_timeout": lambda seconds: ServiceLimits(nats_drain_timeout=seconds),
     "span_flush_timeout": lambda seconds: ServiceLimits(span_flush_timeout=seconds),
 }
@@ -868,16 +869,18 @@ def test_the_waits_have_their_defaults() -> None:
     assert limits.nats_connect_timeout == 60.0
     assert (limits.grpc_stop_grace, limits.worker_stop_grace, limits.nats_drain_timeout) == (8.0, 8.0, 4.0)
     assert limits.span_flush_timeout == 4.0
+    assert limits.resources_close_timeout == 1.0
 
 
-def test_a_stop_takes_less_than_twenty_five_seconds_by_default() -> None:
+def test_a_stop_takes_no_more_than_twenty_five_seconds_by_default() -> None:
     """Kubernetes kills a pod ``terminationGracePeriodSeconds`` (30 by default) after asking it to stop: the
     chassis's own stop fits with room for the ASGI server's, which comes first."""
     limits = ServiceLimits()
-    assert limits.stop_budget == 24.0
+    assert limits.stop_budget == 25.0
     parts = (
         limits.grpc_stop_grace,
         limits.worker_stop_grace,
+        limits.resources_close_timeout,
         limits.nats_drain_timeout,
         limits.span_flush_timeout,
     )
@@ -1408,6 +1411,43 @@ async def test_a_database_without_the_chassis_tables_is_not_ready(
         assert await readiness(client) == (503, ALL_READY | {"schema": False})
 
 
+def counting_schema_checks(monkeypatch: pytest.MonkeyPatch) -> list[Sequence[str]]:
+    """The real ``missing_tables``, noting each time the readiness check asks it (a connection each time)."""
+    asked: list[Sequence[str]] = []
+    real = Database.missing_tables
+
+    async def spy(self: Database, names: Sequence[str]) -> tuple[str, ...]:
+        asked.append(names)
+        return await real(self, names)
+
+    monkeypatch.setattr(Database, "missing_tables", spy)
+    return asked
+
+
+async def test_once_the_schema_is_there_a_probe_no_longer_opens_a_connection_to_look(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del infrastructure
+    asked = counting_schema_checks(monkeypatch)
+    service = bare(database_url, nats_url)
+    async with running(service) as client:
+        for _ in range(3):
+            assert await readiness(client) == (200, ALL_READY)
+    assert len(asked) == 1
+
+
+async def test_a_schema_that_is_missing_is_looked_for_at_every_probe(
+    database_url: str, nats_url: str, jetstream: JetStreamContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del jetstream
+    asked = counting_schema_checks(monkeypatch)
+    service = bare(database_url, nats_url)
+    async with running(service) as client:
+        for _ in range(3):
+            assert await readiness(client) == (503, ALL_READY | {"schema": False})
+    assert len(asked) == 3
+
+
 async def test_the_metrics_of_the_process_are_exported(
     database_url: str, nats_url: str, infrastructure: JetStreamContext
 ) -> None:
@@ -1419,3 +1459,98 @@ async def test_the_metrics_of_the_process_are_exported(
     assert "\npython_gc_objects_collected_total{" in metrics
     if sys.platform == "linux":  # the process collector reads /proc
         assert "\nprocess_resident_memory_bytes " in metrics
+
+
+# ── Resources that will not close ───────────────────────────────────────────────
+
+
+@final
+class Unclosable:
+    """Resources whose close never ends, and ignores its cancellation until ``release``."""
+
+    def __init__(self, *, fails_in_the_end: bool = False) -> None:
+        self.closing = asyncio.Event()
+        self.release = asyncio.Event()
+        self._fails_in_the_end = fails_in_the_end
+
+    @asynccontextmanager
+    async def open(self, settings: ServiceSettings) -> AsyncGenerator[Clients]:
+        try:
+            yield Clients(dgii=settings.service_name)
+        finally:
+            self.closing.set()
+            while not self.release.is_set():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self.release.wait()
+            if self._fails_in_the_end:
+                raise CloseFailedError
+
+
+class CloseFailedError(Exception):
+    def __init__(self) -> None:
+        super().__init__("the close failed")
+
+
+async def test_resources_that_will_not_close_are_abandoned_after_their_limit_and_the_stop_goes_on(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    del infrastructure
+    resources = Unclosable()
+    service = Service(
+        settings=configured(database_url, nats_url),
+        version="1.0",
+        interfaces=Interfaces(resources=resources.open),
+        limits=ServiceLimits(resources_close_timeout=WINDING_DOWN),
+    )
+    with capture_logs() as logs:
+        async with asyncio.timeout(TIMEOUT), running(service):
+            connection = service.runtime().nats
+            stopping = monotonic()
+        stopped_in = monotonic() - stopping
+    resources.release.set()
+    assert resources.closing.is_set()
+    assert connection.is_closed  # the stop went on past the resources, down to NATS
+    assert stopped_in < 2  # the limit of the resources held, not the second they are given by default
+    assert {"event": "resources.close_abandoned", "log_level": "error", "timeout": WINDING_DOWN} in logs
+
+
+async def test_resources_abandoned_at_the_stop_that_fail_later_are_logged_and_not_lost(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    del infrastructure
+    resources = Unclosable(fails_in_the_end=True)
+    service = Service(
+        settings=configured(database_url, nats_url),
+        version="1.0",
+        interfaces=Interfaces(resources=resources.open),
+        limits=ServiceLimits(resources_close_timeout=WINDING_DOWN),
+    )
+    with capture_logs() as logs:
+        async with asyncio.timeout(TIMEOUT), running(service):
+            pass
+        resources.release.set()
+        await within(TIMEOUT, partial(logged, logs, "resources.close_failed_after_abandon"))
+    (entry,) = [entry for entry in logs if entry["event"] == "resources.close_failed_after_abandon"]
+    assert isinstance(entry["exc_info"], CloseFailedError)
+
+
+async def test_resources_whose_close_fails_within_the_limit_fail_the_stop_as_before(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    del infrastructure
+    resources = Unclosable(fails_in_the_end=True)
+    resources.release.set()
+    service = Service(
+        settings=configured(database_url, nats_url),
+        version="1.0",
+        interfaces=Interfaces(resources=resources.open),
+    )
+    connections: list[Client] = []
+    with pytest.raises(CloseFailedError):
+        async with asyncio.timeout(TIMEOUT), running(service):
+            connections.append(service.runtime().nats)
+    assert connections[0].is_closed  # the failure did not keep the rest of the stop from running
+
+
+async def logged(logs: Sequence[MutableMapping[str, object]], event: str) -> bool:
+    return any(entry["event"] == event for entry in logs)

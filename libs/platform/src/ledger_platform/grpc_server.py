@@ -293,8 +293,8 @@ async def _serving(
     server = grpc.aio.server(interceptors=(GuardInterceptor(registry),))
     register(server)
     bound = _bind(server, port)
-    await server.start()
     try:
+        await server.start()
         yield bound
     finally:
         await server.stop(grace)

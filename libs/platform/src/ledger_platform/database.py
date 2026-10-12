@@ -399,8 +399,10 @@ class Database:
         try:
             yield cls(engine, probe=probe)
         finally:
-            await engine.dispose()
-            await probe.dispose()
+            try:
+                await engine.dispose()
+            finally:  # the probe's connections are released even when the pool's close fails
+                await probe.dispose()
 
     @property
     def engine(self) -> AsyncEngine:
