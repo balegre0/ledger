@@ -423,7 +423,8 @@ class Service[S: ServiceSettings]:
         )
         # One stop for every worker started from here on, before NATS drains and after gRPC stops.
         lifecycle.on_close(partial(self._supervisor.stop, limits.worker_stop_grace))
-        _ = self._supervisor.start("outbox relay", partial(outbox.run, database, jetstream))
+        relay = partial(outbox.run, database, jetstream, streams=self._events.streams)
+        _ = self._supervisor.start("outbox relay", relay)
         metrics = ConsumerMetrics(self._registry)
         for spec in self._events.consumers(runtime):
             consumer = Consumer(spec, database=database, tracing=tracing, metrics=metrics)

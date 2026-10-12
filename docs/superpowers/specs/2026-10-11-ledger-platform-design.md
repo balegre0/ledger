@@ -171,7 +171,9 @@ interval (`idle`) off rows that their own replica cannot relay. Several replicas
 
 An event JetStream did not acknowledge stays in the table on a schedule of its own (`attempts` and
 `next_attempt_at`: 1 s after the first failure, doubling up to 30 s). A pass takes only the rows that are
-due, fresh events before retried ones, so a pile of stuck events cannot delay a new one. The backlog is
+due, fresh events before retried ones, so a pile of stuck events cannot delay a new one. When an event
+finds no stream (someone deleted one while the service ran), the relay declares the service's streams
+again, at most every 30 s, and logs it. The backlog is
 measured, not guessed: gauges for the number of pending events and for when the oldest was stored, and
 counters for publishes, failed publishes and failed passes.
 

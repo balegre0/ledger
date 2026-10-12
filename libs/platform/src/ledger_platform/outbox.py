@@ -17,7 +17,8 @@ version of the aggregate an event carries, never on the order of unrelated event
 
 Events nobody could ever publish (a subject NATS cannot route, a message over its size limit) are
 refused when they are added, in the caller's transaction. What is left to wait for is a stream that does not
-exist yet.
+exist yet. One of the service's own that someone deleted while it ran is declared again by the relay, at most
+once per ``STREAMS_ENSURED_EVERY`` seconds.
 """
 
 import asyncio
@@ -31,6 +32,7 @@ from uuid import UUID
 lazy from collections.abc import Iterator, Mapping, Sequence
 
 import structlog
+from nats.js.errors import NoStreamResponseError
 from prometheus_client import Counter, Gauge
 from sqlalchemy import (
     DateTime,
@@ -55,9 +57,11 @@ lazy from sqlalchemy import Update
 from ledger_kernel.errors import ErrorKind, LedgerError, error_type, excerpt
 from ledger_platform.database import PlatformTable
 from ledger_platform.options import InvalidOptionError, require_at_least, require_seconds
+from ledger_platform.streams import ensure_stream
 lazy from ledger_contracts.envelope import Envelope
 lazy from ledger_kernel.clock import Sleep
 lazy from ledger_platform.database import Database, UnitOfWork
+lazy from ledger_platform.streams import StreamSpec
 lazy from ledger_platform.tracing import Tracing
 
 MAX_BATCH: Final = 10_000
@@ -83,6 +87,10 @@ inside the two-minute duplicate window of a stream by default."""
 DEFAULT_MAX_PAYLOAD: Final = 1024 * 1024
 """NATS's default ``max_payload``, which counts the headers of a message as well as its body. A service passes
 the one its connection reports."""
+STREAMS_ENSURED_EVERY: Final = 30.0
+"""The shortest time between two attempts of a relay to declare its service's streams again, when events find
+no stream: often enough to heal a stream deleted by mistake within a minute, seldom enough not to hammer a
+JetStream that keeps refusing."""
 MAX_SUBJECT_LENGTH: Final = 255
 """Far below NATS's limit (a control line of 4,096 bytes): a longer subject is a mistake."""
 _LABEL: Final = r"(?:(?![.*>])[!-~])+"
@@ -130,11 +138,16 @@ class EventTooLargeError(UnpublishableEventError):
         )
 
 
-class PublishFailedError(LedgerError):
-    """JetStream did not acknowledge an event of a pass: it stays in the outbox for the next one.
+type Failure = tuple[UUID, str, BaseException]
+"""An event JetStream did not acknowledge: its id, its subject and why."""
 
-    Raised after the pass has removed the events JetStream did acknowledge. Names the first event that failed,
-    in the order of the pass, and never what it says. The cause is the client's own error.
+
+class PublishFailedError(LedgerError):
+    """JetStream did not acknowledge events of a pass: they stay in the outbox for the next one.
+
+    Raised after the pass has removed the events JetStream did acknowledge. Built from the ones it did not, in
+    the order of the pass; names the first, and never what an event says. The cause is the client's own error
+    for that first one.
     """
 
     kind: ClassVar[ErrorKind] = ErrorKind.UNAVAILABLE
@@ -148,21 +161,43 @@ class PublishFailedError(LedgerError):
     """How many events of the pass JetStream did acknowledge (and the pass removed)."""
     failed: int
     """How many events of the pass it did not."""
+    missing_stream: bool
+    """Whether JetStream had no stream for one of them: its subject belongs to no stream (yet)."""
 
-    def __init__(
-        self, *, event_id: UUID, subject: str, error_type: str, acknowledged: int, failed: int
-    ) -> None:
+    def __init__(self, failures: Sequence[Failure], *, acknowledged: int) -> None:
+        (event_id, subject, reason), *_ = failures
         what = f"event {event_id} was not acknowledged by JetStream on subject {excerpt(subject)}"
-        super().__init__(f"{what}: {failed} events of the pass failed and {acknowledged} went out")
+        super().__init__(f"{what}: {len(failures)} events of the pass failed and {acknowledged} went out")
         self.event_id = event_id
         self.subject = subject
-        self.error_type = error_type
+        self.error_type = error_type(reason)
         self.acknowledged = acknowledged
-        self.failed = failed
+        self.failed = len(failures)
+        self.missing_stream = any(isinstance(cause, NoStreamResponseError) for _, _, cause in failures)
 
 
 def _require_retry(retry: float) -> None:
     require_seconds(InvalidOutboxOptionError, "retry", retry, floor=MIN_RETRY_DELAY, ceiling=MAX_RETRY_DELAY)
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RelayPace:
+    """How often a relay looks for events, and how soon it tries again after a failure."""
+
+    idle: float = 1.0
+    """Seconds a relay waits for a commit of its process before it looks again: also how soon it finds an
+    event that is due again or that another replica wrote. At most ``MAX_IDLE``."""
+    retry: float = DEFAULT_RETRY
+    """Seconds before the first retry, of an event that failed and of a pass that failed; each next one is
+    twice as long, up to ``MAX_RETRY_DELAY``. At least ``MIN_RETRY_DELAY``."""
+
+    def __post_init__(self) -> None:
+        require_seconds(InvalidOutboxOptionError, "idle", self.idle, ceiling=MAX_IDLE)
+        _require_retry(self.retry)
+
+
+DEFAULT_PACE: Final = RelayPace()
 
 
 def _require_subject(subject: str) -> None:
@@ -178,6 +213,18 @@ def _wire_size(headers: Mapping[str, str], data: bytes) -> int:
     """
     lines = sum(len(name) + len(": ") + len(value) + len("\r\n") for name, value in headers.items())
     return len("NATS/1.0\r\n") + lines + len("\r\n") + len(data)
+
+
+async def _declare_again(jetstream: JetStreamContext, streams: Sequence[StreamSpec]) -> None:
+    """Ensure ``streams`` once more, for events that found none; a failure is logged and goes no further."""
+    names = [spec.name for spec in streams]
+    try:
+        for spec in streams:
+            await ensure_stream(jetstream, spec)
+    except Exception:
+        _logger.exception("outbox.streams_not_ensured", streams=names)
+    else:
+        _logger.warning("outbox.streams_ensured", streams=names)
 
 
 def _delays(first: float) -> Iterator[float]:
@@ -379,14 +426,10 @@ class Outbox:
         self._published.inc(len(acknowledged))
         self._publish_failed.inc(len(failures))
         if failures:
-            event, reason = failures[0]
             raise PublishFailedError(
-                event_id=event.id,
-                subject=event.subject,
-                error_type=error_type(reason),
+                [(event.id, event.subject, reason) for event, reason in failures],
                 acknowledged=len(acknowledged),
-                failed=len(failures),
-            ) from reason
+            ) from failures[0][1]
         return len(acknowledged)
 
     async def run(
@@ -394,11 +437,11 @@ class Outbox:
         database: Database,
         jetstream: JetStreamContext,
         *,
-        idle: float = 1.0,
-        retry: float = DEFAULT_RETRY,
+        streams: Sequence[StreamSpec] = (),
+        pace: RelayPace = DEFAULT_PACE,
         sleep: Sleep = asyncio.sleep,
     ) -> Never:
-        """Relay forever, one pass after another.
+        """Relay forever, one pass after another, at ``pace``.
 
         A pass that took a whole batch is followed by another at once; after any other, the relay waits for a
         commit of this process, or ``idle`` seconds, which is also how soon after it is due an event that
@@ -406,17 +449,19 @@ class Outbox:
 
         Events that failed keep to their own schedule (see ``relay_once``) and are logged once per pass, as
         a warning without a traceback: how many failed and went out, and the first failure's event, subject
-        and error type. A pass that failed as a whole, which means the database, is logged with its traceback
-        and counted, and tried again after ``retry`` seconds, then twice that, up to ``MAX_RETRY_DELAY``; a
-        pass that works starts the delays over. The backlog gauges are refreshed after a pass, full or not,
-        at most once per ``idle`` seconds. Stops only when cancelled. ``sleep`` waits between the attempts
-        after a failed pass.
+        and error type. When one found no stream, the relay declares ``streams`` (the service's own) again
+        with ``ensure_stream``, at most once per ``STREAMS_ENSURED_EVERY`` seconds, and logs it: as
+        ``outbox.streams_ensured``, or ``outbox.streams_not_ensured`` with the traceback when JetStream would
+        not; the events wait either way. A pass that failed as a whole, which means the database, is logged
+        with its traceback and counted, and tried again after ``retry`` seconds, then twice that, up to
+        ``MAX_RETRY_DELAY``; a pass that works starts the delays over. The backlog gauges are refreshed after
+        a pass, full or not, at most once per ``idle`` seconds. Stops only when cancelled. ``sleep`` waits
+        between the attempts after a failed pass.
         """
-        require_seconds(InvalidOutboxOptionError, "idle", idle, ceiling=MAX_IDLE)
-        _require_retry(retry)
+        idle, retry = pace.idle, pace.retry
         delays = _delays(retry)
         loop = asyncio.get_running_loop()
-        measured_at = -inf
+        measured_at = ensured_at = -inf
         while True:
             try:
                 attempted = await self.relay_once(database, jetstream, retry=retry)
@@ -430,6 +475,9 @@ class Outbox:
                     failed=failure.failed,
                 )
                 attempted = failure.acknowledged + failure.failed
+                if failure.missing_stream and streams and loop.time() - ensured_at >= STREAMS_ENSURED_EVERY:
+                    ensured_at = loop.time()
+                    await _declare_again(jetstream, streams)
             except Exception:
                 self._failed_passes.inc()
                 delay = next(delays)

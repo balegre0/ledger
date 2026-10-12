@@ -643,6 +643,22 @@ async def test_a_consumer_whose_stream_appears_later_waits_for_it_without_failin
     assert [entry for entry in logs if entry["event"] == "worker.failed"] == []
 
 
+async def test_a_stream_deleted_while_the_service_runs_is_declared_again_and_its_events_still_arrive(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    """Deleted by mistake, with the consumer bound to it: the relay declares the stream again when an event
+    finds none, the consumer's worker binds anew, and the event goes through."""
+    payments = Payments(configured(database_url, nats_url))
+    with capture_logs() as logs:
+        async with running(payments.service) as client:
+            await within(TIMEOUT, partial(bound, infrastructure, LEDGER))
+            await infrastructure.delete_stream(STREAM.name)
+            response = await client.post("/payments")
+            await within(6 * TIMEOUT, partial(payments.got, LEDGER, 1))
+    assert str(payments.received[LEDGER][0].id) == PAID.validate_json(response.content)["id"]
+    assert "outbox.streams_ensured" in [entry["event"] for entry in logs]
+
+
 async def test_without_otlp_and_grpc_the_service_still_runs(
     database_url: str, nats_url: str, infrastructure: JetStreamContext
 ) -> None:
