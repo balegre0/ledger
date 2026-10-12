@@ -11,13 +11,14 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import ClassVar, Final, NewType, final
 
-from ledger_kernel.errors import InvalidInputError, excerpt
+from ledger_kernel.errors import InvalidInputError, LedgerError, excerpt
 lazy from ledger_kernel.ids import OrganizationId
 
 SubjectId = NewType("SubjectId", str)
 """Who a principal is: the identity provider's id of a user or a machine (Zitadel's are digits)."""
 
 MAX_SUBJECT_LENGTH: Final = 128
+MAX_PROVIDER_ORGANIZATION_LENGTH: Final = 128
 _SUBJECT: Final = re.compile(rf"[A-Za-z0-9._@:-]{{1,{MAX_SUBJECT_LENGTH}}}", re.ASCII)
 
 
@@ -28,6 +29,19 @@ class InvalidSubjectError(InvalidInputError):
 
     def __init__(self, text: str) -> None:
         super().__init__(f"not a subject: {excerpt(text)}")
+
+
+class InvalidPrincipalError(LedgerError):
+    """A principal built from values that are not what its fields say. A bug in the code that builds it.
+
+    Annotations are not enforced at runtime, and a principal decides what a caller may do: it is checked once,
+    where it is made. The message names the field, never the value.
+    """
+
+    code: ClassVar[str] = "invalid_principal"
+
+    def __init__(self, *, field: str, requirement: str) -> None:
+        super().__init__(f"principal field {field} must be {requirement}")
 
 
 def parse_subject(text: str) -> SubjectId:
@@ -70,3 +84,13 @@ class Principal:
     """The identity provider's own id of that organization (Zitadel's resource owner)."""
     roles: frozenset[str] = field(default_factory=frozenset[str])
     """Roles the identity provider granted in that organization (project roles); none by default."""
+
+    def __post_init__(self) -> None:
+        if type(self.roles) is not frozenset or not all(type(role) is str for role in self.roles):
+            raise InvalidPrincipalError(field="roles", requirement="a frozenset of text")
+        organization = self.provider_organization
+        if type(organization) is not str or not 1 <= len(organization) <= MAX_PROVIDER_ORGANIZATION_LENGTH:
+            raise InvalidPrincipalError(
+                field="provider_organization",
+                requirement=f"text of 1 to {MAX_PROVIDER_ORGANIZATION_LENGTH} characters",
+            )

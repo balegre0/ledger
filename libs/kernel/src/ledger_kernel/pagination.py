@@ -12,7 +12,7 @@ from typing import ClassVar, Final, final
 from uuid import UUID
 lazy from collections.abc import Callable, Sequence
 
-from ledger_kernel.errors import InvalidInputError, excerpt
+from ledger_kernel.errors import InvalidInputError, described, excerpt
 
 DEFAULT_PAGE_SIZE: Final = 50
 MAX_PAGE_SIZE: Final = 100
@@ -35,8 +35,9 @@ class InvalidPageSizeError(InvalidInputError):
 
     code: ClassVar[str] = "invalid_page_size"
 
-    def __init__(self, size: int) -> None:
-        super().__init__(f"a page holds 1 to {MAX_PAGE_SIZE} items, not {size}")
+    def __init__(self, size: object) -> None:
+        shown = str(size) if type(size) is int else described(size)
+        super().__init__(f"a page holds 1 to {MAX_PAGE_SIZE} items, not {shown}")
 
 
 def encode_cursor(after: UUID) -> str:
@@ -63,7 +64,8 @@ class PageRequest:
     after: UUID | None = None
 
     def __post_init__(self) -> None:
-        if not 1 <= self.size <= MAX_PAGE_SIZE:
+        # ``type`` and not ``isinstance``: a bool is an int, and True is not a page size.
+        if type(self.size) is not int or not 1 <= self.size <= MAX_PAGE_SIZE:
             raise InvalidPageSizeError(self.size)
 
 

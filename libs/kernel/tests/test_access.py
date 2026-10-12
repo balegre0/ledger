@@ -1,11 +1,14 @@
 from dataclasses import FrozenInstanceError
+from typing import Final
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
 from ledger_kernel.access import (
+    MAX_PROVIDER_ORGANIZATION_LENGTH,
     MAX_SUBJECT_LENGTH,
+    InvalidPrincipalError,
     InvalidSubjectError,
     Permission,
     Principal,
@@ -62,3 +65,48 @@ def test_a_principal_is_an_immutable_value_without_roles_by_default() -> None:
     field = "subject"
     with pytest.raises(FrozenInstanceError):
         setattr(principal, field, "someone else")
+
+
+ORGANIZATION: Final = OrganizationId(new_id())
+
+
+def build(**overrides: object) -> Principal:
+    """A principal holding values of any type, the way a caller that skipped the type checker makes one."""
+    principal = Principal(subject=SubjectId("2001"), organization=ORGANIZATION, provider_organization="1001")
+    for name, value in overrides.items():
+        object.__setattr__(principal, name, value)
+    principal.__post_init__()
+    return principal
+
+
+def test_roles_are_kept_as_given_when_they_are_a_frozenset_of_text() -> None:
+    assert build(roles=frozenset({"admin"})).roles == {"admin"}
+
+
+@pytest.mark.parametrize(
+    "roles",
+    [{"admin"}, ["admin"], ("admin",), "admin", None, frozenset({1}), frozenset({b"admin"})],
+    ids=["set", "list", "tuple", "text", "none", "numbers", "bytes"],
+)
+def test_roles_that_are_not_a_frozenset_of_text_are_refused(roles: object) -> None:
+    with pytest.raises(InvalidPrincipalError, match="roles") as caught:
+        build(roles=roles)
+    assert caught.value.code == "invalid_principal"
+
+
+@pytest.mark.parametrize(
+    "provider_organization",
+    ["", "x" * (MAX_PROVIDER_ORGANIZATION_LENGTH + 1), 1001, None],
+    ids=["empty", "too-long", "number", "none"],
+)
+def test_a_provider_organization_that_is_empty_too_long_or_not_text_is_refused(
+    provider_organization: object,
+) -> None:
+    with pytest.raises(InvalidPrincipalError, match="provider_organization") as caught:
+        build(provider_organization=provider_organization)
+    assert len(str(caught.value)) < 80
+
+
+def test_a_provider_organization_of_the_longest_length_is_accepted() -> None:
+    longest = "9" * MAX_PROVIDER_ORGANIZATION_LENGTH
+    assert build(provider_organization=longest).provider_organization == longest

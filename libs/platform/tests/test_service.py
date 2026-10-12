@@ -13,6 +13,7 @@ from time import monotonic
 from typing import Annotated, Final, Literal, Never, Protocol, TypedDict, final, override
 from urllib.parse import urlsplit
 lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, MutableMapping, Sequence
+lazy from collections.abc import Set as AbstractSet
 
 import grpc
 import httpx
@@ -44,6 +45,7 @@ from ledger_platform.grpc_server import GrpcBindError, serve_grpc
 from ledger_platform.health import DuplicateCheckError
 from ledger_platform.outbox import DEFAULT_MAX_PAYLOAD, EventTooLargeError, InvalidOutboxOptionError
 from ledger_platform.service import (
+    ABANDONED_CLOSES,
     Events,
     Interfaces,
     InvalidServiceOptionError,
@@ -1491,6 +1493,28 @@ class CloseFailedError(Exception):
         super().__init__("the close failed")
 
 
+async def test_a_client_that_is_closed_by_another_task_than_the_one_that_opened_it_closes_correctly(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    """Resources are closed by the stop, a task other than the start's: an HTTP client does not mind."""
+    clients: list[httpx.AsyncClient] = []
+
+    @asynccontextmanager
+    async def opener(settings: ServiceSettings) -> AsyncGenerator[httpx.AsyncClient]:
+        del settings
+        async with httpx.AsyncClient() as client:
+            clients.append(client)
+            yield client
+
+    del infrastructure
+    service = Service(
+        settings=configured(database_url, nats_url), version="1.0", interfaces=Interfaces(resources=opener)
+    )
+    async with running(service):
+        assert not clients[0].is_closed
+    assert clients[0].is_closed
+
+
 async def test_resources_that_will_not_close_are_abandoned_after_their_limit_and_the_stop_goes_on(
     database_url: str, nats_url: str, infrastructure: JetStreamContext
 ) -> None:
@@ -1507,7 +1531,9 @@ async def test_resources_that_will_not_close_are_abandoned_after_their_limit_and
             connection = service.runtime().nats
             stopping = monotonic()
         stopped_in = monotonic() - stopping
+    assert len(ABANDONED_CLOSES) == 1  # held by the module while it runs: nothing else refers to it
     resources.release.set()
+    await within(TIMEOUT, partial(emptied, ABANDONED_CLOSES))
     assert resources.closing.is_set()
     assert connection.is_closed  # the stop went on past the resources, down to NATS
     assert stopped_in < 2  # the limit of the resources held, not the second they are given by default
@@ -1550,6 +1576,10 @@ async def test_resources_whose_close_fails_within_the_limit_fail_the_stop_as_bef
         async with asyncio.timeout(TIMEOUT), running(service):
             connections.append(service.runtime().nats)
     assert connections[0].is_closed  # the failure did not keep the rest of the stop from running
+
+
+async def emptied(held: AbstractSet[object]) -> bool:
+    return not held
 
 
 async def logged(logs: Sequence[MutableMapping[str, object]], event: str) -> bool:

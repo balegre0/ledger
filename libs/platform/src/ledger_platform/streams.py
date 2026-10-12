@@ -7,6 +7,7 @@ delete events early. Shrinking a stream (a subject no version publishes any more
 an operations step, taken with the ``nats`` command line once no replica declares the old spec.
 """
 
+import asyncio
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass, replace
 from datetime import timedelta
@@ -23,6 +24,9 @@ from ledger_platform.options import InvalidOptionError
 
 MAX_ATTEMPTS: Final = 4
 """How many times ``ensure_stream`` writes a stream before it gives up on it being settled."""
+_BACKOFF: Final = 0.05
+"""Seconds before the second attempt; each later one waits that much longer. Replicas that start together
+and keep overwriting each other part ways this way."""
 
 
 class InvalidStreamSpecError(InvalidOptionError):
@@ -165,14 +169,15 @@ async def ensure_stream(jetstream: StreamApi, spec: StreamSpec) -> None:
     JetStream updates a stream without asking what it was before, so replicas of different versions that
     start together can each write a configuration built from the stream as it was, the later one dropping
     what the earlier added. Each write is therefore followed by reading the stream back, and repeated while
-    the stream lacks something of ``spec``: after at most ``MAX_ATTEMPTS`` writes, ``StreamNotSettledError``.
+    the stream lacks something of ``spec`` (after a short, growing pause): the last write is read back too,
+    and when even then the stream lacks something, ``StreamNotSettledError``.
     Whatever the other replica lost, it finds out the same way when it reads its own stream back.
 
     ``StreamRefusedError`` when JetStream refuses the configuration for good, or nats-py cannot build the
     request. Any other answer (JetStream unable to serve for now) is raised as it came: it may well work next
     time.
     """
-    for _ in range(MAX_ATTEMPTS):
+    for attempt in range(MAX_ATTEMPTS):
         try:
             existing = await jetstream.stream_info(spec.name)
         except NotFoundError:
@@ -181,8 +186,20 @@ async def ensure_stream(jetstream: StreamApi, spec: StreamSpec) -> None:
             apply, config = jetstream.update_stream, _widened(existing.config, spec)
             if config == existing.config:
                 return
+        if attempt:  # the read-back showed a write lost: pause before the next, so rivals part ways
+            await asyncio.sleep(_BACKOFF * attempt)
         await _write(apply, config, spec.name)
-    raise StreamNotSettledError(spec.name)
+    if not await _holds(jetstream, spec):
+        raise StreamNotSettledError(spec.name)
+
+
+async def _holds(jetstream: StreamApi, spec: StreamSpec) -> bool:
+    """Whether the stream exists and holds all of ``spec``."""
+    try:
+        existing = await jetstream.stream_info(spec.name)
+    except NotFoundError:
+        return False
+    return _widened(existing.config, spec) == existing.config
 
 
 async def _write(

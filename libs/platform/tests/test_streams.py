@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import replace
 from datetime import timedelta
 from typing import Final, final, override
@@ -431,6 +432,51 @@ async def test_a_write_overwritten_by_a_replica_that_read_before_it_is_made_agai
     await ensure_stream(stream, StreamSpec(name="TEST", subjects=("a.>", "c.>")))
     assert set(stream.config.subjects or ()) == {"a.>", "b.>", "c.>"}
     assert stream.writes == 2
+
+
+async def test_a_last_write_that_settles_the_stream_is_no_failure() -> None:
+    """The final write is read back too: it held, so there is nothing to give up on."""
+    stream = Overwriting(StreamConfig(name="TEST", subjects=["a.>"]), times=MAX_ATTEMPTS - 1)
+    await ensure_stream(stream, StreamSpec(name="TEST", subjects=("a.>", "c.>")))
+    assert stream.writes == MAX_ATTEMPTS
+    assert "c.>" in (stream.config.subjects or ())
+
+
+async def test_the_attempts_are_spaced_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    pauses: list[float] = []
+
+    async def pause(seconds: float) -> None:
+        pauses.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", pause)
+    stream = Overwriting(StreamConfig(name="TEST", subjects=["a.>"]), times=MAX_ATTEMPTS + 5)
+    with pytest.raises(StreamNotSettledError):
+        await ensure_stream(stream, StreamSpec(name="TEST", subjects=("a.>", "c.>")))
+    assert len(pauses) == MAX_ATTEMPTS - 1
+    assert pauses == sorted(pauses)
+    assert 0 < pauses[0] < pauses[-1]
+
+
+@final
+class Vanishing(StreamApi):
+    """JetStream where a stream never appears: it is created, and gone when read."""
+
+    @override
+    async def stream_info(self, name: str) -> StreamInfo:
+        raise NotFoundError
+
+    @override
+    async def add_stream(self, config: StreamConfig) -> StreamInfo:
+        return StreamInfo(config=config, state=StreamState(0, 0, 0, 0, 0))
+
+    @override
+    async def update_stream(self, config: StreamConfig) -> StreamInfo:
+        raise AssertionError  # the stream never exists
+
+
+async def test_a_stream_that_is_gone_when_read_back_is_not_settled() -> None:
+    with pytest.raises(StreamNotSettledError, match="'TEST'"):
+        await ensure_stream(Vanishing(), STREAM)
 
 
 async def test_a_stream_that_keeps_being_overwritten_is_given_up_on_after_a_few_writes() -> None:

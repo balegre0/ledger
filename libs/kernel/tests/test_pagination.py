@@ -58,6 +58,24 @@ def test_a_page_request_outside_the_range_is_refused(size: int) -> None:
     assert caught.value.code == "invalid_page_size"
 
 
+def build(*, size: object) -> PageRequest:
+    """A page request holding a size of any type, the way a caller that skipped the type checker makes one."""
+    request = PageRequest()
+    object.__setattr__(request, "size", size)
+    request.__post_init__()
+    return request
+
+
+@pytest.mark.parametrize(
+    ("size", "shown"),
+    [(True, "bool: True"), (1.0, "float: 1.0"), ("5", "str: 5"), (None, "NoneType: None")],
+    ids=["bool", "float", "text", "none"],
+)
+def test_a_page_size_that_is_not_an_integer_is_refused_and_described(size: object, shown: str) -> None:
+    with pytest.raises(InvalidPageSizeError, match=f"not {shown}"):
+        build(size=size)
+
+
 def test_a_page_holds_at_most_the_size_asked_for_and_says_where_to_continue() -> None:
     ids = sorted(new_id() for _ in range(3))
     page = page_of(ids, PageRequest(size=2), key=same)

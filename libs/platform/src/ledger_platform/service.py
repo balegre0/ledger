@@ -85,6 +85,9 @@ DEFAULT_NATS_DRAIN_TIMEOUT: Final = 4.0
 """Seconds the connection to NATS is given to drain (what it buffered goes out) before it is closed."""
 NATS_ERRORS_LOGGED_EVERY: Final = 60.0
 """Seconds between two log lines of the errors of a connection to NATS that stays unreachable."""
+ABANDONED_CLOSES: Final[set[asyncio.Task[None]]] = set()
+"""Closes of resources that ran past their limit and are still running. The event loop holds a task weakly:
+a reference kept here stops it from being collected, and cancelled, in the middle of the close."""
 _logger = structlog.stdlib.get_logger(__name__)
 
 
@@ -241,7 +244,12 @@ class Interfaces[S: ServiceSettings]:
     """An async context manager that opens what the service talks to beside the chassis (an HTTP client, gRPC
     channels) and yields one object holding them, a dataclass of the service's own: entered at start after
     NATS and the streams, and exited at stop after the gRPC server and the workers have stopped and before
-    NATS drains. Code reads it typed with ``runtime.resources(Kind)``. ``None``: the service opens nothing."""
+    NATS drains. Code reads it typed with ``runtime.resources(Kind)``. ``None``: the service opens nothing.
+
+    The exit runs in another task than the entry (the stop bounds it with ``resources_close_timeout``), so a
+    resource must not hold a scope bound to the task that entered it across its ``yield``: an
+    ``asyncio.timeout``, a ``TaskGroup`` or an anyio cancel scope fails at the close. Clients (an HTTP client,
+    a gRPC channel) do not."""
     checks: Mapping[str, ReadinessCheck[S]] = field(default_factory=dict[str, ReadinessCheck[S]])
     """Readiness checks of the service's own, by name, beside the chassis's (``database``, ``nats``,
     ``workers``, ``schema``, whose names they cannot take): each is handed the runtime and held to the same
@@ -447,6 +455,7 @@ async def _close_within(resources: AsyncExitStack, limit: float) -> None:
     closing = asyncio.create_task(resources.aclose())
     _, unfinished = await asyncio.wait((closing,), timeout=limit)
     if unfinished:
+        ABANDONED_CLOSES.add(closing)
         closing.add_done_callback(_note_abandoned_close)
         closing.cancel()
         _logger.error("resources.close_abandoned", timeout=limit)
@@ -456,6 +465,7 @@ async def _close_within(resources: AsyncExitStack, limit: float) -> None:
 
 def _note_abandoned_close(closing: asyncio.Task[None]) -> None:
     """How an abandoned close ended, when it did: its error is taken and logged, not reported as lost."""
+    ABANDONED_CLOSES.discard(closing)
     if not closing.cancelled() and (error := closing.exception()) is not None:
         _logger.warning("resources.close_failed_after_abandon", exc_info=error)
 
