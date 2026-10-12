@@ -81,18 +81,6 @@ def event_carrying(traceparent: str | None) -> Envelope:
     )
 
 
-@pytest.fixture
-def exporter() -> InMemorySpanExporter:
-    return InMemorySpanExporter()
-
-
-@pytest.fixture
-def tracing(exporter: InMemorySpanExporter) -> Tracing:
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    return Tracing(provider)
-
-
 @pytest.fixture(scope="module")
 def unexported() -> Tracing:
     """Spans are made and dropped; for tests that check the trace context, not what was exported."""

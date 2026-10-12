@@ -32,7 +32,6 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from math import inf
 from typing import ClassVar, Final, Never, final
 from uuid import UUID
 lazy from collections.abc import Awaitable, Callable
@@ -50,8 +49,14 @@ lazy from prometheus_client import CollectorRegistry
 
 from ledger_contracts.envelope import Envelope, MalformedEventError
 from ledger_kernel.clock import utc_now
-from ledger_kernel.errors import ErrorKind, LedgerError, described
+from ledger_kernel.errors import ErrorKind, LedgerError
 from ledger_platform.database import PlatformTable
+from ledger_platform.options import (
+    InvalidOptionError,
+    is_positive_and_finite,
+    require_at_least,
+    require_seconds,
+)
 lazy from ledger_kernel.clock import Clock
 lazy from ledger_platform.database import Database, UnitOfWork
 lazy from ledger_platform.tracing import Tracing
@@ -75,17 +80,11 @@ type Handler = Callable[[Envelope, UnitOfWork], Awaitable[None]]
 commits together with the event's claim in the inbox. Raise to have the delivery retried."""
 
 
-class InvalidConsumerOptionError(LedgerError):
-    """A consumer option that cannot work. A mistake in the code or the configuration, never client input."""
+class InvalidConsumerOptionError(InvalidOptionError):
+    """A consumer option that cannot work."""
 
     code: ClassVar[str] = "invalid_consumer_option"
-
-    def __init__(self, *, option: str, requirement: str, value: object) -> None:
-        super().__init__(f"consumer option {option} must be {requirement}, not {described(value)}")
-
-
-def _is_positive_and_finite(value: float) -> bool:
-    return 0 < value < inf
+    label: ClassVar[str] = "consumer option"
 
 
 def _require_name(name: str) -> None:
@@ -97,7 +96,7 @@ def _require_name(name: str) -> None:
 def _require_backoff(backoff: tuple[float, ...], max_deliver: int) -> None:
     if not backoff:
         raise InvalidConsumerOptionError(option="backoff", requirement="at least one delay", value=backoff)
-    if not all(_is_positive_and_finite(delay) for delay in backoff):
+    if not all(is_positive_and_finite(delay) for delay in backoff):
         raise InvalidConsumerOptionError(
             option="backoff", requirement="positive, finite numbers of seconds", value=backoff
         )
@@ -105,15 +104,6 @@ def _require_backoff(backoff: tuple[float, ...], max_deliver: int) -> None:
         raise InvalidConsumerOptionError(
             option="backoff", requirement=f"at most max_deliver ({max_deliver}) delays", value=backoff
         )
-
-
-def _require_seconds(option: str, value: float, *, floor: float | None = None) -> None:
-    if not _is_positive_and_finite(value):
-        raise InvalidConsumerOptionError(
-            option=option, requirement="a positive, finite number of seconds", value=value
-        )
-    if floor is not None and value < floor:
-        raise InvalidConsumerOptionError(option=option, requirement=f"at least {floor} seconds", value=value)
 
 
 def _read(message: Msg) -> Envelope | None:
@@ -220,12 +210,9 @@ class ConsumerSpec:
 
     def __post_init__(self) -> None:
         _require_name(self.name)
-        if self.max_deliver < 1:
-            raise InvalidConsumerOptionError(
-                option="max_deliver", requirement="at least 1", value=self.max_deliver
-            )
+        require_at_least(InvalidConsumerOptionError, "max_deliver", self.max_deliver)
         _require_backoff(self.backoff, self.max_deliver)
-        _require_seconds("ack_wait", self.ack_wait)
+        require_seconds(InvalidConsumerOptionError, "ack_wait", self.ack_wait)
 
     def retry_delay(self, delivery: int) -> float:
         """Seconds to wait after the ``delivery``-th delivery failed (the first is 1)."""
@@ -272,9 +259,8 @@ class Consumer:
         one should stay well inside ``ack_wait``; otherwise the tail of a batch is delivered again while it
         waits (harmless, as the inbox shows, but wasted work).
         """
-        if batch < 1:
-            raise InvalidConsumerOptionError(option="batch", requirement="at least 1", value=batch)
-        _require_seconds("poll", poll, floor=MIN_POLL)
+        require_at_least(InvalidConsumerOptionError, "batch", batch)
+        require_seconds(InvalidConsumerOptionError, "poll", poll, floor=MIN_POLL)
         subscription = await jetstream.pull_subscribe(
             self._spec.subject,
             durable=self._spec.name,

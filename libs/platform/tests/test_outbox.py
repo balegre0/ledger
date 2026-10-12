@@ -13,7 +13,6 @@ lazy from uuid import UUID
 import pytest
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js import JetStreamContext
-from opentelemetry.sdk.trace import TracerProvider
 from prometheus_client import CollectorRegistry
 from sqlalchemy import DateTime, String, column, delete, func, select, text, type_coerce, update
 from sqlalchemy.event import listen, remove
@@ -38,11 +37,14 @@ from ledger_platform.outbox import (
     PublishFailedError,
 )
 from ledger_platform.streams import StreamSpec, ensure_stream
-from ledger_platform.tracing import Tracing
 lazy from ledger_platform.database import Database
+lazy from ledger_platform.tracing import Tracing
 
 STREAM = StreamSpec(name="TEST", subjects=("test.>",))
 TRACEPARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+
+type Eventually = Callable[[Callable[[], Awaitable[bool]]], Awaitable[None]]
+"""The ``eventually`` fixture of conftest.py."""
 
 
 def event() -> Envelope:
@@ -61,16 +63,6 @@ def event_of_size(size: int) -> Envelope:
     """An event that takes ``size`` bytes on the wire."""
     bare = replace(event(), data=b"")
     return replace(bare, data=b"x" * (size - wire_size(bare)))
-
-
-@pytest.fixture
-def tracing() -> Tracing:
-    return Tracing(TracerProvider())
-
-
-@pytest.fixture
-def registry() -> CollectorRegistry:
-    return CollectorRegistry()
 
 
 @pytest.fixture
@@ -154,14 +146,6 @@ async def unlocked(database: Database, count: int) -> bool:
 
 async def delivered(jetstream: JetStreamContext, count: int) -> bool:
     return await stored(jetstream) >= count
-
-
-async def eventually(check: Callable[[], Awaitable[bool]], *, within: float = 5) -> None:
-    async with asyncio.timeout(within):
-        while True:
-            if await check():
-                return
-            await asyncio.sleep(0.02)
 
 
 async def published(jetstream: JetStreamContext, count: int) -> list[Envelope]:
@@ -308,7 +292,7 @@ async def test_a_batch_goes_out_in_order_on_a_connection_that_has_sent_nothing_y
 
 
 async def test_events_wait_while_publishing_fails_and_go_out_once_it_works(
-    database: Database, jetstream: JetStreamContext, outbox: Outbox
+    database: Database, jetstream: JetStreamContext, outbox: Outbox, eventually: Eventually
 ) -> None:
     async with database.transaction(None) as unit:
         await outbox.add(unit, event(), subject="test.created")
@@ -349,7 +333,11 @@ async def test_a_failure_names_the_event_and_nothing_of_its_content(
 
 
 async def test_the_relay_logs_a_failed_publish_and_names_the_event(
-    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+    database: Database,
+    jetstream: JetStreamContext,
+    tracing: Tracing,
+    registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     await ensure_stream(jetstream, STREAM)
     outbox = Outbox(tracing=tracing, registry=registry)
@@ -402,7 +390,11 @@ async def test_the_relay_backs_off_while_the_database_fails_up_to_a_ceiling(
 
 
 async def test_a_pass_that_works_starts_the_delays_over(
-    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+    database: Database,
+    jetstream: JetStreamContext,
+    tracing: Tracing,
+    registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     await ensure_stream(jetstream, STREAM)
     delays: list[float] = []
@@ -435,18 +427,18 @@ async def test_a_pass_that_works_starts_the_delays_over(
 
 
 async def test_a_commit_wakes_the_relay(
-    database: Database, jetstream: JetStreamContext, outbox: Outbox
+    database: Database, jetstream: JetStreamContext, outbox: Outbox, eventually: Eventually
 ) -> None:
     await ensure_stream(jetstream, STREAM)
     async with relaying(outbox.run(database, jetstream, idle=MAX_IDLE)):
         await asyncio.sleep(0.1)
         async with database.transaction(None) as unit:
             await outbox.add(unit, event(), subject="test.created")
-        await eventually(partial(delivered, jetstream, 1), within=2)
+        await eventually(partial(delivered, jetstream, 1))
 
 
 async def test_an_event_another_replica_wrote_is_found_within_idle(
-    database: Database, jetstream: JetStreamContext, tracing: Tracing
+    database: Database, jetstream: JetStreamContext, tracing: Tracing, eventually: Eventually
 ) -> None:
     await ensure_stream(jetstream, STREAM)
     relay = Outbox(tracing=tracing, registry=CollectorRegistry())
@@ -457,18 +449,18 @@ async def test_an_event_another_replica_wrote_is_found_within_idle(
             await other_replica.add(
                 unit, event(), subject="test.created"
             )  # wakes its own relay, not this one
-        await eventually(partial(delivered, jetstream, 1), within=3)
+        await eventually(partial(delivered, jetstream, 1))
 
 
 async def test_more_events_than_a_batch_go_out_without_waiting(
-    database: Database, jetstream: JetStreamContext, outbox: Outbox
+    database: Database, jetstream: JetStreamContext, outbox: Outbox, eventually: Eventually
 ) -> None:
     await ensure_stream(jetstream, STREAM)
     async with database.transaction(None) as unit:
         for _ in range(25):
             await outbox.add(unit, event(), subject="test.created")
     async with relaying(outbox.run(database, jetstream, idle=MAX_IDLE)):
-        await eventually(partial(delivered, jetstream, 25), within=3)
+        await eventually(partial(delivered, jetstream, 25))
 
 
 async def test_a_relay_does_not_wait_for_events_another_one_holds(
@@ -476,6 +468,7 @@ async def test_a_relay_does_not_wait_for_events_another_one_holds(
     jetstream: JetStreamContext,
     connect: Callable[[], Awaitable[Client]],
     tracing: Tracing,
+    eventually: Eventually,
 ) -> None:
     """The oldest five go to a subject nobody acknowledges: that relay holds them, waiting. Another replica's
     relay publishes the rest at once instead of queueing behind its locks."""
@@ -505,9 +498,9 @@ async def test_stopping_the_relay_mid_publish_releases_the_events(
     jetstream: JetStreamContext,
     connect: Callable[[], Awaitable[Client]],
     tracing: Tracing,
-    registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
-    outbox = Outbox(tracing=tracing, registry=registry, publish_timeout=MAX_PUBLISH_TIMEOUT)
+    outbox = Outbox(tracing=tracing, registry=CollectorRegistry(), publish_timeout=MAX_PUBLISH_TIMEOUT)
     async with database.transaction(None) as unit:
         await outbox.add(unit, event(), subject="test.silent")
 
@@ -601,7 +594,11 @@ async def test_an_event_published_twice_is_stored_once(
 
 
 async def test_a_failing_event_does_not_block_the_relay(
-    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+    database: Database,
+    jetstream: JetStreamContext,
+    tracing: Tracing,
+    registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     """The oldest event has nowhere to go; five more are behind it, and the relay takes two at a time."""
     await ensure_stream(jetstream, STREAM)
@@ -625,7 +622,11 @@ async def rename_outbox(database: Database, old: str, new: str, *, if_exists: bo
 
 
 async def test_the_relay_survives_the_database_failing(
-    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+    database: Database,
+    jetstream: JetStreamContext,
+    tracing: Tracing,
+    registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     await ensure_stream(jetstream, STREAM)
     delays: list[float] = []
@@ -803,7 +804,11 @@ def test_a_payload_limit_below_one_byte_is_refused(
 
 
 async def test_stuck_events_in_numbers_beyond_a_batch_do_not_hold_back_healthy_ones(
-    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+    database: Database,
+    jetstream: JetStreamContext,
+    tracing: Tracing,
+    registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     """Five events with no stream are older than three healthy ones, and a batch is three: the oldest rows of
     every pass are the stuck ones, unless each stuck row keeps to its own schedule."""
@@ -815,7 +820,7 @@ async def test_stuck_events_in_numbers_beyond_a_batch_do_not_hold_back_healthy_o
         await commit(database, outbox)
 
     async with relaying(outbox.run(database, jetstream, idle=MAX_IDLE, retry=MAX_RETRY_DELAY)):
-        await eventually(partial(delivered, jetstream, 3), within=3)
+        await eventually(partial(delivered, jetstream, 3))
 
     assert await pending(database) == 5
     assert sample(registry, "ledger_outbox_failed_passes_total") == 0
@@ -877,7 +882,11 @@ async def test_a_schedule_does_not_overflow_after_thousands_of_attempts(
 
 
 async def test_stuck_events_go_out_once_their_stream_appears(
-    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+    database: Database,
+    jetstream: JetStreamContext,
+    tracing: Tracing,
+    registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     """More than two batches of them, each due again in half a minute: until time passes, nothing moves."""
     outbox = Outbox(tracing=tracing, registry=registry, batch=3)
@@ -897,7 +906,11 @@ async def test_stuck_events_go_out_once_their_stream_appears(
 
 
 async def test_a_full_pass_is_followed_by_another_at_once(
-    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+    database: Database,
+    jetstream: JetStreamContext,
+    tracing: Tracing,
+    registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     await ensure_stream(jetstream, STREAM)
     outbox = Outbox(tracing=tracing, registry=registry, batch=2)
@@ -905,7 +918,7 @@ async def test_a_full_pass_is_followed_by_another_at_once(
         await commit(database, outbox)
 
     async with relaying(outbox.run(database, jetstream, idle=MAX_IDLE)):
-        await eventually(partial(delivered, jetstream, 9), within=3)
+        await eventually(partial(delivered, jetstream, 9))
 
 
 async def gauge_is(registry: CollectorRegistry, name: str, value: float) -> bool:
@@ -913,7 +926,11 @@ async def gauge_is(registry: CollectorRegistry, name: str, value: float) -> bool
 
 
 async def test_the_relay_measures_the_backlog_after_a_pass_that_was_not_full(
-    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+    database: Database,
+    jetstream: JetStreamContext,
+    tracing: Tracing,
+    registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     outbox = Outbox(tracing=tracing, registry=registry)
     await commit(database, outbox, subject="quiet.a")
@@ -927,7 +944,11 @@ async def test_the_relay_measures_the_backlog_after_a_pass_that_was_not_full(
 
 
 async def test_the_relay_measures_the_backlog_at_most_once_per_idle_period(
-    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+    database: Database,
+    jetstream: JetStreamContext,
+    tracing: Tracing,
+    registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     outbox = Outbox(tracing=tracing, registry=registry)
     await commit(database, outbox, subject="quiet.a")
@@ -982,7 +1003,11 @@ async def test_a_retry_the_pass_cannot_work_with_is_refused_before_anything_is_r
 
 
 async def test_the_backlog_is_measured_during_a_run_of_full_passes_too(
-    database: Database, jetstream: JetStreamContext, tracing: Tracing, registry: CollectorRegistry
+    database: Database,
+    jetstream: JetStreamContext,
+    tracing: Tracing,
+    registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     """Forty events, a batch of one: forty full passes, none of them the last word on the backlog."""
     await ensure_stream(jetstream, STREAM)

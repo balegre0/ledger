@@ -1,5 +1,6 @@
 """Fixtures of the platform's tests: a real PostgreSQL and a real NATS server with JetStream."""
 
+import asyncio
 import logging
 lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 
@@ -8,11 +9,16 @@ import pytest
 import structlog
 from nats.aio.client import Client
 from nats.js import JetStreamContext
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from prometheus_client import CollectorRegistry
 from testcontainers.community.postgres import PostgresContainer
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.wait_strategies import LogMessageWaitStrategy
 
 from ledger_platform.database import Database, PlatformTable
+from ledger_platform.tracing import Tracing
 
 POSTGRES_IMAGE = "postgres:18.6"
 NATS_IMAGE = "nats:2.12.15"
@@ -120,3 +126,40 @@ async def jetstream(connect: Callable[[], Awaitable[Client]]) -> AsyncGenerator[
         for info in await context.streams_info():
             if info.config.name is not None:
                 await context.delete_stream(info.config.name)
+
+
+@pytest.fixture
+def exporter() -> InMemorySpanExporter:
+    """Where the spans of ``tracing`` end up, for a test to read."""
+    return InMemorySpanExporter()
+
+
+@pytest.fixture
+def tracing(exporter: InMemorySpanExporter) -> Tracing:
+    """A tracer provider of the test's own; every finished span goes to ``exporter``."""
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    return Tracing(provider)
+
+
+@pytest.fixture
+def registry() -> CollectorRegistry:
+    """A metrics registry of the test's own, so that no two tests see each other's counters."""
+    return CollectorRegistry()
+
+
+@pytest.fixture
+def eventually() -> Callable[[Callable[[], Awaitable[bool]]], Awaitable[None]]:
+    """Waits until ``check`` is true, for at most five seconds: a bound, it returns as soon as it holds.
+
+    For what happens in a task of its own, such as a relay or a consumer, whose progress a test cannot await.
+    """
+
+    async def wait(check: Callable[[], Awaitable[bool]]) -> None:
+        async with asyncio.timeout(5):
+            while True:
+                if await check():
+                    return
+                await asyncio.sleep(0.02)
+
+    return wait

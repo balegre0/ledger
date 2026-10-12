@@ -52,8 +52,9 @@ lazy from nats.js import JetStreamContext
 lazy from prometheus_client import CollectorRegistry
 lazy from sqlalchemy import Update
 
-from ledger_kernel.errors import ErrorKind, LedgerError, described, excerpt
+from ledger_kernel.errors import ErrorKind, LedgerError, excerpt
 from ledger_platform.database import PlatformTable
+from ledger_platform.options import InvalidOptionError, require_at_least, require_seconds
 lazy from ledger_contracts.envelope import Envelope
 lazy from ledger_platform.database import Database, UnitOfWork
 lazy from ledger_platform.tracing import Tracing
@@ -93,13 +94,11 @@ type Sleep = Callable[[float], Awaitable[None]]
 """Waits that many seconds. A test passes its own, so that no test waits."""
 
 
-class InvalidOutboxOptionError(LedgerError):
-    """An outbox option that cannot work. A mistake in the code or the configuration, never client input."""
+class InvalidOutboxOptionError(InvalidOptionError):
+    """An outbox option that cannot work."""
 
     code: ClassVar[str] = "invalid_outbox_option"
-
-    def __init__(self, *, option: str, requirement: str, value: object) -> None:
-        super().__init__(f"outbox option {option} must be {requirement}, not {described(value)}")
+    label: ClassVar[str] = "outbox option"
 
 
 class UnpublishableEventError(LedgerError):
@@ -164,22 +163,8 @@ class PublishFailedError(LedgerError):
         self.failed = failed
 
 
-def _require_seconds(
-    option: str, value: float, *, floor: float | None = None, ceiling: float | None = None
-) -> None:
-    """Refuse a wait that is not a positive, finite number of seconds within ``floor`` and ``ceiling``."""
-    if not 0 < value < inf:
-        raise InvalidOutboxOptionError(
-            option=option, requirement="a positive, finite number of seconds", value=value
-        )
-    if floor is not None and value < floor:
-        raise InvalidOutboxOptionError(option=option, requirement=f"at least {floor} seconds", value=value)
-    if ceiling is not None and value > ceiling:
-        raise InvalidOutboxOptionError(option=option, requirement=f"at most {ceiling} seconds", value=value)
-
-
 def _require_retry(retry: float) -> None:
-    _require_seconds("retry", retry, floor=MIN_RETRY_DELAY, ceiling=MAX_RETRY_DELAY)
+    require_seconds(InvalidOutboxOptionError, "retry", retry, floor=MIN_RETRY_DELAY, ceiling=MAX_RETRY_DELAY)
 
 
 def _require_subject(subject: str) -> None:
@@ -316,9 +301,10 @@ class Outbox:
             raise InvalidOutboxOptionError(
                 option="batch", requirement=f"between 1 and {MAX_BATCH}", value=batch
             )
-        _require_seconds("publish_timeout", publish_timeout, ceiling=MAX_PUBLISH_TIMEOUT)
-        if max_payload < 1:
-            raise InvalidOutboxOptionError(option="max_payload", requirement="at least 1", value=max_payload)
+        require_seconds(
+            InvalidOutboxOptionError, "publish_timeout", publish_timeout, ceiling=MAX_PUBLISH_TIMEOUT
+        )
+        require_at_least(InvalidOutboxOptionError, "max_payload", max_payload)
         self._tracing = tracing
         self._batch = batch
         self._publish_timeout = publish_timeout
@@ -434,7 +420,7 @@ class Outbox:
         at most once per ``idle`` seconds. Stops only when cancelled. ``sleep`` waits between the attempts
         after a failed pass.
         """
-        _require_seconds("idle", idle, ceiling=MAX_IDLE)
+        require_seconds(InvalidOutboxOptionError, "idle", idle, ceiling=MAX_IDLE)
         _require_retry(retry)
         delays = _delays(retry)
         loop = asyncio.get_running_loop()

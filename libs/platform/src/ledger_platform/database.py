@@ -27,7 +27,8 @@ lazy from sqlalchemy.engine import URL
 lazy from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 lazy from sqlalchemy.sql.base import ReadOnlyColumnCollection
 
-from ledger_kernel.errors import LedgerError, described
+from ledger_kernel.errors import LedgerError
+from ledger_platform.options import InvalidOptionError, require_at_least
 lazy from ledger_kernel.ids import Tenant
 
 _DRIVERS: Final = ("postgresql+psycopg", "postgresql+psycopg_async")
@@ -105,13 +106,11 @@ class ClosedUnitOfWorkError(LedgerError):
         super().__init__("the transaction has ended: add after-commit callbacks inside it, before it exits")
 
 
-class InvalidDatabaseOptionError(LedgerError):
-    """A database option that cannot work. A mistake in the code or the configuration, never client input."""
+class InvalidDatabaseOptionError(InvalidOptionError):
+    """A database option that cannot work."""
 
     code: ClassVar[str] = "invalid_database_option"
-
-    def __init__(self, *, option: str, requirement: str, value: object) -> None:
-        super().__init__(f"database option {option} must be {requirement}, not {described(value)}")
+    label: ClassVar[str] = "database option"
 
 
 def _within(option: str, value: timedelta, *, floor: timedelta, named: str) -> None:
@@ -362,8 +361,7 @@ class Database:
         error (``hide_parameters``): that text reaches logs. PostgreSQL's own ``DETAIL`` can still carry
         values, such as the ``Key (...)=(...)`` of a unique violation.
         """
-        if pool_size < 1:
-            raise InvalidDatabaseOptionError(option="pool_size", requirement="at least 1", value=pool_size)
+        require_at_least(InvalidDatabaseOptionError, "pool_size", pool_size)
         parsed = make_url(url)
         _require_psycopg(parsed)
         _leave_the_owned_parameters_out(parsed)

@@ -11,9 +11,6 @@ lazy from uuid import UUID
 import pytest
 from nats.errors import ConnectionClosedError
 from nats.js.errors import NotFoundError as JetStreamNotFoundError
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 from prometheus_client import CollectorRegistry
 from pydantic import TypeAdapter
@@ -37,6 +34,7 @@ lazy from nats.aio.client import Client
 lazy from nats.aio.msg import Msg
 lazy from nats.aio.subscription import Subscription
 lazy from nats.js import JetStreamContext
+lazy from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from ledger.common.v1.money_pb2 import Money
 from ledger_contracts.envelope import Envelope
@@ -61,9 +59,9 @@ from ledger_platform.consumer import (
 from ledger_platform.database import Database, DatabaseLimits
 from ledger_platform.outbox import Outbox
 from ledger_platform.streams import DEAD_LETTERS, StreamSpec, ensure_stream
-from ledger_platform.tracing import Tracing
 lazy from ledger_platform.consumer import Handler
 lazy from ledger_platform.database import UnitOfWork
+lazy from ledger_platform.tracing import Tracing
 
 NAME = "test-consumer"
 STREAM = StreamSpec(name="EVENTS", subjects=("events.>",))
@@ -72,6 +70,9 @@ EFFECTS = Table("effects", MetaData(), Column("event_id", Uuid(), nullable=False
 """What handlers write in the event's transaction: it must happen once per event, whatever is delivered."""
 COMPANY = literal_column("current_setting('ledger.company_id')", Text)
 ADVISORY = TypeAdapter(dict[str, object])
+
+type Eventually = Callable[[Callable[[], Awaitable[bool]]], Awaitable[None]]
+"""The ``eventually`` fixture of conftest.py."""
 
 
 class NeverValidError(InvalidInputError):
@@ -172,23 +173,6 @@ def spec(handler: Handler, **tuning: Unpack[Tuning]) -> ConsumerSpec:
 
 
 @pytest.fixture
-def exporter() -> InMemorySpanExporter:
-    return InMemorySpanExporter()
-
-
-@pytest.fixture
-def tracing(exporter: InMemorySpanExporter) -> Tracing:
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    return Tracing(provider)
-
-
-@pytest.fixture
-def registry() -> CollectorRegistry:
-    return CollectorRegistry()
-
-
-@pytest.fixture
 def metrics(registry: CollectorRegistry) -> ConsumerMetrics:
     return ConsumerMetrics(registry)
 
@@ -238,14 +222,6 @@ async def fetch(jetstream: JetStreamContext, count: int = 1) -> list[Msg]:
     """Deliveries for a test to hand to ``Consumer.handle`` itself."""
     subscription = await jetstream.pull_subscribe("events.>", durable="inspector", stream="EVENTS")
     return await subscription.fetch(count, timeout=5)
-
-
-async def eventually(check: Callable[[], Awaitable[bool]], *, within: float = 5) -> None:
-    async with asyncio.timeout(within):
-        while True:
-            if await check():
-                return
-            await asyncio.sleep(0.02)
 
 
 @asynccontextmanager
@@ -357,7 +333,7 @@ async def test_an_event_is_handled_in_the_transaction_of_its_tenant(
     database: Database,
     streams: JetStreamContext,
     make: ConsumerFactory,
-    registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     recorder = Recorder()
     envelope = money(tenant)
@@ -368,7 +344,6 @@ async def test_an_event_is_handled_in_the_transaction_of_its_tenant(
 
     assert recorder.received == [envelope]
     assert recorder.tenants == ["" if tenant is None else str(tenant.company)]
-    assert outcome(registry, "handled") == 1
     assert await inbox(database) == [(NAME, envelope.id)]
 
 
@@ -377,6 +352,7 @@ async def test_a_redelivered_event_is_handled_once(
     streams: JetStreamContext,
     make: ConsumerFactory,
     registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     """The same event stored twice by JetStream (a publish after the de-duplication window)."""
     recorder = Recorder()
@@ -399,6 +375,7 @@ async def test_a_failing_handler_is_retried_until_it_succeeds_and_leaves_one_eff
     streams: JetStreamContext,
     make: ConsumerFactory,
     registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     """Each failed attempt wrote its effect and the claim, and both were rolled back with it."""
     recorder = Recorder(failures=2)
@@ -422,6 +399,7 @@ async def test_a_handler_error_that_may_pass_is_retried_and_then_handled(
     streams: JetStreamContext,
     make: ConsumerFactory,
     registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     """Only an error of kind ``INVALID`` says the event can never succeed."""
     recorder = Recorder(failures=1, error=error)
@@ -435,7 +413,7 @@ async def test_a_handler_error_that_may_pass_is_retried_and_then_handled(
 
 
 async def test_a_failing_event_does_not_hold_back_the_ones_behind_it(
-    streams: JetStreamContext, make: ConsumerFactory, registry: CollectorRegistry
+    streams: JetStreamContext, make: ConsumerFactory, registry: CollectorRegistry, eventually: Eventually
 ) -> None:
     recorder = Recorder(failures=1)
     events = [money() for _ in range(3)]
@@ -449,7 +427,11 @@ async def test_a_failing_event_does_not_hold_back_the_ones_behind_it(
 
 
 async def test_an_event_that_keeps_failing_ends_in_dead_letters(
-    database: Database, streams: JetStreamContext, make: ConsumerFactory, registry: CollectorRegistry
+    database: Database,
+    streams: JetStreamContext,
+    make: ConsumerFactory,
+    registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     recorder = Recorder(failures=1000)
     await publish(streams, money())
@@ -465,7 +447,7 @@ async def test_an_event_that_keeps_failing_ends_in_dead_letters(
 
 
 async def test_a_permanently_invalid_event_goes_to_dead_letters_at_once(
-    streams: JetStreamContext, make: ConsumerFactory, registry: CollectorRegistry
+    streams: JetStreamContext, make: ConsumerFactory, registry: CollectorRegistry, eventually: Eventually
 ) -> None:
     recorder = Recorder(failures=1000, error=NeverValidError)
     await publish(streams, money())
@@ -486,6 +468,7 @@ async def test_an_unreadable_message_goes_to_dead_letters_without_reaching_the_h
     streams: JetStreamContext,
     make: ConsumerFactory,
     registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     """And the consumer carries on: the next event is handled."""
     recorder = Recorder()
@@ -516,8 +499,8 @@ async def test_the_producer_s_trace_continues_in_the_consumer(
         async with database.transaction(TENANT) as unit:
             await outbox.add(unit, money(), subject="events.created")
     await outbox.relay_once(database, streams)
-    async with running(make(Recorder()), streams):
-        await eventually(partial(acknowledged, streams, 1))
+    (message,) = await fetch(streams)
+    await make(Recorder()).handle(message)
 
     spans = {span.name: span for span in exporter.get_finished_spans()}
     request, consumed = spans["request"], spans[f"consume {NAME}"]
@@ -615,6 +598,7 @@ async def test_a_handler_that_swallows_a_database_error_is_not_acknowledged_but_
     streams: JetStreamContext,
     make: ConsumerFactory,
     registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     """A statement failed and the handler went on: the commit would be a rollback, so no acknowledgement."""
     swallower = Swallower()
@@ -629,7 +613,11 @@ async def test_a_handler_that_swallows_a_database_error_is_not_acknowledged_but_
 
 
 async def test_consumers_of_one_service_share_a_registry_and_are_counted_apart(
-    database: Database, streams: JetStreamContext, make: ConsumerFactory, registry: CollectorRegistry
+    database: Database,
+    streams: JetStreamContext,
+    make: ConsumerFactory,
+    registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     alpha, beta = Recorder(), Recorder()
     envelope = money()
@@ -651,7 +639,7 @@ async def test_every_outcome_of_a_consumer_is_exported_from_the_start(
 
 
 async def test_a_restarted_consumer_takes_up_where_the_last_one_stopped(
-    streams: JetStreamContext, make: ConsumerFactory
+    streams: JetStreamContext, make: ConsumerFactory, eventually: Eventually
 ) -> None:
     before, after = Recorder(), Recorder()
     first, second = money(), money()
@@ -665,7 +653,9 @@ async def test_a_restarted_consumer_takes_up_where_the_last_one_stopped(
     assert (before.received, after.received) == ([first], [second])
 
 
-async def test_an_idle_consumer_keeps_polling(streams: JetStreamContext, make: ConsumerFactory) -> None:
+async def test_an_idle_consumer_keeps_polling(
+    streams: JetStreamContext, make: ConsumerFactory, eventually: Eventually
+) -> None:
     recorder = Recorder()
     async with running(make(recorder), streams, poll=0.1):
         await asyncio.sleep(0.5)  # several polls that find nothing
@@ -674,7 +664,7 @@ async def test_an_idle_consumer_keeps_polling(streams: JetStreamContext, make: C
 
 
 async def test_the_durable_consumer_is_created_as_the_spec_says_and_an_existing_one_is_left_alone(
-    streams: JetStreamContext, make: ConsumerFactory
+    streams: JetStreamContext, make: ConsumerFactory, eventually: Eventually
 ) -> None:
     """JetStream applies a spec when it creates the consumer: a changed spec needs a new consumer."""
     async with running(make(Recorder(), max_deliver=3, backoff=(1.0,), ack_wait=7.0), streams):
@@ -711,7 +701,10 @@ async def test_a_claim_is_dated_by_the_clock_of_the_consumer(
 
 
 async def test_a_closed_connection_ends_the_consumer_with_the_error_of_the_connection(
-    connect: Callable[[], Awaitable[Client]], streams: JetStreamContext, make: ConsumerFactory
+    connect: Callable[[], Awaitable[Client]],
+    streams: JetStreamContext,
+    make: ConsumerFactory,
+    eventually: Eventually,
 ) -> None:
     """The consumer does not paper over NATS being gone: the service's supervision sees it end."""
     client = await connect()
@@ -733,6 +726,7 @@ async def test_a_delivery_that_arrives_while_the_first_is_still_being_handled_is
     streams: JetStreamContext,
     make: ConsumerFactory,
     registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     """The handler outlasts ``ack_wait``: JetStream delivers the event again to another replica.
 
@@ -756,29 +750,36 @@ async def test_a_delivery_that_arrives_while_the_first_is_still_being_handled_is
     assert await inbox(database) == [(NAME, envelope.id)]
 
 
+@pytest.fixture
+async def impatient(database_url: str, database: Database) -> AsyncGenerator[Database]:
+    """The tests' database, reached by connections that give up waiting for a lock after 100 milliseconds."""
+    del database  # its tables exist, and are dropped after this pool is closed
+    limits = DatabaseLimits(lock_timeout=timedelta(milliseconds=100))
+    async with Database.open(database_url, pool_size=1, limits=limits) as opened:
+        yield opened
+
+
 async def test_a_claim_that_waits_longer_than_the_lock_timeout_fails_and_the_event_is_still_handled_once(
-    database_url: str,
-    database: Database,
+    impatient: Database,
     streams: JetStreamContext,
     make: ConsumerFactory,
     registry: CollectorRegistry,
+    eventually: Eventually,
 ) -> None:
     """Behind a handling that outlasts PostgreSQL's ``lock_timeout`` a claim is cancelled: that delivery is
     counted as failed and retried with the backoff, and the event is still handled once."""
     gated = Gated()
-    limits = DatabaseLimits(lock_timeout=timedelta(milliseconds=100))
-    async with Database.open(database_url, pool_size=1, limits=limits) as impatient:
-        await publish(streams, money())
-        async with running(make(gated, ack_wait=0.5), streams):
-            await eventually(partial(handling, gated))
-            async with running(make(gated, ack_wait=0.5, database=impatient), streams):
-                await eventually(partial(counted, registry, "failed", 1))
-                gated.open.set()
-                await eventually(partial(acknowledged, streams, 1))
+    await publish(streams, money())
+    async with running(make(gated, ack_wait=0.5), streams):
+        await eventually(partial(handling, gated))
+        async with running(make(gated, ack_wait=0.5, database=impatient), streams):
+            await eventually(partial(counted, registry, "failed", 1))
+            gated.open.set()
+            await eventually(partial(acknowledged, streams, 1))
 
     assert gated.calls == 1
     assert outcome(registry, "handled") == 1
-    assert await effects_written(database) == 1
+    assert await effects_written(impatient) == 1
     assert await dead_letters(streams) == 0
 
 

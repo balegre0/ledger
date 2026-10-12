@@ -10,10 +10,10 @@ import httpx
 import pytest
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from prometheus_client import CollectorRegistry
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 from structlog.testing import capture_logs
 lazy from fastapi import FastAPI
+lazy from prometheus_client import CollectorRegistry
 
 from ledger_kernel.errors import (
     ConflictError,
@@ -223,11 +223,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 @pytest.fixture
 def health() -> Health:
     return Health(timeout=0.05)
-
-
-@pytest.fixture
-def registry() -> CollectorRegistry:
-    return CollectorRegistry()
 
 
 def build(health: Health, registry: CollectorRegistry, *routers: APIRouter) -> FastAPI:

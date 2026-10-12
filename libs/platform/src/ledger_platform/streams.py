@@ -9,16 +9,15 @@ from nats.js.api import StorageType, StreamConfig
 from nats.js.errors import APIError, NotFoundError
 lazy from nats.js.api import StreamInfo
 
-from ledger_kernel.errors import LedgerError, described
+from ledger_kernel.errors import LedgerError
+from ledger_platform.options import InvalidOptionError
 
 
-class InvalidStreamSpecError(LedgerError):
-    """A stream declaration that NATS would read as something else. A mistake in the code, not input."""
+class InvalidStreamSpecError(InvalidOptionError):
+    """A stream declaration that NATS would read as something else."""
 
     code: ClassVar[str] = "invalid_stream_spec"
-
-    def __init__(self, *, field: str, requirement: str, value: object) -> None:
-        super().__init__(f"stream {field} must be {requirement}, not {described(value)}")
+    label: ClassVar[str] = "stream"
 
 
 class StreamRefusedError(LedgerError):
@@ -61,14 +60,14 @@ class StreamSpec:
     def __post_init__(self) -> None:
         if not self.subjects:
             raise InvalidStreamSpecError(
-                field="subjects", requirement="at least one subject", value=self.subjects
+                option="subjects", requirement="at least one subject", value=self.subjects
             )
         for field, value in (("duplicate_window", self.duplicate_window), ("max_age", self.max_age)):
             if value <= timedelta(0):
-                raise InvalidStreamSpecError(field=field, requirement="longer than zero", value=value)
+                raise InvalidStreamSpecError(option=field, requirement="longer than zero", value=value)
         if self.duplicate_window > self.max_age:
             raise InvalidStreamSpecError(
-                field="duplicate_window",
+                option="duplicate_window",
                 requirement=f"at most max_age ({self.max_age})",
                 value=self.duplicate_window,
             )
