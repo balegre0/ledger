@@ -20,11 +20,17 @@ Keys come from the provider's JWKS document and are fresh for ``keys_ttl`` secon
 key is held is still answered at once while a refresh runs behind it (stale while revalidate): a provider that
 stalls slows no request whose key is known. A request waits for the refresh only when it cannot be answered
 without one: no key was ever obtained, the token's key id is not held (the provider rotated its keys), or the
-keys held are older than ``keys_max_age``. A refresh never starts sooner than ``refresh_floor`` seconds after
-the last one: a stream of tokens with invented key ids costs one fetch per floor, not one per token. Requests
-share the one refresh under way, which none of them can cancel by going away. When a refresh fails (including
-a document without a single usable key), the keys already held keep working; with none at all a token cannot
-be checked and the request gets a 503.
+keys held are older than ``keys_max_age`` and no refresh has failed since the last one that succeeded. That
+ceiling is soft: availability wins while the provider is down (a key can only be retired at the provider,
+which is what is down), so once a refresh past the ceiling has failed, the keys held are served without
+waiting, a refresh still set off behind them once per floor, until one succeeds. Crossing the ceiling is
+logged once (``tokens.keys_past_ceiling``, a warning) and so is the copy being fresh again
+(``tokens.keys_refreshed``); ``ledger_auth_keys_age_seconds`` exports the age of the keys held, for alerts.
+A refresh never starts sooner than ``refresh_floor`` seconds after the last one: a stream of tokens with
+invented key ids costs one fetch per floor, not one per token. Requests share the one refresh under way,
+which none of them can cancel by going away. When a refresh fails (including a document without a single
+usable key), the keys already held keep working; with none at all a token cannot be checked and the request
+gets a 503.
 
 A service fetches with ``HttpKeys``: one HTTP client for the service's run, a resource the service opens at
 start and closes at stop. ``fetch_keys``, a client per fetch, is for tools and tests that run no service.
@@ -33,11 +39,13 @@ is followed (the keys are where the configuration says), and the document is ask
 refused compressed, so ``MAX_KEYS_SIZE`` bounds the bytes received, not a bomb they would inflate to.
 
 A refused token is an ``InvalidTokenError`` that names the problem in a word (``expired``, ``audience``...)
-and has no cause or context attached: neither the token nor its claims are ever echoed or logged.
+and is raised with no cause or context attached: neither the token nor its claims are ever echoed or
+logged.
 """
 
 import asyncio
 import base64
+import contextlib
 import math
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -53,8 +61,10 @@ from joserfc import jwt
 from joserfc.errors import BadSignatureError, InvalidKeyCurveError, JoseError, KeyParameterError
 from joserfc.jwk import KeySet, KeySetSerialization
 from joserfc.jws import JWSRegistry
+from prometheus_client import Gauge
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, StringConstraints, TypeAdapter, ValidationError
 lazy from joserfc.jwk import Key
+lazy from prometheus_client import CollectorRegistry
 
 from ledger_kernel.access import InvalidSubjectError, Principal, parse_subject
 from ledger_kernel.errors import LedgerError, UnauthenticatedError, UnavailableError, excerpt
@@ -163,8 +173,26 @@ class _NoKeysError(ValueError):
 
 
 def _refuse(problem: TokenProblem) -> Never:
-    """Refuse the token for ``problem``, with nothing attached that could quote it."""
-    raise InvalidTokenError(problem) from None
+    """Refuse the token for ``problem``. Never called while an exception is handled: it would be attached."""
+    raise InvalidTokenError(problem)
+
+
+def _valid[T](adapter: TypeAdapter[T], value: object, problem: TokenProblem) -> T:
+    """``value`` as ``adapter`` reads it, else the token is refused for ``problem``."""
+    with contextlib.suppress(ValidationError):
+        return adapter.validate_python(value)
+    _refuse(problem)
+
+
+def _problem_of(error: Exception) -> TokenProblem:
+    """What a failure of joserfc to verify a token says of it."""
+    match error:
+        case BadSignatureError():
+            return TokenProblem.SIGNATURE
+        case KeyParameterError() | InvalidKeyCurveError():  # the published key is not one for that algorithm
+            return TokenProblem.ALGORITHM
+        case _:  # TypeError among them: a header joserfc reads before it checks its type
+            return TokenProblem.MALFORMED
 
 
 def organization_of(provider_organization: str) -> OrganizationId:
@@ -184,8 +212,8 @@ class TokenPolicy:
     leeway: int = 60
     keys_ttl: float = 600.0
     keys_max_age: float = 1200.0
-    """Keys older than this are refreshed before a request is answered with them (at least ``keys_ttl``; by
-    default twice its default)."""
+    """The soft ceiling: keys older than this are refreshed before a request is answered with them, unless a
+    refresh failed since the last success (at least ``keys_ttl``; by default twice its default)."""
     refresh_floor: float = 10.0
     fetch_timeout: float = 5.0
 
@@ -314,11 +342,27 @@ def _parse(document: bytes) -> dict[str, Key]:
 class PublishedKeys:
     """The provider's signing keys by id, fetched and refreshed as the module describes."""
 
-    __slots__ = ("_clock", "_fetch", "_fetched_at", "_keys", "_policy", "_refreshing", "_tried_at")
+    __slots__ = (
+        "_clock",
+        "_failed",
+        "_fetch",
+        "_fetched_at",
+        "_keys",
+        "_past_ceiling",
+        "_policy",
+        "_refreshing",
+        "_tried_at",
+    )
 
     def __init__(
-        self, policy: TokenPolicy, *, fetch: FetchKeys = fetch_keys, clock: Callable[[], float] = monotonic
+        self,
+        policy: TokenPolicy,
+        *,
+        fetch: FetchKeys = fetch_keys,
+        clock: Callable[[], float] = monotonic,
+        registry: CollectorRegistry | None = None,
     ) -> None:
+        """``registry``: where the age of the keys is exported (a service's); ``None``, nowhere."""
         self._policy = policy
         self._fetch = fetch
         self._clock = clock
@@ -326,21 +370,35 @@ class PublishedKeys:
         self._fetched_at: float | None = None
         self._tried_at: float | None = None
         self._refreshing: asyncio.Task[None] | None = None
+        self._failed = False
+        """Whether a refresh failed since the last one that succeeded."""
+        self._past_ceiling = False
+        """Whether the keys held were seen past ``keys_max_age`` (and the crossing logged)."""
+        if registry is not None:
+            Gauge(
+                "ledger_auth_keys_age_seconds",
+                "Seconds since the identity provider's signing keys held were fetched; +Inf while none were.",
+                registry=registry,
+            ).set_function(self._age)
 
     async def key(self, kid: str) -> Key | None:
         """The published key ``kid`` or ``None``; ``TokenKeysUnavailableError`` while no key was ever had.
 
-        A held key is answered at once unless the keys are past ``keys_max_age``; past ``keys_ttl`` it sets
-        off a refresh it does not wait for.
+        A held key is answered at once while the keys are fresh; past ``keys_ttl`` it sets off a refresh it
+        does not wait for; past ``keys_max_age`` it waits for that refresh, unless one failed since the last
+        success (the soft ceiling). A key not held waits for a refresh, if the floor allows one.
         """
         age = self._age()
         held = self._keys.get(kid)
-        if held is not None and age < self._policy.keys_max_age:
-            if age >= self._policy.keys_ttl:
-                self._refreshing_now()
+        if age < self._policy.keys_ttl and held is not None:
             return held
+        beyond_ceiling = age >= self._policy.keys_max_age and self._fetched_at is not None
+        if beyond_ceiling and not self._past_ceiling:
+            self._past_ceiling = True
+            _logger.warning("tokens.keys_past_ceiling", age=age, ceiling=self._policy.keys_max_age)
         refreshing = self._refreshing_now()
-        if refreshing is not None:
+        waits = held is None or (beyond_ceiling and not self._failed)
+        if refreshing is not None and waits:
             await asyncio.shield(refreshing)
         if self._fetched_at is None:
             raise TokenKeysUnavailableError
@@ -373,10 +431,15 @@ class PublishedKeys:
                 document = await self._fetch(self._policy.keys_url)
             keys = _parse(document)
         except Exception:
+            self._failed = True
             _logger.exception("tokens.keys_unavailable", url=self._policy.keys_url)
         else:
             self._keys = keys
             self._fetched_at = started
+            self._failed = False
+            if self._past_ceiling:
+                self._past_ceiling = False
+                _logger.info("tokens.keys_refreshed", url=self._policy.keys_url)
         finally:
             self._refreshing = None
 
@@ -407,10 +470,9 @@ def _header_of(token: str) -> _Header:
     if not token.isascii() or len(token) > MAX_TOKEN_LENGTH or token.count(".") != _DOTS:
         _refuse(TokenProblem.MALFORMED)
     encoded = token.partition(".")[0]
-    try:
+    with contextlib.suppress(ValueError):  # binascii.Error and ValidationError are both ValueErrors
         return _Header.model_validate_json(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
-    except ValueError:  # binascii.Error and ValidationError are both ValueErrors
-        _refuse(TokenProblem.MALFORMED)
+    _refuse(TokenProblem.MALFORMED)
 
 
 def _registry(algorithm: str) -> JWSRegistry:
@@ -473,29 +535,17 @@ class TokenVerifier:
         """The claims of ``token`` once its signature verifies with ``key``."""
         try:
             decoded = jwt.decode(token, key, registry=_registry(algorithm))
-        except BadSignatureError:
-            _refuse(TokenProblem.SIGNATURE)
-        except KeyParameterError, InvalidKeyCurveError:  # the published key is not one for that algorithm
-            _refuse(TokenProblem.ALGORITHM)
-        except (
-            JoseError,
-            ValueError,
-            TypeError,
-        ):  # TypeError: a header joserfc reads before it checks its type
-            _refuse(TokenProblem.MALFORMED)
-        try:
-            return _OBJECT.validate_python(decoded.claims)
-        except ValidationError:
-            _refuse(TokenProblem.MALFORMED)
+        except (JoseError, ValueError, TypeError) as error:
+            problem = _problem_of(error)
+        else:
+            return _valid(_OBJECT, decoded.claims, TokenProblem.MALFORMED)
+        _refuse(problem)
 
     def _check(self, claims: Mapping[str, object]) -> None:
         """Refuse claims of another issuer, for another audience, expired or not yet valid."""
         if claims.get("iss") != self._policy.issuer:
             _refuse(TokenProblem.ISSUER)
-        try:
-            audiences = _AUDIENCES.validate_python(claims.get("aud"))
-        except ValidationError:
-            _refuse(TokenProblem.AUDIENCE)
+        audiences = _valid(_AUDIENCES, claims.get("aud"), TokenProblem.AUDIENCE)
         if self._policy.audience not in ([audiences] if isinstance(audiences, str) else audiences):
             _refuse(TokenProblem.AUDIENCE)
         expires = _numeric_date(claims, "exp")
@@ -510,15 +560,12 @@ class TokenVerifier:
             _refuse(TokenProblem.NOT_YET_VALID)
 
     def _principal(self, claims: Mapping[str, object]) -> Principal:
-        try:
-            subject = parse_subject(_TEXT.validate_python(claims.get("sub")))
+        with contextlib.suppress(ValidationError, InvalidSubjectError):
             organization = _PROVIDER_ORGANIZATION.validate_python(claims.get(ORGANIZATION_CLAIM))
-            roles = frozenset(_granted_roles(claims, self._role_claims, organization))
-        except ValidationError, InvalidSubjectError:
-            _refuse(TokenProblem.CLAIMS)
-        return Principal(
-            subject=subject,
-            organization=organization_of(organization),
-            provider_organization=organization,
-            roles=roles,
-        )
+            return Principal(
+                subject=parse_subject(_TEXT.validate_python(claims.get("sub"))),
+                organization=organization_of(organization),
+                provider_organization=organization,
+                roles=frozenset(_granted_roles(claims, self._role_claims, organization)),
+            )
+        _refuse(TokenProblem.CLAIMS)

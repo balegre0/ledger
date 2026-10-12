@@ -2,6 +2,7 @@ import asyncio
 import base64
 import gzip
 import json
+import math
 from http import HTTPStatus
 from time import time
 from typing import Final
@@ -14,6 +15,7 @@ from hypothesis import strategies as st
 from joserfc import jws, jwt
 from joserfc.jwk import ECKey, OctKey, RSAKey
 from joserfc.jws import JWSRegistry
+from prometheus_client import CollectorRegistry
 from pydantic import SecretStr, TypeAdapter
 from structlog.testing import capture_logs
 
@@ -140,8 +142,8 @@ def verifier(policy: TokenPolicy, moment: Moment) -> TokenVerifier:
     return TokenVerifier(policy, keys=PublishedKeys(policy, clock=moment))
 
 
-async def logged(logs: list[MutableMapping[str, object]]) -> bool:
-    return bool(logs)
+async def logged(logs: list[MutableMapping[str, object]], count: int = 1) -> bool:
+    return len(logs) >= count
 
 
 async def unknown(verifier: TokenVerifier, token: str) -> bool:
@@ -157,8 +159,8 @@ async def refused(verifier: TokenVerifier, token: str) -> TokenProblem:
     with pytest.raises(InvalidTokenError) as caught:
         await verifier.verify(token)
     assert not token or token not in str(caught.value)
-    assert caught.value.__cause__ is None
-    assert caught.value.__suppress_context__  # no cause or context can quote the token or its claims
+    assert caught.value.__cause__ is None  # nothing attached can quote the token or its claims
+    assert caught.value.__context__ is None
     return caught.value.problem
 
 
@@ -553,7 +555,69 @@ async def test_keys_past_their_ceiling_still_work_when_the_refresh_fails(
     moment.now += policy.keys_max_age
     with capture_logs() as logs:
         assert await accepted(verifier, issuer.token())
-    assert [log["event"] for log in logs] == ["tokens.keys_unavailable"]  # it waited for the refresh
+    assert [log["event"] for log in logs] == ["tokens.keys_past_ceiling", "tokens.keys_unavailable"]
+
+
+async def test_past_the_ceiling_a_hung_provider_stalls_one_request_and_no_more(
+    issuer: LocalIssuer, moment: Moment
+) -> None:
+    patient = TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=issuer.keys_url, fetch_timeout=1.0)
+    verifier = TokenVerifier(patient, keys=PublishedKeys(patient, clock=moment))
+    old = issuer.token()
+    await verifier.verify(old)
+    issuer.delay = 30.0
+    moment.now += patient.keys_max_age
+    with capture_logs() as logs:
+        assert await accepted(verifier, old)  # waited once, for a refresh that failed
+        assert [log["event"] for log in logs] == ["tokens.keys_past_ceiling", "tokens.keys_unavailable"]
+        moment.now += patient.refresh_floor
+        async with asyncio.timeout(patient.fetch_timeout / 4), asyncio.TaskGroup() as group:
+            answers = [group.create_task(accepted(verifier, old)) for _ in range(20)]
+        assert all(answer.result() for answer in answers)
+        await eventually(lambda: logged(logs, 3))  # the refresh behind them failed too
+        issuer.delay = 0.0
+        issuer.rotate()
+        issuer.retire("key-1")
+        moment.now += patient.refresh_floor
+        assert await accepted(verifier, old)  # still not waiting: the refresh runs behind
+        await eventually(lambda: unknown(verifier, old))  # the provider is back: the copy is fresh again
+    assert [log["event"] for log in logs][3:] == ["tokens.keys_refreshed"]
+    assert logs[3]["log_level"] == "info"
+
+
+async def test_once_refreshed_past_the_ceiling_the_next_crossing_waits_again(
+    issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
+) -> None:
+    await verifier.verify(issuer.token())
+    issuer.failure = (HTTPStatus.SERVICE_UNAVAILABLE, b"")
+    moment.now += policy.keys_max_age
+    with capture_logs():
+        assert await accepted(verifier, issuer.token())  # waited, failed: held keys served from now on
+        issuer.failure = None
+        moment.now += policy.refresh_floor
+        old = issuer.token()
+        issuer.rotate()
+        issuer.retire("key-1")
+        assert await accepted(verifier, old)
+        await eventually(lambda: unknown(verifier, old))
+    newest = issuer.token()
+    issuer.rotate()
+    issuer.retire("key-2")
+    moment.now += policy.keys_max_age
+    with capture_logs():
+        assert await refused(verifier, newest) is TokenProblem.UNKNOWN_KEY  # waited: no failure since
+
+
+async def test_the_age_of_the_keys_held_is_exported(
+    issuer: LocalIssuer, policy: TokenPolicy, moment: Moment
+) -> None:
+    registry = CollectorRegistry()
+    verifier = TokenVerifier(policy, keys=PublishedKeys(policy, clock=moment, registry=registry))
+    assert registry.get_sample_value("ledger_auth_keys_age_seconds") == math.inf  # none held yet
+    await verifier.verify(issuer.token())
+    assert registry.get_sample_value("ledger_auth_keys_age_seconds") == 0.0
+    moment.now += 42.5
+    assert registry.get_sample_value("ledger_auth_keys_age_seconds") == 42.5
 
 
 async def test_a_keys_document_without_a_key_with_an_id_keeps_the_keys_held(
@@ -566,7 +630,7 @@ async def test_a_keys_document_without_a_key_with_an_id_keeps_the_keys_held(
     moment.now += policy.keys_max_age
     with capture_logs() as logs:
         assert await accepted(verifier, issuer.token())
-    assert [log["event"] for log in logs] == ["tokens.keys_unavailable"]
+    assert [log["event"] for log in logs] == ["tokens.keys_past_ceiling", "tokens.keys_unavailable"]
 
 
 async def test_without_keys_no_token_can_be_checked_and_the_provider_is_not_hammered(
