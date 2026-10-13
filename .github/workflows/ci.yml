@@ -15,7 +15,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -44,9 +44,18 @@ jobs:
         run: uv run poe check
       - name: Local infrastructure configuration
         run: docker compose -f deploy/local/compose.yaml config --quiet
-      - name: Local infrastructure starts healthy
-        # Exercises init.sql (the runtime role and its database) and both health checks; torn down on any exit.
+      - name: Local stack starts healthy, identity from its production image
+        # Builds the image, runs the migrations (one-shot service), starts identity and waits for its health check
+        # (/readyz: PostgreSQL, NATS, workers, the chassis's tables, identity's migrations); then checks that the
+        # API refuses an anonymous caller, that gRPC is not published to the host (Decision 14), that the image
+        # runs as nonroot and that migrating again changes nothing. Torn down on any exit.
         run: |
           compose='docker compose -p ledger-ci -f deploy/local/compose.yaml'
           trap '$compose down -v' EXIT
+          $compose build identity-migrate
           $compose up -d --wait || { $compose logs; exit 1; }
+          curl --fail --silent --show-error http://127.0.0.1:8000/readyz
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8000/v1/companies)" = 401
+          test -z "$($compose port identity 50051 2>/dev/null)"
+          test "$(docker image inspect ledger-identity:local --format '{{.Config.User}}')" = nonroot
+          $compose run --rm identity-migrate

@@ -14,6 +14,10 @@
 #
 # Every image is pinned to an exact version tag, not to a floating one. A version tag can still be
 # re-pushed (a rebuild on a newer base image keeps it); pinning digests is a later hardening step.
+#
+# Services: identity runs from its production image (services/identity/Dockerfile), read-only, as nonroot, with
+# its migrations applied first by the one-shot identity-migrate. Its database and role come from
+# postgres/init.sql; a data volume made before that file listed them needs `docker compose down -v`.
 name: ledger
 
 services:
@@ -49,6 +53,39 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  identity-migrate:
+    # Brings identity's database to the image's schema, then exits; identity starts only once it has succeeded.
+    image: ledger-identity:local
+    build:
+      context: ../..
+      dockerfile: services/identity/Dockerfile
+    entrypoint: ["/app/.venv/bin/ledger-identity-migrate"]
+    env_file: [identity.env]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  identity:
+    image: ledger-identity:local
+    env_file:
+      - identity.env
+      - path: zitadel/.local/identity.env
+        required: false
+    # HTTP only. The gRPC port (50051) stays inside this network: IdentityQueryService authenticates no
+    # caller until the mesh does, so nothing outside the services may reach it.
+    ports: ["127.0.0.1:8000:8000"]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      identity-migrate: {condition: service_completed_successfully}
+      nats: {condition: service_healthy}
 
 volumes:
   postgres: {}

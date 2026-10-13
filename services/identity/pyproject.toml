@@ -9,6 +9,7 @@ dependencies = [
     "ledger-platform",
     "alembic>=1.20.0",
     "fastapi>=0.143.0",
+    "granian[uvloop]>=2.8.4",
     "grpcio>=1.84.0",
     "prometheus-client>=0.26.0",
     "protobuf>=7.36.2",
@@ -29,6 +30,9 @@ ledger-platform = { workspace = true }
 [tool.deptry.package_module_name_map]
 "ledger-contracts" = ["ledger_contracts", "ledger"]
 "prometheus-client" = "prometheus_client"
+
+[tool.deptry.per_rule_ignores]
+DEP002 = ["granian"]  # the ASGI server the image runs the app with; no module imports it
 
 [build-system]
 requires = ["uv_build>=0.13.0,<0.14.0"]
