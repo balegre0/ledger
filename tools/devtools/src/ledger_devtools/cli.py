@@ -8,6 +8,7 @@ lazy from collections.abc import Mapping, Sequence
 
 from ledger_devtools.checks import check
 from ledger_devtools.generate import orphans, targets
+from ledger_devtools.repository import repository_problems
 from ledger_devtools.workspace import Workspace, WorkspaceError
 
 _PROBLEMS: Final = 1
@@ -42,8 +43,9 @@ def _report(lines: Sequence[str]) -> int:
 def main(arguments: Sequence[str] | None = None) -> int:
     """Run ``sync`` or ``check`` on ``--root`` (the current directory by default); the exit status.
 
-    ``check`` exits 1 when a manifest breaks a rule, a generated file is stale, or a generated file is one
-    no manifest implies any more; ``sync`` writes the stale files and deletes those, but writes nothing while
+    ``check`` exits 1 when a manifest breaks a rule, a generated file is stale, a generated file is one no
+    manifest implies any more, or the repository around the manifests disagrees with them (the root's lists,
+    the image pins); ``sync`` writes the stale files and deletes those, but writes nothing while
     a manifest breaks a rule (what it writes follows from the manifests) and exits 1. Both exit 2 when the
     tree has no readable manifest.
     """
@@ -68,9 +70,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
             [
                 *(f"{path.as_posix()}: stale, run `uv run ledger-devtools sync`" for path in stale),
                 *(f"{path.as_posix()}: {_ORPHAN}" for path in unwanted),
+                *(f"{problem.where}: {problem.message}" for problem in repository_problems(workspace)),
             ]
         )
     for path in stale:
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
         (root / path).write_text(generated[path], encoding="utf-8", newline="\n")
         sys.stdout.write(f"wrote {path.as_posix()}\n")
     for path in unwanted:

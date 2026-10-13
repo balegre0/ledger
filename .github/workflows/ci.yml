@@ -24,7 +24,7 @@ jobs:
         with:
           enable-cache: true
       - name: Install (locked)
-        run: uv sync --locked
+        run: uv sync --locked --all-packages
       - name: Protobuf breaking changes against main
         # Only once contracts/proto holds a .proto (the signer milestone adds the first). Runs as the owner of the
         # checkout, not as root: nothing root-owned lands in the workspace and git never has to trust a

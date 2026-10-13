@@ -17,7 +17,7 @@ import copy
 import hashlib
 from abc import ABCMeta, abstractmethod
 from types import MappingProxyType
-from typing import Final, Protocol, cast
+from typing import ClassVar, Final, Protocol, TypeIs
 lazy from collections.abc import Callable, Collection, Mapping
 
 from cryptography import x509
@@ -40,6 +40,7 @@ lazy from signxml.verifier import VerifyResult
 
 from ledger_country_do.channels.ecf_v1.adapters.signing.profile import XML_NAMESPACE, signature
 from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import DSIG, parser, require_readable, texts
+from ledger_kernel.errors import LedgerError
 lazy from ledger_country_do_testing.pki import Issued
 
 OUTSIDE_ROOT: Final = "outside-root"
@@ -104,6 +105,37 @@ class _Signs(Protocol, metaclass=ABCMeta):
         """``data``, an element, with an enveloped signature, as an element."""
 
 
+class SignxmlShapeError(LedgerError):
+    """signxml's object is not what this module describes it as: an upgrade of signxml changed it."""
+
+    code: ClassVar[str] = "do_signxml_shape_changed"
+
+    def __init__(self, described: str) -> None:
+        super().__init__(f"signxml's object is no longer what {described} describes")
+
+
+def _is_verifier(value: object) -> TypeIs[_Verifies]:
+    return isinstance(value, XMLVerifier)
+
+
+def _is_signer(value: object) -> TypeIs[_Signs]:
+    return isinstance(value, XMLSigner)
+
+
+def as_verifier(made: object) -> _Verifies:
+    """``made``, signxml's ``XMLVerifier``, as ``_Verifies`` describes it."""
+    if _is_verifier(made):
+        return made
+    raise SignxmlShapeError(_Verifies.__name__)
+
+
+def as_signer(made: object) -> _Signs:
+    """``made``, signxml's ``XMLSigner``, as ``_Signs`` describes it."""
+    if _is_signer(made):
+        return made
+    raise SignxmlShapeError(_Signs.__name__)
+
+
 def verify_with_signxml(signed: bytes, *, trusted: Collection[x509.Certificate] | None = None) -> bool:
     """Whether signxml finds ``signed``'s signature good, by the certificate it carries, if trusted.
 
@@ -116,7 +148,7 @@ def verify_with_signxml(signed: bytes, *, trusted: Collection[x509.Certificate] 
     certificate = x509.load_der_x509_certificate(base64.b64decode("".join(carried.split())))
     if trusted is not None and certificate not in trusted:
         return False
-    verifier = cast("_Verifies", XMLVerifier())
+    verifier = as_verifier(XMLVerifier())
     verifier.excise_empty_xmlns_declarations = True
     try:
         verifier.verify(signed, x509_cert=certificate, expect_config=_CONFIGURATION)
@@ -128,15 +160,14 @@ def verify_with_signxml(signed: bytes, *, trusted: Collection[x509.Certificate] 
 def sign_with_signxml(document: bytes, issued: Issued, *, prefixed: bool = False) -> bytes:
     """``document`` signed by signxml (enveloped, C14N 1.0, RSA-SHA256), the namespace default or ``ds:``."""
     # signxml types ``namespaces`` ``dict[str, str]`` yet documents ``None`` as the default namespace's
-    # key (https://github.com/XML-Security/signxml/issues/275): its signer is bound to ``_Signs`` through
-    # ``object``.
+    # key (https://github.com/XML-Security/signxml/issues/275): its signer is taken as ``_Signs`` says.
     made = XMLSigner(
         method=SignatureConstructionMethod.enveloped,
         signature_algorithm=SignatureMethod.RSA_SHA256,
         digest_algorithm=DigestAlgorithm.SHA256,
         c14n_algorithm=CanonicalizationMethod.CANONICAL_XML_1_0,
     )
-    signer = cast("_Signs", cast("object", made))
+    signer = as_signer(made)
     if not prefixed:
         signer.namespaces = {None: DSIG}
     require_readable(document)

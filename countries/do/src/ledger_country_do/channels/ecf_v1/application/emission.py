@@ -142,8 +142,8 @@ class EmitterOptions(TypedDict, total=False):
     """``Emitter``'s keywords beyond its ports: three required, the rest with defaults.
 
     The environment, a clock (``FechaHoraFirma``) and a sleep (the settle delay, between polls); the poll
-    schedule (``POLL_SCHEDULE``), the settle delay (``SETTLE_DELAY``), the send budget (``SEND_BUDGET``), the
-    QR's hosts (``OFFICIAL_QR``) and the regime (``REGIME``).
+    schedule (``POLL_SCHEDULE``), the settle delay (``SETTLE_DELAY``), the send budget (``SEND_BUDGET``) and
+    the regime (``REGIME``). The QR's hosts are ``Emitter``'s own keyword (``OFFICIAL_QR`` by default).
     """
 
     environment: Required[Environment]
@@ -152,7 +152,6 @@ class EmitterOptions(TypedDict, total=False):
     schedule: tuple[float, ...]
     settle: float
     budget: float
-    qr_hosts: QrHosts
     regime: RegimeDef
 
 
@@ -255,7 +254,13 @@ class Emitter:
     )
 
     def __init__(
-        self, *, xml: EcfFormat, signer: XmlSigner, authority: Authority, **options: Unpack[EmitterOptions]
+        self,
+        *,
+        xml: EcfFormat,
+        signer: XmlSigner,
+        authority: Authority,
+        qr_hosts: QrHosts = OFFICIAL_QR,
+        **options: Unpack[EmitterOptions],
     ) -> None:
         self._xml = xml
         self._signer = signer
@@ -266,7 +271,7 @@ class Emitter:
         self._schedule = options.get("schedule", POLL_SCHEDULE)
         self._settle = options.get("settle", SETTLE_DELAY)
         self._budget = options.get("budget", SEND_BUDGET)
-        self._qr_hosts = options.get("qr_hosts", OFFICIAL_QR)
+        self._qr_hosts = qr_hosts
         self._regime = options.get("regime", REGIME)
         if self._settle < authority.attempt_limit():
             raise SettleTooShortError

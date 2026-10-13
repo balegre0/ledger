@@ -32,10 +32,7 @@ def test_an_event_carries_its_envelope_fields_and_its_payload() -> None:
 
 def test_an_event_class_without_a_type_is_refused_when_it_is_declared() -> None:
     with pytest.raises(InvalidEventClassError, match="Untyped"):
-
-        @dataclass(frozen=True, slots=True, kw_only=True)
-        class Untyped(Event):
-            VERSION: ClassVar[int] = 1
+        dataclass(frozen=True, slots=True, kw_only=True)(type("Untyped", (Event,), {"VERSION": 1}))
 
 
 @pytest.mark.parametrize(

@@ -19,6 +19,12 @@ _IMPORTS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
         "pytest-xdist": ("xdist",),
     }
 )
+LOADED_BY_OTHERS: Final = frozenset({"python-multipart", "tzdata"})
+"""Distributions no module imports by name, installed for another to load.
+
+``zoneinfo`` reads ``tzdata`` where the system has no time zone database (Windows); Starlette's form parser
+imports ``multipart``. deptry would call them unused.
+"""
 TEST_TOOLING: Final = ("pytest", "hypothesis", "testcontainers", "xdist", "ledger_testing")
 """What production code never imports (contract 13)."""
 

@@ -243,3 +243,8 @@ def test_every_rounding_mode_rounds_as_decimal_s_constant_of_the_same_name() -> 
 
 def test_the_regime_is_a_kernel_regime() -> None:
     assert isinstance(REGIME, RegimeDef)
+
+
+def test_every_source_says_when_it_was_retrieved_and_none_is_dated_later() -> None:
+    assert REGIME.sources
+    assert all(date(2019, 1, 1) <= source.retrieved_on <= date(2026, 10, 13) for source in REGIME.sources)

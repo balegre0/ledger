@@ -10,6 +10,7 @@ dist/
 .import_linter_cache/
 .hypothesis/
 .coverage
+.coverage.*
 htmlcov/
 .env
 deploy/local/zitadel/.local/

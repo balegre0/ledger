@@ -112,3 +112,20 @@ def test_generated_files_nothing_implies_are_deleted_and_hand_written_ones_kept(
     assert not (tree / "apps/api/pyproject.toml").exists()
     assert not stray.exists()
     assert hand_written.exists()
+
+
+def test_check_names_repository_problems_that_sync_leaves_alone(
+    tree: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tree / "deploy/local").mkdir(parents=True)
+    (tree / "deploy/local/compose.yaml").write_text(
+        "services:\n  db:\n    image: postgres:18.7\n", encoding="utf-8"
+    )
+    code, written, _ = run(capsys, "sync", "--root", str(tree))
+    assert code == 0
+    assert written
+    assert run(capsys, "check", "--root", str(tree)) == (
+        1,
+        ["deploy/local/compose.yaml: image 'postgres:18.7' is not pinned in deploy/local/images.toml"],
+        "",
+    )

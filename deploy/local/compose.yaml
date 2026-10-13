@@ -7,9 +7,11 @@
 #
 # PostgreSQL's administrator is `postgres`. A service never connects as that role: a superuser bypasses
 # row-level security, and a database that ignored the policies would hide exactly the bugs they exist to
-# catch. postgres/init.sql creates the role services use, `ledger_app`, which owns the `ledger` database and
-# is no superuser (the platform's tests run as the same role). It runs only when the volume is first
-# created: after editing it, `docker compose down -v` starts over.
+# catch. postgres/init.sql (generated from the manifests by `ledger-devtools sync`) creates the roles, as
+# production makes them: the `ledger_app` and `ledger_migrator` logins, no superuser, and each schema's
+# owner, rw and purge roles; then the `ledger` database and its schemas. postgres/zitadel.sql (by hand) adds
+# Zitadel's role and database. They run only when the volume is first created: after a change,
+# `docker compose down -v` starts over.
 #
 # Every image is pinned to an exact version tag, not to a floating one. A version tag can still be
 # re-pushed (a rebuild on a newer base image keeps it): Zitadel's is pinned by digest too, and pinning the others'
@@ -48,6 +50,7 @@ services:
     volumes:
       - postgres:/var/lib/postgresql
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/10-ledger.sql:ro
+      - ./postgres/zitadel.sql:/docker-entrypoint-initdb.d/20-zitadel.sql:ro
     healthcheck:
       # Healthy when a service could connect: over TCP (while the image runs its init scripts, PostgreSQL
       # listens on a socket only), as the runtime role, to its own database. `pg_isready` would say yes

@@ -137,7 +137,11 @@ def test_the_spec_example_of_a_module_reads() -> None:
 def test_the_spec_example_of_a_country_reads() -> None:
     manifest = load_manifest(COUNTRY)
     assert manifest.distribution == "ledger-country-do"
-    assert manifest.channels[0].valid_from == date(2019, 1, 1)
+    channel = manifest.channels[0]
+    assert (channel.valid_from, channel.valid_until) == (date(2019, 1, 1), None)
+    assert (channel.environments, channel.live_environments) == (("testecf", "certecf", "ecf"), ("ecf",))
+    assert channel.document_kinds == ("invoice", "credit_note", "debit_note")
+    assert (channel.directions, channel.tier) == (("sales", "purchase"), "bronze")
     assert manifest.channels[0].schema_name == "do_ecf"
     assert manifest.channels[0].jobs[0].concurrency == 16
 

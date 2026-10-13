@@ -19,8 +19,8 @@ SOURCE: Final = (
     "https://dgii.gov.do/cicloContribuyente/facturacion/comprobantesFiscalesElectronicosE-CF/"
     "Documentacin%20sobre%20eCF/Documentaci%C3%B3n%20T%C3%A9cnica%20(XSD)/"
 )
-"""Where DGII publishes its XSDs (its page "Documentación sobre e-CF" links each file under it)."""
-FETCHED_ON: Final = "2026-10-12"
+"""Where DGII publishes its XSDs (its page "Documentación sobre e-CF" links each file under it); fetched
+on 2026-10-12."""
 
 
 class Format(StrEnum):

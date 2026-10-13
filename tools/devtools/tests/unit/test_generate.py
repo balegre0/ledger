@@ -17,6 +17,7 @@ from ledger_devtools.workspace import Workspace
 from ledger_platform.config.manifest import PackageManifest
 
 type Writer = Callable[[str, str, tuple[str, ...]], Path]
+type Editor = Callable[[str, str, str], None]
 
 ROOT: Final = Path(__file__).parents[4]
 """The repository: ``ruff format`` reads its configuration from there."""
@@ -291,7 +292,7 @@ def test_importlinter_contracts_follow_the_manifests(tree: Path) -> None:
     assert "    adapters\n    application\n    domain\n    _manifest\n" in text
     assert "[importlinter:contract:identity-is-protected]" in text
     assert "[importlinter:contract:apps-only-compose]" in text
-    assert "identity-declared-edges" not in text
+    assert "[importlinter:contract:identity-declared-edges]" in text
     assert "modules-never-import-countries" not in text
     assert "countries-are-independent" not in text
     assert "containers =\n    ledger_platform\nexhaustive = True\nlayers =\n    _manifest\n" in text
@@ -336,7 +337,7 @@ def test_importlinter_contracts_cover_countries_edges_and_the_kit(tree: Path, wr
         "name = Countries are independent\ntype = independence\n"
     )
     assert independent in text
-    assert "[importlinter:contract:billing-declared-edges]" not in text
+    assert "[importlinter:contract:billing-declared-edges]" in text
     assert "[importlinter:contract:identity-declared-edges]\n" in text
     assert "source_modules =\n    ledger_billing.domain\n    ledger_billing.events\n" in text
     assert "    ledger_country_do_testing\n" in text
@@ -371,3 +372,134 @@ def test_targets_cover_every_generated_file(tree: Path, write: Writer) -> None:
         Path("packages/kernel/src/ledger_kernel/_manifest.py") not in generated
     )  # the runtime never reads it
     assert all(text.endswith("\n") for text in generated.values())
+
+
+TESTING: Final = """
+[package]
+name = "testing"
+kind = "package"
+summary = "Test helpers."
+owners = ["@o"]
+
+[dependencies]
+packages = ["platform"]
+python = ["pytest>=9.1.1"]
+"""
+
+
+def test_the_testing_package_registers_its_pytest_plugin(tree: Path, write: Writer) -> None:
+    write("packages/testing", TESTING, ())
+    workspace = Workspace.load(tree)
+    text = pyproject_text(workspace.by_name("testing"), workspace)
+    assert '[project.entry-points.pytest11]\nledger = "ledger_testing.plugin"\n' in text
+    assert "pytest11" not in pyproject_text(workspace.by_name("platform"), workspace)
+    assert tomllib.loads(text)["project"]["entry-points"]["pytest11"] == {"ledger": "ledger_testing.plugin"}
+
+
+def test_distributions_no_module_imports_by_name_are_never_reported_unused(tree: Path, edit: Editor) -> None:
+    edit(
+        "packages/platform", '"prometheus-client>=0.26.0"]', '"prometheus-client>=0.26.0", "tzdata>=2025.2"]'
+    )
+    edit(
+        "modules/identity",
+        'python = ["fastapi>=0.143"]',
+        'python = ["fastapi>=0.143", "python-multipart>=0.0.32"]',
+    )
+    workspace = Workspace.load(tree)
+    platform = tomllib.loads(pyproject_text(workspace.by_name("platform"), workspace))
+    assert platform["tool"]["deptry"]["per_rule_ignores"] == {"DEP002": ["tzdata"]}
+    identity = tomllib.loads(pyproject_text(workspace.by_name("identity"), workspace))
+    assert identity["tool"]["deptry"] == {"per_rule_ignores": {"DEP002": ["python-multipart"]}}
+    kernel = pyproject_text(workspace.by_name("kernel"), workspace)
+    assert "per_rule_ignores" not in kernel
+
+
+def test_every_package_imports_only_the_workspace_packages_it_declares(tree: Path, write: Writer) -> None:
+    write("packages/testing", TESTING, ())
+    text = importlinter_text(Workspace.load(tree))
+    assert (
+        "[importlinter:contract:api-declared-edges]\n"
+        "name = api imports only the workspace packages it declares\n"
+        "type = forbidden\n"
+        "source_modules =\n    ledger_app_api\n"
+        "forbidden_modules =\n    ledger_identity\n    ledger_kernel\n    ledger_testing\n"
+    ) in text
+    assert "[importlinter:contract:identity-declared-edges]\n" in text
+    assert "source_modules =\n    ledger_kernel\nforbidden_modules =\n    ledger_app_api\n" in text
+
+
+def test_apps_compose_through_the_platform_s_runtime_only(tree: Path) -> None:
+    for child in ("runtime", "http", "data"):
+        (tree / "packages/platform/src/ledger_platform" / child).mkdir()
+    text = importlinter_text(Workspace.load(tree))
+    compose = text.split("[importlinter:contract:apps-only-compose]\n", 1)[1]
+    assert (
+        "forbidden_modules =\n    ledger_identity.adapters\n    ledger_identity.application\n"
+        "    ledger_identity.domain\n    ledger_platform._manifest\n    ledger_platform.data\n"
+        "    ledger_platform.http\nallow_indirect_imports = True\n"
+    ) in compose
+
+
+def test_production_never_imports_what_only_dev_tooling_declares(tree: Path, write: Writer) -> None:
+    write("countries/do", COUNTRY, ())
+    write("countries/do/testing", DO_TESTING + 'python = ["signxml>=5.1.0", "lxml>=6.0"]\n', ())
+    text = importlinter_text(Workspace.load(tree))
+    tooling = text.split("[importlinter:contract:production-never-imports-test-tooling]\n", 1)[1]
+    forbidden = tooling.split("forbidden_modules =\n", 1)[1].split("\n\n", 1)[0]
+    assert "    signxml" in forbidden.splitlines()
+    assert "    lxml" not in forbidden.splitlines()  # the country declares it: production uses it
+    assert "    ledger_country_do_testing" in forbidden.splitlines()
+
+
+def test_a_country_s_channels_on_disk_are_layered_and_pure(tree: Path, write: Writer) -> None:
+    source = write("countries/do", COUNTRY, ("regime", "channels"))
+    for layer in ("adapters", "application", "domain"):
+        (source / "channels/ecf_v1" / layer).mkdir(parents=True)
+    (source / "channels/notes.py").write_text('"""Not a channel."""\n', encoding="utf-8")
+    text = importlinter_text(Workspace.load(tree))
+    assert (
+        "[importlinter:contract:do-channel-ecf_v1-layers]\n"
+        "name = Channel ecf_v1 of do is layered\n"
+        "type = layers\n"
+        "containers =\n    ledger_country_do.channels.ecf_v1\n"
+        "exhaustive = True\n"
+        "layers =\n    adapters\n    application\n    domain\n"
+    ) in text
+    pure = text.split("[importlinter:contract:do-channel-ecf_v1-is-pure]\n", 1)[1].split("\n\n", 1)[0]
+    assert (
+        "source_modules =\n    ledger_country_do.channels.ecf_v1.application\n"
+        "    ledger_country_do.channels.ecf_v1.domain\n"
+    ) in pure
+    forbidden = pure.split("forbidden_modules =\n", 1)[1].splitlines()
+    assert {"    lxml", "    ledger_platform", "    ledger_identity"} <= set(forbidden)
+    assert not {"    ledger_kernel", "    ledger_country_do"} & set(forbidden)
+    assert "notes" not in text
+
+
+def test_targets_cover_init_sql_and_the_openapi_document_of_each_module_the_api_mounts(
+    tree: Path, write: Writer
+) -> None:
+    write("modules/billing", BILLING, ())
+    calls: list[str] = []
+
+    def document() -> dict[str, object]:
+        calls.append("built")
+        return {"openapi": "3.1.0", "paths": {"/v1/companies": {}, "/v1/bills": {}}}
+
+    generated = targets(Workspace.load(tree), document=document)
+    assert generated[Path("deploy/local/postgres/init.sql")].startswith(
+        "-- GENERATED by ledger-devtools sync"
+    )
+    assert '"/v1/companies": {}' in generated[Path("modules/identity/openapi.json")]
+    assert Path("modules/billing/openapi.json") not in generated
+    assert calls == ["built"]
+
+
+def test_no_document_is_built_when_no_module_mounts_routes_in_the_api(tree: Path, edit: Editor) -> None:
+    edit("modules/identity", 'mounted_in = ["api"]', 'mounted_in = ["worker"]')
+
+    def document() -> dict[str, object]:
+        raise AssertionError
+
+    generated = targets(Workspace.load(tree), document=document)
+    assert Path("modules/identity/openapi.json") not in generated

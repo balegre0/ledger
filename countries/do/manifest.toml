@@ -4,6 +4,7 @@ kind = "country"
 summary = "Dominican Republic: regime 'do' (DGII's tax law as data) and channel 'do-ecf-v1' (e-CF)."
 owners = ["@balegre0"]
 
+# The platform is no dependency of the pack's code: `sync` adds it for the generated _manifest.py alone.
 [dependencies]
 packages = ["kernel"]
 python = ["cryptography>=50.0.2", "httpx>=0.28.1", "lxml>=6.1.3", "pydantic>=2.14.1"]

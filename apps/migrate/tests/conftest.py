@@ -7,12 +7,18 @@ import psycopg
 import pytest
 from psycopg import sql
 
+from ledger_platform._manifest import MANIFEST as PLATFORM
 from ledger_platform.data.roles import APP, MIGRATOR
+from ledger_platform.runtime.packs import load_modules
 from ledger_testing.database import TEST_LOGINS, bootstrap, fresh_database
 lazy from ledger_testing.postgres import PostgresServer, Template, WorkerDatabase
 
-SCHEMAS: Final = ("platform", "identity")
-"""The schemas of every package installed here (the platform's and identity's)."""
+SCHEMAS: Final = tuple(
+    schema
+    for schema in (PLATFORM.schema_name, *(module.manifest.schema_name for module in load_modules()))
+    if schema is not None
+)
+"""The schemas of every package installed here, from their manifests: the platform's, then each module's."""
 
 
 def pytest_ledger_template(template: Template) -> None:

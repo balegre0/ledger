@@ -7,16 +7,15 @@ class of a first-party module counts, ``LedgerError`` or not.
 
 import importlib
 import pkgutil
-import tomllib
 from collections import defaultdict
 from pathlib import Path
 from typing import ClassVar, Final
 
-from pydantic import TypeAdapter
-
+from ledger_devtools.workspace import Workspace
 from ledger_kernel.errors import LedgerError
 
-ROOT: Final = Path(__file__).resolve().parent.parent
+ROOT: Final = Path(__file__).resolve().parents[4]
+"""The repository: its manifests name the workspace's packages."""
 
 ENTRY_POINTS: Final = frozenset({"env"})
 """Alembic's migration environments: importing one runs migrations."""
@@ -55,12 +54,8 @@ def declared_codes(classes: set[type[BaseException]], packages: tuple[str, ...])
 
 
 def first_party() -> tuple[str, ...]:
-    """The workspace's import packages: those coverage measures."""
-    config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    return tuple(_SOURCE_PKGS.validate_python(config["tool"]["coverage"]["run"]["source_pkgs"]))
-
-
-_SOURCE_PKGS: Final = TypeAdapter(list[str])
+    """The workspace's import packages, as the manifests name them."""
+    return tuple(package.import_name for package in Workspace.load(ROOT).packages)
 
 
 def test_no_two_error_classes_of_the_workspace_declare_one_code() -> None:

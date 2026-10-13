@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Final
 
 from ledger_devtools.checks import Problem, check
+from ledger_devtools.repository import repository_problems
 from ledger_devtools.workspace import Workspace
 
 type Writer = Callable[[str, str, tuple[str, ...]], Path]
@@ -307,4 +308,77 @@ def test_packages_never_depend_on_each_other_in_a_cycle(tree: Path) -> None:
     )
     assert messages(tree) == [
         "packages/platform/manifest.toml: the package graph has a cycle: platform -> kernel -> platform"
+    ]
+
+
+ROOT_PYPROJECT: Final = """
+[dependency-groups]
+dev = ["pytest>=9.1.1", "ledger-testing"]
+
+[tool.uv.sources]
+ledger-app-api = { workspace = true }
+ledger-identity = { workspace = true }
+ledger-kernel = { workspace = true }
+ledger-platform = { workspace = true }
+ledger-testing = { workspace = true }
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "ledger_kernel", "ledger_platform", "ledger_testing", "ledger_identity", "ledger_app_api",
+]
+"""
+TESTING: Final = """
+[package]
+name = "testing"
+kind = "package"
+summary = "Test helpers."
+owners = ["@o"]
+"""
+
+
+def root_messages(root: Path) -> list[str]:
+    return [f"{problem.where}: {problem.message}" for problem in repository_problems(Workspace.load(root))]
+
+
+def test_the_root_lists_name_the_workspace_s_packages(tree: Path, write: Writer) -> None:
+    write("packages/testing", TESTING, ())
+    (tree / "pyproject.toml").write_text(ROOT_PYPROJECT, encoding="utf-8")
+    assert root_messages(tree) == []
+
+
+def test_root_lists_that_differ_from_the_workspace_are_named(tree: Path, write: Writer) -> None:
+    write("packages/testing", TESTING, ())
+    (tree / "pyproject.toml").write_text(
+        ROOT_PYPROJECT.replace(' "ledger_app_api",', "")
+        .replace("ledger-app-api = { workspace = true }\n", "")
+        .replace('"ledger-testing"]', '"ledger-testing", "ledger-identity"]'),
+        encoding="utf-8",
+    )
+    assert root_messages(tree) == [
+        "pyproject.toml: known-first-party is not the workspace's import packages",
+        "pyproject.toml: [tool.uv.sources] is not the workspace's distributions",
+        (
+            "pyproject.toml: the dev dependency group does not name exactly the workspace's "
+            "dev-only distributions"
+        ),
+    ]
+
+
+def test_a_root_without_those_lists_is_named_too(tree: Path, write: Writer) -> None:
+    write("packages/testing", TESTING, ())
+    (tree / "pyproject.toml").write_text("[project]\nname = 'root'\n", encoding="utf-8")
+    assert len(root_messages(tree)) == 3
+
+
+def test_a_tree_without_a_root_pyproject_or_deploy_files_has_no_repository_problem(tree: Path) -> None:
+    assert root_messages(tree) == []
+
+
+def test_an_unpinned_image_is_a_repository_problem(tree: Path) -> None:
+    (tree / "deploy/local").mkdir(parents=True)
+    (tree / "deploy/local/compose.yaml").write_text(
+        "services:\n  db:\n    image: postgres:18.7\n", encoding="utf-8"
+    )
+    assert root_messages(tree) == [
+        "deploy/local/compose.yaml: image 'postgres:18.7' is not pinned in deploy/local/images.toml"
     ]

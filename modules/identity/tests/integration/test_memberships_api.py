@@ -8,6 +8,7 @@ from uuid import UUID
 import pytest
 lazy import httpx
 
+from ledger_identity.adapters.http.models import MembershipView
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import commands
 from ledger_identity.domain.roles import Role
@@ -59,6 +60,8 @@ def members(client: httpx.AsyncClient, local_issuer: LocalIssuer, company: str) 
 async def test_an_owner_gives_a_role_changes_it_takes_it_away_and_gives_it_again(members: Members) -> None:
     granted = await members.assign("3001", "viewer")
     made = document(granted)
+    view = MembershipView.model_validate_json(granted.content)
+    assert (view.granted_by, view.granted_at.tzinfo is not None) == ("2001", True)
     assert (granted.status_code, made["role"], made["version"], made["granted_by"]) == (
         201,
         "viewer",

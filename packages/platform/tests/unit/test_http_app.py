@@ -120,7 +120,6 @@ class FieldProblem(TypedDict):
 class InvalidRequest(TypedDict):
     code: str
     errors: list[FieldProblem]
-    omitted_errors: int
 
 
 class OpenApiDocument(TypedDict):
@@ -630,6 +629,12 @@ async def test_a_name_the_client_chose_is_cut_in_a_location(client: httpx.AsyncC
     }
 
 
+async def test_a_discriminated_union_takes_each_of_its_members(client: httpx.AsyncClient) -> None:
+    response = await client.post("/households", json={"pet": {"kind": "dog"}})
+    assert response.status_code == 200
+    assert Household.model_validate_json(response.content).pet == Dog(kind="dog")
+
+
 async def test_the_tag_of_a_discriminated_union_does_not_come_back(client: httpx.AsyncClient) -> None:
     response = await client.post("/households", json={"pet": {"kind": "SECRET-4f9a"}})
     assert response.status_code == 422
@@ -680,7 +685,7 @@ async def test_a_flood_of_problems_is_cut_and_counted(client: httpx.AsyncClient)
     response = await client.post("/batches", json=[{"name": 1}] * 50)
     body = INVALID_REQUEST.validate_json(response.content)
     assert len(body["errors"]) == 20
-    assert body["omitted_errors"] == 80
+    assert RECORD.validate_json(response.content)["omitted_errors"] == 80
 
 
 async def test_a_bug_is_a_500_without_details(client: httpx.AsyncClient) -> None:

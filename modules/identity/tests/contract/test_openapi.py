@@ -1,28 +1,28 @@
 """identity's OpenAPI document (3.1), as published in ``modules/identity/openapi.json`` (§10): a snapshot.
 
 The document is made from the code: the ``api`` app is built with placeholder settings (nothing connects) and
-asked for its schema, restricted to identity's paths. With ``UPDATE_SNAPSHOTS=1`` the test writes the
-file instead and fails, for the diff to be reviewed (``uv run poe openapi``).
+asked for its schema, restricted to identity's paths. ``uv run ledger-devtools sync`` writes the file; this
+test compares it (as ``ledger-devtools check`` does), and the others pin what the document says.
 """
 
 import json
-import os
 from pathlib import Path
 from typing import Final, TypedDict
 
-import pytest
 from fastapi.routing import APIRoute, iter_route_contexts
 from pydantic import SecretStr, TypeAdapter
 lazy from fastapi import FastAPI
 lazy from fastapi.dependencies.models import Dependant
 
+from ledger_devtools.openapi import api_document, openapi_text
+from ledger_devtools.workspace import Workspace
 from ledger_identity._manifest import MANIFEST
 from ledger_platform.config.settings import Settings
 from ledger_platform.http.deps import if_match, unguarded_routes
 from ledger_platform.runtime.app import App
 
+ROOT: Final = Path(__file__).parents[4]
 PUBLISHED: Final = Path(__file__).parents[2] / "openapi.json"
-UPDATE: Final = "UPDATE_SNAPSHOTS"
 PLACEHOLDERS: Final = Settings(
     environment="test",
     database_url=SecretStr("postgresql+psycopg://openapi@localhost/openapi"),
@@ -69,23 +69,10 @@ def document() -> str:
     return json.dumps(whole, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
 
-def test_the_published_document_is_the_one_the_code_makes() -> None:
-    made = document()
-    if os.environ.get(UPDATE) == "1":
-        PUBLISHED.write_text(made, encoding="utf-8", newline="\n")
-        pytest.fail("snapshot updated")
-    assert PUBLISHED.read_text(encoding="utf-8") == made, "regenerate it: uv run poe openapi"
-
-
-def test_the_snapshot_switch_writes_the_document_and_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    target = tmp_path / "openapi.json"
-    monkeypatch.setattr(f"{__name__}.PUBLISHED", target)
-    monkeypatch.setenv(UPDATE, "1")
-    with pytest.raises(pytest.fail.Exception, match="snapshot updated"):
-        test_the_published_document_is_the_one_the_code_makes()
-    assert target.read_text(encoding="utf-8") == document()
+def test_the_published_document_is_the_one_sync_writes() -> None:
+    identity = Workspace.load(ROOT).by_name("identity")
+    made = openapi_text(identity, api_document())
+    assert PUBLISHED.read_text(encoding="utf-8") == made, "regenerate it: uv run ledger-devtools sync"
 
 
 def test_the_document_is_openapi_3_1_and_every_post_takes_an_idempotency_key_in_a_mode() -> None:

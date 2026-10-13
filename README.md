@@ -34,12 +34,12 @@ You need [uv](https://docs.astral.sh/uv/) 0.13 or later (it installs CPython 3.1
 real PostgreSQL and a real NATS, and the protobuf lint runs in a container.
 
 ```bash
-uv sync               # the workspace into .venv (CI runs uv sync --locked)
+uv sync --all-packages  # the workspace into .venv (CI runs uv sync --locked --all-packages)
 uv run poe check      # the whole gate, as CI runs it; Docker must be running
 uv run poe fmt        # format and autofix
 uv run poe test       # only the tests, in parallel (xdist), with coverage
 uv run poe proto      # regenerate libs/contracts/src/ledger after editing a .proto; commit the result
-uv run poe openapi    # regenerate services/identity/openapi.json after changing identity's API; commit the result
+uv run poe sync       # rewrite what the manifests imply (pyprojects, contracts, init.sql, OpenAPI); commit it
 uv run poe            # every task
 ```
 

@@ -327,6 +327,7 @@ class Payment(BaseModel):
 def test_a_validation_error_is_logged_by_its_locations_and_types_without_the_input(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    assert Payment.model_validate({"payer": "x", "amount": 7}).payer == "x"  # the model takes what is valid
     with pytest.raises(ValidationError) as invalid:
         Payment.model_validate({"payer": 7, "amount": TAX_ID + "x"})
     assert TAX_ID in str(invalid.value)  # pydantic quotes the input

@@ -449,3 +449,20 @@ def test_the_order_of_the_lines_never_changes_the_totals(
     calculator = TaxCalculator(regime(points=rounding))
     shuffled = [items[index] for index in order if index < len(items)]
     assert calculator.totals(items, DAY) == calculator.totals(shuffled, DAY)
+
+
+def test_field_and_category_kinds_are_the_names_the_wire_carries() -> None:
+    assert {kind: kind.value for kind in FieldKind} == {
+        FieldKind.TEXT: "text",
+        FieldKind.CODE: "code",
+        FieldKind.DATE: "date",
+        FieldKind.DECIMAL: "decimal",
+        FieldKind.OBJECT: "object",
+    }
+    assert {kind: kind.value for kind in TaxCategoryKind} == {
+        TaxCategoryKind.STANDARD: "standard",
+        TaxCategoryKind.REDUCED: "reduced",
+        TaxCategoryKind.ZERO: "zero",
+        TaxCategoryKind.EXEMPT: "exempt",
+        TaxCategoryKind.OUTSIDE_SCOPE: "outside_scope",
+    }

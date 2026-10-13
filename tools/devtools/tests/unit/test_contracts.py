@@ -73,6 +73,7 @@ PLATFORM_CHILDREN: Final = (
     "observability",
     "config",
 )
+ECF_V1: Final = "countries/do/src/ledger_country_do/channels/ecf_v1"
 ALLOWED: Final = {
     "packages/kernel/src/ledger_kernel/__init__.py": "import json",
     "packages/platform/src/ledger_platform/__init__.py": "import ledger_kernel",
@@ -89,7 +90,10 @@ ALLOWED: Final = {
     "modules/billing/src/ledger_billing/__init__.py": "import ledger_identity",
     "countries/do/src/ledger_country_do/regime/__init__.py": "import ledger_kernel",
     "countries/do/testing/src/ledger_country_do_testing/__init__.py": "import ledger_country_do",
-    "apps/api/src/ledger_app_api/main.py": "import ledger_identity.assembly",
+    "apps/api/src/ledger_app_api/main.py": "import ledger_platform.runtime",
+    f"{ECF_V1}/adapters/__init__.py": "import lxml\nimport ledger_country_do.channels.ecf_v1.application",
+    f"{ECF_V1}/application/__init__.py": "import ledger_country_do.channels.ecf_v1.domain",
+    f"{ECF_V1}/domain/__init__.py": "import ledger_kernel\nimport ledger_country_do.regime",
 }
 FORBIDDEN: Final = {
     "workspace-layers": ("packages/kernel/src/ledger_kernel/__init__.py", "import ledger_platform"),
@@ -141,7 +145,26 @@ FORBIDDEN: Final = {
         "packages/platform/src/ledger_platform/__init__.py",
         "import ledger_testing",
     ),
-    "apps-only-compose": ("apps/api/src/ledger_app_api/main.py", "import ledger_identity.domain"),
+    "apps-only-compose": ("apps/api/src/ledger_app_api/main.py", "import ledger_platform.data"),
+    "api-declared-edges": ("apps/api/src/ledger_app_api/main.py", "import ledger_kernel"),
+    "billing-declared-edges": ("modules/billing/src/ledger_billing/__init__.py", "import ledger_testing"),
+    "do-declared-edges": ("countries/do/src/ledger_country_do/__init__.py", "import ledger_testing"),
+    "do-testing-declared-edges": (
+        "countries/do/testing/src/ledger_country_do_testing/__init__.py",
+        "import ledger_platform",
+    ),
+    "kernel-declared-edges": ("packages/kernel/src/ledger_kernel/__init__.py", "import ledger_testing"),
+    "mx-declared-edges": ("countries/mx/src/ledger_country_mx/__init__.py", "import ledger_testing"),
+    "platform-declared-edges": (
+        "packages/platform/src/ledger_platform/__init__.py",
+        "import ledger_identity",
+    ),
+    "testing-declared-edges": ("packages/testing/src/ledger_testing/__init__.py", "import ledger_identity"),
+    "do-channel-ecf_v1-layers": (
+        f"{ECF_V1}/domain/__init__.py",
+        "import ledger_country_do.channels.ecf_v1.adapters",
+    ),
+    "do-channel-ecf_v1-is-pure": (f"{ECF_V1}/domain/__init__.py", "import sqlalchemy"),
 }
 _CONTRACT: Final = re.compile(r"^\[importlinter:contract:(.+)\]$", re.MULTILINE)
 
@@ -164,6 +187,14 @@ def synced(tree: Path, write: Writer) -> Path:
         directory = tree / "packages/platform/src/ledger_platform" / child
         directory.mkdir()
         (directory / "__init__.py").write_text('"""Layer."""\n', encoding="utf-8")
+    for layer in ("adapters", "application", "domain"):
+        directory = tree / ECF_V1 / layer
+        directory.mkdir(parents=True)
+        (directory / "__init__.py").write_text('"""Layer."""\n', encoding="utf-8")
+    (tree / ECF_V1 / "__init__.py").write_text('"""Channel."""\n', encoding="utf-8")
+    (tree / "countries/do/src/ledger_country_do/channels/__init__.py").write_text(
+        '"""Channels."""\n', encoding="utf-8"
+    )
     for child in ("events",):
         directory = tree / "modules/identity/src/ledger_identity" / child
         directory.mkdir()

@@ -12,7 +12,15 @@ from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import texts
 from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import corrected, violations
 from ledger_country_do.channels.ecf_v1.adapters.xml.writer import EmptyTextError, Node, UnwritableTextError
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
-from ledger_country_do.channels.ecf_v1.domain.drafts import BillingIndicator, Buyer, DraftInvalidError, Line
+from ledger_country_do.channels.ecf_v1.domain.drafts import (
+    BillingIndicator,
+    Buyer,
+    DraftInvalidError,
+    GoodsOrService,
+    IncomeType,
+    Line,
+    PaymentType,
+)
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.samples import SIGNED_AT, consumer_invoice, credit_invoice
 
@@ -152,3 +160,30 @@ def test_every_drafted_consumer_invoice_is_valid_for_both_validators(
         b"</ECF>", b'<Signature xmlns="http://www.w3.org/2000/09/xmldsig#"/></ECF>'
     )
     assert XSD_32.is_valid(signed_shape.decode("utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("income", "payment", "kind", "codes"),
+    [
+        (IncomeType.OPERATIONS, PaymentType.CASH, GoodsOrService.GOODS, ("01", "1", "1")),
+        (IncomeType.FINANCIAL, PaymentType.CREDIT, GoodsOrService.SERVICE, ("02", "2", "2")),
+        (IncomeType.EXTRAORDINARY, PaymentType.FREE, GoodsOrService.GOODS, ("03", "3", "1")),
+        (IncomeType.LEASES, PaymentType.CREDIT, GoodsOrService.SERVICE, ("04", "2", "2")),
+        (IncomeType.DEPRECIABLE_ASSETS, PaymentType.CASH, GoodsOrService.GOODS, ("05", "1", "1")),
+        (IncomeType.OTHER, PaymentType.CASH, GoodsOrService.SERVICE, ("06", "1", "2")),
+    ],
+)
+def test_income_payment_and_item_kinds_are_written_in_dgii_s_codes(
+    income: IncomeType, payment: PaymentType, kind: GoodsOrService, codes: tuple[str, str, str]
+) -> None:
+    sample = credit_invoice()
+    lines = tuple(replace(line, kind=kind) for line in sample.lines)
+    draft = replace(sample, income=income, payment=payment, lines=lines)
+    document = ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT)
+    found = texts(
+        document,
+        "Encabezado/IdDoc/TipoIngresos",
+        "Encabezado/IdDoc/TipoPago",
+        "DetallesItems/Item/IndicadorBienoServicio",
+    )
+    assert found == codes

@@ -1,12 +1,9 @@
 [project]
 name = "ledger-workspace"
 version = "0.0.0"
-description = "Workspace root: the shared tooling of every ledger package and service."
+description = "Workspace root: the shared tooling of every ledger package. Packages are found by their manifests."
 requires-python = ">=3.15"
-dependencies = [
-    "ledger-kernel", "ledger-platform", "ledger-identity", "ledger-country-do", "ledger-app-api", "ledger-app-worker",
-    "ledger-app-migrate",
-]
+dependencies = []
 
 [dependency-groups]
 dev = [
@@ -31,6 +28,7 @@ dev = [
     "types-grpcio>=1.84.0.20260928",
     "types-lxml>=2026.2.16",
     "typos>=1.51.1",
+    "vulture>=2.14",
     "xmlschema>=4.3.2",
 ]
 
@@ -40,19 +38,23 @@ package = false
 constraint-dependencies = ["cryptography>=50.0.2"]  # joserfc's: the first release with CPython 3.15 wheels of its own
 
 [tool.uv.workspace]
-members = ["packages/*", "modules/*", "tools/*", "countries/*", "countries/*/testing", "apps/*"]
+members = ["packages/*", "modules/*", "countries/*", "countries/*/testing", "apps/*", "tools/*"]
 
+# Every distribution of the workspace (`ledger-devtools check` compares this table, the dev group's ledger-*
+# entries and ruff's known-first-party with the manifests). A member's own pyproject names the sources it needs,
+# but a member nested in another (countries/<cc>/testing) may not (Decision 27): the root's serve it. Install
+# everything with `uv sync --all-packages`; the root itself depends on nothing.
 [tool.uv.sources]
+ledger-app-api = { workspace = true }
+ledger-app-migrate = { workspace = true }
+ledger-app-worker = { workspace = true }
+ledger-country-do = { workspace = true }
+ledger-country-do-testing = { workspace = true }
+ledger-devtools = { workspace = true }
+ledger-identity = { workspace = true }
 ledger-kernel = { workspace = true }
 ledger-platform = { workspace = true }
 ledger-testing = { workspace = true }
-ledger-identity = { workspace = true }
-ledger-devtools = { workspace = true }
-ledger-country-do = { workspace = true }
-ledger-country-do-testing = { workspace = true }
-ledger-app-api = { workspace = true }
-ledger-app-worker = { workspace = true }
-ledger-app-migrate = { workspace = true }
 
 # ── Tasks: `uv run poe <task>` ──────────────────────────────────────────────────
 [tool.poe.tasks]
@@ -60,35 +62,82 @@ fmt = { shell = "ruff format . && ruff check --fix .", help = "Format and autofi
 format-check = { cmd = "ruff format --check .", help = "Verify formatting" }
 lint = { cmd = "ruff check .", help = "Lint (every ruff rule enabled)" }
 pyright = { cmd = "basedpyright", help = "Type check #1: basedpyright, mode 'all'" }
-mypy-kernel = { cmd = "mypy packages/kernel" }
-mypy-platform = { cmd = "mypy packages/platform" }
-mypy-testing = { cmd = "mypy packages/testing" }
-mypy-identity = { cmd = "mypy modules/identity" }
-mypy-devtools = { cmd = "mypy tools/devtools" }
-mypy-country-do = { cmd = "mypy countries/do/src countries/do/tests" }
-mypy-country-do-testing = { cmd = "mypy countries/do/testing" }
-mypy-app-api = { cmd = "mypy apps/api" }
-mypy-app-worker = { cmd = "mypy apps/worker" }
-mypy-app-migrate = { cmd = "mypy apps/migrate" }
-mypy-workspace = { cmd = "mypy tests" }
-mypy = { sequence = ["mypy-kernel", "mypy-platform", "mypy-testing", "mypy-identity", "mypy-devtools", "mypy-country-do", "mypy-country-do-testing", "mypy-app-api", "mypy-app-worker", "mypy-app-migrate", "mypy-workspace"], help = "Type check #2, one package at a time (each has its own tests), then the workspace's own tests" }
 types = { sequence = ["pyright", "mypy"], help = "Both type checkers" }
-arch = { cmd = "lint-imports", help = "Architecture contracts (import-linter)" }
-deps-kernel = { cmd = "deptry packages/kernel/src --config packages/kernel/pyproject.toml" }
-deps-platform = { cmd = "deptry packages/platform/src --config packages/platform/pyproject.toml" }
-deps-testing = { cmd = "deptry packages/testing/src --config packages/testing/pyproject.toml" }
-deps-identity = { cmd = "deptry modules/identity/src --config modules/identity/pyproject.toml" }
-deps-devtools = { cmd = "deptry tools/devtools/src --config tools/devtools/pyproject.toml" }
-deps-country-do = { cmd = "deptry countries/do/src --config countries/do/pyproject.toml" }
-deps-country-do-testing = { cmd = "deptry countries/do/testing/src --config countries/do/testing/pyproject.toml" }
-deps-app-api = { cmd = "deptry apps/api/src --config apps/api/pyproject.toml" }
-deps-app-worker = { cmd = "deptry apps/worker/src --config apps/worker/pyproject.toml" }
-deps-app-migrate = { cmd = "deptry apps/migrate/src --config apps/migrate/pyproject.toml" }
-deps = { sequence = ["deps-kernel", "deps-platform", "deps-testing", "deps-identity", "deps-devtools", "deps-country-do", "deps-country-do-testing", "deps-app-api", "deps-app-worker", "deps-app-migrate"], help = "Unused / missing / transitive dependencies, per package" }
+arch = { cmd = "lint-imports", help = "Architecture contracts (import-linter, .importlinter is generated)" }
 spell = { cmd = "typos", help = "Spell check" }
-test = { cmd = "pytest -n auto", help = "Tests with coverage, in parallel" }
-openapi = { cmd = "pytest modules/identity/tests/contract --no-cov -q -p no:randomly", env = { UPDATE_SNAPSHOTS = "1" }, help = "Rewrite the published OpenAPI documents (the snapshot test writes them, then fails: review the diff)" }
-check = { sequence = ["format-check", "lint", "suppressions", "types", "arch", "deps", "spell", "proto-lint", "test"], help = "Everything CI runs" }
+devtools = { cmd = "ledger-devtools check", help = "Manifests valid, generated files current, root lists and image pins" }
+sync = { cmd = "ledger-devtools sync", help = "Write every file the manifests imply (pyprojects, _manifest.py, contracts, init.sql, OpenAPI)" }
+check = { sequence = ["format-check", "lint", "suppressions", "types", "arch", "deps", "spell", "proto-lint", "devtools", "dead", "test"], help = "Everything CI runs" }
+
+# The per-package loops run over every directory holding a manifest.toml (Decision 22): no list of packages lives
+# here. A package's sources and tests are named, not its directory: countries/<cc> holds countries/<cc>/testing,
+# a package of its own. `all([...])` builds the whole list first, so every package runs and reports even after
+# one has failed.
+[tool.poe.tasks.mypy]
+help = "Type check #2: mypy --strict, one package at a time (each with its own tests)"
+imports = ["glob", "os", "subprocess"]
+assert = true
+expr = """
+all([subprocess.run(["mypy", f"{directory}/src", f"{directory}/tests"]).returncode == 0 for directory in sorted(
+    os.path.dirname(path).replace(os.sep, "/")
+    for path in glob.glob("*/*/manifest.toml") + glob.glob("countries/*/testing/manifest.toml")
+)])
+"""
+
+[tool.poe.tasks.deps]
+help = "Unused, missing and transitive dependencies (deptry), one package at a time"
+imports = ["glob", "os", "subprocess"]
+assert = true
+expr = """
+all([subprocess.run(["deptry", f"{directory}/src", "--config", f"{directory}/pyproject.toml"]).returncode == 0
+    for directory in sorted(
+        os.path.dirname(path).replace(os.sep, "/")
+        for path in glob.glob("*/*/manifest.toml") + glob.glob("countries/*/testing/manifest.toml")
+    )
+])
+"""
+
+# Every package's tests at once, each run with its own coverage (its data file named after it), its output kept
+# and printed whole, package by package, once all have finished. A package with an integration suite of four
+# files or more spreads it over four workers (the packages share the machine); for the others, starting workers
+# (and the PostgreSQL server xdist's controller starts for them) costs more than it saves.
+[tool.poe.tasks.test]
+help = "Each package's tests, all packages at once, each with its own 100 % branch coverage"
+imports = ["glob", "os", "subprocess", "tempfile"]
+assert = true
+expr = """
+(lambda started: all([
+    (process.wait(), log.seek(0), print(f"=== {directory}", log.read().decode("utf-8", "replace"), sep="\\n"))[0] == 0
+    for directory, log, process in started
+]))([
+    (directory, log, subprocess.Popen(
+        [
+            "pytest", f"{directory}/tests", "-c", "pyproject.toml", "-p", "no:cacheprovider",
+            *(["-n", "4"] if len(glob.glob(f"{directory}/tests/integration/test_*.py")) >= 4 else []),
+            "--cov", f"--cov-config={directory}/pyproject.toml", "--cov-report=term-missing:skip-covered",
+        ],
+        stdout=log, stderr=subprocess.STDOUT,
+        env={**os.environ, "COVERAGE_FILE": f".coverage.{directory.replace('/', '-')}"},
+    ))
+    for directory, log in [(directory, tempfile.TemporaryFile()) for directory in sorted(
+        os.path.dirname(path).replace(os.sep, "/")
+        for path in glob.glob("*/*/manifest.toml") + glob.glob("countries/*/testing/manifest.toml")
+    )]
+])
+"""
+
+# Dead code in every package's sources. Each package's tests are scanned with them, as their users: the test
+# tooling's helpers and the chassis API the spec asks for are used by tests (and by modules to come).
+[tool.poe.tasks.dead]
+help = "Dead code (vulture), over every package's sources and tests"
+imports = ["glob", "subprocess"]
+assert = true
+expr = """
+subprocess.run(["vulture", *sorted(
+    glob.glob("*/*/src") + glob.glob("*/*/tests") + glob.glob("countries/*/testing/src")
+    + glob.glob("countries/*/testing/tests")
+)]).returncode == 0
+"""
 
 # buf lint over contracts/, in the image deploy/local/images.toml pins. Skipped while no .proto exists: the signer
 # milestone adds the first (the only cross-process surface; in-process APIs are Python Protocols).
@@ -150,7 +199,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"{packages/*/tests,modules/*/tests,tools/*/tests,countries/do/tests,countries/do/testing/tests,apps/*/tests,tests}/**" = [
+"{*/*/tests,countries/*/testing/tests}/**" = [
     "S101",    # assert is the point of a test
     "D",       # test names are the documentation
     "PLR2004", # magic values are fine in assertions
@@ -174,9 +223,10 @@ runtime-evaluated-base-classes = [
 ]
 
 [tool.ruff.lint.isort]
+# The workspace's import packages: `ledger-devtools check` compares them with the manifests.
 known-first-party = [
-    "ledger_kernel", "ledger_platform", "ledger_testing", "ledger_identity", "ledger_devtools", "ledger_country_do",
-    "ledger_country_do_testing", "ledger_app_api", "ledger_app_worker", "ledger_app_migrate",
+    "ledger_app_api", "ledger_app_migrate", "ledger_app_worker", "ledger_country_do", "ledger_country_do_testing",
+    "ledger_devtools", "ledger_identity", "ledger_kernel", "ledger_platform", "ledger_testing",
 ]
 
 [tool.ruff.format]
@@ -186,7 +236,7 @@ exclude = ["*.md"]  # ruff 0.17 formats Python blocks inside Markdown; the docs 
 # ── Type checker #1: basedpyright ───────────────────────────────────────────────
 [tool.basedpyright]
 pythonVersion = "3.15"
-include = ["packages", "modules", "tools", "countries", "apps", "tests"]
+include = ["packages", "modules", "countries", "apps", "tools"]
 exclude = ["**/.venv", "**/__pycache__"]
 typeCheckingMode = "all"
 failOnWarnings = true
@@ -227,172 +277,38 @@ init_typed = true
 warn_required_dynamic_aliases = true
 
 # ── Tests ───────────────────────────────────────────────────────────────────────
+# Run per package by `poe test` (coverage is each package's own: its generated pyproject.toml).
 [tool.pytest]
 minversion = "9.0"
-testpaths = ["packages", "modules", "tools", "countries", "apps", "tests"]
-addopts = [
-    "--strict-markers",
-    "--strict-config",
-    "--import-mode=importlib",
-    "--cov",
-    "--cov-report=term-missing:skip-covered",
-]
+addopts = ["--strict-markers", "--strict-config", "--import-mode=importlib"]
 xfail_strict = true
 filterwarnings = ["error"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
-[tool.coverage.run]
-branch = true
-source_pkgs = [
-    "ledger_kernel", "ledger_platform", "ledger_testing", "ledger_identity", "ledger_devtools", "ledger_country_do",
-    "ledger_country_do_testing", "ledger_app_api", "ledger_app_worker", "ledger_app_migrate",
+# ── Dead code (vulture) ─────────────────────────────────────────────────────────
+# A finding is dead code (delete it) or something a framework reads or calls by name or by registration; only
+# patterns of the latter are listed, each with what reads it. No symbol of the repository is named here.
+[tool.vulture]
+min_confidence = 60
+ignore_decorators = [
+    # FastAPI calls the route and exception handlers registered by decorator
+    "@*.get", "@*.post", "@*.put", "@*.patch", "@*.delete", "@*.exception_handler",
+    # pydantic calls validators and serializers
+    "@field_validator", "@model_validator", "@field_serializer", "@model_serializer",
+    # pytest calls fixtures and hooks
+    "@pytest.fixture", "@pytest.hookimpl", "@pytest.hookspec",
 ]
-# Alembic runs a service's migration environment and scripts from their files, as modules named after the file
-# (`env_py`), outside the service's package: coverage, which picks `source_pkgs` by module name, would never
-# trace them. Their directory is named here, which coverage matches by path.
-source = [
-    "modules/identity/src/ledger_identity/adapters/postgres/migrations",
-    "packages/platform/src/ledger_platform/data/revisions",
+ignore_names = [
+    "model_config",                 # pydantic reads a model's configuration by this name
+    "settings_customise_sources",   # pydantic-settings calls this classmethod of a settings class
+    "pytest_*",                     # pytest calls its hooks by name
+    "down_revision", "branch_labels", "depends_on", "upgrade", "downgrade",  # Alembic: a revision's globals
+    "exc_type", "exc_value", "traceback",  # the `__exit__`/`__aexit__` protocol's parameters; structlog's key
+    "msg",                          # the key of a pydantic error (`ErrorDetails`) that a TypedDict reads by subscript
+    "max_header_length",            # joserfc reads this attribute of its JWS registry
+    "invocation_metadata",          # grpc's HandlerCallDetails attribute, which a test's stand-in must have
+    "securitySchemes",              # OpenAPI's key, which a TypedDict of a test reads by subscript
+    # signxml reads these attributes of its signer and verifier, and takes these keywords (typed by Protocols)
+    "excise_empty_xmlns_declarations", "namespaces", "x509_cert", "expect_config",
 ]
-# sys.monitoring, not the C tracer: lines of a route that run after SQLAlchemy's asynchronous driver switched
-# greenlets are reported unexecuted by the C tracer although they ran; sys.monitoring sees them.
-core = "sysmon"
-
-[tool.coverage.report]
-fail_under = 100
-exclude_lines = []     # no "pragma: no cover": every line counts
-partial_branches = []  # no "pragma: no branch": every branch counts
-
-# ── Architecture contracts (import-linter) ──────────────────────────────────────
-[tool.importlinter]
-root_packages = [
-    "ledger_kernel", "ledger_platform", "ledger_testing", "ledger_identity", "ledger_devtools", "ledger_country_do",
-    "ledger_country_do_testing", "ledger_app_api", "ledger_app_worker", "ledger_app_migrate",
-]
-include_external_packages = true
-
-[[tool.importlinter.contracts]]
-name = "Production code never imports test tooling"
-type = "forbidden"
-source_modules = [
-    "ledger_kernel", "ledger_platform", "ledger_identity", "ledger_country_do", "ledger_app_api", "ledger_app_worker",
-    "ledger_app_migrate",
-]
-forbidden_modules = [
-    "pytest", "hypothesis", "testcontainers", "ledger_testing", "ledger_country_do_testing", "signxml", "xmlschema",
-]
-
-[[tool.importlinter.contracts]]
-name = "Packages point down: platform -> kernel"
-type = "layers"
-layers = ["ledger_platform", "ledger_kernel"]
-
-# Inside the platform, top to bottom (§5.2). Subpackages are layers and peers (`|`) never import each other; the
-# runtime, the composition root, imports every layer below it. Exhaustive: a module without a layer is an error.
-[[tool.importlinter.contracts]]
-name = "Platform layers"
-type = "layers"
-containers = ["ledger_platform"]
-exhaustive = true
-layers = ["runtime", "http | grpc", "events | jobs", "auth", "data", "observability", "_manifest", "config"]
-
-[[tool.importlinter.contracts]]
-name = "Kernel is standard library only"
-type = "forbidden"
-source_modules = ["ledger_kernel"]
-forbidden_modules = ["pydantic", "pydantic_settings", "sqlalchemy", "fastapi", "starlette", "structlog", "google", "grpc", "opentelemetry", "prometheus_client", "psycopg"]
-
-# An app is a composition root (§3.3): it builds an App and serves it. Modules are found through their entry
-# points, so an app imports no module at all; nor the kernel, nor the platform below its runtime. (Indirect
-# imports are the runtime's own.)
-[[tool.importlinter.contracts]]
-name = "Apps only compose"
-type = "forbidden"
-source_modules = ["ledger_app_api", "ledger_app_worker", "ledger_app_migrate"]
-forbidden_modules = [
-    "ledger_identity", "ledger_country_do", "ledger_kernel",
-    "ledger_platform._manifest", "ledger_platform.config", "ledger_platform.observability", "ledger_platform.data",
-    "ledger_platform.auth", "ledger_platform.events", "ledger_platform.jobs", "ledger_platform.http",
-    "ledger_platform.grpc",
-]
-allow_indirect_imports = true
-
-[[tool.importlinter.contracts]]
-name = "Libraries never import services"
-type = "forbidden"
-source_modules = ["ledger_kernel", "ledger_platform", "ledger_testing"]
-forbidden_modules = ["ledger_identity"]
-
-# Inside identity (§4.1): the assembly over the adapters (its REST API may use its PostgreSQL adapter), over the
-# use cases (application), over the domain, over its events, over its generated manifest. Exhaustive: a module
-# without a layer is an error.
-[[tool.importlinter.contracts]]
-name = "identity layers"
-type = "layers"
-containers = ["ledger_identity"]
-exhaustive = true
-layers = ["assembly", "adapters", "application", "domain", "events", "_manifest"]
-
-# The application's ports are its own: it knows no platform type either.
-[[tool.importlinter.contracts]]
-name = "identity domain, events and use cases are pure"
-type = "forbidden"
-source_modules = ["ledger_identity.domain", "ledger_identity.events", "ledger_identity.application"]
-forbidden_modules = [
-    "ledger_platform",
-    # the kernel contract's list ...
-    "pydantic", "pydantic_settings", "sqlalchemy", "fastapi", "starlette", "structlog", "google", "grpc",
-    "opentelemetry", "prometheus_client", "psycopg",
-    # ... and every other dependency the packages of this repository bring in
-    "httpx", "joserfc", "cryptography", "alembic", "granian",
-]
-
-# ── Countries (§4.6 contracts 3-5; written by hand until `ledger-devtools sync` generates them, Task 19) ──
-# The DO pack stands on the kernel; its channel takes the platform when it gets an assembly (v2-M3).
-[[tool.importlinter.contracts]]
-name = "The DO pack imports the kernel and nothing else of the workspace"
-type = "forbidden"
-source_modules = ["ledger_country_do", "ledger_country_do_testing"]
-forbidden_modules = ["ledger_platform", "ledger_identity", "ledger_testing", "ledger_devtools"]
-
-[[tool.importlinter.contracts]]
-name = "Modules never import countries"
-type = "forbidden"
-source_modules = ["ledger_identity"]
-forbidden_modules = ["ledger_country_do", "ledger_country_do_testing"]
-
-# Starlette is production code for the platform and identity, and test tooling (the fake DGII's) for the DO
-# pack: hence a contract of the pack's own rather than an entry in "Production code never imports test tooling".
-[[tool.importlinter.contracts]]
-name = "The DO pack's production code never imports the fake DGII's web framework"
-type = "forbidden"
-source_modules = ["ledger_country_do"]
-forbidden_modules = ["starlette"]
-
-# A regime is data in the kernel's types: the kernel and the standard library only (ADR 0005).
-[[tool.importlinter.contracts]]
-name = "Regimes are pure"
-type = "forbidden"
-source_modules = ["ledger_country_do.regime"]
-forbidden_modules = [
-    "ledger_country_do.channels", "ledger_country_do_testing", "ledger_platform", "ledger_identity",
-    "ledger_testing", "ledger_devtools",
-    # every third-party distribution of the workspace a regime could reach for
-    "lxml", "httpx", "pydantic", "pydantic_settings", "cryptography", "starlette", "fastapi", "sqlalchemy",
-    "psycopg", "structlog", "opentelemetry", "prometheus_client", "joserfc", "alembic", "granian", "grpc",
-    "google", "xmlschema", "signxml", "testcontainers",
-]
-
-[[tool.importlinter.contracts]]
-name = "Channel do-ecf-v1 is layered: adapters -> application -> domain"
-type = "layers"
-containers = ["ledger_country_do.channels.ecf_v1"]
-exhaustive = true
-layers = ["adapters", "application", "domain"]
-
-[[tool.importlinter.contracts]]
-name = "do-ecf-v1's domain and use cases know no third party"
-type = "forbidden"
-source_modules = ["ledger_country_do.channels.ecf_v1.domain", "ledger_country_do.channels.ecf_v1.application"]
-forbidden_modules = ["lxml", "httpx", "pydantic", "cryptography"]

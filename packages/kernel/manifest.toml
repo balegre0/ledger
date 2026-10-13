@@ -1,0 +1,5 @@
+[package]
+name = "kernel"
+kind = "package"
+summary = "Value types every package shares: ids, tenancy, money, tax ids, regimes, events. Standard library only."
+owners = ["@balegre0"]

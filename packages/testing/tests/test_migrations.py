@@ -96,3 +96,6 @@ def test_the_readers_read_the_schema_they_are_told(postgres: PostgresServer) -> 
     assert policies(url, schema="books") == [("shelves", "mine")]
     assert row_security(url, schema="books") == {"shelves": (True, False)}
     assert (tables_of(url), policies(url)) == (set(), [])  # nothing of it in public
+    assert pending_changes(url, models, schema="books") is None
+    Table("labels", models, Column("shelf_id", Uuid(), primary_key=True), schema="books")
+    assert "labels" in (pending_changes(url, models, schema="books") or "")
