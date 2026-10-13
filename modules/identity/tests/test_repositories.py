@@ -47,8 +47,9 @@ from ledger_identity.domain.roles import READ_ONLY, Role
 from ledger_identity.domain.text import LegalName, parse_code, parse_legal_name, parse_name
 from ledger_kernel.access import Permission, Principal, SubjectId
 from ledger_kernel.countries.do import TaxId
-from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
+from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.pagination import PageRequest, decode_cursor
+from ledger_kernel.tenancy import OrganizationScope, Tenant
 from ledger_platform.auth.tokens import organization_of
 from ledger_platform.outbox import OutboxRecord
 from ledger_testing.waiting import eventually, waits_for_a_lock
@@ -56,7 +57,8 @@ lazy from ledger_identity.application.ports import IdentityUnit
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_identity.domain.events import IdentityEvent
 lazy from ledger_kernel.pagination import Page
-lazy from ledger_platform.data.database import Database, Scope
+lazy from ledger_kernel.tenancy import Scope
+lazy from ledger_platform.data.database import Database
 lazy from ledger_platform.outbox import Outbox
 
 NOW: Final = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
@@ -117,7 +119,7 @@ async def create(
     return await in_unit(
         database,
         outbox,
-        founder.organization,
+        OrganizationScope(founder.organization, None),
         lambda unit: commands.create_company(
             unit, founder, tax_id=tax_id, legal_name=parse_legal_name("Duarte")
         ),
@@ -188,8 +190,10 @@ async def test_a_unit_that_fails_keeps_and_announces_nothing(database: Database,
         raise ZeroDivisionError
 
     with pytest.raises(ZeroDivisionError):
-        await in_unit(database, outbox, FOUNDER.organization, create_then_fail)
-    async with database.transaction(FOUNDER.organization) as unit:  # the scope that would see the company
+        await in_unit(database, outbox, OrganizationScope(FOUNDER.organization, None), create_then_fail)
+    async with database.transaction(
+        OrganizationScope(FOUNDER.organization, None)
+    ) as unit:  # the scope that would see the company
         companies = (
             await unit.connection.execute(select(func.count()).select_from(CompanyRecord))
         ).scalar_one()
@@ -206,7 +210,7 @@ async def test_a_tax_id_is_one_active_company_s_in_every_organization(
         await create(database, outbox)
     with pytest.raises(TaxIdTakenError):
         await create(database, outbox, founder=STRANGER)
-    async with database.transaction(STRANGER.organization) as unit:
+    async with database.transaction(OrganizationScope(STRANGER.organization, None)) as unit:
         assert (
             await unit.connection.execute(select(func.count()).select_from(CompanyRecord))
         ).scalar_one() == 0
@@ -222,7 +226,7 @@ async def test_two_organizations_registering_one_taxpayer_at_once_get_one_compan
 
 
 async def deactivate(database: Database, outbox: Outbox, company: Company) -> None:
-    tenant = Tenant(company.organization, company.id)
+    tenant = Tenant(company.organization, company.id, None)
     await in_unit(
         database,
         outbox,
@@ -247,8 +251,13 @@ async def test_a_deactivated_company_frees_its_tax_id_for_any_organization(
 async def test_another_organization_sees_none_of_a_company(database: Database, outbox: Outbox) -> None:
     company = await create(database, outbox)
     with pytest.raises(CompanyNotFoundError):
-        await in_unit(database, outbox, STRANGER.organization, lambda unit: queries.company(unit, company.id))
-    stranger_tenant = Tenant(STRANGER.organization, company.id)
+        await in_unit(
+            database,
+            outbox,
+            OrganizationScope(STRANGER.organization, None),
+            lambda unit: queries.company(unit, company.id),
+        )
+    stranger_tenant = Tenant(STRANGER.organization, company.id, None)
     with pytest.raises(CompanyNotFoundError):
         await in_unit(database, outbox, stranger_tenant, lambda unit: queries.company(unit, company.id))
     assert await MembershipPermissions(database).permissions(STRANGER, company.id) == frozenset()
@@ -300,7 +309,7 @@ async def test_a_principal_pages_through_the_companies_it_holds_a_role_in(
     first = await in_unit(
         database,
         outbox,
-        FOUNDER.organization,
+        OrganizationScope(FOUNDER.organization, None),
         lambda unit: queries.companies_of(unit, OWNER, PageRequest(size=2)),
     )
     assert len(first.items) == 2
@@ -309,7 +318,7 @@ async def test_a_principal_pages_through_the_companies_it_holds_a_role_in(
     rest = await in_unit(
         database,
         outbox,
-        FOUNDER.organization,
+        OrganizationScope(FOUNDER.organization, None),
         lambda unit: queries.companies_of(unit, OWNER, PageRequest(size=2, after=after)),
     )
     assert (len(rest.items), rest.next_cursor) == (1, None)
@@ -317,7 +326,7 @@ async def test_a_principal_pages_through_the_companies_it_holds_a_role_in(
     partner = await in_unit(
         database,
         outbox,
-        FOUNDER.organization,
+        OrganizationScope(FOUNDER.organization, None),
         lambda unit: queries.companies_of(unit, PARTNER.subject, PageRequest()),
     )
     assert partner.items == ()
@@ -464,8 +473,11 @@ async def test_a_row_cannot_point_at_a_company_or_a_branch_of_another_tenant(
         created_at=NOW,
     )
     attempts: tuple[tuple[Scope, Insert], ...] = (
-        (mine.organization, member_of_theirs),  # row-level security lets each of these through
-        (Tenant(mine.organization, theirs.id), branch_of_theirs),
+        (
+            OrganizationScope(mine.organization, None),
+            member_of_theirs,
+        ),  # row-level security lets each of these through
+        (Tenant(mine.organization, theirs.id, None), branch_of_theirs),
         (mine.tenant, point_in_the_sister_s_branch),
     )
     for scope, statement in attempts:
@@ -540,7 +552,7 @@ async def test_the_repositories_keep_to_the_unit_s_organization_without_row_leve
             (await unit.emission_points.page(company.id, branch.id, PageRequest())).items,
         ]
 
-    seen = await with_the_policies_off(database, outbox, STRANGER.organization, look)
+    seen = await with_the_policies_off(database, outbox, OrganizationScope(STRANGER.organization, None), look)
     assert seen == [1, None, None, None, (), None, 0, (), None, (), None, ()]
 
 
@@ -561,7 +573,10 @@ async def test_the_repositories_keep_to_the_unit_s_company_without_row_level_sec
 
     nothing: Final = [None, (), None, ()]
     assert await with_the_policies_off(database, outbox, sister.tenant, look) == nothing
-    assert await with_the_policies_off(database, outbox, company.organization, look) == nothing
+    assert (
+        await with_the_policies_off(database, outbox, OrganizationScope(company.organization, None), look)
+        == nothing
+    )
     own = await with_the_policies_off(database, outbox, company.tenant, look)
     assert own == [branch, (branch,), point, (point,)]  # the same statements, in the company's own unit
 
@@ -587,9 +602,11 @@ async def test_a_unit_refuses_to_write_a_row_of_another_tenant(database: Databas
         lambda unit: unit.emission_points.add(point),
     )
     attempts: tuple[tuple[Scope, Callable[[IdentityUnit], Awaitable[object]]], ...] = (
-        *((STRANGER.organization, write) for write in of_another_organization),
+        *((OrganizationScope(STRANGER.organization, None), write) for write in of_another_organization),
         *((sister.tenant, write) for write in of_another_company),
-        *((company.organization, write) for write in of_another_company),  # a unit of no company at all
+        *(
+            (OrganizationScope(company.organization, None), write) for write in of_another_company
+        ),  # a unit of no company at all
     )
     for scope, write_elsewhere in attempts:
         with pytest.raises(ForeignTenantError) as caught:
@@ -608,7 +625,7 @@ async def test_a_unit_reads_its_clock_once_for_its_time_and_its_events(
         readings.append(NOW + timedelta(seconds=len(readings)))
         return readings[-1]
 
-    async with database.transaction(FOUNDER.organization) as transaction:
+    async with database.transaction(OrganizationScope(FOUNDER.organization, None)) as transaction:
         unit = bind(transaction, outbox, clock=ticking)
         company = await commands.create_company(
             unit, FOUNDER, tax_id=RNC, legal_name=parse_legal_name("Duarte")
@@ -781,7 +798,10 @@ async def test_a_deactivated_company_lets_other_services_read_only_and_identity_
         lambda unit: commands.deactivate_company(unit, company.id, admits=anything, actor=OWNER),
     )
     for_other_services = await in_unit(
-        database, outbox, FOUNDER.organization, lambda unit: queries.permissions_of(unit, company.id, OWNER)
+        database,
+        outbox,
+        OrganizationScope(FOUNDER.organization, None),
+        lambda unit: queries.permissions_of(unit, company.id, OWNER),
     )
     assert for_other_services == READ_ONLY
     permissions = MembershipPermissions(database)
@@ -867,7 +887,7 @@ async def test_branches_and_emission_points_are_paged_in_id_order_by_cursor(
 
 # ── The wire ────────────────────────────────────────────────────────────────────
 
-TENANT: Final = Tenant(OrganizationId(new_id()), CompanyId(new_id()))
+TENANT: Final = Tenant(OrganizationId(new_id()), CompanyId(new_id()), None)
 
 
 @pytest.mark.parametrize(

@@ -38,7 +38,8 @@ from sqlalchemy.pool import NullPool
 lazy from sqlalchemy import ColumnElement, Connection, Delete, MetaData, Update
 
 from ledger_kernel.errors import LedgerError, UnavailableError
-from ledger_kernel.ids import CompanyId, OrganizationId, Tenant
+from ledger_kernel.ids import CompanyId, OrganizationId
+from ledger_kernel.tenancy import OrganizationScope, Tenant
 from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.data.database import (
     ORGANIZATION_POLICY,
@@ -48,7 +49,8 @@ from ledger_platform.data.database import (
     scope_settings,
 )
 from ledger_platform.schema import CHASSIS_METADATA
-lazy from ledger_platform.data.database import AnyTable, Database, Scope
+lazy from ledger_kernel.tenancy import Scope
+lazy from ledger_platform.data.database import AnyTable, Database
 
 HEAD: Final = "head"
 BASE: Final = "base"
@@ -158,11 +160,10 @@ class UnexpectedRowCountError(LedgerError):
 
 
 def _named(scope: Scope) -> str:
-    match scope:
-        case Tenant(organization=organization, company=company):
-            return f"company {company} of organization {organization}"
-        case organization:
-            return f"organization {organization}"
+    company = scope.company
+    if company is None:
+        return f"organization {scope.organization}"
+    return f"company {company} of organization {scope.organization}"
 
 
 @final
@@ -365,7 +366,7 @@ def _by_tenant(connection: Connection, of: AnyTable, where: ColumnElement[bool] 
     company = type_coerce(of.c.company_id, Uuid())
     counted = select(organization, company, func.count()).group_by(organization, company)
     rows = connection.execute(counted if where is None else counted.where(where)).all()
-    return {Tenant(OrganizationId(owner), CompanyId(unit)): count for owner, unit, count in rows}
+    return {Tenant(OrganizationId(owner), CompanyId(unit), None): count for owner, unit, count in rows}
 
 
 def _by_organization(
@@ -374,7 +375,7 @@ def _by_organization(
     organization = type_coerce(of.c[column], Uuid())
     counted = select(organization, func.count()).group_by(organization)
     rows = connection.execute(counted if where is None else counted.where(where)).all()
-    return {OrganizationId(owner): count for owner, count in rows}
+    return {OrganizationScope(OrganizationId(owner), None): count for owner, count in rows}
 
 
 def run_per_scope(connection: Connection, statement: Update | Delete, expected: Mapping[Scope, int]) -> None:

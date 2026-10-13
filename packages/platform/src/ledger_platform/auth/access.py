@@ -17,7 +17,8 @@ from ledger_kernel.errors import ForbiddenError, NotFoundError
 from ledger_platform.config.options import InvalidOptionError, require_at_least, require_seconds
 lazy from ledger_kernel.access import Permission, Principal, SubjectId
 lazy from ledger_kernel.clock import MonotonicClock
-lazy from ledger_kernel.ids import CompanyId, OrganizationId, Tenant
+lazy from ledger_kernel.ids import CompanyId, OrganizationId
+lazy from ledger_kernel.tenancy import Tenant
 
 DEFAULT_TTL: Final = 30.0
 """Seconds an answer is kept from when it was asked for: how long a revoked role may still work in another
@@ -73,7 +74,8 @@ class PermissionSource(Protocol, metaclass=ABCMeta):
 class CompanyAccess:
     """A request's caller, the company it acts on (with its organization) and what it may do there.
 
-    ``tenant`` is the scope of a company's transaction; ``principal.organization`` that of an organization's.
+    ``tenant`` is the scope of a company's transaction (mode-less in this milestone); an organization's is an
+    ``OrganizationScope`` of ``principal.organization``.
     """
 
     principal: Principal

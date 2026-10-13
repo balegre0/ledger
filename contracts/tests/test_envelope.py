@@ -15,7 +15,8 @@ from ledger_contracts.envelope import (
     MalformedEventError,
     UnexpectedEventError,
 )
-from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
+from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_kernel.tenancy import Tenant
 
 NOW = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
 OFFSETS = st.integers(min_value=-86_399, max_value=86_399).map(
@@ -25,7 +26,7 @@ VISIBLE_ASCII = st.characters(min_codepoint=ord("!"), max_codepoint=ord("~"))
 IDENTIFIERS = st.from_regex(r"[A-Za-z_][A-Za-z0-9_]{0,9}", fullmatch=True)
 NOISE = st.text(st.characters(max_codepoint=0x200) | st.sampled_from([chr(0xD800), chr(0xDFFF)]), max_size=40)
 """Controls, spaces, non-ASCII and lone surrogates among ordinary characters."""
-TENANT = Tenant(OrganizationId(new_id()), CompanyId(new_id()))
+TENANT = Tenant(OrganizationId(new_id()), CompanyId(new_id()), None)
 TRACEPARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 BAD_TRACEPARENTS = {
     "empty": "",

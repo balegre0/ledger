@@ -14,7 +14,8 @@ from ledger_identity.application import commands
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN
 from ledger_identity.domain.roles import Role
 from ledger_kernel.access import SubjectId
-from ledger_kernel.ids import CompanyId, Tenant, new_id
+from ledger_kernel.ids import CompanyId, new_id
+from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.tokens import organization_of
 from ledger_testing.api import Caller, created, document, page
 from ledger_testing.issuer import LocalIssuer
@@ -31,7 +32,7 @@ FAR_FUTURE: Final = 4_102_444_800
 async def grant(service: Service[IdentitySettings], company: str, subject: str, role: Role) -> None:
     """Give ``subject`` a role directly, as the owner (``2001``) would through the memberships API."""
     runtime = service.runtime()
-    tenant = Tenant(organization_of("1001"), CompanyId(UUID(company)))
+    tenant = Tenant(organization_of("1001"), CompanyId(UUID(company)), None)
     async with runtime.database.transaction(tenant) as transaction:
         await commands.grant_role(
             bind(transaction, runtime.outbox),
@@ -442,7 +443,7 @@ async def test_an_admin_demoted_while_its_deactivation_waits_for_the_company_can
 ) -> None:
     await grant(service, company, "2002", Role.ADMIN)
     runtime = service.runtime()
-    tenant = Tenant(organization_of("1001"), CompanyId(UUID(company)))
+    tenant = Tenant(organization_of("1001"), CompanyId(UUID(company)), None)
     headers = Caller(issuer, subject="2002").posting("k-off") | {"If-Match": '"1"'}
     async with runtime.database.transaction(tenant) as transaction:  # holds the company's lock
         await commands.grant_role(

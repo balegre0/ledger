@@ -29,7 +29,8 @@ from sqlalchemy.pool import NullPool
 lazy from sqlalchemy import Connection
 
 from ledger_kernel.errors import ErrorKind
-from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
+from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_kernel.tenancy import OrganizationScope, Tenant
 from ledger_platform import migrations
 from ledger_platform.data.database import (
     SET_SCOPE,
@@ -55,7 +56,7 @@ from ledger_platform.migrations import (
 )
 from ledger_testing.containers import libpq_url
 from ledger_testing.waiting import eventually, waits_for_a_lock
-lazy from ledger_platform.data.database import Scope
+lazy from ledger_kernel.tenancy import Scope
 lazy from ledger_platform.migrations import SchemaReadiness
 
 ENV: Final = """
@@ -152,9 +153,9 @@ TAGS: Final = Table(
     Column("read", Boolean, nullable=True),
 )
 ORGANIZATION: Final = OrganizationId(new_id())
-ALPHA: Final = Tenant(ORGANIZATION, CompanyId(new_id()))
-BETA: Final = Tenant(ORGANIZATION, CompanyId(new_id()))
-ELSEWHERE: Final = Tenant(OrganizationId(new_id()), CompanyId(new_id()))
+ALPHA: Final = Tenant(ORGANIZATION, CompanyId(new_id()), None)
+BETA: Final = Tenant(ORGANIZATION, CompanyId(new_id()), None)
+ELSEWHERE: Final = Tenant(OrganizationId(new_id()), CompanyId(new_id()), None)
 HOLD_THE_MIGRATION_LOCK: Final = "SELECT pg_advisory_lock(%s)"
 """What a migration that takes long looks like to another: the lock held, by a session of the test's own."""
 CANCEL_THE_WAITING: Final = (
@@ -457,10 +458,13 @@ def test_rows_of_a_table_an_organization_owns_are_counted_by_organization(owner:
     create(owner, *organization_isolation(NOTEBOOKS))
     other = ELSEWHERE.organization
     for organization in (ORGANIZATION, ORGANIZATION, other):
-        in_scope(owner, organization)
+        in_scope(owner, OrganizationScope(organization, None))
         owner.execute(NOTEBOOKS.insert().values(id=new_id(), organization_id=organization))
     in_scope(owner, None)
-    assert rows_by_scope(owner, NOTEBOOKS) == {ORGANIZATION: 2, other: 1}
+    assert rows_by_scope(owner, NOTEBOOKS) == {
+        OrganizationScope(ORGANIZATION, None): 2,
+        OrganizationScope(other, None): 1,
+    }
     expected = rows_by_scope(owner, NOTEBOOKS, NOTEBOOKS.c.title.is_(None))
     run_per_scope(owner, update(NOTEBOOKS).values(title="untitled"), expected)
     assert rows_by_scope(owner, NOTEBOOKS, NOTEBOOKS.c.title.is_(None)) == {}
@@ -492,7 +496,7 @@ def test_an_organization_s_table_with_a_company_column_is_counted_by_organizatio
     organization's, and a statement run per company would miss them."""
     create(owner, *organization_isolation(TAGS))
     for tenant, label in ((ALPHA, "a"), (BETA, "b"), (BETA, "c"), (ELSEWHERE, "d")):
-        in_scope(owner, tenant.organization)
+        in_scope(owner, OrganizationScope(tenant.organization, None))
         owner.execute(
             TAGS.insert().values(
                 id=new_id(), organization_id=tenant.organization, company_id=tenant.company, label=label
@@ -501,7 +505,10 @@ def test_an_organization_s_table_with_a_company_column_is_counted_by_organizatio
     in_scope(owner, None)
     unread = TAGS.c.read.is_(None)
     expected = rows_by_scope(owner, TAGS, unread)
-    assert expected == {ORGANIZATION: 3, ELSEWHERE.organization: 1}
+    assert expected == {
+        OrganizationScope(ORGANIZATION, None): 3,
+        OrganizationScope(ELSEWHERE.organization, None): 1,
+    }
     run_per_scope(owner, update(TAGS).where(unread).values(read=True), expected)
     assert rows_by_scope(owner, TAGS, unread) == {}
     assert rows_by_scope(owner, TAGS, TAGS.c.read.is_(True)) == expected
@@ -525,7 +532,7 @@ def test_a_statement_the_policy_confines_to_fewer_rows_than_counted_fails(owner:
     """The scope an organization's table needs, used on a company's table: the policy hides every row."""
     create(owner, *tenant_isolation(NOTES))
     add_note(owner, ALPHA, "a")
-    by_organization: dict[Scope, int] = {ORGANIZATION: 1}
+    by_organization: dict[Scope, int] = {OrganizationScope(ORGANIZATION, None): 1}
     with pytest.raises(UnexpectedRowCountError) as caught:
         run_per_scope(owner, update(NOTES).values(length=1), by_organization)
     assert caught.value.code == "unexpected_row_count"

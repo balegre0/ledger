@@ -19,8 +19,10 @@ from ledger_identity.adapters.postgres.tables import (
     MembershipRecord,
     OrganizationRecord,
 )
-from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
-lazy from ledger_platform.data.database import Database, Scope
+from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_kernel.tenancy import OrganizationScope, Tenant
+lazy from ledger_kernel.tenancy import Scope
+lazy from ledger_platform.data.database import Database
 
 NOW: Final = datetime(2026, 10, 12, 12, tzinfo=UTC)
 SUBJECT: Final = "312345678901234567"
@@ -76,8 +78,10 @@ def point_of(tenant: Tenant, branch: UUID, code: str = "001") -> dict[str, objec
 
 async def seeded(database: Database, organization: OrganizationId | None = None) -> Seeded:
     """A company (of a new organization unless ``organization`` is given) with one branch and one owner."""
-    tenant = Tenant(organization=organization or OrganizationId(new_id()), company=CompanyId(new_id()))
-    async with database.transaction(tenant.organization) as unit:
+    tenant = Tenant(
+        organization=organization or OrganizationId(new_id()), company=CompanyId(new_id()), mode=None
+    )
+    async with database.transaction(OrganizationScope(tenant.organization, None)) as unit:
         if organization is None:
             await unit.connection.execute(
                 insert(OrganizationRecord).values(
@@ -128,7 +132,7 @@ async def test_row_level_security_shows_a_scope_what_it_owns_and_nothing_without
     everything = {"organizations": 1, "companies": 2, "memberships": 2, "branches": 1, "emission_points": 1}
     assert await counts(database, first.tenant) == everything
     assert await counts(database, sibling.tenant) == everything
-    assert await counts(database, first.tenant.organization) == {
+    assert await counts(database, OrganizationScope(first.tenant.organization, None)) == {
         **everything,
         "branches": 0,
         "emission_points": 0,
@@ -140,9 +144,11 @@ async def test_row_level_security_shows_a_scope_what_it_owns_and_nothing_without
 async def test_a_membership_cannot_point_at_another_organizations_company(database: Database) -> None:
     victim = await seeded(database)
     attacker = await seeded(database)
-    across = Tenant(organization=attacker.tenant.organization, company=victim.tenant.company)
+    across = Tenant(organization=attacker.tenant.organization, company=victim.tenant.company, mode=None)
     with pytest.raises(IntegrityError) as caught:
-        async with database.transaction(attacker.tenant.organization) as unit:  # the policy lets the row in
+        async with database.transaction(
+            OrganizationScope(attacker.tenant.organization, None)
+        ) as unit:  # the policy lets the row in
             await unit.connection.execute(insert(MembershipRecord).values(membership_of(across, INTRUDER)))
     assert violated_key(caught) == "fk_memberships_company"
 
@@ -150,7 +156,7 @@ async def test_a_membership_cannot_point_at_another_organizations_company(databa
 async def test_a_branch_cannot_point_at_another_organizations_company(database: Database) -> None:
     victim = await seeded(database)
     attacker = await seeded(database)
-    across = Tenant(organization=attacker.tenant.organization, company=victim.tenant.company)
+    across = Tenant(organization=attacker.tenant.organization, company=victim.tenant.company, mode=None)
     with pytest.raises(IntegrityError) as caught:
         async with database.transaction(across) as unit:
             await unit.connection.execute(insert(BranchRecord).values(branch_of(across, new_id(), "999")))
@@ -171,7 +177,7 @@ async def test_an_emission_point_cannot_point_at_the_branch_of_another_company(d
 async def test_an_emission_point_cannot_point_at_another_organizations_company(database: Database) -> None:
     victim = await seeded(database)
     attacker = await seeded(database)
-    across = Tenant(organization=attacker.tenant.organization, company=victim.tenant.company)
+    across = Tenant(organization=attacker.tenant.organization, company=victim.tenant.company, mode=None)
     with pytest.raises(IntegrityError) as caught:
         async with database.transaction(across) as unit:
             await unit.connection.execute(

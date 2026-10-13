@@ -1,10 +1,11 @@
 """PostgreSQL: one transaction per unit of work, with the tenant enforced by row-level security.
 
-Every transaction sets ``ledger.organization_id`` and ``ledger.company_id`` (transaction-local) from its
-scope: a company of an organization (``Tenant``), or an organization alone (``OrganizationId``). Tables
-protected by ``tenant_isolation`` show and accept only the rows of that organization and company; tables an
-organization owns as a whole, protected by ``organization_isolation``, the rows of that organization. Without
-a scope they show nothing and accept nothing (fail closed). A transaction commits only if every statement in
+Every transaction sets ``ledger.organization_id``, ``ledger.company_id`` and ``ledger.mode``
+(transaction-local) from its scope (``ledger_kernel.tenancy.Scope``): a company of an organization
+(``Tenant``), or an organization alone (``OrganizationScope``), each in a mode or in none. Tables protected by
+``tenant_isolation`` show and accept only the rows of that organization and company; tables an organization
+owns as a whole, protected by ``organization_isolation``, the rows of that organization. Without a scope they
+show nothing and accept nothing (fail closed). A transaction commits only if every statement in
 it succeeded, and what runs after the commit can no longer change the outcome.
 """
 
@@ -14,7 +15,7 @@ from datetime import timedelta
 from functools import partial
 from math import ceil
 from types import BuiltinFunctionType, FunctionType, MethodType
-from typing import ClassVar, Final, assert_type, final
+from typing import ClassVar, Final, final
 lazy from collections.abc import AsyncGenerator, Callable, Sequence
 
 import psycopg
@@ -31,9 +32,8 @@ lazy from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 lazy from sqlalchemy.sql.base import ReadOnlyColumnCollection
 
 from ledger_kernel.errors import LedgerError
-from ledger_kernel.ids import Tenant
 from ledger_platform.config.options import InvalidOptionError, require_at_least
-lazy from ledger_kernel.ids import OrganizationId
+lazy from ledger_kernel.tenancy import Scope
 
 _DRIVERS: Final = ("postgresql+psycopg", "postgresql+psycopg_async")
 """The only driver, in the two spellings SQLAlchemy has for its asynchronous use (one dialect, one
@@ -43,7 +43,8 @@ _OWNED_PARAMETERS: Final = ("application_name", "connect_timeout", "options")
 SET_SCOPE: Final = text(
     """
     SELECT set_config('ledger.organization_id', :organization, true),
-           set_config('ledger.company_id', :company, true)
+           set_config('ledger.company_id', :company, true),
+           set_config('ledger.mode', :mode, true)
     """
 )
 """Sets the transaction's scope: run it with ``scope_settings(scope)``, before any statement of the scope."""
@@ -71,10 +72,6 @@ type AnyTable = Table[ReadOnlyColumnCollection[str, Column[object]]]
 SQLAlchemy 2.1 gives a bare ``Table`` the default ``Table[ReadOnlyColumnCollection[str, Column[Any]]]``, and
 mypy refuses the ``Any`` of that default wherever it is spelled out; ``object`` accepts the same tables.
 """
-
-type Scope = Tenant | OrganizationId
-"""Whose rows a transaction may touch: one company of an organization (``Tenant``), or an organization's own
-rows (``OrganizationId``), such as its list of companies. ``None`` touches no protected row at all."""
 
 
 class PlatformTable(DeclarativeBase):
@@ -310,21 +307,19 @@ class _Callbacks:
 
 
 def scope_settings(scope: Scope | None) -> dict[str, str]:
-    """What ``ledger.organization_id`` and ``ledger.company_id`` are set to for ``scope``; empty if absent.
+    """What ``ledger.organization_id``, ``ledger.company_id`` and ``ledger.mode`` are set to; empty if absent.
 
     The parameters of ``SET_SCOPE``: ``Database.transaction`` sets them, and so does a data migration that
     runs a statement in each scope (``ledger_platform.migrations.run_per_scope``).
-
-    Exhaustive over ``Scope``: what reaches the last case must be an ``OrganizationId`` (``assert_type``), so
-    a new kind of scope fails type checking here instead of being taken for an organization.
     """
-    match scope:
-        case None:
-            return {"organization": "", "company": ""}
-        case Tenant(organization=organization, company=company):
-            return {"organization": str(organization), "company": str(company)}
-        case organization:
-            return {"organization": str(assert_type(organization, OrganizationId)), "company": ""}
+    if scope is None:
+        return {"organization": "", "company": "", "mode": ""}
+    company, mode = scope.company, scope.mode
+    return {
+        "organization": str(scope.organization),
+        "company": "" if company is None else str(company),
+        "mode": "" if mode is None else mode.value,
+    }
 
 
 @final
@@ -488,10 +483,10 @@ class Database:
     async def transaction(self, scope: Scope | None) -> AsyncGenerator[UnitOfWork]:
         """A transaction scoped to ``scope``: commits on normal exit, rolls back on an exception.
 
-        A ``Tenant`` scopes it to one company of an organization, an ``OrganizationId`` to the rows the
-        organization owns as a whole, ``None`` to no protected row. It never reports a commit that did not
-        happen: if a statement failed and the caller went on, the exit raises ``AbortedTransactionError`` and
-        the callbacks do not run.
+        A ``Tenant`` scopes it to one company of an organization, an ``OrganizationScope`` to the rows the
+        organization owns as a whole, ``None`` to no protected row; the scope's mode is set too. It never
+        reports a commit that did not happen: if a statement failed and the caller went on, the exit raises
+        ``AbortedTransactionError`` and the callbacks do not run.
         """
         callbacks = _Callbacks()
         try:

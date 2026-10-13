@@ -51,7 +51,7 @@ from ledger.identity.v1.identity_query_pb2_grpc import IdentityQueryServiceStub
 from ledger_contracts.envelope import Envelope
 from ledger_kernel.access import Permission, parse_subject
 from ledger_kernel.errors import InvalidInputError
-from ledger_kernel.ids import CompanyId, OrganizationId, parse_id
+from ledger_kernel.ids import CompanyId, OrganizationId, parse_uuid
 from ledger_platform.auth.access import PermissionSource
 from ledger_platform.grpc.client import DEFAULT_DEADLINE, call_unary, require_deadline
 lazy from ledger_kernel.access import Principal, SubjectId
@@ -126,11 +126,11 @@ class Subscriber(Protocol, metaclass=ABCMeta):
 
 
 def _member(organization: str, company: str, subject: str) -> tuple[OrganizationId, CompanyId, SubjectId]:
-    return OrganizationId(parse_id(organization)), CompanyId(parse_id(company)), parse_subject(subject)
+    return OrganizationId(parse_uuid(organization)), CompanyId(parse_uuid(company)), parse_subject(subject)
 
 
 def _company(organization: str, company: str) -> tuple[OrganizationId, CompanyId]:
-    return OrganizationId(parse_id(organization)), CompanyId(parse_id(company))
+    return OrganizationId(parse_uuid(organization)), CompanyId(parse_uuid(company))
 
 
 @final

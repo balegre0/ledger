@@ -48,8 +48,9 @@ lazy from pydantic import BaseModel
 lazy from starlette.routing import BaseRoute
 
 from ledger_kernel.errors import ForbiddenError, InvalidInputError, LedgerError
-from ledger_kernel.ids import CompanyId, Tenant, parse_id
+from ledger_kernel.ids import CompanyId, parse_uuid
 from ledger_kernel.pagination import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, PageRequest, decode_cursor
+from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.access import CompanyAccess, NoCompanyAccessError
 from ledger_platform.auth.tokens import MissingTokenError
 from ledger_platform.http.request_fields import remember
@@ -149,11 +150,11 @@ def authenticated(verifier: TokenVerifier) -> Caller:
 
 async def _granted(principal: Principal, company_id: str, source: PermissionSource) -> CompanyAccess:
     """``principal``'s access to the company ``company_id`` names; ``NoCompanyAccessError`` without a role."""
-    company = CompanyId(parse_id(company_id))
+    company = CompanyId(parse_uuid(company_id))
     permissions = await source.permissions(principal, company)
     if not permissions:
         raise NoCompanyAccessError(company)
-    return CompanyAccess(principal, Tenant(principal.organization, company), permissions)
+    return CompanyAccess(principal, Tenant(principal.organization, company, None), permissions)
 
 
 def company_in_path[**P](caller: Caller, permissions: PermissionsDependency[P]) -> InCompany:

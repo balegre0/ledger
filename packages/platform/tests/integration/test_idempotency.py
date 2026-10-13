@@ -13,7 +13,8 @@ from sqlalchemy.exc import OperationalError
 
 from ledger_kernel.access import Principal, SubjectId
 from ledger_kernel.errors import ErrorKind
-from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
+from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_kernel.tenancy import OrganizationScope, Tenant
 from ledger_platform.data.database import Database, DatabaseLimits
 from ledger_platform.idempotency import (
     MAX_KEY_LENGTH,
@@ -35,7 +36,8 @@ from ledger_platform.idempotency import (
 )
 from ledger_platform.schema import CHASSIS_METADATA, CHASSIS_POLICIES
 from ledger_testing.waiting import PATIENCE, eventually, waits_for_a_lock
-lazy from ledger_platform.data.database import Scope, UnitOfWork
+lazy from ledger_kernel.tenancy import Scope
+lazy from ledger_platform.data.database import UnitOfWork
 
 ORGANIZATION: Final = OrganizationId(new_id())
 STRANGERS: Final = OrganizationId(new_id())
@@ -117,7 +119,7 @@ async def respond(
     scope: Scope | None = None,
 ) -> Outcome:
     """``tried``'s request in a transaction of its own, scoped to ``scope`` or else its organization."""
-    async with database.transaction(scope or tried.organization) as unit:
+    async with database.transaction(scope or OrganizationScope(tried.organization, None)) as unit:
         return await idempotency.once(unit, tried, lambda: work(unit))
 
 
@@ -134,7 +136,7 @@ async def count_effects(database: Database) -> int:
 
 
 async def stored_keys(database: Database, organization: OrganizationId) -> list[str]:
-    async with database.transaction(organization) as unit:
+    async with database.transaction(OrganizationScope(organization, None)) as unit:
         rows = await unit.connection.execute(select(IdempotencyRecord.key).order_by(IdempotencyRecord.key))
         return list(rows.scalars())
 
@@ -146,7 +148,7 @@ async def expire(
     expired = update(IdempotencyRecord).values(expires_at=func.now() - ago)
     if only:
         expired = expired.where(IdempotencyRecord.key.in_(only))
-    async with database.transaction(organization) as unit:
+    async with database.transaction(OrganizationScope(organization, None)) as unit:
         await unit.connection.execute(expired)
 
 
@@ -252,14 +254,14 @@ async def test_a_body_above_the_bound_is_a_defect_and_leaves_the_key_free(keys: 
 
 
 async def test_a_unit_scoped_to_a_company_of_the_organization_is_accepted(keys: Database) -> None:
-    company = Tenant(ORGANIZATION, CompanyId(new_id()))
+    company = Tenant(ORGANIZATION, CompanyId(new_id()), None)
     assert await respond(keys, attempt(), scope=company) == Outcome(CREATED, replayed=False)
     assert await respond(keys, attempt()) == Outcome(CREATED, replayed=True)
 
 
 @pytest.mark.parametrize(
     "scope",
-    [STRANGERS, Tenant(STRANGERS, CompanyId(new_id()))],
+    [OrganizationScope(STRANGERS, None), Tenant(STRANGERS, CompanyId(new_id()), None)],
     ids=["another organization", "a company of another organization"],
 )
 async def test_a_unit_scoped_to_another_organization_is_a_defect(keys: Database, scope: Scope) -> None:
@@ -375,7 +377,7 @@ async def test_an_expired_key_the_purge_left_is_taken_over_by_its_next_request(k
 async def test_a_key_is_kept_for_the_retention_from_its_first_use(keys: Database) -> None:
     await respond(keys, attempt(key="an-hour"), idempotency=Idempotency(retention=timedelta(hours=1)))
     await respond(keys, attempt(key="a-day"))
-    async with keys.transaction(ORGANIZATION) as unit:
+    async with keys.transaction(OrganizationScope(ORGANIZATION, None)) as unit:
         rows = await unit.connection.execute(
             select(IdempotencyRecord.key, IdempotencyRecord.expires_at, func.now())
         )
@@ -434,7 +436,7 @@ async def test_an_organization_sees_only_its_own_keys(keys: Database) -> None:
 
 async def test_a_committed_key_without_a_response_is_a_defect(keys: Database) -> None:
     tried = attempt()
-    async with keys.transaction(ORGANIZATION) as unit:
+    async with keys.transaction(OrganizationScope(ORGANIZATION, None)) as unit:
         await unit.connection.execute(
             insert(IdempotencyRecord).values(
                 organization_id=tried.organization,

@@ -11,7 +11,8 @@ from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import commands
 from ledger_identity.domain.roles import Role
 from ledger_kernel.access import SubjectId
-from ledger_kernel.ids import CompanyId, Tenant
+from ledger_kernel.ids import CompanyId
+from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.tokens import organization_of
 from ledger_testing.api import Caller, document, page
 from ledger_testing.waiting import eventually, waits_for_a_lock
@@ -164,7 +165,7 @@ async def test_an_owner_demoted_while_its_grant_of_ownership_waits_for_the_compa
 ) -> None:
     await members.assign("2002", "owner")
     runtime = service.runtime()
-    tenant = Tenant(organization_of("1001"), CompanyId(UUID(members.company)))
+    tenant = Tenant(organization_of("1001"), CompanyId(UUID(members.company)), None)
     async with runtime.database.transaction(tenant) as transaction:  # holds the company's lock
         await commands.grant_role(
             bind(transaction, runtime.outbox),

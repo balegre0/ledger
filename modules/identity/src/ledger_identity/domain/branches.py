@@ -9,7 +9,7 @@ from ledger_identity.domain.ids import BranchId, EmissionPointId
 from ledger_kernel.ids import new_id
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_identity.domain.text import Code, Name
-lazy from ledger_kernel.ids import Tenant
+lazy from ledger_kernel.tenancy import Tenant
 
 
 @final

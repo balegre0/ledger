@@ -21,7 +21,8 @@ lazy from nats.aio.client import Client
 
 from ledger.common.v1.money_pb2 import Money
 from ledger_contracts.envelope import Envelope
-from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
+from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_kernel.tenancy import Tenant
 from ledger_platform import outbox as outbox_module
 from ledger_platform.data.database import Database
 from ledger_platform.outbox import (
@@ -329,7 +330,7 @@ async def test_a_failure_names_the_event_and_nothing_of_its_content(
     registry: CollectorRegistry,
 ) -> None:
     outbox = Outbox(tracing=tracing, registry=registry, publish_timeout=0.1)
-    tenant = Tenant(OrganizationId(new_id()), CompanyId(new_id()))
+    tenant = Tenant(OrganizationId(new_id()), CompanyId(new_id()), None)
     envelope = Envelope.wrap(Money(amount="31337", currency="DOP"), source="test", tenant=tenant)
     async with database.transaction(None) as unit:
         await outbox.add(unit, envelope, subject="test.silent")
@@ -671,7 +672,7 @@ async def test_the_outbox_is_outside_row_level_security(
 ) -> None:
     """A company's transaction writes the event; the relay, which has no tenant, still sees and sends it."""
     await ensure_stream(jetstream, STREAM)
-    tenant = Tenant(OrganizationId(new_id()), CompanyId(new_id()))
+    tenant = Tenant(OrganizationId(new_id()), CompanyId(new_id()), None)
     envelope = Envelope.wrap(Money(amount="1", currency="DOP"), source="test", tenant=tenant)
     await commit(database, outbox, envelope, tenant=tenant)
 

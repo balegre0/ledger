@@ -21,6 +21,7 @@ from ledger_identity.domain.organization import ORGANIZATION_ADMIN
 from ledger_identity.domain.text import parse_legal_name
 from ledger_kernel.access import Permission
 from ledger_kernel.countries.do import TaxId
+from ledger_kernel.tenancy import OrganizationScope
 from ledger_platform.http.deps import (
     REPLAYED_HEADER,
     allowed,
@@ -86,7 +87,9 @@ def router(context: ApiContext) -> APIRouter:
         """
         tax_id, legal_name = TaxId.parse(body.tax_id), parse_legal_name(body.legal_name)
         attempt = attempt_of(request, principal, key, body)
-        async with current.database.transaction(principal.organization) as transaction:
+        async with current.database.transaction(
+            OrganizationScope(principal.organization, None)
+        ) as transaction:
 
             async def register() -> StoredResponse:
                 unit = context.bind(transaction, current.outbox)
@@ -103,7 +106,9 @@ def router(context: ApiContext) -> APIRouter:
         current: Annotated[Runtime[IdentitySettings], Depends(runtime)],
     ) -> CompanyPage:
         """The companies of the caller's organization in which it holds a role."""
-        async with current.database.transaction(principal.organization) as transaction:
+        async with current.database.transaction(
+            OrganizationScope(principal.organization, None)
+        ) as transaction:
             unit = context.bind(transaction, current.outbox)
             found = await queries.companies_of(unit, principal.subject, page)
         return CompanyPage(

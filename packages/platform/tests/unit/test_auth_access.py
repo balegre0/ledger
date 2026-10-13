@@ -5,7 +5,8 @@ import pytest
 
 from ledger_kernel.access import Permission, Principal, SubjectId
 from ledger_kernel.errors import ErrorKind
-from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
+from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.access import (
     CachedPermissions,
     CompanyAccess,
@@ -54,7 +55,7 @@ class Counting(PermissionSource):
 
 
 def test_access_allows_what_it_holds_and_refuses_the_rest() -> None:
-    access = CompanyAccess(ALICE, Tenant(ORGANIZATION, COMPANY), READ)
+    access = CompanyAccess(ALICE, Tenant(ORGANIZATION, COMPANY, None), READ)
     assert access.allows(Permission.COMPANY_READ)
     assert not access.allows(Permission.COMPANY_MANAGE)
     access.require(Permission.COMPANY_READ)

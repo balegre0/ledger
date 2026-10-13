@@ -35,7 +35,8 @@ lazy from sqlalchemy import Insert
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ledger_kernel.errors import ErrorKind
-from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
+from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_kernel.tenancy import Mode, OrganizationScope, Tenant
 from ledger_platform.data.database import (
     AbortedTransactionError,
     ClosedUnitOfWorkError,
@@ -48,7 +49,8 @@ from ledger_platform.data.database import (
     tenant_isolation,
     tenant_isolation_removal,
 )
-lazy from ledger_platform.data.database import AnyTable, Scope, UnitOfWork
+lazy from ledger_kernel.tenancy import Scope
+lazy from ledger_platform.data.database import AnyTable, UnitOfWork
 
 metadata = MetaData()
 notes = Table(
@@ -61,8 +63,10 @@ notes = Table(
 )
 ORGANIZATION = OrganizationId(new_id())
 OTHER_ORGANIZATION = OrganizationId(new_id())
-ALPHA = Tenant(ORGANIZATION, CompanyId(new_id()))
-BETA = Tenant(ORGANIZATION, CompanyId(new_id()))
+ORGANIZATION_SCOPE = OrganizationScope(ORGANIZATION, None)
+OTHER_ORGANIZATION_SCOPE = OrganizationScope(OTHER_ORGANIZATION, None)
+ALPHA = Tenant(ORGANIZATION, CompanyId(new_id()), None)
+BETA = Tenant(ORGANIZATION, CompanyId(new_id()), None)
 UNREACHABLE = "postgresql+psycopg://nobody:nothing@127.0.0.1:1/none"
 
 
@@ -172,7 +176,7 @@ async def test_a_company_cannot_write_rows_of_another(isolated: Database) -> Non
 
 
 async def test_a_company_cannot_write_into_another_organization(isolated: Database) -> None:
-    stranger = Tenant(OTHER_ORGANIZATION, ALPHA.company)
+    stranger = Tenant(OTHER_ORGANIZATION, ALPHA.company, None)
     with pytest.raises(DBAPIError, match="row-level security"):
         async with isolated.transaction(stranger) as unit:
             await unit.connection.execute(note(ALPHA, "x"))
@@ -180,7 +184,7 @@ async def test_a_company_cannot_write_into_another_organization(isolated: Databa
 
 async def test_the_same_company_under_another_organization_sees_nothing(isolated: Database) -> None:
     await write(isolated, ALPHA, "alpha 1")
-    assert await read(isolated, Tenant(OTHER_ORGANIZATION, ALPHA.company)) == []
+    assert await read(isolated, Tenant(OTHER_ORGANIZATION, ALPHA.company, None)) == []
 
 
 async def test_a_company_cannot_hand_its_row_to_another(isolated: Database) -> None:
@@ -939,21 +943,21 @@ async def names(database: Database, scope: Scope | None) -> list[str]:
 
 
 async def test_an_organization_sees_its_own_rows_from_any_of_its_companies(shared: Database) -> None:
-    await enter(shared, ORGANIZATION, ORGANIZATION, "first")
+    await enter(shared, ORGANIZATION_SCOPE, ORGANIZATION, "first")
     await enter(shared, ALPHA, ORGANIZATION, "second")
-    assert await names(shared, ORGANIZATION) == ["first", "second"]
+    assert await names(shared, ORGANIZATION_SCOPE) == ["first", "second"]
     assert await names(shared, ALPHA) == ["first", "second"]
     assert await names(shared, BETA) == ["first", "second"]
 
 
 async def test_another_organization_sees_none_of_them(shared: Database) -> None:
-    await enter(shared, ORGANIZATION, ORGANIZATION, "first")
-    assert await names(shared, OTHER_ORGANIZATION) == []
-    assert await names(shared, Tenant(OTHER_ORGANIZATION, ALPHA.company)) == []
+    await enter(shared, ORGANIZATION_SCOPE, ORGANIZATION, "first")
+    assert await names(shared, OTHER_ORGANIZATION_SCOPE) == []
+    assert await names(shared, Tenant(OTHER_ORGANIZATION, ALPHA.company, None)) == []
 
 
 async def test_without_a_scope_no_organization_row_is_visible_or_writable(shared: Database) -> None:
-    await enter(shared, ORGANIZATION, ORGANIZATION, "first")
+    await enter(shared, ORGANIZATION_SCOPE, ORGANIZATION, "first")
     assert await names(shared, None) == []
     with pytest.raises(DBAPIError, match="row-level security"):
         await enter(shared, None, ORGANIZATION, "orphan")
@@ -961,51 +965,68 @@ async def test_without_a_scope_no_organization_row_is_visible_or_writable(shared
 
 async def test_an_organization_cannot_write_rows_of_another(shared: Database) -> None:
     with pytest.raises(DBAPIError, match="row-level security"):
-        await enter(shared, ORGANIZATION, OTHER_ORGANIZATION, "intruder")
+        await enter(shared, ORGANIZATION_SCOPE, OTHER_ORGANIZATION, "intruder")
 
 
 async def test_an_organization_cannot_hand_its_rows_to_another(shared: Database) -> None:
-    await enter(shared, ORGANIZATION, ORGANIZATION, "first")
+    await enter(shared, ORGANIZATION_SCOPE, ORGANIZATION, "first")
     with pytest.raises(DBAPIError, match="row-level security"):
-        async with shared.transaction(ORGANIZATION) as unit:
+        async with shared.transaction(ORGANIZATION_SCOPE) as unit:
             await unit.connection.execute(update(directory).values(organization_id=OTHER_ORGANIZATION))
 
 
 async def test_an_organization_scope_sees_no_company_owned_row(isolated: Database) -> None:
     await write(isolated, ALPHA, "alpha 1")
-    async with isolated.transaction(ORGANIZATION) as unit:
+    async with isolated.transaction(ORGANIZATION_SCOPE) as unit:
         visible = list((await unit.connection.execute(select(notes.c.body))).scalars())
     assert visible == []
     with pytest.raises(DBAPIError, match="row-level security"):
-        async with isolated.transaction(ORGANIZATION) as unit:
+        async with isolated.transaction(ORGANIZATION_SCOPE) as unit:
             await unit.connection.execute(note(ALPHA, "no company in scope"))
 
 
 async def test_an_organization_scope_hides_the_company_owned_rows_of_another_organization(
     isolated: Database,
 ) -> None:
-    stranger = Tenant(OTHER_ORGANIZATION, CompanyId(new_id()))
+    stranger = Tenant(OTHER_ORGANIZATION, CompanyId(new_id()), None)
     await write(isolated, stranger, "theirs")
-    async with isolated.transaction(ORGANIZATION) as unit:
+    async with isolated.transaction(ORGANIZATION_SCOPE) as unit:
         visible = list((await unit.connection.execute(select(notes.c.body))).scalars())
         changed = (await unit.connection.execute(update(notes).values(body="taken"))).rowcount
         deleted = (await unit.connection.execute(delete(notes))).rowcount
     assert (visible, changed, deleted) == ([], 0, 0)
     assert await read(isolated, stranger) == ["theirs"]
     with pytest.raises(DBAPIError, match="row-level security"):
-        async with isolated.transaction(ORGANIZATION) as unit:
+        async with isolated.transaction(ORGANIZATION_SCOPE) as unit:
             await unit.connection.execute(note(stranger, "planted"))
 
 
 async def test_an_organization_scope_sets_the_organization_and_no_company(database: Database) -> None:
     organization = literal_column("current_setting('ledger.organization_id')", Text)
     company = literal_column("current_setting('ledger.company_id')", Text)
-    async with database.transaction(ORGANIZATION) as unit:
+    async with database.transaction(ORGANIZATION_SCOPE) as unit:
         carried = (await unit.connection.execute(select(organization, company))).one()
     assert carried == (str(ORGANIZATION), "")
 
 
-@pytest.mark.parametrize("scope", [ALPHA, ORGANIZATION, None], ids=["tenant", "organization", "none"])
+MODE_SETTING = literal_column("current_setting('ledger.mode', true)", Text)
+
+
+async def test_a_transaction_sets_the_mode_of_its_scope(database: Database) -> None:
+    scope = Tenant(OrganizationId(new_id()), CompanyId(new_id()), Mode.LIVE)
+    async with database.transaction(scope) as unit:
+        mode = (await unit.connection.execute(select(MODE_SETTING))).scalar_one()
+    assert mode == "live"
+
+
+@pytest.mark.parametrize("scope", [ALPHA, ORGANIZATION_SCOPE, None], ids=["tenant", "organization", "none"])
+async def test_a_unit_without_a_mode_sets_none(database: Database, scope: Scope | None) -> None:
+    async with database.transaction(scope) as unit:
+        mode = (await unit.connection.execute(select(MODE_SETTING))).scalar_one()
+    assert mode == ""
+
+
+@pytest.mark.parametrize("scope", [ALPHA, ORGANIZATION_SCOPE, None], ids=["tenant", "organization", "none"])
 async def test_a_unit_knows_the_scope_it_was_opened_with(database: Database, scope: Scope | None) -> None:
     async with database.transaction(scope) as unit:
         assert unit.scope == scope
@@ -1046,7 +1067,7 @@ def test_the_organization_policy_removal_undoes_it_step_by_step() -> None:
 async def test_removing_the_organization_policy_opens_the_table_and_it_can_be_put_back(
     shared: Database,
 ) -> None:
-    await enter(shared, ORGANIZATION, ORGANIZATION, "first")
+    await enter(shared, ORGANIZATION_SCOPE, ORGANIZATION, "first")
     await apply(shared, organization_isolation_removal(directory))
     assert await names(shared, None) == ["first"]
     await apply(shared, organization_isolation(directory))

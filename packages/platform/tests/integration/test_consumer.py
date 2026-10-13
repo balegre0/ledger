@@ -51,7 +51,8 @@ from ledger_kernel.errors import (
     NotFoundError,
     UnavailableError,
 )
-from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
+from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_kernel.tenancy import Tenant
 from ledger_platform.consumer import (
     DEFAULT_ACK_WAIT,
     MAX_NAME_LENGTH,
@@ -75,7 +76,7 @@ lazy from ledger_platform.observability.tracing import Tracing
 
 NAME = "test-consumer"
 STREAM = StreamSpec(name="EVENTS", subjects=("events.>",))
-TENANT = Tenant(OrganizationId(new_id()), CompanyId(new_id()))
+TENANT = Tenant(OrganizationId(new_id()), CompanyId(new_id()), None)
 EFFECTS = Table("effects", MetaData(), Column("event_id", Uuid(), nullable=False))
 """What handlers write in the event's transaction: it must happen once per event, whatever is delivered."""
 COMPANY = literal_column("current_setting('ledger.company_id')", Text)

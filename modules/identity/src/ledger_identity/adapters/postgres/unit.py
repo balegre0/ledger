@@ -1,6 +1,6 @@
 """identity's unit of work over one chassis transaction: its repositories and its outbox."""
 
-from typing import ClassVar, assert_type
+from typing import ClassVar
 
 from ledger_identity.adapters.events import OutboxEvents
 from ledger_identity.adapters.postgres.repositories import (
@@ -13,10 +13,8 @@ from ledger_identity.adapters.postgres.repositories import (
 from ledger_identity.application.ports import IdentityUnit
 from ledger_kernel.clock import utc_now
 from ledger_kernel.errors import LedgerError
-from ledger_kernel.ids import OrganizationId, Tenant
 lazy from ledger_kernel.clock import Clock
-lazy from ledger_kernel.ids import CompanyId
-lazy from ledger_platform.data.database import Scope, UnitOfWork
+lazy from ledger_platform.data.database import UnitOfWork
 lazy from ledger_platform.outbox import Outbox
 
 
@@ -29,17 +27,6 @@ class UnscopedUnitError(LedgerError):
         super().__init__("identity's state is read and changed in a transaction scoped to an organization")
 
 
-def _tenancy_of(scope: Scope | None) -> tuple[OrganizationId, CompanyId | None]:
-    """The organization of ``scope``, and its company if it is one's; exhaustive over ``Scope``."""
-    match scope:
-        case None:
-            raise UnscopedUnitError
-        case Tenant(organization=organization, company=company):
-            return organization, company
-        case organization:
-            return assert_type(organization, OrganizationId), None
-
-
 def bind(unit: UnitOfWork, outbox: Outbox, *, clock: Clock = utc_now) -> IdentityUnit:
     """The identity view of the transaction ``unit``: what its use cases read, change and announce.
 
@@ -48,7 +35,10 @@ def bind(unit: UnitOfWork, outbox: Outbox, *, clock: Clock = utc_now) -> Identit
     security enforces them. ``clock`` is read once: its answer is the unit's ``now`` and the time
     of every event the unit announces.
     """
-    organization, company = _tenancy_of(unit.scope)
+    scope = unit.scope
+    if scope is None:
+        raise UnscopedUnitError
+    organization, company = scope.organization, scope.company
     now = clock()
     connection = unit.connection
     return IdentityUnit(

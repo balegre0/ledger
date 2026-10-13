@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends
 from ledger_identity.api.context import problems
 from ledger_identity.api.models import OrganizationView
 from ledger_identity.application import queries
+from ledger_kernel.tenancy import OrganizationScope
 from ledger_platform.http.deps import in_organization
 lazy from ledger_identity.api.context import ApiContext
 lazy from ledger_identity.settings import IdentitySettings
@@ -25,7 +26,9 @@ def router(context: ApiContext) -> APIRouter:
         current: Annotated[Runtime[IdentitySettings], Depends(runtime)],
     ) -> OrganizationView:
         """The organization the caller acts in; 404 until it has a company."""
-        async with current.database.transaction(principal.organization) as transaction:
+        async with current.database.transaction(
+            OrganizationScope(principal.organization, None)
+        ) as transaction:
             found = await queries.organization(
                 context.bind(transaction, current.outbox), principal.organization
             )

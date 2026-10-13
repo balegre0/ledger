@@ -40,8 +40,9 @@ from ledger_identity.domain.text import Code, LegalName, Name
 from ledger_kernel.access import SubjectId
 from ledger_kernel.countries.do import TaxId
 from ledger_kernel.errors import LedgerError
-from ledger_kernel.ids import CompanyId, OrganizationId, Tenant
+from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.pagination import page_of
+from ledger_kernel.tenancy import Tenant
 lazy from ledger_kernel.pagination import Page, PageRequest
 
 
@@ -62,7 +63,7 @@ def _require_own(organization: OrganizationId, unit: OrganizationId) -> None:
 
 def _require_own_company(tenant: Tenant, organization: OrganizationId, company: CompanyId | None) -> None:
     """Refuse a company's row in a unit of another organization or company, or of no company at all."""
-    if company is None or tenant != Tenant(organization, company):
+    if company is None or tenant != Tenant(organization, company, None):
         raise ForeignTenantError
 
 
@@ -147,7 +148,7 @@ def _company(row: Row[UUID, UUID, str, str, str, int, datetime, datetime]) -> Co
 
 def _branch(row: Row[UUID, UUID, UUID, str, str, datetime]) -> Branch:
     identifier, organization, company, code, name, created_at = row
-    tenant = Tenant(OrganizationId(organization), CompanyId(company))
+    tenant = Tenant(OrganizationId(organization), CompanyId(company), None)
     return Branch(
         id=BranchId(identifier), tenant=tenant, code=Code(code), name=Name(name), created_at=created_at
     )
@@ -157,7 +158,7 @@ def _point(row: Row[UUID, UUID, UUID, UUID, str, str, datetime]) -> EmissionPoin
     identifier, organization, company, branch, code, name, created_at = row
     return EmissionPoint(
         id=EmissionPointId(identifier),
-        tenant=Tenant(OrganizationId(organization), CompanyId(company)),
+        tenant=Tenant(OrganizationId(organization), CompanyId(company), None),
         branch=BranchId(branch),
         code=Code(code),
         name=Name(name),
@@ -169,7 +170,7 @@ def _membership(row: Row[UUID, UUID, UUID, str, str, str, int, datetime, str]) -
     identifier, organization, company, subject, role, status, version, changed_at, changed_by = row
     return Membership(
         id=MembershipId(identifier),
-        tenant=Tenant(OrganizationId(organization), CompanyId(company)),
+        tenant=Tenant(OrganizationId(organization), CompanyId(company), None),
         subject=SubjectId(subject),
         role=Role(role),
         status=MembershipStatus(status),

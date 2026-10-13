@@ -32,7 +32,8 @@ from ledger.identity.v1.identity_query_pb2_grpc import (
 from ledger_contracts.envelope import Envelope
 from ledger_kernel.access import Permission, Principal, SubjectId
 from ledger_kernel.errors import NotFoundError
-from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
+from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.access import CachedPermissions
 from ledger_platform.grpc.client import MAX_DEADLINE, InvalidGrpcClientOptionError, RemoteUnavailableError
 from ledger_platform.grpc.server import serve_grpc
@@ -53,7 +54,7 @@ from ledger_testing.clock import Moment
 ORGANIZATION: Final = OrganizationId(new_id())
 COMPANY: Final = CompanyId(new_id())
 ALICE: Final = Principal(subject=SubjectId("2001"), organization=ORGANIZATION, provider_organization="1001")
-TENANT: Final = Tenant(ORGANIZATION, COMPANY)
+TENANT: Final = Tenant(ORGANIZATION, COMPANY, None)
 ORGANIZATION_ID: Final = str(ORGANIZATION)
 
 type Context = grpc.aio.ServicerContext[GetPermissionsRequest, GetPermissionsResponse]

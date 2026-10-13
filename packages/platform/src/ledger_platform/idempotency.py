@@ -47,12 +47,12 @@ lazy from pydantic import BaseModel
 lazy from sqlalchemy import ColumnElement
 
 from ledger_kernel.errors import ConflictError, InvalidInputError, LedgerError, excerpt
-from ledger_kernel.ids import Tenant
 from ledger_platform.config.options import InvalidOptionError, require_at_least
 from ledger_platform.data.database import PlatformTable
 lazy from ledger_kernel.access import Principal, SubjectId
 lazy from ledger_kernel.ids import OrganizationId
-lazy from ledger_platform.data.database import Scope, UnitOfWork
+lazy from ledger_kernel.tenancy import Scope
+lazy from ledger_platform.data.database import UnitOfWork
 
 DEFAULT_RETENTION: Final = timedelta(hours=24)
 MAX_KEY_LENGTH: Final = 255
@@ -259,11 +259,7 @@ def _row_of(attempt: Attempt) -> tuple[ColumnElement[bool], ...]:
 
 
 def _organization_of(scope: Scope | None) -> OrganizationId | None:
-    match scope:
-        case Tenant(organization=organization):
-            return organization
-        case organization_or_none:
-            return organization_or_none
+    return None if scope is None else scope.organization
 
 
 def _storable(response: StoredResponse) -> list[list[str]]:

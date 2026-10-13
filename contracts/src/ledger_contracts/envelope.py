@@ -24,7 +24,8 @@ lazy from google.protobuf.message import Message
 
 from ledger_kernel.clock import utc_now
 from ledger_kernel.errors import InvalidInputError, excerpt
-from ledger_kernel.ids import CompanyId, InvalidIdError, OrganizationId, Tenant, new_id, parse_id
+from ledger_kernel.ids import CompanyId, InvalidIdError, OrganizationId, new_id, parse_uuid
+from ledger_kernel.tenancy import Tenant
 lazy from ledger_kernel.clock import Clock
 
 SPEC_VERSION: Final = "1.0"
@@ -90,7 +91,7 @@ def _require_exactly(headers: Mapping[str, str], name: str, expected: str) -> No
 def _id(headers: Mapping[str, str], name: str) -> UUID:
     value = _required(headers, name)
     try:
-        return parse_id(value)
+        return parse_uuid(value)
     except InvalidIdError as error:
         raise MalformedEventError(name, value) from error
 
@@ -107,7 +108,7 @@ def _tenant(headers: Mapping[str, str]) -> Tenant | None:
     if _ORGANIZATION_HEADER not in headers and _COMPANY_HEADER not in headers:
         return None
     organization = OrganizationId(_id(headers, _ORGANIZATION_HEADER))
-    return Tenant(organization, CompanyId(_id(headers, _COMPANY_HEADER)))
+    return Tenant(organization, CompanyId(_id(headers, _COMPANY_HEADER)), None)
 
 
 def _is_attribute(pattern: re.Pattern[str], value: str) -> bool:

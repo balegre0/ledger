@@ -7,7 +7,7 @@ lazy from ledger_identity.domain.roles import Role
 lazy from ledger_identity.domain.text import LegalName
 lazy from ledger_kernel.access import SubjectId
 lazy from ledger_kernel.countries.do import TaxId
-lazy from ledger_kernel.ids import Tenant
+lazy from ledger_kernel.tenancy import Tenant
 
 
 @final

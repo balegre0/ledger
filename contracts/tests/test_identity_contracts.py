@@ -28,9 +28,10 @@ from ledger.identity.v1.identity_query_pb2 import (
     DESCRIPTOR as QUERY_DESCRIPTOR,
 )
 from ledger_contracts.envelope import Envelope
-from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
+from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_kernel.tenancy import Tenant
 
-TENANT: Final = Tenant(OrganizationId(new_id()), CompanyId(new_id()))
+TENANT: Final = Tenant(OrganizationId(new_id()), CompanyId(new_id()), None)
 EVENTS: Final[tuple[Message, ...]] = (
     CompanyCreated(),
     CompanyUpdated(),

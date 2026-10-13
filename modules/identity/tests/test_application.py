@@ -49,8 +49,9 @@ from ledger_identity.domain.text import parse_code, parse_legal_name, parse_name
 from ledger_kernel.access import Permission, Principal, SubjectId
 from ledger_kernel.countries.do import TaxId
 from ledger_kernel.errors import ErrorKind
-from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
+from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.pagination import PageRequest, page_of
+from ledger_kernel.tenancy import Tenant
 lazy from ledger_identity.domain.branches import Branch, EmissionPoint
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_identity.domain.events import IdentityEvent
@@ -212,14 +213,16 @@ class MemoryBranches(Branches):
     @override
     async def get(self, company: CompanyId, branch: BranchId) -> Branch | None:
         found = self._state.branches.get(branch)
-        return found if found is not None and found.tenant == Tenant(self._organization, company) else None
+        return (
+            found if found is not None and found.tenant == Tenant(self._organization, company, None) else None
+        )
 
     @override
     async def page(self, company: CompanyId, request: PageRequest) -> Page[Branch]:
         mine = [
             branch
             for branch in self._state.branches.values()
-            if branch.tenant == Tenant(self._organization, company)
+            if branch.tenant == Tenant(self._organization, company, None)
         ]
         return paged(mine, request, key=lambda branch: branch.id)
 
@@ -242,11 +245,13 @@ class MemoryEmissionPoints(EmissionPoints):
     @override
     async def get(self, company: CompanyId, point: EmissionPointId) -> EmissionPoint | None:
         found = self._state.points.get(point)
-        return found if found is not None and found.tenant == Tenant(self._organization, company) else None
+        return (
+            found if found is not None and found.tenant == Tenant(self._organization, company, None) else None
+        )
 
     @override
     async def page(self, company: CompanyId, branch: BranchId, request: PageRequest) -> Page[EmissionPoint]:
-        tenant = Tenant(self._organization, company)
+        tenant = Tenant(self._organization, company, None)
         mine = [p for p in self._state.points.values() if p.tenant == tenant and p.branch == branch]
         return paged(mine, request, key=lambda point: point.id)
 

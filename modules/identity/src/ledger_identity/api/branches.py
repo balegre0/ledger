@@ -12,7 +12,7 @@ from ledger_identity.application import commands, queries
 from ledger_identity.domain.ids import BranchId
 from ledger_identity.domain.text import parse_code, parse_name
 from ledger_kernel.access import Permission
-from ledger_kernel.ids import parse_id
+from ledger_kernel.ids import parse_uuid
 from ledger_platform.http.deps import (
     REPLAYED_HEADER,
     allowed,
@@ -91,7 +91,7 @@ def router(context: ApiContext) -> APIRouter:
         current: Annotated[Runtime[IdentitySettings], Depends(runtime)],
     ) -> BranchView:
         """A branch of the company."""
-        branch = BranchId(parse_id(branch_id))
+        branch = BranchId(parse_uuid(branch_id))
         async with current.database.transaction(access.tenant) as transaction:
             found = await queries.branch(
                 context.bind(transaction, current.outbox), access.tenant.company, branch

@@ -57,7 +57,8 @@ from ledger_identity.domain.text import (
 from ledger_kernel.access import Permission, Principal, SubjectId
 from ledger_kernel.countries.do import TaxId
 from ledger_kernel.errors import ErrorKind
-from ledger_kernel.ids import OrganizationId, Tenant, new_id
+from ledger_kernel.ids import OrganizationId, new_id
+from ledger_kernel.tenancy import Tenant
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_kernel.errors import LedgerError
 
@@ -190,7 +191,7 @@ def test_a_registered_company_is_active_at_its_first_version_and_says_so() -> No
         NOW,
         NOW,
     )
-    assert company.tenant == Tenant(ORGANIZATION, company.id)
+    assert company.tenant == Tenant(ORGANIZATION, company.id, None)
     assert company.id.version == 7
     assert created == CompanyCreated(
         tenant=company.tenant, tax_id=RNC, legal_name=LegalName("Duarte"), version=1

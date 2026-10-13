@@ -11,7 +11,8 @@ lazy from datetime import datetime
 
 from ledger_identity.domain.errors import CompanyInactiveError, InvalidStateError
 from ledger_identity.domain.events import CompanyCreated, CompanyDeactivated, CompanyUpdated
-from ledger_kernel.ids import CompanyId, Tenant, new_id
+from ledger_kernel.ids import CompanyId, new_id
+from ledger_kernel.tenancy import Tenant
 lazy from ledger_identity.domain.text import LegalName
 lazy from ledger_kernel.countries.do import TaxId
 lazy from ledger_kernel.ids import OrganizationId
@@ -45,7 +46,7 @@ class Company:
     @property
     def tenant(self) -> Tenant:
         """The company with its organization: what its rows and its events are scoped to."""
-        return Tenant(self.organization, self.id)
+        return Tenant(self.organization, self.id, None)
 
     @classmethod
     def register(

@@ -30,7 +30,7 @@ from ledger_kernel.access import Permission
 from ledger_kernel.ids import new_id
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_kernel.access import Principal, SubjectId
-lazy from ledger_kernel.ids import Tenant
+lazy from ledger_kernel.tenancy import Tenant
 
 
 class MembershipStatus(StrEnum):

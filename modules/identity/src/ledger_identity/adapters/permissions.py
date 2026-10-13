@@ -11,6 +11,7 @@ Identity's own routes get the role's permissions in a deactivated company too, u
 from typing import final, override
 
 from ledger_identity.adapters.postgres.repositories import PgMemberships
+from ledger_kernel.tenancy import OrganizationScope
 from ledger_platform.auth.access import PermissionSource
 lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_kernel.ids import CompanyId
@@ -28,7 +29,7 @@ class MembershipPermissions(PermissionSource):
 
     @override
     async def permissions(self, principal: Principal, company: CompanyId) -> frozenset[Permission]:
-        async with self._database.transaction(principal.organization) as unit:
+        async with self._database.transaction(OrganizationScope(principal.organization, None)) as unit:
             memberships = PgMemberships(unit.connection, principal.organization)
             membership = await memberships.get(company, principal.subject)
         return frozenset() if membership is None else membership.permissions

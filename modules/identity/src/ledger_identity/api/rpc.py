@@ -22,7 +22,8 @@ from ledger.identity.v1.identity_query_pb2_grpc import (
 from ledger_identity.application import queries
 from ledger_identity.domain.company import CompanyStatus
 from ledger_kernel.access import parse_subject
-from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, parse_id
+from ledger_kernel.ids import CompanyId, OrganizationId, parse_uuid
+from ledger_kernel.tenancy import OrganizationScope, Tenant
 lazy from ledger_identity.api.context import BindUnit
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_identity.settings import IdentitySettings
@@ -65,7 +66,9 @@ class IdentityQuery(IdentityQueryServiceServicer):
     ) -> query.GetCompanyResponse:
         del context
         tenant = Tenant(
-            OrganizationId(parse_id(request.organization_id)), CompanyId(parse_id(request.company_id))
+            OrganizationId(parse_uuid(request.organization_id)),
+            CompanyId(parse_uuid(request.company_id)),
+            None,
         )
         async with self._database.transaction(tenant) as transaction:
             company = await queries.company(self._bind(transaction, self._outbox), tenant.company)
@@ -76,10 +79,10 @@ class IdentityQuery(IdentityQueryServiceServicer):
         self, request: query.GetPermissionsRequest, context: _PermissionsContext
     ) -> query.GetPermissionsResponse:
         del context
-        organization = OrganizationId(parse_id(request.organization_id))
-        company = CompanyId(parse_id(request.company_id))
+        organization = OrganizationId(parse_uuid(request.organization_id))
+        company = CompanyId(parse_uuid(request.company_id))
         subject = parse_subject(request.subject)
-        async with self._database.transaction(organization) as transaction:
+        async with self._database.transaction(OrganizationScope(organization, None)) as transaction:
             permissions = await queries.permissions_of(
                 self._bind(transaction, self._outbox), company, subject
             )

@@ -14,7 +14,7 @@ from ledger_identity.application import commands, queries
 from ledger_identity.domain.ids import BranchId, EmissionPointId
 from ledger_identity.domain.text import parse_code, parse_name
 from ledger_kernel.access import Permission
-from ledger_kernel.ids import parse_id
+from ledger_kernel.ids import parse_uuid
 from ledger_platform.http.deps import (
     allowed,
     answer,
@@ -57,7 +57,7 @@ def router(context: ApiContext) -> APIRouter:
         guard = allowed(context.in_company, permission)
 
         async def place(branch_id: str, access: Annotated[CompanyAccess, Depends(guard)]) -> InBranch:
-            return InBranch(access, BranchId(parse_id(branch_id)))
+            return InBranch(access, BranchId(parse_uuid(branch_id)))
 
         return place
 
@@ -115,7 +115,7 @@ def router(context: ApiContext) -> APIRouter:
     ) -> EmissionPointView:
         """An emission point of the branch."""
         access = place.access
-        point = EmissionPointId(parse_id(emission_point_id))
+        point = EmissionPointId(parse_uuid(emission_point_id))
         async with current.database.transaction(access.tenant) as transaction:
             unit = context.bind(transaction, current.outbox)
             found = await queries.emission_point(unit, access.tenant.company, place.branch, point)
