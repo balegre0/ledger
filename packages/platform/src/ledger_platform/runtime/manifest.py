@@ -1,7 +1,8 @@
 """A workspace package's manifest (§4.2, §4.3): what its ``manifest.toml`` declares, as validated values.
 
 One model serves both sides. ``ledger-devtools`` reads every ``manifest.toml`` with ``load_manifest`` (unknown
-keys, malformed names and impossible combinations are listed together, by location, never by value) and writes
+keys and malformed names are listed together, by location, never by value; what a kind may declare is
+checked once the fields are valid, so its problem is reported after the field problems are fixed) and writes
 each package's ``_manifest.py``, which validates the same data again when it is imported; the runtime reads
 those values. Rules that need the whole workspace (a name equal to its directory, unique schemas and prefixes,
 an acyclic module graph, schedules that enqueue a declared job kind) are ``ledger-devtools check``'s.
@@ -12,9 +13,18 @@ import tomllib
 from collections.abc import Mapping
 from datetime import date, timedelta
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Annotated, ClassVar, Final, Literal, Self
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_validator,
+)
 
 from ledger_kernel.errors import LedgerError
 
@@ -25,6 +35,8 @@ type BuiltInRole = Literal["owner", "admin", "accountant", "issuer", "viewer"]
 type Tier = Literal["bronze", "silver", "gold"]
 
 _FROZEN: Final = ConfigDict(extra="forbid", frozen=True)
+_VALUE_ERROR: Final = "Value error, "
+"""What pydantic puts before the message of a ``ValueError`` raised by a validator."""
 _DURATION: Final = re.compile(r"([1-9][0-9]*)([smhd])", re.ASCII)
 _UNIT_SECONDS: Final[Mapping[str, int]] = {"s": 1, "m": 60, "h": 3600, "d": 86_400}
 
@@ -44,7 +56,8 @@ type Requirement = Annotated[
 ]
 """A third-party distribution with a floor: ``fastapi>=0.143``, ``psycopg[binary]>=3.3.6``."""
 type ObjectPath = Annotated[str, Field(pattern=r"^[a-z_][a-z0-9_.]*(:[A-Za-z_][A-Za-z0-9_]*)?$")]
-type Script = Annotated[str, Field(pattern=r"^ledger-[a-z][a-z0-9-]*$")]
+type Script = Annotated[str, Field(pattern=r"^ledger-[a-z][a-z0-9-]{0,32}$")]
+"""A console script: at most 40 characters, so a generated line that names one fits."""
 
 
 class _DurationFormatError(ValueError):
@@ -63,6 +76,14 @@ def parse_duration(text: object) -> timedelta:
 
 
 type Duration = Annotated[timedelta, BeforeValidator(parse_duration)]
+
+
+def _read_only(scripts: Mapping[str, str]) -> Mapping[str, str]:
+    return MappingProxyType(dict(scripts))
+
+
+type Scripts = Annotated[Mapping[Script, ObjectPath], AfterValidator(_read_only)]
+"""Console scripts by name; read-only once validated."""
 
 
 class PackageKind(StrEnum):
@@ -94,7 +115,7 @@ class PackageInfo(_Section):
     summary: str = Field(min_length=1, max_length=200)
     owners: tuple[str, ...] = Field(min_length=1)
     status: PackageStatus = PackageStatus.ACTIVE
-    scripts: Mapping[Script, ObjectPath] = Field(default_factory=dict)
+    scripts: Scripts = Field(default_factory=dict, validate_default=True)
     """Console scripts of a package or tool (``ledger-probe``); an app's is ``[app] script``."""
 
 
@@ -344,12 +365,19 @@ class PackageManifest(_Section):
 
 
 class InvalidManifestError(LedgerError):
-    """A ``manifest.toml`` the model refuses; every problem, by location, never by value."""
+    """A ``manifest.toml`` the model refuses; each problem reads ``<location>: <rule>``, never its value."""
 
     code: ClassVar[str] = "invalid_manifest"
 
     def __init__(self, problems: tuple[str, ...]) -> None:
         super().__init__("manifest: " + "; ".join(problems))
+        self.problems: Final = problems
+
+
+def _problem(location: tuple[str, ...], message: str) -> str:
+    """``<location>: <rule>``; a kind rule's location is already the start of its own message."""
+    rule = message.removeprefix(_VALUE_ERROR)
+    return rule if not location else f"{'.'.join(location)}: {rule}"
 
 
 def load_manifest(text: str) -> PackageManifest:
@@ -357,10 +385,10 @@ def load_manifest(text: str) -> PackageManifest:
     try:
         return PackageManifest.model_validate(tomllib.loads(text))
     except tomllib.TOMLDecodeError as error:
-        raise InvalidManifestError((f"not TOML at line {error.lineno}",)) from error
+        raise InvalidManifestError((f"line {error.lineno}: not TOML",)) from error
     except ValidationError as error:
         problems = tuple(
-            ".".join(str(part) for part in issue["loc"]) + f": {issue['msg']}"
+            _problem(tuple(str(part) for part in issue["loc"]), issue["msg"])
             for issue in error.errors(include_input=False, include_url=False)
         )
         raise InvalidManifestError(problems) from error

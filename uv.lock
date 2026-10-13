@@ -5,6 +5,7 @@ requires-python = ">=3.15"
 [manifest]
 members = [
     "ledger-contracts",
+    "ledger-devtools",
     "ledger-identity",
     "ledger-kernel",
     "ledger-platform",
@@ -671,6 +672,23 @@ requires-dist = [
 ]
 
 [[package]]
+name = "ledger-devtools"
+version = "0.1.0"
+source = { editable = "tools/devtools" }
+dependencies = [
+    { name = "ledger-kernel" },
+    { name = "ledger-platform" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "ledger-kernel", editable = "packages/kernel" },
+    { name = "ledger-platform", editable = "packages/platform" },
+    { name = "pydantic", specifier = ">=2.14.1" },
+]
+
+[[package]]
 name = "ledger-identity"
 version = "0.1.0"
 source = { editable = "modules/identity" }
@@ -805,6 +823,7 @@ dev = [
     { name = "httpx" },
     { name = "hypothesis" },
     { name = "import-linter" },
+    { name = "ledger-devtools" },
     { name = "ledger-testing" },
     { name = "mypy" },
     { name = "mypy-protobuf" },
@@ -837,6 +856,7 @@ dev = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "hypothesis", specifier = ">=6.168.5" },
     { name = "import-linter", specifier = ">=2.15" },
+    { name = "ledger-devtools", editable = "tools/devtools" },
     { name = "ledger-testing", editable = "packages/testing" },
     { name = "mypy", specifier = ">=2.4.0" },
     { name = "mypy-protobuf", specifier = ">=5.1.0" },

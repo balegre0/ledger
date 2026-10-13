@@ -13,6 +13,7 @@ dev = [
     "httpx>=0.28.1",
     "hypothesis>=6.168.5",
     "import-linter>=2.15",
+    "ledger-devtools",
     "ledger-testing",
     "mypy>=2.4.0",
     "mypy-protobuf>=5.1.0",
@@ -35,7 +36,7 @@ package = false
 constraint-dependencies = ["cryptography>=50.0.2"]  # joserfc's: the first release with CPython 3.15 wheels of its own
 
 [tool.uv.workspace]
-members = ["packages/*", "modules/*", "contracts"]
+members = ["packages/*", "modules/*", "contracts", "tools/*"]
 
 [tool.uv.sources]
 ledger-kernel = { workspace = true }
@@ -43,6 +44,7 @@ ledger-contracts = { workspace = true }
 ledger-platform = { workspace = true }
 ledger-testing = { workspace = true }
 ledger-identity = { workspace = true }
+ledger-devtools = { workspace = true }
 
 # ── Tasks: `uv run poe <task>` ──────────────────────────────────────────────────
 [tool.poe.tasks]
@@ -55,8 +57,9 @@ mypy-contracts = { cmd = "mypy contracts" }
 mypy-platform = { cmd = "mypy packages/platform" }
 mypy-testing = { cmd = "mypy packages/testing" }
 mypy-identity = { cmd = "mypy modules/identity" }
+mypy-devtools = { cmd = "mypy tools/devtools" }
 mypy-workspace = { cmd = "mypy tests" }
-mypy = { sequence = ["mypy-kernel", "mypy-contracts", "mypy-platform", "mypy-testing", "mypy-identity", "mypy-workspace"], help = "Type check #2, one package at a time (each has its own tests), then the workspace's own tests" }
+mypy = { sequence = ["mypy-kernel", "mypy-contracts", "mypy-platform", "mypy-testing", "mypy-identity", "mypy-devtools", "mypy-workspace"], help = "Type check #2, one package at a time (each has its own tests), then the workspace's own tests" }
 types = { sequence = ["pyright", "mypy"], help = "Both type checkers" }
 arch = { cmd = "lint-imports", help = "Architecture contracts (import-linter)" }
 deps-kernel = { cmd = "deptry packages/kernel/src --config packages/kernel/pyproject.toml" }
@@ -64,7 +67,8 @@ deps-contracts = { cmd = "deptry contracts/src --config contracts/pyproject.toml
 deps-platform = { cmd = "deptry packages/platform/src --config packages/platform/pyproject.toml" }
 deps-testing = { cmd = "deptry packages/testing/src --config packages/testing/pyproject.toml" }
 deps-identity = { cmd = "deptry modules/identity/src --config modules/identity/pyproject.toml" }
-deps = { sequence = ["deps-kernel", "deps-contracts", "deps-platform", "deps-testing", "deps-identity"], help = "Unused / missing / transitive dependencies, per package" }
+deps-devtools = { cmd = "deptry tools/devtools/src --config tools/devtools/pyproject.toml" }
+deps = { sequence = ["deps-kernel", "deps-contracts", "deps-platform", "deps-testing", "deps-identity", "deps-devtools"], help = "Unused / missing / transitive dependencies, per package" }
 spell = { cmd = "typos", help = "Spell check" }
 # Poe expands the `**` glob to absolute paths, and protoc only accepts a file that lies under a --proto_path
 # spelled the same way: hence the absolute --proto_path. The *_out directories take no such comparison and
@@ -123,7 +127,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"{packages/*/tests,modules/*/tests,contracts/tests,tests}/**" = [
+"{packages/*/tests,modules/*/tests,contracts/tests,tools/*/tests,tests}/**" = [
     "S101",    # assert is the point of a test
     "D",       # test names are the documentation
     "PLR2004", # magic values are fine in assertions
@@ -147,7 +151,7 @@ runtime-evaluated-base-classes = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing", "ledger_identity", "ledger"]
+known-first-party = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing", "ledger_identity", "ledger_devtools", "ledger"]
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -156,7 +160,7 @@ exclude = ["*.md"]  # ruff 0.17 formats Python blocks inside Markdown; the docs 
 # ── Type checker #1: basedpyright ───────────────────────────────────────────────
 [tool.basedpyright]
 pythonVersion = "3.15"
-include = ["packages", "modules", "contracts", "tests"]
+include = ["packages", "modules", "contracts", "tools", "tests"]
 exclude = ["contracts/src/ledger", "**/.venv", "**/__pycache__"]
 typeCheckingMode = "all"
 failOnWarnings = true
@@ -204,7 +208,7 @@ warn_required_dynamic_aliases = true
 # ── Tests ───────────────────────────────────────────────────────────────────────
 [tool.pytest]
 minversion = "9.0"
-testpaths = ["packages", "modules", "contracts", "tests"]
+testpaths = ["packages", "modules", "contracts", "tools", "tests"]
 addopts = [
     "--strict-markers",
     "--strict-config",
@@ -219,7 +223,7 @@ asyncio_default_fixture_loop_scope = "function"
 
 [tool.coverage.run]
 branch = true
-source_pkgs = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing", "ledger_identity"]
+source_pkgs = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing", "ledger_identity", "ledger_devtools"]
 # Alembic runs a service's migration environment and scripts from their files, as modules named after the file
 # (`env_py`), outside the service's package: coverage, which picks `source_pkgs` by module name, would never
 # trace them. Their directory is named here, which coverage matches by path.
@@ -235,7 +239,7 @@ partial_branches = []  # no "pragma: no branch": every branch counts
 
 # ── Architecture contracts (import-linter) ──────────────────────────────────────
 [tool.importlinter]
-root_packages = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing", "ledger_identity"]
+root_packages = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing", "ledger_identity", "ledger_devtools"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
