@@ -142,6 +142,7 @@ runtime-evaluated-base-classes = [
     "pydantic_settings.BaseSettings",
     "sqlalchemy.orm.DeclarativeBase",
     "ledger_platform.database.PlatformTable",  # SQLAlchemy reads the annotations of its tables at runtime
+    "ledger_identity.adapters.postgres.tables.IdentityTable",
 ]
 
 [tool.ruff.lint.isort]
@@ -218,6 +219,10 @@ asyncio_default_fixture_loop_scope = "function"
 [tool.coverage.run]
 branch = true
 source_pkgs = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing", "ledger_identity"]
+# Alembic runs a service's migration environment and scripts from their files, as modules named after the file
+# (`env_py`), outside the service's package: coverage, which picks `source_pkgs` by module name, would never
+# trace them. Their directory is named here, which coverage matches by path.
+source = ["services/identity/src/ledger_identity/adapters/postgres/migrations"]
 core = "ctrace"
 
 [tool.coverage.report]
@@ -293,14 +298,15 @@ forbidden_modules = [
     "httpx", "joserfc", "cryptography", "alembic", "granian",
 ]
 
-# Inside identity: the use cases (application) over the domain. Later layers (adapters, api, main) join above
-# `application` as they appear. Exhaustive: a module without a layer is an error.
+# Inside identity: the adapters (PostgreSQL, ...) over the settings, over the use cases (application), over the
+# domain. Later layers (api, main) join above `adapters` as they appear. Exhaustive: a module without a layer
+# is an error.
 [[tool.importlinter.contracts]]
 name = "Identity is hexagonal"
 type = "layers"
 containers = ["ledger_identity"]
 exhaustive = true
-layers = ["application", "domain"]
+layers = ["adapters", "settings", "application", "domain"]
 
 [[tool.importlinter.contracts]]
 name = "Identity's use cases know ports, not adapters or frameworks"

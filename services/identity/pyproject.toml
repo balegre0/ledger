@@ -3,10 +3,20 @@ name = "ledger-identity"
 version = "0.1.0"
 description = "The identity service: organizations, companies, branches, emission points, memberships and roles."
 requires-python = ">=3.15"
-dependencies = ["ledger-kernel"]
+dependencies = [
+    "ledger-kernel",
+    "ledger-platform",
+    "alembic>=1.20.0",
+    "pydantic>=2.14.1",
+    "sqlalchemy>=2.1.4",
+]
+
+[project.scripts]
+ledger-identity-migrate = "ledger_identity.adapters.postgres.migrate:main"
 
 [tool.uv.sources]
 ledger-kernel = { workspace = true }
+ledger-platform = { workspace = true }
 
 [build-system]
 requires = ["uv_build>=0.13.0,<0.14.0"]
