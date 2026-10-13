@@ -50,8 +50,8 @@ SET_SCOPE: Final = text(
 _PING: Final = text("SELECT 1")
 _TENANT_COLUMNS: Final = ("organization_id", "company_id")
 """Each is also the name of a setting: ``ledger.organization_id``, ``ledger.company_id``."""
-_POLICY: Final = "tenant_isolation"
-_ORGANIZATION_POLICY: Final = "organization_isolation"
+TENANT_POLICY: Final = "tenant_isolation"
+ORGANIZATION_POLICY: Final = "organization_isolation"
 _ORGANIZATION_SETTING: Final = "organization_id"
 _IDENTIFIERS: Final = make_url(f"{_DRIVERS[0]}://").get_dialect()().identifier_preparer
 """Quotes a name exactly when PostgreSQL needs it quoted: DDL is text, so the names in it must be safe.
@@ -236,8 +236,8 @@ def tenant_isolation(table: AnyTable) -> tuple[str, ...]:
     return (
         f"ALTER TABLE {name} ENABLE ROW LEVEL SECURITY",
         f"ALTER TABLE {name} FORCE ROW LEVEL SECURITY",
-        f"DROP POLICY IF EXISTS {_POLICY} ON {name}",
-        f"CREATE POLICY {_POLICY} ON {name} USING ({rule}) WITH CHECK ({rule})",
+        f"DROP POLICY IF EXISTS {TENANT_POLICY} ON {name}",
+        f"CREATE POLICY {TENANT_POLICY} ON {name} USING ({rule}) WITH CHECK ({rule})",
     )
 
 
@@ -245,7 +245,7 @@ def tenant_isolation_removal(table: AnyTable) -> tuple[str, ...]:
     """DDL (for a migration's downgrade) that undoes ``tenant_isolation``; harmless on a table without it."""
     name = ddl_name(table)
     return (
-        f"DROP POLICY IF EXISTS {_POLICY} ON {name}",
+        f"DROP POLICY IF EXISTS {TENANT_POLICY} ON {name}",
         f"ALTER TABLE {name} NO FORCE ROW LEVEL SECURITY",
         f"ALTER TABLE {name} DISABLE ROW LEVEL SECURITY",
     )
@@ -267,8 +267,8 @@ def organization_isolation(table: AnyTable, *, column: str = _ORGANIZATION_SETTI
     return (
         f"ALTER TABLE {name} ENABLE ROW LEVEL SECURITY",
         f"ALTER TABLE {name} FORCE ROW LEVEL SECURITY",
-        f"DROP POLICY IF EXISTS {_ORGANIZATION_POLICY} ON {name}",
-        f"CREATE POLICY {_ORGANIZATION_POLICY} ON {name} USING ({rule}) WITH CHECK ({rule})",
+        f"DROP POLICY IF EXISTS {ORGANIZATION_POLICY} ON {name}",
+        f"CREATE POLICY {ORGANIZATION_POLICY} ON {name} USING ({rule}) WITH CHECK ({rule})",
     )
 
 
@@ -276,7 +276,7 @@ def organization_isolation_removal(table: AnyTable) -> tuple[str, ...]:
     """DDL (for a migration's downgrade) that undoes ``organization_isolation``; harmless without it."""
     name = ddl_name(table)
     return (
-        f"DROP POLICY IF EXISTS {_ORGANIZATION_POLICY} ON {name}",
+        f"DROP POLICY IF EXISTS {ORGANIZATION_POLICY} ON {name}",
         f"ALTER TABLE {name} NO FORCE ROW LEVEL SECURITY",
         f"ALTER TABLE {name} DISABLE ROW LEVEL SECURITY",
     )

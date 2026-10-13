@@ -122,8 +122,10 @@ its own, never the pool's, and stops asking once it has passed.
 
 A data migration runs as the tables' owner, which `FORCE ROW LEVEL SECURITY` subjects to the policies: a statement
 run with no scope changes nothing and says so only by its row count. `rows_by_scope(connection, table, where)`
-counts the rows to change by tenant (or by organization, for a table without `company_id`), reading past the policy
-for that one statement; `run_per_scope(connection, statement, expected)` runs the `UPDATE` or `DELETE` in each scope
+counts the rows to change by the scope the table's policy grants them to (by tenant under `tenant_isolation`, by
+organization under `organization_isolation`, whatever columns the table has; a table under neither is refused,
+`NoIsolationPolicyError`), reading past the policy for that one statement and forcing it again even if the read
+fails; `run_per_scope(connection, statement, expected)` runs the `UPDATE` or `DELETE` in each scope
 and raises `UnexpectedRowCountError` (rolling the migration back) unless each run changed exactly the rows counted:
 
 ```python

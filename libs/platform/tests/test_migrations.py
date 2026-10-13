@@ -11,6 +11,7 @@ import pytest
 from alembic import command
 from pydantic import TypeAdapter
 from sqlalchemy import (
+    Boolean,
     Column,
     Integer,
     MetaData,
@@ -19,10 +20,11 @@ from sqlalchemy import (
     Uuid,
     create_engine,
     inspect,
+    literal_column,
     text,
     update,
 )
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.pool import NullPool
 lazy from sqlalchemy import Connection
 
@@ -43,6 +45,7 @@ from ledger_platform.migrations import (
     MigrationLockTimeoutError,
     Migrations,
     MigrationUrlMissingError,
+    NoIsolationPolicyError,
     OfflineMigrationsError,
     SchemaNotCurrentError,
     Target,
@@ -139,6 +142,15 @@ NOTEBOOKS: Final = Table(
     Column("organization_id", Uuid(), nullable=False),
     Column("title", Text, nullable=True),
 )
+TAGS: Final = Table(
+    "tags",
+    MetaData(),
+    Column("id", Uuid(), primary_key=True),
+    Column("organization_id", Uuid(), nullable=False),
+    Column("company_id", Uuid(), nullable=False),  # which company a tag is about; the organization owns it
+    Column("label", Text, nullable=False),
+    Column("read", Boolean, nullable=True),
+)
 ORGANIZATION: Final = OrganizationId(new_id())
 ALPHA: Final = Tenant(ORGANIZATION, CompanyId(new_id()))
 BETA: Final = Tenant(ORGANIZATION, CompanyId(new_id()))
@@ -150,6 +162,11 @@ CANCEL_THE_WAITING: Final = (
     "WHERE datname = current_database() AND wait_event_type = 'Lock'"
 )
 FORCED: Final = TypeAdapter(list[tuple[str, bool]])
+FORCED_SQL: Final = text(
+    """
+    SELECT relname::text, relforcerowsecurity FROM pg_class WHERE relname IN ('notes', 'notebooks', 'tags')
+    """
+)
 LENGTHS: Final = TypeAdapter(list[tuple[str, int | None]])
 
 
@@ -194,11 +211,7 @@ def execute(url: str, *statements: str) -> None:
 
 
 def forced(connection: Connection) -> dict[str, bool]:
-    rows = connection.execute(
-        text(
-            "SELECT relname::text, relforcerowsecurity FROM pg_class WHERE relname IN ('notes', 'notebooks')"
-        )
-    )
+    rows = connection.execute(FORCED_SQL)
     return dict(FORCED.validate_python([tuple(row) for row in rows]))
 
 
@@ -403,6 +416,7 @@ async def test_a_backfill_reaches_every_company_s_rows_through_their_policy(
 def create(connection: Connection, *statements: str) -> None:
     NOTES.create(connection)
     NOTEBOOKS.create(connection)
+    TAGS.create(connection)
     for statement in statements:
         connection.execute(text(statement))
 
@@ -435,7 +449,7 @@ def test_rows_are_counted_by_tenant_past_the_policy_which_binds_the_owner_again_
     missing = NOTES.c.length.is_(None)
     assert rows_by_scope(owner, NOTES, missing) == {ALPHA: 2, BETA: 1, ELSEWHERE: 1}
     assert rows_by_scope(owner, NOTES) == {ALPHA: 2, BETA: 2, ELSEWHERE: 1}
-    assert forced(owner) == {"notes": True, "notebooks": False}
+    assert forced(owner) == {"notes": True, "notebooks": False, "tags": False}
     assert owner.execute(NOTES.select()).all() == []  # no scope: the owner sees nothing again
 
 
@@ -452,11 +466,59 @@ def test_rows_of_a_table_an_organization_owns_are_counted_by_organization(owner:
     assert rows_by_scope(owner, NOTEBOOKS, NOTEBOOKS.c.title.is_(None)) == {}
 
 
-def test_a_table_outside_row_level_security_is_counted_and_left_outside(owner: Connection) -> None:
-    create(owner)
-    owner.execute(NOTEBOOKS.insert().values(id=new_id(), organization_id=ORGANIZATION))
-    assert rows_by_scope(owner, NOTEBOOKS) == {ORGANIZATION: 1}
-    assert forced(owner) == {"notes": False, "notebooks": False}
+@pytest.mark.parametrize(
+    "statements",
+    [
+        (),
+        ("CREATE POLICY open_to_all ON notebooks USING (true)",),
+        ("ALTER TABLE notebooks ENABLE ROW LEVEL SECURITY",),
+    ],
+    ids=["no-security", "a-policy-not-enabled", "enabled-without-an-isolation-policy"],
+)
+def test_a_table_under_no_isolation_policy_is_refused(owner: Connection, statements: tuple[str, ...]) -> None:
+    """Without a policy to say whose a row is, a count by scope could only guess it from the columns."""
+    create(owner, *statements)
+    with pytest.raises(NoIsolationPolicyError) as caught:
+        rows_by_scope(owner, NOTEBOOKS)
+    assert caught.value.code == "no_isolation_policy"
+    assert str(caught.value) == (
+        "table notebooks is under neither tenant_isolation nor organization_isolation: "
+        "whose its rows are is unknown"
+    )
+
+
+def test_an_organization_s_table_with_a_company_column_is_counted_by_organization(owner: Connection) -> None:
+    """The policy decides the scope, not the columns: an organization's rows that name a company are still the
+    organization's, and a statement run per company would miss them."""
+    create(owner, *organization_isolation(TAGS))
+    for tenant, label in ((ALPHA, "a"), (BETA, "b"), (BETA, "c"), (ELSEWHERE, "d")):
+        in_scope(owner, tenant.organization)
+        owner.execute(
+            TAGS.insert().values(
+                id=new_id(), organization_id=tenant.organization, company_id=tenant.company, label=label
+            )
+        )
+    in_scope(owner, None)
+    unread = TAGS.c.read.is_(None)
+    expected = rows_by_scope(owner, TAGS, unread)
+    assert expected == {ORGANIZATION: 3, ELSEWHERE.organization: 1}
+    run_per_scope(owner, update(TAGS).where(unread).values(read=True), expected)
+    assert rows_by_scope(owner, TAGS, unread) == {}
+    assert rows_by_scope(owner, TAGS, TAGS.c.read.is_(True)) == expected
+
+
+def test_a_policy_not_forced_on_the_owner_is_read_as_it_is_and_left_unforced(owner: Connection) -> None:
+    create(owner, *(statement for statement in tenant_isolation(NOTES) if "FORCE" not in statement))
+    add_note(owner, ALPHA, "a")
+    assert rows_by_scope(owner, NOTES) == {ALPHA: 1}
+    assert forced(owner) == {"notes": False, "notebooks": False, "tags": False}
+
+
+def test_a_count_that_fails_still_puts_the_force_back(owner: Connection) -> None:
+    create(owner, *tenant_isolation(NOTES))
+    with pytest.raises(ProgrammingError):
+        rows_by_scope(owner, NOTES, literal_column("no_such_column").is_(None))
+    assert forced(owner) == {"notes": True, "notebooks": False, "tags": False}  # and the transaction goes on
 
 
 def test_a_statement_the_policy_confines_to_fewer_rows_than_counted_fails(owner: Connection) -> None:

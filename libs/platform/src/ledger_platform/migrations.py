@@ -16,9 +16,9 @@ never migrated. It reads on a connection of its own, never the pool's, and stops
 
 Data migrations. Every tenant table is under row-level security forced on its owner, so a statement a
 migration runs with no scope touches nothing, and says so only by its row count. ``rows_by_scope`` counts
-the rows a backfill must change, per scope, past the policies; ``run_per_scope`` runs the statement once in
-each scope and fails unless each run changed exactly that many: a policy that hides a row, or a scope that
-was not set, is an error instead of a silent no-op.
+the rows a backfill must change, per scope its table's policy grants them to, past the policies;
+``run_per_scope`` runs the statement once in each scope and fails unless each run changed exactly that many: a
+policy that hides a row, or a scope that was not set, is an error instead of a silent no-op.
 """
 
 import math
@@ -31,6 +31,7 @@ import psycopg
 from alembic import command, context
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from pydantic import TypeAdapter
 from sqlalchemy import String, Uuid, column, create_engine, func, select, table, text, true, type_coerce
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
@@ -38,7 +39,13 @@ lazy from sqlalchemy import ColumnElement, Connection, Delete, MetaData, Update
 
 from ledger_kernel.errors import LedgerError, UnavailableError
 from ledger_kernel.ids import CompanyId, OrganizationId, Tenant
-from ledger_platform.database import SET_SCOPE, ddl_name, scope_settings
+from ledger_platform.database import (
+    ORGANIZATION_POLICY,
+    SET_SCOPE,
+    TENANT_POLICY,
+    ddl_name,
+    scope_settings,
+)
 from ledger_platform.options import InvalidOptionError
 from ledger_platform.schema import CHASSIS_METADATA
 lazy from ledger_platform.database import AnyTable, Database, Scope
@@ -64,7 +71,15 @@ _RECORDED: Final = select(func.to_regclass("public.alembic_version").is_not(None
 """Whether Alembic's table exists: a database no migration ever ran on has none."""
 _VERSION: Final = select(column("version_num", String)).select_from(table("alembic_version", schema="public"))
 """The revisions Alembic recorded: one row at a revision, none at the base."""
-_FORCED: Final = text("SELECT relforcerowsecurity FROM pg_class WHERE oid = to_regclass(:table)")
+_SECURITY: Final = text(
+    """
+    SELECT relrowsecurity, relforcerowsecurity,
+           ARRAY(SELECT polname::text FROM pg_policy WHERE polrelid = pg_class.oid ORDER BY polname)
+    FROM pg_class WHERE oid = to_regclass(:table)
+    """
+)
+"""Whether a table has row-level security on, whether it is forced on its owner, and its policies' names."""
+_SECURITY_ROW: Final = TypeAdapter(tuple[bool, bool, list[str]])
 
 
 class OfflineMigrationsError(LedgerError):
@@ -111,6 +126,20 @@ class SchemaNotCurrentError(UnavailableError):
 
     def __init__(self, expected: str) -> None:
         super().__init__(f"the database schema is not at revision {expected}, the one this version needs")
+
+
+class NoIsolationPolicyError(LedgerError):
+    """A data migration asked for the scopes of a table that no isolation policy of the chassis protects.
+
+    Whose a row is comes from the policy that decides who sees it, never from the table's columns: without one
+    (row-level security off, or on under another policy) there is no scope to run a statement in.
+    """
+
+    code: ClassVar[str] = "no_isolation_policy"
+
+    def __init__(self, table: str) -> None:
+        policies = f"neither {TENANT_POLICY} nor {ORGANIZATION_POLICY}"
+        super().__init__(f"table {table} is under {policies}: whose its rows are is unknown")
 
 
 class UnexpectedRowCountError(LedgerError):
@@ -299,31 +328,53 @@ def rows_by_scope(
 ) -> dict[Scope, int]:
     """How many rows of ``of`` match ``where``, by the scope that owns them, read past row-level security.
 
-    For a data migration, inside its transaction, as the table's owner (who runs migrations). A table with a
-    ``company_id`` is counted by ``Tenant``, any other by the organization in ``organization_column``. The
-    policy is lifted for this one read: the owner is subject to it only because it is forced, and the force
-    is put back before the function returns (and by the rollback if the read fails), so the statements that
-    follow run under it again. ``run_per_scope`` takes the answer as what each scope's statement must change.
+    For a data migration, inside its transaction, as the table's owner (who runs migrations). The scope is
+    the one the table's policy grants its rows to: under ``tenant_isolation`` a ``Tenant`` (its
+    ``organization_id`` and ``company_id``), under ``organization_isolation`` the organization in
+    ``organization_column``, even when the table names a company too. A table under neither raises
+    ``NoIsolationPolicyError``. The policy is lifted for this one read: the owner is subject to it only
+    because it is forced, and the force is put back whether the read succeeds or fails (the read runs in a
+    savepoint, so a failed one leaves the transaction usable).
+    ``run_per_scope`` takes the answer as what each scope's statement must change.
     """
     name = ddl_name(of)
-    forced = connection.execute(_FORCED, {"table": name}).scalar_one() is True
-    organization = type_coerce(of.c[organization_column], Uuid())
+    enabled, forced, policies = _security_of(connection, name)
+    if not enabled or not {TENANT_POLICY, ORGANIZATION_POLICY} & policies:
+        raise NoIsolationPolicyError(of.fullname)
     if forced:
         connection.execute(text(f"ALTER TABLE {name} NO FORCE ROW LEVEL SECURITY"))
-    if "company_id" in of.c:
-        company = type_coerce(of.c.company_id, Uuid())
-        by_tenant = select(organization, company, func.count()).group_by(organization, company)
-        counted = connection.execute(by_tenant if where is None else by_tenant.where(where)).all()
-        counts: dict[Scope, int] = {
-            Tenant(OrganizationId(owner), CompanyId(unit)): rows for owner, unit, rows in counted
-        }
-    else:
-        by_organization = select(organization, func.count()).group_by(organization)
-        statement = by_organization if where is None else by_organization.where(where)
-        counts = {OrganizationId(owner): rows for owner, rows in connection.execute(statement).all()}
-    if forced:
-        connection.execute(text(f"ALTER TABLE {name} FORCE ROW LEVEL SECURITY"))
-    return counts
+    try:
+        with connection.begin_nested():
+            if TENANT_POLICY in policies:
+                return _by_tenant(connection, of, where)
+            return _by_organization(connection, of, where, organization_column)
+    finally:
+        if forced:
+            connection.execute(text(f"ALTER TABLE {name} FORCE ROW LEVEL SECURITY"))
+
+
+def _security_of(connection: Connection, name: str) -> tuple[bool, bool, frozenset[str]]:
+    """Whether the table ``name`` has row-level security on and forced, and the names of its policies."""
+    row = connection.execute(_SECURITY, {"table": name}).one()
+    enabled, forced, policies = _SECURITY_ROW.validate_python(tuple(row))
+    return enabled, forced, frozenset(policies)
+
+
+def _by_tenant(connection: Connection, of: AnyTable, where: ColumnElement[bool] | None) -> dict[Scope, int]:
+    organization = type_coerce(of.c.organization_id, Uuid())
+    company = type_coerce(of.c.company_id, Uuid())
+    counted = select(organization, company, func.count()).group_by(organization, company)
+    rows = connection.execute(counted if where is None else counted.where(where)).all()
+    return {Tenant(OrganizationId(owner), CompanyId(unit)): count for owner, unit, count in rows}
+
+
+def _by_organization(
+    connection: Connection, of: AnyTable, where: ColumnElement[bool] | None, column: str
+) -> dict[Scope, int]:
+    organization = type_coerce(of.c[column], Uuid())
+    counted = select(organization, func.count()).group_by(organization)
+    rows = connection.execute(counted if where is None else counted.where(where)).all()
+    return {OrganizationId(owner): count for owner, count in rows}
 
 
 def run_per_scope(connection: Connection, statement: Update | Delete, expected: Mapping[Scope, int]) -> None:

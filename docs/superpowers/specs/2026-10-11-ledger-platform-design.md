@@ -344,9 +344,11 @@ company can certify while another runs in production.
   expand-only while two versions run), not ready behind or unmigrated.
 - Data migrations run as the tables' owner, which `FORCE ROW LEVEL SECURITY` holds to the policies, so a
   statement without a scope changes nothing silently. A backfill counts the rows to change per scope past the
-  policies (`rows_by_scope`, which lifts the force for that one read inside the migration's transaction) and
-  runs its statement in each scope (`run_per_scope`), failing the migration unless every scope changed exactly
-  the rows counted.
+  policies (`rows_by_scope`, which lifts the force for that one read inside the migration's transaction and puts
+  it back whatever happens); the scope is the one the table's policy grants rows to (a tenant under
+  `tenant_isolation`, an organization under `organization_isolation`), never guessed from its columns, and a
+  table under neither is refused. It then runs its statement in each scope (`run_per_scope`), failing the
+  migration unless every scope changed exactly the rows counted.
 - Every connection carries limits, none of them unlimited: connect 5 s, statement 30 s, lock 5 s,
   idle-in-transaction 60 s, wait for a pooled connection 10 s. A missing limit turns one stuck dependency
   into every worker stuck; a migration or batch job passes longer ones. SQLAlchemy does not echo the values
