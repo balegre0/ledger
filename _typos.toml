@@ -23,3 +23,10 @@ emision = "emision"
 excede = "excede"
 informe = "informe"
 instructivo = "instructivo"
+
+[default.extend-identifiers]
+# ISO 3166-1 and ISO 4217 codes the plans list (Bosnia, the Faroe Islands, Pitcairn; the Jordanian dinar).
+BA = "BA"
+FO = "FO"
+PN = "PN"
+JOD = "JOD"
