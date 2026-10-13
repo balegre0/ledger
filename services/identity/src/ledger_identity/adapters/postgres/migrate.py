@@ -2,11 +2,14 @@
 
 Migrations run on a synchronous psycopg engine: no event loop is needed, so the same code runs in a test,
 in the container that migrates before the service starts, and on a laptop. Each upgrade or downgrade is one
-transaction. ``require_head`` is the running service's side: its readiness check that the database is at the
-revision this version's migrations end at.
+transaction, and waits for any other migration of the database first (``MIGRATION_LOCK``), for
+``MIGRATION_LOCK_WAIT`` at most. ``require_head`` is the running service's side: its readiness check that the
+database is at the revision this version's migrations end at.
 """
 
-from typing import ClassVar, Final
+from dataclasses import dataclass, field
+from datetime import timedelta
+from typing import ClassVar, Final, final
 
 from alembic import command
 from alembic.config import Config
@@ -26,6 +29,15 @@ _RECORDED: Final = select(func.to_regclass(_VERSION_TABLE).is_not(None))
 """Whether Alembic's table exists: a database no migration ever ran on has none."""
 _VERSION: Final = select(column("version_num", String)).select_from(table("alembic_version", schema="public"))
 """The revision Alembic recorded: one row at a revision, none at the base."""
+MIGRATION_LOCK: Final = 0x6C65646765720001
+"""The advisory lock a migration holds until it commits: ``ledger`` in ASCII, then the lock's number.
+
+Advisory locks are per database, and identity's database is its own.
+"""
+MIGRATION_LOCK_WAIT: Final = timedelta(minutes=10)
+"""How long a migration waits for another one to commit: far longer than any of identity's migrations takes,
+so that a replica starting while another migrates waits for it; yet finite, so that a migration stuck (or a
+session that took the lock and never let go) fails the next one loudly instead of hanging it forever."""
 
 
 class OfflineMigrationsError(LedgerError):
@@ -46,6 +58,15 @@ class MigrationUrlMissingError(LedgerError):
         super().__init__("identity's migrations were started without a database URL")
 
 
+class MigrationLockTimeoutError(UnavailableError):
+    """Another migration held the migration lock for longer than this one would wait."""
+
+    code: ClassVar[str] = "migration_lock_timeout"
+
+    def __init__(self, waited: timedelta) -> None:
+        super().__init__(f"another migration of identity's database held its lock for longer than {waited}")
+
+
 class SchemaNotCurrentError(UnavailableError):
     """The database is not at the revision this version needs: migrations are pending (or ran ahead)."""
 
@@ -55,27 +76,44 @@ class SchemaNotCurrentError(UnavailableError):
         super().__init__(f"the database schema is not at revision {expected}, the one this version needs")
 
 
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Target:
+    """What the migration environment runs against: the database, and how long to wait for its lock."""
+
+    url: str = field(repr=False)  # it carries the password
+    lock_wait: timedelta
+
+
+TARGET: Final = "target"
+"""The key of the ``Target`` among the attributes of Alembic's configuration."""
+
+
 def _scripts() -> Config:
     config = Config()
     config.set_main_option("script_location", SCRIPTS)
     return config
 
 
-def _config(url: str) -> Config:
+def _config(url: str, lock_wait: timedelta) -> Config:
     config = _scripts()
     # An attribute, not an option: the option parser would read a % in the password as interpolation.
-    config.attributes["url"] = url
+    config.attributes[TARGET] = Target(url=url, lock_wait=lock_wait)
     return config
 
 
-def upgrade(url: str, revision: str = HEAD) -> None:
-    """Bring the database at ``url`` (``postgresql+psycopg://``) up to ``revision``."""
-    command.upgrade(_config(url), revision)
+def upgrade(url: str, revision: str = HEAD, *, lock_wait: timedelta = MIGRATION_LOCK_WAIT) -> None:
+    """Bring the database at ``url`` (``postgresql+psycopg://``) up to ``revision``.
+
+    Raises ``MigrationLockTimeoutError`` when another migration holds the database for longer than
+    ``lock_wait``.
+    """
+    command.upgrade(_config(url, lock_wait), revision)
 
 
-def downgrade(url: str, revision: str = BASE) -> None:
-    """Take the database at ``url`` down to ``revision``."""
-    command.downgrade(_config(url), revision)
+def downgrade(url: str, revision: str = BASE, *, lock_wait: timedelta = MIGRATION_LOCK_WAIT) -> None:
+    """Take the database at ``url`` down to ``revision``, after any other migration, as ``upgrade`` does."""
+    command.downgrade(_config(url, lock_wait), revision)
 
 
 def head() -> str:

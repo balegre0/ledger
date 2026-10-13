@@ -7,6 +7,7 @@ dependencies = [
     "ledger-kernel",
     "ledger-platform",
     "alembic>=1.20.0",
+    "psycopg>=3.3.6",
     "pydantic>=2.14.1",
     "sqlalchemy>=2.1.4",
 ]

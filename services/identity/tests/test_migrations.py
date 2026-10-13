@@ -1,10 +1,13 @@
 """identity's migrations: from nothing to this version's schema and back, equal to the models, under RLS."""
 
+import asyncio
 import re
 import subprocess
 import sys
+from datetime import timedelta
 from typing import Final
 
+import psycopg
 import pytest
 from alembic import command
 from alembic.autogenerate import produce_migrations, render_python_code
@@ -12,11 +15,14 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 from pydantic import TypeAdapter
 from sqlalchemy import CheckConstraint, MetaData, create_engine, inspect, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
 
 from ledger_identity.adapters.postgres import migrate
 from ledger_identity.adapters.postgres.migrate import (
+    MIGRATION_LOCK_WAIT,
     SCRIPTS,
+    MigrationLockTimeoutError,
     MigrationUrlMissingError,
     OfflineMigrationsError,
     SchemaNotCurrentError,
@@ -33,6 +39,8 @@ from ledger_identity.domain.roles import Role
 from ledger_kernel.errors import ErrorKind
 from ledger_platform.database import Database, organization_isolation, tenant_isolation
 from ledger_platform.schema import CHASSIS_METADATA, CHASSIS_POLICIES
+from ledger_testing.containers import libpq_url
+from ledger_testing.waiting import eventually, waits_for_a_lock
 
 IDENTITY_TABLES: Final = frozenset(
     {"organizations", "companies", "memberships", "branches", "emission_points"}
@@ -57,6 +65,12 @@ MIGRATE: Final = (
     "import sys; from ledger_identity.adapters.postgres.migrate import upgrade; upgrade(sys.argv[1])"
 )
 """A migration in a process of its own, of the database its first argument names."""
+HOLD_THE_MIGRATION_LOCK: Final = "SELECT pg_advisory_lock(%s)"
+"""What a migration that takes long looks like to another: the lock held, by a session of the test's own."""
+CANCEL_THE_WAITING: Final = (
+    "SELECT pg_cancel_backend(pid) FROM pg_stat_activity "
+    "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+)
 QUOTED: Final = re.compile(r"'([^']*)'")
 """A literal in a constraint's definition as PostgreSQL prints it back: ``'owner'::character varying``."""
 
@@ -258,9 +272,40 @@ async def test_the_readiness_check_passes_on_a_database_at_this_version_only(
     assert (caught.value.kind, caught.value.code) == (ErrorKind.UNAVAILABLE, "schema_not_current")
 
 
+def test_a_migration_waits_for_another_long_but_not_forever() -> None:
+    assert timedelta(minutes=10) == MIGRATION_LOCK_WAIT
+
+
+async def test_a_migration_that_waits_longer_than_its_bound_fails_saying_why(fresh_database_url: str) -> None:
+    async with await psycopg.AsyncConnection.connect(libpq_url(fresh_database_url), autocommit=True) as other:
+        await other.execute(HOLD_THE_MIGRATION_LOCK, (migrate.MIGRATION_LOCK,))
+        with pytest.raises(MigrationLockTimeoutError) as caught:
+            await asyncio.to_thread(upgrade, fresh_database_url, lock_wait=timedelta(milliseconds=50))
+    assert (caught.value.kind, caught.value.code) == (ErrorKind.UNAVAILABLE, "migration_lock_timeout")
+    assert (
+        str(caught.value)
+        == "another migration of identity's database held its lock for longer than 0:00:00.050000"
+    )
+    assert tables_of(fresh_database_url) == set()  # nothing ran, not even Alembic's own table
+    upgrade(fresh_database_url)  # once the other one is done, the next migration runs
+    assert tables_of(fresh_database_url) >= IDENTITY_TABLES
+
+
+async def test_a_migration_cancelled_while_it_waits_fails_with_the_database_s_error(
+    fresh_database_url: str,
+) -> None:
+    async with await psycopg.AsyncConnection.connect(libpq_url(fresh_database_url), autocommit=True) as other:
+        await other.execute(HOLD_THE_MIGRATION_LOCK, (migrate.MIGRATION_LOCK,))
+        waiting = asyncio.create_task(asyncio.to_thread(upgrade, fresh_database_url))
+        await eventually(lambda: waits_for_a_lock(fresh_database_url))
+        await other.execute(CANCEL_THE_WAITING)
+        with pytest.raises(OperationalError) as caught:
+            await waiting
+    assert isinstance(caught.value.orig, psycopg.errors.QueryCanceled)
+
+
 def test_migrations_are_never_written_out_as_sql() -> None:
     config = scripts()
-    config.attributes["url"] = "postgresql+psycopg://nobody@localhost/nothing"
     with pytest.raises(OfflineMigrationsError, match="run against a database"):
         command.upgrade(config, "head", sql=True)
 

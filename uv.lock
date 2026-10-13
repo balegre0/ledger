@@ -633,6 +633,7 @@ dependencies = [
     { name = "alembic" },
     { name = "ledger-kernel" },
     { name = "ledger-platform" },
+    { name = "psycopg" },
     { name = "pydantic" },
     { name = "sqlalchemy" },
 ]
@@ -642,6 +643,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.20.0" },
     { name = "ledger-kernel", editable = "libs/kernel" },
     { name = "ledger-platform", editable = "libs/platform" },
+    { name = "psycopg", specifier = ">=3.3.6" },
     { name = "pydantic", specifier = ">=2.14.1" },
     { name = "sqlalchemy", specifier = ">=2.1.4" },
 ]
