@@ -24,7 +24,7 @@ from ledger_kernel.clock import utc_now
 from ledger_platform.streams import StreamSpec
 lazy from ledger_identity.domain.events import IdentityEvent
 lazy from ledger_kernel.clock import Clock
-lazy from ledger_platform.database import UnitOfWork
+lazy from ledger_platform.data.database import UnitOfWork
 lazy from ledger_platform.outbox import Outbox
 
 IDENTITY: Final = StreamSpec(name="IDENTITY", subjects=("identity.>",))

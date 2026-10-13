@@ -13,7 +13,7 @@ from ledger_identity.domain.ids import BranchId
 from ledger_identity.domain.text import parse_code, parse_name
 from ledger_kernel.access import Permission
 from ledger_kernel.ids import parse_id
-from ledger_platform.routes import (
+from ledger_platform.http.deps import (
     REPLAYED_HEADER,
     allowed,
     answer,
@@ -26,7 +26,7 @@ lazy from ledger_identity.api.context import ApiContext
 lazy from ledger_identity.api.models import NewBranch
 lazy from ledger_identity.settings import IdentitySettings
 lazy from ledger_kernel.pagination import PageRequest
-lazy from ledger_platform.authorization import CompanyAccess
+lazy from ledger_platform.auth.access import CompanyAccess
 lazy from ledger_platform.idempotency import StoredResponse
 lazy from ledger_platform.service import Runtime
 

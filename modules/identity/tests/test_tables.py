@@ -20,7 +20,7 @@ from ledger_identity.adapters.postgres.tables import (
     OrganizationRecord,
 )
 from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
-lazy from ledger_platform.database import Database, Scope
+lazy from ledger_platform.data.database import Database, Scope
 
 NOW: Final = datetime(2026, 10, 12, 12, tzinfo=UTC)
 SUBJECT: Final = "312345678901234567"

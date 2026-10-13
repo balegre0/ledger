@@ -21,7 +21,7 @@ from ledger_identity.domain.organization import ORGANIZATION_ADMIN
 from ledger_identity.domain.text import parse_legal_name
 from ledger_kernel.access import Permission
 from ledger_kernel.countries.do import TaxId
-from ledger_platform.routes import (
+from ledger_platform.http.deps import (
     REPLAYED_HEADER,
     allowed,
     answer,
@@ -41,9 +41,9 @@ lazy from ledger_identity.domain.company import Company
 lazy from ledger_identity.settings import IdentitySettings
 lazy from ledger_kernel.access import Principal
 lazy from ledger_kernel.pagination import PageRequest
-lazy from ledger_platform.authorization import CompanyAccess
+lazy from ledger_platform.auth.access import CompanyAccess
+lazy from ledger_platform.http.deps import IfMatch
 lazy from ledger_platform.idempotency import StoredResponse
-lazy from ledger_platform.routes import IfMatch
 lazy from ledger_platform.service import Runtime
 
 

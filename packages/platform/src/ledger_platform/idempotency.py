@@ -48,11 +48,11 @@ lazy from sqlalchemy import ColumnElement
 
 from ledger_kernel.errors import ConflictError, InvalidInputError, LedgerError, excerpt
 from ledger_kernel.ids import Tenant
-from ledger_platform.database import PlatformTable
-from ledger_platform.options import InvalidOptionError, require_at_least
+from ledger_platform.config.options import InvalidOptionError, require_at_least
+from ledger_platform.data.database import PlatformTable
 lazy from ledger_kernel.access import Principal, SubjectId
 lazy from ledger_kernel.ids import OrganizationId
-lazy from ledger_platform.database import Scope, UnitOfWork
+lazy from ledger_platform.data.database import Scope, UnitOfWork
 
 DEFAULT_RETENTION: Final = timedelta(hours=24)
 MAX_KEY_LENGTH: Final = 255

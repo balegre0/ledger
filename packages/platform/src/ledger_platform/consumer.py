@@ -86,18 +86,18 @@ lazy from prometheus_client import CollectorRegistry
 from ledger_contracts.envelope import Envelope, MalformedEventError
 from ledger_kernel.clock import utc_now
 from ledger_kernel.errors import ErrorKind, LedgerError
-from ledger_platform.database import DEFAULT_LIMITS, PlatformTable
-from ledger_platform.jetstream import is_refusal
-from ledger_platform.options import (
+from ledger_platform.config.options import (
     InvalidOptionError,
     is_positive_and_finite,
     require_at_least,
     require_seconds,
 )
-from ledger_platform.supervision import being_cancelled
+from ledger_platform.data.database import DEFAULT_LIMITS, PlatformTable
+from ledger_platform.jetstream import is_refusal
+from ledger_platform.runtime.supervision import being_cancelled
 lazy from ledger_kernel.clock import Clock
-lazy from ledger_platform.database import Database, UnitOfWork
-lazy from ledger_platform.tracing import Tracing
+lazy from ledger_platform.data.database import Database, UnitOfWork
+lazy from ledger_platform.observability.tracing import Tracing
 
 DEFAULT_MAX_DELIVER: Final = 10
 DEFAULT_BACKOFF: Final = (1.0, 10.0, 60.0, 300.0, 600.0)
@@ -450,10 +450,10 @@ class Consumer:
         request that timed out during an outage, the stream gone, the connection closed) and a cancellation,
         even one that a clean-up turned into another error (a rollback on a broken connection): that error
         ends the loop instead of counting as a failed handling.
-        The service's supervisor (``ledger_platform.supervision``) logs such an error and runs the consumer
-        again after a growing delay, binding it anew; a ``ConsumerRefusedError`` is a configuration mistake no
-        new run can fix, so the consumer stays stopped and the process reports itself not live, to be
-        restarted. On either, the handling in progress is rolled back and every message of the batch
+        The service's supervisor (``ledger_platform.runtime.supervision``) logs such an error and runs the
+        consumer again after a growing delay, binding it anew; a ``ConsumerRefusedError`` is a configuration
+        mistake no new run can fix, so the consumer stays stopped and the process reports itself not live, to
+        be restarted. On either, the handling in progress is rolled back and every message of the batch
         not yet settled goes back to JetStream at once (a negative acknowledgement without a delay: it counts
         as a delivery), so that nothing waits for ``ack_wait``; if the connection is gone, those messages are
         delivered again after ``ack_wait``.

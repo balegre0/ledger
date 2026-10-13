@@ -11,9 +11,9 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from prometheus_client import CollectorRegistry
 
 from ledger_kernel.ids import new_id
-from ledger_platform.database import Database
+from ledger_platform.data.database import Database
+from ledger_platform.observability.tracing import Tracing
 from ledger_platform.schema import CHASSIS_METADATA
-from ledger_platform.tracing import Tracing
 from ledger_testing import waiting
 from ledger_testing.containers import Postgres, nats_address, nats_server
 from ledger_testing.logs import restored_logging

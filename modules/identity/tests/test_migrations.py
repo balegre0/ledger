@@ -20,7 +20,7 @@ from ledger_identity.domain.company import CompanyStatus
 from ledger_identity.domain.membership import MembershipStatus
 from ledger_identity.domain.roles import Role
 from ledger_kernel.errors import ErrorKind
-from ledger_platform.database import Database, organization_isolation, tenant_isolation
+from ledger_platform.data.database import Database, organization_isolation, tenant_isolation
 from ledger_platform.migrations import SchemaNotCurrentError
 from ledger_platform.schema import CHASSIS_METADATA, CHASSIS_POLICIES
 from ledger_testing.migrations import (

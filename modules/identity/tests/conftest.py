@@ -15,9 +15,9 @@ from ledger_identity.domain.organization import ORGANIZATION_ADMIN
 from ledger_identity.main import build
 from ledger_identity.settings import IdentitySettings
 from ledger_kernel.ids import new_id
-from ledger_platform.database import Database
+from ledger_platform.data.database import Database
+from ledger_platform.observability.tracing import Tracing
 from ledger_platform.outbox import Outbox
-from ledger_platform.tracing import Tracing
 from ledger_testing.api import Caller, created
 from ledger_testing.containers import Postgres, nats_address, nats_server
 from ledger_testing.issuer import LocalIssuer

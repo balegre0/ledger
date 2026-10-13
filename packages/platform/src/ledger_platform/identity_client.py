@@ -52,8 +52,8 @@ from ledger_contracts.envelope import Envelope
 from ledger_kernel.access import Permission, parse_subject
 from ledger_kernel.errors import InvalidInputError
 from ledger_kernel.ids import CompanyId, OrganizationId, parse_id
-from ledger_platform.authorization import PermissionSource
-from ledger_platform.grpc_client import DEFAULT_DEADLINE, call_unary, require_deadline
+from ledger_platform.auth.access import PermissionSource
+from ledger_platform.grpc.client import DEFAULT_DEADLINE, call_unary, require_deadline
 lazy from ledger_kernel.access import Principal, SubjectId
 lazy from ledger_platform.interruptions import Interruptions
 

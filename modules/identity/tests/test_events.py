@@ -18,14 +18,14 @@ from ledger_contracts.envelope import Envelope
 from ledger_identity.adapters.events import IDENTITY, SOURCE
 from ledger_kernel.access import SubjectId
 from ledger_kernel.ids import CompanyId
-from ledger_platform.authentication import organization_of
+from ledger_platform.auth.tokens import organization_of
 from ledger_platform.identity_client import PermissionChanges
 from ledger_platform.outbox import OutboxRecord
 from ledger_testing.api import created
 from ledger_testing.caches import Forgotten
 from ledger_testing.waiting import eventually
 lazy from ledger_identity.settings import IdentitySettings
-lazy from ledger_platform.database import Database
+lazy from ledger_platform.data.database import Database
 lazy from ledger_platform.identity_client import Subscriber
 lazy from ledger_platform.service import Service
 lazy from ledger_testing.api import Caller

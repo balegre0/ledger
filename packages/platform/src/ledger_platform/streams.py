@@ -19,8 +19,8 @@ from nats.js.errors import APIError, NotFoundError
 lazy from nats.js.api import StreamInfo
 
 from ledger_kernel.errors import LedgerError, UnavailableError
+from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.jetstream import is_refusal
-from ledger_platform.options import InvalidOptionError
 
 MAX_ATTEMPTS: Final = 4
 """How many times ``ensure_stream`` writes a stream before it gives up on it being settled."""

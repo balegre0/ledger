@@ -10,16 +10,16 @@ from fastapi import Depends
 
 from ledger_identity.api.models import Problem
 from ledger_identity.domain.errors import StaleVersionError
-from ledger_platform.routes import REPLAYED_HEADER, authenticated, company_in_path, precondition_failed
-from ledger_platform.web import PROBLEM_JSON
+from ledger_platform.http.app import PROBLEM_JSON
+from ledger_platform.http.deps import REPLAYED_HEADER, authenticated, company_in_path, precondition_failed
 lazy from ledger_identity.application.ports import IdentityUnit
 lazy from ledger_identity.settings import IdentitySettings
-lazy from ledger_platform.authentication import TokenVerifier
-lazy from ledger_platform.authorization import PermissionSource
-lazy from ledger_platform.database import Database, UnitOfWork
+lazy from ledger_platform.auth.access import PermissionSource
+lazy from ledger_platform.auth.tokens import TokenVerifier
+lazy from ledger_platform.data.database import Database, UnitOfWork
+lazy from ledger_platform.http.deps import Caller, InCompany
 lazy from ledger_platform.idempotency import Idempotency
 lazy from ledger_platform.outbox import Outbox
-lazy from ledger_platform.routes import Caller, InCompany
 lazy from ledger_platform.service import Runtime, RuntimeDependency
 
 type BindUnit = Callable[[UnitOfWork, Outbox], IdentityUnit]

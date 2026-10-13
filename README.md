@@ -103,7 +103,7 @@ keys, policies). The first revision's gist, as a script:
 ```python
 from sqlalchemy import text
 
-from ledger_platform.database import Database, tenant_isolation
+from ledger_platform.data.database import Database, tenant_isolation
 from ledger_platform.schema import CHASSIS_METADATA, CHASSIS_POLICIES  # it imports every module with a table
 
 async with Database.open(url) as database, database.engine.begin() as connection:
@@ -156,18 +156,18 @@ from sqlalchemy import Boolean, Column, MetaData, Table, Text, Uuid, false, inse
 from ledger.common.v1.money_pb2 import Money
 from ledger_contracts.envelope import Envelope
 from ledger_kernel.access import Permission
-from ledger_platform.authentication import HttpKeys, PublishedKeys, TokenPolicy, TokenVerifier
-from ledger_platform.authorization import CachedPermissions
+from ledger_platform.auth.tokens import HttpKeys, PublishedKeys, TokenPolicy, TokenVerifier
+from ledger_platform.auth.access import CachedPermissions
 from ledger_platform.consumer import ConsumerSpec
 from ledger_platform.identity_client import RemotePermissions, follow_permission_changes
-from ledger_platform.routes import allowed, authenticated, company_in_path
+from ledger_platform.http.deps import allowed, authenticated, company_in_path
 from ledger_platform.service import Events, Interfaces, Service, ServiceLimits
-from ledger_platform.settings import ApiSettings
+from ledger_platform.config.settings import ApiSettings
 from ledger_platform.streams import StreamSpec
-lazy from ledger_platform.authorization import CompanyAccess, PermissionSource
-lazy from ledger_platform.database import UnitOfWork
+lazy from ledger_platform.auth.access import CompanyAccess, PermissionSource
+lazy from ledger_platform.data.database import UnitOfWork
 lazy from ledger_platform.service import Runtime, RuntimeDependency
-lazy from ledger_platform.supervision import Work
+lazy from ledger_platform.runtime.supervision import Work
 
 
 class PaymentsSettings(ApiSettings):
@@ -311,7 +311,7 @@ status of the error's kind (see below).
 | `tenant_isolation(table)` | The DDL (a tuple of statements) for a migration that enables and forces row-level security on a table with `organization_id` and `company_id` columns, and creates the policy. `tenant_isolation_removal(table)` undoes it for a downgrade. `organization_isolation(table, column=)` does the same for a table an organization owns as a whole (its `organization_id`, or `id` for the organizations themselves) |
 | Errors | Raise a `LedgerError` subclass: `InvalidInputError`, `UnauthenticatedError`, `NotFoundError`, `ConflictError`, `ForbiddenError`, `UnavailableError`, or your own with a stable `code`. Its message is built inside the class (`raise PaymentTooLargeError(limit)`), and `excerpt()` quotes at most 40 characters of an input |
 | `ApiSettings`, `TokenVerifier`, `HttpKeys` | A service with a public API takes `LEDGER_TOKEN_ISSUER`, `LEDGER_TOKEN_AUDIENCE` and `LEDGER_TOKEN_JWKS_URL` (https outside `local` and `test`). The verifier accepts access tokens only, never an ID token of the same project (one that lacks `jti` or `client_id`, or carries `azp`, `nonce`, `at_hash` or `c_hash`, is refused), and asymmetric algorithms only; a principal's roles are read only from the claim of the project that is the audience (`urn:zitadel:iam:org:project:<audience>:roles`), granted in its organization; it keeps the provider's keys for 10 minutes, refreshes them at once for a key id it lacks (at most once per 10 s), keeps serving the keys it holds while the provider is down, and answers 401 with the problem in a word, never the token; `HttpKeys` is the service's resource that fetches them |
-| `authenticated`, `company_in_path`, `company_in_header`, `allowed`, `holding`, `in_organization`, `unguarded_routes` | What a route declares (`ledger_platform.routes`): the caller, and the company of the request with what the caller may do there: `allowed(in_company, Permission.COMPANY_MANAGE)` is 404 without a role there, 403 without the permission; `holding(caller, role)` requires a role the identity provider granted in the organization (403), `in_organization(caller)` any principal of it, for a route about the organization as a whole. `unguarded_routes(app.routes)` names every `/v1` route that needs no bearer token or declares none of these: a service's test asserts it is empty. Also `page_request` (`limit`, `cursor`), `if_match` (428 without it), `idempotency_key`, `attempt_of`, `json_response`, `answer` |
+| `authenticated`, `company_in_path`, `company_in_header`, `allowed`, `holding`, `in_organization`, `unguarded_routes` | What a route declares (`ledger_platform.http.deps`): the caller, and the company of the request with what the caller may do there: `allowed(in_company, Permission.COMPANY_MANAGE)` is 404 without a role there, 403 without the permission; `holding(caller, role)` requires a role the identity provider granted in the organization (403), `in_organization(caller)` any principal of it, for a route about the organization as a whole. `unguarded_routes(app.routes)` names every `/v1` route that needs no bearer token or declares none of these: a service's test asserts it is empty. Also `page_request` (`limit`, `cursor`), `if_match` (428 without it), `idempotency_key`, `attempt_of`, `json_response`, `answer` |
 | `Idempotency` | `once(unit, attempt, work)` runs a `POST`'s work once per `(organization, subject, key)`, in the work's own transaction, and replays its stored answer byte for byte (`Idempotent-Replayed: true`); another body with the key is a 422, a twin in flight waits, keys live 24 h |
 | `call_unary`, `RemotePermissions`, `CachedPermissions`, `follow_permission_changes` | A gRPC call with a deadline whose failure comes back as a ledger error of the other side's kind; permissions asked of identity, cached 30 s and dropped by every replica when identity announces a change: a membership granted or revoked drops the member's answer, a company deactivated every answer about the company (`forget_company`). Every identity event that changes what other services may do must be followed there |
 

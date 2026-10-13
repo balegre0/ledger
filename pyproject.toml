@@ -142,7 +142,7 @@ runtime-evaluated-base-classes = [
     "pydantic.BaseModel",
     "pydantic_settings.BaseSettings",
     "sqlalchemy.orm.DeclarativeBase",
-    "ledger_platform.database.PlatformTable",  # SQLAlchemy reads the annotations of its tables at runtime
+    "ledger_platform.data.database.PlatformTable",  # SQLAlchemy reads the annotations of its tables at runtime
     "ledger_identity.adapters.postgres.tables.IdentityTable",
 ]
 
@@ -249,25 +249,21 @@ name = "Packages point down: platform -> contracts -> kernel"
 type = "layers"
 layers = ["ledger_platform", "ledger_contracts", "ledger_kernel"]
 
-# Inside the platform: the service assembles the adapters (HTTP, gRPC, consumers), which use messaging (the
-# outbox, which declares streams again when they vanish, over the streams) and the idempotency keys, which use the
-# infrastructure, which uses the foundations. Modules of one layer never import each other. The schema, which
-# gathers the tables of the outbox, the consumers and the idempotency keys for migrations, sits below the service,
-# whose readiness checks the tables exist; the migrations, which create them, sit beside the service.
-# Exhaustive: a new module must be given its layer here.
+# Inside the platform, top to bottom. Subpackages are layers; the v1 modules that Task 16 deletes keep the place
+# they had. Peers (`|`) never import each other. Exhaustive: a new module or subpackage must be given its layer.
 [[tool.importlinter.contracts]]
-name = "Platform layers: service -> adapters -> messaging -> infrastructure -> foundations"
+name = "Platform layers"
 type = "layers"
 containers = ["ledger_platform"]
 exhaustive = true
 layers = [
     "service | migrations",
     "schema",
-    "web | grpc_server | consumer | routes | identity_client",
-    "outbox | idempotency | authorization",
+    "http | consumer | identity_client",
+    "outbox | idempotency | auth | grpc",
     "streams",
-    "database | tracing | health | logs | jetstream | authentication | request_fields | grpc_client",
-    "settings | options | lifecycle | supervision | interruptions | probe",
+    "data | observability | jetstream",
+    "config | runtime | lifecycle | interruptions",
 ]
 
 [[tool.importlinter.contracts]]

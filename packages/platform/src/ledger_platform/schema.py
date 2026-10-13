@@ -14,7 +14,7 @@ all three (a migration, say). This module imports them and is the one thing a mi
 from typing import Final
 
 from ledger_platform.consumer import InboxRecord
-from ledger_platform.database import PlatformTable, organization_isolation
+from ledger_platform.data.database import PlatformTable, organization_isolation
 from ledger_platform.idempotency import IdempotencyRecord
 from ledger_platform.outbox import OutboxRecord
 

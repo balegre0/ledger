@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends
 from ledger_identity.api.context import problems
 from ledger_identity.api.models import OrganizationView
 from ledger_identity.application import queries
-from ledger_platform.routes import in_organization
+from ledger_platform.http.deps import in_organization
 lazy from ledger_identity.api.context import ApiContext
 lazy from ledger_identity.settings import IdentitySettings
 lazy from ledger_kernel.access import Principal

@@ -11,10 +11,10 @@ Identity's own routes get the role's permissions in a deactivated company too, u
 from typing import final, override
 
 from ledger_identity.adapters.postgres.repositories import PgMemberships
-from ledger_platform.authorization import PermissionSource
+from ledger_platform.auth.access import PermissionSource
 lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_kernel.ids import CompanyId
-lazy from ledger_platform.database import Database
+lazy from ledger_platform.data.database import Database
 
 
 @final

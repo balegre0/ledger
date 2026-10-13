@@ -26,7 +26,7 @@ from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, parse_id
 lazy from ledger_identity.api.context import BindUnit
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_identity.settings import IdentitySettings
-lazy from ledger_platform.database import Database
+lazy from ledger_platform.data.database import Database
 lazy from ledger_platform.outbox import Outbox
 lazy from ledger_platform.service import GrpcServices, Runtime
 

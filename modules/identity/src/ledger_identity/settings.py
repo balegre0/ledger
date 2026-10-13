@@ -2,7 +2,7 @@
 
 from pydantic import Field
 
-from ledger_platform.settings import ApiSettings
+from ledger_platform.config.settings import ApiSettings
 
 
 class IdentitySettings(ApiSettings):

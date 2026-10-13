@@ -39,16 +39,16 @@ lazy from sqlalchemy import ColumnElement, Connection, Delete, MetaData, Update
 
 from ledger_kernel.errors import LedgerError, UnavailableError
 from ledger_kernel.ids import CompanyId, OrganizationId, Tenant
-from ledger_platform.database import (
+from ledger_platform.config.options import InvalidOptionError
+from ledger_platform.data.database import (
     ORGANIZATION_POLICY,
     SET_SCOPE,
     TENANT_POLICY,
     ddl_name,
     scope_settings,
 )
-from ledger_platform.options import InvalidOptionError
 from ledger_platform.schema import CHASSIS_METADATA
-lazy from ledger_platform.database import AnyTable, Database, Scope
+lazy from ledger_platform.data.database import AnyTable, Database, Scope
 
 HEAD: Final = "head"
 BASE: Final = "base"
