@@ -10,7 +10,7 @@ lazy from fastapi import APIRouter, FastAPI
 
 from ledger_identity.adapters.events import IDENTITY
 from ledger_identity.adapters.permissions import MembershipPermissions
-from ledger_identity.adapters.postgres.migrate import head, require_head
+from ledger_identity.adapters.postgres.migrate import MIGRATIONS
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.api.context import ApiContext
 from ledger_identity.api.rest import routes
@@ -29,15 +29,16 @@ def build(settings: IdentitySettings) -> Service[IdentitySettings]:
 
     Its resource is the HTTP client that fetches the identity provider's keys, open while the service runs;
     the age of the keys it fetched is a metric of the service. Its own readiness check, ``migrations``: the
-    database is at the revision this version's migrations end at, so a new version on a database not yet
-    migrated (or never migrated) stays out of rotation.
+    database is at the revision this version's migrations end at, or at a newer one (``SchemaReadiness``):
+    a new version on a database not yet migrated (or never migrated) stays out of rotation, while an old one
+    keeps serving through a rollout.
     """
     policy = TokenPolicy.of(settings)
     registry = CollectorRegistry()
     keys = HttpKeys()
     verifier = TokenVerifier(policy, keys=PublishedKeys(policy, fetch=keys, registry=registry))
     idempotency = Idempotency()
-    expected = head()
+    schema = MIGRATIONS.readiness()
 
     def http(runtime: RuntimeDependency[IdentitySettings]) -> Sequence[APIRouter]:
         context = ApiContext.build(
@@ -53,8 +54,8 @@ def build(settings: IdentitySettings) -> Service[IdentitySettings]:
         del running
         return keys.opened()
 
-    async def migrations_at_head(runtime: Runtime[IdentitySettings]) -> None:
-        await require_head(runtime.database, expected)
+    async def migrations_applied(runtime: Runtime[IdentitySettings]) -> None:
+        await schema(runtime.database)
 
     return Service(
         settings=settings,
@@ -63,7 +64,7 @@ def build(settings: IdentitySettings) -> Service[IdentitySettings]:
             http=http,
             grpc=services(bind),
             resources=resources,
-            checks={"migrations": migrations_at_head},
+            checks={"migrations": migrations_applied},
             registry=registry,
         ),
         events=Events(streams=(IDENTITY,)),

@@ -10,6 +10,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from prometheus_client import CollectorRegistry
 
+from ledger_kernel.ids import new_id
 from ledger_platform.database import Database
 from ledger_platform.schema import CHASSIS_METADATA
 from ledger_platform.tracing import Tracing
@@ -28,10 +29,23 @@ def restore_logging() -> Iterator[None]:
 
 
 @pytest.fixture(scope="session")
-def database_url() -> Iterator[str]:
-    """A real PostgreSQL; the app connects as ``ledger_app``, which owns the database but is no superuser."""
+def postgres() -> Iterator[Postgres]:
+    """A real PostgreSQL for the whole session."""
     with Postgres.started() as server:
-        yield server.database("ledger", role="ledger_app", password="app-password")
+        yield server
+
+
+@pytest.fixture(scope="session")
+def database_url(postgres: Postgres) -> str:
+    """The app's database; it connects as ``ledger_app``, which owns the database but is no superuser."""
+    return postgres.database("ledger", role="ledger_app", password="app-password")
+
+
+@pytest.fixture
+def fresh_database_url(postgres: Postgres) -> str:
+    """An empty database of its own, owned by a role of its own: for the tests of the migrations."""
+    name = f"fresh_{new_id().hex[16:]}"  # the random half of a UUIDv7
+    return postgres.database(name, role=name, password="fresh-password")
 
 
 @pytest.fixture

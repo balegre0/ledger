@@ -100,7 +100,7 @@ Future country services (`fiscal-mx`, `fiscal-co`) consume `invoicing.document.i
 |---|---|---|
 | `kernel` | UUIDv7 ids (a type per entity), exact `Money` and `Currency`, `TaxId` (RNC or cédula; check digit reported, not enforced, because DGII has issued numbers that fail it), clock, the base domain exception hierarchy (a kind and a stable code per error), principals and typed permissions, cursor pagination | stdlib only |
 | `contracts` | `.proto` files for gRPC services and event payloads, generated code and stubs, event envelope | `kernel`, protobuf, grpcio |
-| `platform` | the service chassis: settings, logging, tracing, metrics, PostgreSQL transactions (unit of work, row-level security), outbox relay, inbox and consumers, JetStream stream management, gRPC server, HTTP app factory, health, lifecycle, and the `Service` that assembles them. Built with the first service (milestone 2): bearer-token verification against the identity provider's keys, the authorization context (permissions per company, cached 30 s and dropped on membership events), idempotency keys, cursor pagination, conditional updates, gRPC client helpers | `kernel`, `contracts`, third-party infrastructure libraries |
+| `platform` | the service chassis: settings, logging, tracing, metrics, PostgreSQL transactions (unit of work, row-level security), outbox relay, inbox and consumers, JetStream stream management, gRPC server, HTTP app factory, health, lifecycle, and the `Service` that assembles them. Built with the first service (milestone 2): bearer-token verification against the identity provider's keys, Alembic migrations run the same way for every service, the authorization context (permissions per company, cached 30 s and dropped on membership events), idempotency keys, cursor pagination, conditional updates, gRPC client helpers | `kernel`, `contracts`, third-party infrastructure libraries |
 | `testing` | what the tests of every package share: PostgreSQL and NATS containers, a local OpenID provider, the logging baseline (a dev dependency) | anything; production code never imports it |
 
 A service may depend on `libs/*`, never on another service. import-linter enforces it.
@@ -334,6 +334,18 @@ company can certify while another runs in production.
   simplicity, and rely on `FORCE ROW LEVEL SECURITY` to subject the owner to the policies.
 - SQLAlchemy 2.1 Core with typed tables (no ORM sessions in the domain); psycopg 3, asynchronous, as the
   only driver (the chassis refuses any other); Alembic migrations, reviewed and tested up and down in CI.
+- Migrations run through `platform`'s runner (`ledger_platform.migrations`): a service ships its revisions
+  and its `env.py` is one call. One migration per database at a time (a transaction-level advisory lock,
+  waited for at most 10 minutes; every other lock at most 10 s), one transaction each, never as SQL text, run
+  by a one-shot job before the new version starts. A service's readiness checks its schema on a connection
+  of its own (never the pool's), and remembers once it passed: ready at this version's head or at a revision
+  this version does not know (a newer version migrated during a rollout; schemas only grow, so revisions are
+  expand-only while two versions run), not ready behind or unmigrated.
+- Data migrations run as the tables' owner, which `FORCE ROW LEVEL SECURITY` holds to the policies, so a
+  statement without a scope changes nothing silently. A backfill counts the rows to change per scope past the
+  policies (`rows_by_scope`, which lifts the force for that one read inside the migration's transaction) and
+  runs its statement in each scope (`run_per_scope`), failing the migration unless every scope changed exactly
+  the rows counted.
 - Every connection carries limits, none of them unlimited: connect 5 s, statement 30 s, lock 5 s,
   idle-in-transaction 60 s, wait for a pooled connection 10 s. A missing limit turns one stuck dependency
   into every worker stuck; a migration or batch job passes longer ones. SQLAlchemy does not echo the values

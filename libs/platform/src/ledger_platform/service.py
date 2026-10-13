@@ -257,7 +257,13 @@ class Interfaces[S: ServiceSettings]:
     checks: Mapping[str, ReadinessCheck[S]] = field(default_factory=dict[str, ReadinessCheck[S]])
     """Readiness checks of the service's own, by name, beside the chassis's (``database``, ``nats``,
     ``workers``, ``schema``, whose names they cannot take): each is handed the runtime and held to the same
-    time limit; while the service is not running it fails."""
+    time limit; while the service is not running it fails.
+
+    A check must never use the pool (``runtime.database.transaction``): every request may hold a pooled
+    connection, and a check waiting for one would take every busy replica out of rotation. It reads on a
+    connection of its own (``runtime.database.probing()``), and a check of what does not change back once it
+    holds (a schema migrated, a table created) remembers that it passed and stops asking, as the chassis's
+    ``schema`` check and ``ledger_platform.migrations.SchemaReadiness`` do: probes come every few seconds."""
     registry: CollectorRegistry | None = None
     """Where the service's metrics are kept, which ``/metrics`` exports to Prometheus; ``None``: a new one.
 

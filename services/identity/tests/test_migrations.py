@@ -1,38 +1,19 @@
-"""identity's migrations: from nothing to this version's schema and back, equal to the models, under RLS."""
+"""identity's migrations: from nothing to this version's schema and back, equal to the models, under RLS.
 
-import asyncio
+How migrations run (the lock, its bound, offline mode, readiness) is the platform's, tested there.
+"""
+
 import re
 import subprocess
 import sys
-from datetime import timedelta
 from typing import Final
 
-import psycopg
 import pytest
-from alembic import command
-from alembic.autogenerate import produce_migrations, render_python_code
-from alembic.config import Config
-from alembic.migration import MigrationContext
-from pydantic import TypeAdapter
-from sqlalchemy import CheckConstraint, MetaData, create_engine, inspect, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import CheckConstraint, create_engine, text
 from sqlalchemy.pool import NullPool
 
 from ledger_identity.adapters.postgres import migrate
-from ledger_identity.adapters.postgres.migrate import (
-    MIGRATION_LOCK_WAIT,
-    SCRIPTS,
-    InvalidMigrationOptionError,
-    MigrationLockTimeoutError,
-    MigrationUrlMissingError,
-    OfflineMigrationsError,
-    SchemaNotCurrentError,
-    Target,
-    downgrade,
-    head,
-    require_head,
-    upgrade,
-)
+from ledger_identity.adapters.postgres.migrate import MIGRATIONS
 from ledger_identity.adapters.postgres.migrations.versions import r0001_identity
 from ledger_identity.adapters.postgres.tables import IdentityTable
 from ledger_identity.domain.company import CompanyStatus
@@ -40,123 +21,66 @@ from ledger_identity.domain.membership import MembershipStatus
 from ledger_identity.domain.roles import Role
 from ledger_kernel.errors import ErrorKind
 from ledger_platform.database import Database, organization_isolation, tenant_isolation
+from ledger_platform.migrations import SchemaNotCurrentError
 from ledger_platform.schema import CHASSIS_METADATA, CHASSIS_POLICIES
-from ledger_testing.containers import libpq_url
-from ledger_testing.waiting import eventually, waits_for_a_lock
+from ledger_testing.migrations import (
+    check_constraints,
+    combined,
+    pending_changes,
+    policies,
+    primary_keys,
+    row_security,
+    tables_of,
+)
 
 IDENTITY_TABLES: Final = frozenset(
     {"organizations", "companies", "memberships", "branches", "emission_points"}
 )
 CHASSIS_TABLES: Final = frozenset({"outbox", "inbox", "idempotency_keys"})
-POLICIES: Final = TypeAdapter(list[tuple[str, str]])
-SECURITY: Final = TypeAdapter(list[tuple[str, bool, bool]])
-CHECKS: Final = TypeAdapter(dict[str, str])
-CHECKS_SQL: Final = text(
-    """
-    SELECT conname::text, pg_get_constraintdef(oid) FROM pg_constraint
-    WHERE contype = 'c' AND connamespace = 'public'::regnamespace
-    """
-)
-SECURITY_SQL: Final = text(
-    """
-    SELECT relname::text, relrowsecurity, relforcerowsecurity FROM pg_class
-    WHERE relkind = 'r' AND relnamespace = 'public'::regnamespace
-    """
-)
+MODELS: Final = combined(CHASSIS_METADATA, IdentityTable.metadata)
+"""The chassis's tables and identity's, in one metadata, as the migrations must make them."""
 MIGRATE: Final = (
-    "import sys; from ledger_identity.adapters.postgres.migrate import upgrade; upgrade(sys.argv[1])"
+    "import sys; from ledger_identity.adapters.postgres.migrate import MIGRATIONS; "
+    "MIGRATIONS.upgrade(sys.argv[1])"
 )
 """A migration in a process of its own, of the database its first argument names."""
-HOLD_THE_MIGRATION_LOCK: Final = "SELECT pg_advisory_lock(%s)"
-"""What a migration that takes long looks like to another: the lock held, by a session of the test's own."""
-CANCEL_THE_WAITING: Final = (
-    "SELECT pg_cancel_backend(pid) FROM pg_stat_activity "
-    "WHERE datname = current_database() AND wait_event_type = 'Lock'"
-)
 QUOTED: Final = re.compile(r"'([^']*)'")
 """A literal in a constraint's definition as PostgreSQL prints it back: ``'owner'::character varying``."""
 
 
-def tables_of(url: str) -> set[str]:
-    engine = create_engine(url, poolclass=NullPool)
-    try:
-        with engine.connect() as connection:
-            return set(inspect(connection).get_table_names())
-    finally:
-        engine.dispose()
-
-
-def models() -> MetaData:
-    """The chassis's tables and identity's, in one metadata, as the migrations must make them."""
-    combined = MetaData()
-    for table in (*CHASSIS_METADATA.tables.values(), *IdentityTable.metadata.tables.values()):
-        table.to_metadata(combined)
-    return combined
-
-
-def pending_changes(url: str) -> str | None:
-    """The migration the models would still need, as Alembic would write it; ``None`` when there is none."""
-    engine = create_engine(url, poolclass=NullPool)
-    try:
-        with engine.connect() as connection:
-            context = MigrationContext.configure(
-                connection, opts={"compare_type": True, "compare_server_default": True}
-            )
-            operations = produce_migrations(context, models()).upgrade_ops
-            return None if operations is None or operations.is_empty() else render_python_code(operations)
-    finally:
-        engine.dispose()
-
-
-def checks_of(url: str) -> dict[str, str]:
-    """Every check constraint of the database, by name, as PostgreSQL prints its definition back."""
-    engine = create_engine(url, poolclass=NullPool)
-    try:
-        with engine.connect() as connection:
-            return CHECKS.validate_python(dict(tuple(row) for row in connection.execute(CHECKS_SQL)))
-    finally:
-        engine.dispose()
-
-
-def scripts() -> Config:
-    config = Config()
-    config.set_main_option("script_location", SCRIPTS)
-    return config
-
-
 def test_the_schema_is_built_from_nothing_and_taken_back_to_nothing(fresh_database_url: str) -> None:
-    upgrade(fresh_database_url)
+    MIGRATIONS.upgrade(fresh_database_url)
     assert tables_of(fresh_database_url) == {*IDENTITY_TABLES, *CHASSIS_TABLES, "alembic_version"}
-    downgrade(fresh_database_url)
+    MIGRATIONS.downgrade(fresh_database_url)
     assert tables_of(fresh_database_url) == {"alembic_version"}
-    upgrade(fresh_database_url)
+    MIGRATIONS.upgrade(fresh_database_url)
     assert tables_of(fresh_database_url) >= IDENTITY_TABLES
 
 
 def test_upgrading_a_database_already_at_this_version_changes_nothing(database_url: str) -> None:
-    upgrade(database_url)
-    assert pending_changes(database_url) is None
+    MIGRATIONS.upgrade(database_url)
+    assert pending_changes(database_url, MODELS) is None
 
 
 def test_the_migrated_schema_is_exactly_the_models(database_url: str) -> None:
-    assert pending_changes(database_url) is None
+    assert pending_changes(database_url, MODELS) is None
 
 
 def test_a_schema_that_differs_from_the_models_is_noticed(fresh_database_url: str) -> None:
     """The comparison sees the expression index of the outbox, so a schema without it is not "the models"."""
-    upgrade(fresh_database_url)
+    MIGRATIONS.upgrade(fresh_database_url)
     engine = create_engine(fresh_database_url, poolclass=NullPool)
     try:
         with engine.begin() as connection:
             connection.execute(text("DROP INDEX ix_outbox_due"))
     finally:
         engine.dispose()
-    assert "ix_outbox_due" in (pending_changes(fresh_database_url) or "")
+    assert "ix_outbox_due" in (pending_changes(fresh_database_url, MODELS) or "")
 
 
 def test_the_check_constraints_are_the_models_and_allow_exactly_the_domains_words(database_url: str) -> None:
     """Alembic does not compare check constraints: their names and the words they allow are compared here."""
-    checks = checks_of(database_url)
+    checks = check_constraints(database_url)
     declared = {
         str(constraint.name)
         for table in IdentityTable.metadata.tables.values()
@@ -177,21 +101,7 @@ def test_the_check_constraints_are_the_models_and_allow_exactly_the_domains_word
 
 
 def test_every_table_of_a_tenants_data_is_under_its_policy_forced_on_its_owner(database_url: str) -> None:
-    engine = create_engine(database_url, poolclass=NullPool)
-    try:
-        with engine.connect() as connection:
-            policies = POLICIES.validate_python(
-                [
-                    tuple(row)
-                    for row in connection.execute(
-                        text("SELECT tablename::text, policyname::text FROM pg_policies")
-                    )
-                ]
-            )
-            security = SECURITY.validate_python([tuple(row) for row in connection.execute(SECURITY_SQL)])
-    finally:
-        engine.dispose()
-    assert sorted(policies) == [
+    assert policies(database_url) == [
         ("branches", "tenant_isolation"),
         ("companies", "organization_isolation"),
         ("emission_points", "tenant_isolation"),
@@ -201,7 +111,7 @@ def test_every_table_of_a_tenants_data_is_under_its_policy_forced_on_its_owner(d
     ]
     on: Final = (True, True)
     off: Final = (False, False)
-    assert {name: (enabled, forced) for name, enabled, forced in security} == {
+    assert row_security(database_url) == {
         **dict.fromkeys(IDENTITY_TABLES, on),
         "idempotency_keys": on,
         "outbox": off,  # the outbox and the inbox stay outside on purpose
@@ -212,7 +122,7 @@ def test_every_table_of_a_tenants_data_is_under_its_policy_forced_on_its_owner(d
 
 def test_the_revision_runs_the_isolation_the_platform_writes_today() -> None:
     """The revision keeps the policies' DDL as it ran; a platform that now writes another is noticed here."""
-    tables = models().tables
+    tables = MODELS.tables
     written_today = (
         CHASSIS_POLICIES,
         organization_isolation(tables["organizations"], column="id"),
@@ -226,21 +136,11 @@ def test_the_revision_runs_the_isolation_the_platform_writes_today() -> None:
 
 def test_every_primary_key_is_the_models_column_for_column(database_url: str) -> None:
     """Alembic does not compare primary keys: their columns, in order, are compared here."""
-    engine = create_engine(database_url, poolclass=NullPool)
-    try:
-        with engine.connect() as connection:
-            schema = inspect(connection)
-            migrated = {
-                name: list(schema.get_pk_constraint(name)["constrained_columns"])
-                for name in schema.get_table_names()
-            }
-    finally:
-        engine.dispose()
-    assert migrated == {
+    assert primary_keys(database_url) == {
         "alembic_version": ["version_num"],
         **{
             name: [column.name for column in table.primary_key.columns]
-            for name, table in models().tables.items()
+            for name, table in MODELS.tables.items()
         },
     }
 
@@ -261,78 +161,14 @@ def test_two_migrations_started_at_once_both_succeed(fresh_database_url: str) ->
 async def test_the_readiness_check_passes_on_a_database_at_this_version_only(
     database: Database, fresh_database_url: str
 ) -> None:
-    assert head() == "0001"
-    await require_head(database, head())
-    async with Database.open(fresh_database_url, pool_size=1) as never_migrated:
-        with pytest.raises(SchemaNotCurrentError):
-            await require_head(never_migrated, head())
-    upgrade(fresh_database_url)
-    downgrade(fresh_database_url)  # alembic_version is left, empty
+    assert MIGRATIONS.head() == "0001"
+    await MIGRATIONS.readiness()(database)
+    MIGRATIONS.upgrade(fresh_database_url)
+    MIGRATIONS.downgrade(fresh_database_url)  # alembic_version is left, empty
     async with Database.open(fresh_database_url, pool_size=1) as behind:
         with pytest.raises(SchemaNotCurrentError) as caught:
-            await require_head(behind, head())
+            await MIGRATIONS.readiness()(behind)
     assert (caught.value.kind, caught.value.code) == (ErrorKind.UNAVAILABLE, "schema_not_current")
-
-
-def test_a_migration_waits_for_another_long_but_not_forever() -> None:
-    assert timedelta(minutes=10) == MIGRATION_LOCK_WAIT
-
-
-@pytest.mark.parametrize(
-    "wait",
-    [timedelta(0), timedelta(milliseconds=-1), timedelta(milliseconds=2**31)],
-    ids=["zero", "negative", "beyond-postgresql"],
-)
-def test_a_migration_waits_a_positive_time_postgresql_can_hold(wait: timedelta) -> None:
-    """Zero would be no bound at all to ``lock_timeout``; above 2^31 - 1 ms PostgreSQL refuses the setting."""
-    with pytest.raises(InvalidMigrationOptionError) as caught:
-        upgrade("postgresql+psycopg://nobody@localhost/nothing", lock_wait=wait)
-    assert caught.value.code == "invalid_migration_option"
-    assert str(caught.value).startswith("migration option lock_wait must be between 1 microsecond and ")
-
-
-def test_the_longest_wait_postgresql_can_hold_is_accepted() -> None:
-    longest = timedelta(milliseconds=2**31 - 1)
-    assert Target(url="postgresql+psycopg://nobody@localhost/nothing", lock_wait=longest).lock_wait == longest
-
-
-async def test_a_migration_that_waits_longer_than_its_bound_fails_saying_why(fresh_database_url: str) -> None:
-    async with await psycopg.AsyncConnection.connect(libpq_url(fresh_database_url), autocommit=True) as other:
-        await other.execute(HOLD_THE_MIGRATION_LOCK, (migrate.MIGRATION_LOCK,))
-        with pytest.raises(MigrationLockTimeoutError) as caught:
-            await asyncio.to_thread(upgrade, fresh_database_url, lock_wait=timedelta(milliseconds=50))
-    assert (caught.value.kind, caught.value.code) == (ErrorKind.UNAVAILABLE, "migration_lock_timeout")
-    assert (
-        str(caught.value)
-        == "another migration of identity's database held its lock for longer than 0:00:00.050000"
-    )
-    assert tables_of(fresh_database_url) == set()  # nothing ran, not even Alembic's own table
-    upgrade(fresh_database_url)  # once the other one is done, the next migration runs
-    assert tables_of(fresh_database_url) >= IDENTITY_TABLES
-
-
-async def test_a_migration_cancelled_while_it_waits_fails_with_the_database_s_error(
-    fresh_database_url: str,
-) -> None:
-    async with await psycopg.AsyncConnection.connect(libpq_url(fresh_database_url), autocommit=True) as other:
-        await other.execute(HOLD_THE_MIGRATION_LOCK, (migrate.MIGRATION_LOCK,))
-        waiting = asyncio.create_task(asyncio.to_thread(upgrade, fresh_database_url))
-        await eventually(lambda: waits_for_a_lock(fresh_database_url))
-        await other.execute(CANCEL_THE_WAITING)
-        with pytest.raises(OperationalError) as caught:
-            await waiting
-    assert isinstance(caught.value.orig, psycopg.errors.QueryCanceled)
-
-
-def test_migrations_are_never_written_out_as_sql() -> None:
-    config = scripts()
-    with pytest.raises(OfflineMigrationsError, match="run against a database"):
-        command.upgrade(config, "head", sql=True)
-
-
-def test_migrations_need_a_database_to_run_against() -> None:
-    with pytest.raises(MigrationUrlMissingError, match="without a database URL"):
-        command.upgrade(scripts(), "head")
 
 
 def test_the_command_line_migrates_the_database_its_settings_name(

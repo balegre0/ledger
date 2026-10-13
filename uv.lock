@@ -675,7 +675,6 @@ dependencies = [
     { name = "ledger-platform" },
     { name = "prometheus-client" },
     { name = "protobuf" },
-    { name = "psycopg" },
     { name = "pydantic" },
     { name = "sqlalchemy" },
 ]
@@ -691,7 +690,6 @@ requires-dist = [
     { name = "ledger-platform", editable = "libs/platform" },
     { name = "prometheus-client", specifier = ">=0.26.0" },
     { name = "protobuf", specifier = ">=7.36.2" },
-    { name = "psycopg", specifier = ">=3.3.6" },
     { name = "pydantic", specifier = ">=2.14.1" },
     { name = "sqlalchemy", specifier = ">=2.1.4" },
 ]
@@ -706,6 +704,7 @@ name = "ledger-platform"
 version = "0.1.0"
 source = { editable = "libs/platform" }
 dependencies = [
+    { name = "alembic" },
     { name = "fastapi" },
     { name = "grpcio" },
     { name = "httpx" },
@@ -727,6 +726,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "alembic", specifier = ">=1.20.0" },
     { name = "fastapi", specifier = ">=0.143.0" },
     { name = "grpcio", specifier = ">=1.84.0" },
     { name = "httpx", specifier = ">=0.28.1" },
@@ -751,22 +751,26 @@ name = "ledger-testing"
 version = "0.1.0"
 source = { editable = "libs/testing" }
 dependencies = [
+    { name = "alembic" },
     { name = "httpx" },
     { name = "joserfc" },
     { name = "ledger-kernel" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
+    { name = "sqlalchemy" },
     { name = "structlog" },
     { name = "testcontainers" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "alembic", specifier = ">=1.20.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "joserfc", specifier = ">=1.7.5" },
     { name = "ledger-kernel", editable = "libs/kernel" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.6" },
     { name = "pydantic", specifier = ">=2.14.1" },
+    { name = "sqlalchemy", specifier = ">=2.1.4" },
     { name = "structlog", specifier = ">=26.1.0" },
     { name = "testcontainers", specifier = ">=4.15.0" },
 ]

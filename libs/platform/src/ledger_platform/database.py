@@ -40,12 +40,13 @@ _DRIVERS: Final = ("postgresql+psycopg", "postgresql+psycopg_async")
 connection class): transactions are checked through its connection (see ``_is_committable``)."""
 _OWNED_PARAMETERS: Final = ("application_name", "connect_timeout", "options")
 """Connection parameters the chassis sets from ``Database.open``'s arguments: a URL must not carry them."""
-_SET_TENANT: Final = text(
+SET_SCOPE: Final = text(
     """
     SELECT set_config('ledger.organization_id', :organization, true),
            set_config('ledger.company_id', :company, true)
     """
 )
+"""Sets the transaction's scope: run it with ``scope_settings(scope)``, before any statement of the scope."""
 _PING: Final = text("SELECT 1")
 _TENANT_COLUMNS: Final = ("organization_id", "company_id")
 """Each is also the name of a setting: ``ledger.organization_id``, ``ledger.company_id``."""
@@ -211,6 +212,11 @@ def _matches(column: str, setting: str) -> str:
     return f"{_IDENTIFIERS.quote(column)} = NULLIF(current_setting('ledger.{setting}', true), '')::uuid"
 
 
+def ddl_name(table: AnyTable) -> str:
+    """``table``'s name as DDL spells it: with its schema if it has one, quoted where PostgreSQL needs it."""
+    return _IDENTIFIERS.format_table(table)
+
+
 def tenant_isolation(table: AnyTable) -> tuple[str, ...]:
     """DDL (for a migration) that shows and accepts only the current tenant's rows of ``table``.
 
@@ -225,7 +231,7 @@ def tenant_isolation(table: AnyTable) -> tuple[str, ...]:
     missing = tuple(column for column in _TENANT_COLUMNS if column not in table.c)
     if missing:
         raise MissingTenantColumnError(table.name, missing)
-    name = _IDENTIFIERS.format_table(table)
+    name = ddl_name(table)
     rule = " AND ".join(_matches(column, column) for column in _TENANT_COLUMNS)
     return (
         f"ALTER TABLE {name} ENABLE ROW LEVEL SECURITY",
@@ -237,7 +243,7 @@ def tenant_isolation(table: AnyTable) -> tuple[str, ...]:
 
 def tenant_isolation_removal(table: AnyTable) -> tuple[str, ...]:
     """DDL (for a migration's downgrade) that undoes ``tenant_isolation``; harmless on a table without it."""
-    name = _IDENTIFIERS.format_table(table)
+    name = ddl_name(table)
     return (
         f"DROP POLICY IF EXISTS {_POLICY} ON {name}",
         f"ALTER TABLE {name} NO FORCE ROW LEVEL SECURITY",
@@ -256,7 +262,7 @@ def organization_isolation(table: AnyTable, *, column: str = _ORGANIZATION_SETTI
     """
     if column not in table.c:
         raise MissingTenantColumnError(table.name, (column,))
-    name = _IDENTIFIERS.format_table(table)
+    name = ddl_name(table)
     rule = _matches(column, _ORGANIZATION_SETTING)
     return (
         f"ALTER TABLE {name} ENABLE ROW LEVEL SECURITY",
@@ -268,7 +274,7 @@ def organization_isolation(table: AnyTable, *, column: str = _ORGANIZATION_SETTI
 
 def organization_isolation_removal(table: AnyTable) -> tuple[str, ...]:
     """DDL (for a migration's downgrade) that undoes ``organization_isolation``; harmless without it."""
-    name = _IDENTIFIERS.format_table(table)
+    name = ddl_name(table)
     return (
         f"DROP POLICY IF EXISTS {_ORGANIZATION_POLICY} ON {name}",
         f"ALTER TABLE {name} NO FORCE ROW LEVEL SECURITY",
@@ -303,8 +309,11 @@ class _Callbacks:
         return taken
 
 
-def _settings_of(scope: Scope | None) -> dict[str, str]:
+def scope_settings(scope: Scope | None) -> dict[str, str]:
     """What ``ledger.organization_id`` and ``ledger.company_id`` are set to for ``scope``; empty if absent.
+
+    The parameters of ``SET_SCOPE``: ``Database.transaction`` sets them, and so does a data migration that
+    runs a statement in each scope (``ledger_platform.migrations.run_per_scope``).
 
     Exhaustive over ``Scope``: what reaches the last case must be an ``OrganizationId`` (``assert_type``), so
     a new kind of scope fails type checking here instead of being taken for an organization.
@@ -487,7 +496,7 @@ class Database:
         callbacks = _Callbacks()
         try:
             async with self._engine.begin() as connection:
-                await connection.execute(_SET_TENANT, _settings_of(scope))
+                await connection.execute(SET_SCOPE, scope_settings(scope))
                 yield UnitOfWork(connection, callbacks, scope)
                 if not await _is_committable(connection):
                     raise AbortedTransactionError
@@ -501,15 +510,22 @@ class Database:
         On a connection of its own, like ``ping``: for a readiness check, never waiting for the pool.
         """
         found = select(*(type_coerce(func.to_regclass(name), Text) for name in names))
-        async with self._probe.connect() as connection:
+        async with self.probing() as connection:
             row = (await connection.execute(found)).one()
         return tuple(name for name, table in zip(names, row, strict=True) if table is None)
 
     async def ping(self) -> None:
-        """Raises unless PostgreSQL answers, on a connection of its own, closed after.
+        """Raises unless PostgreSQL answers, on a connection of its own (``probing``)."""
+        async with self.probing() as connection:
+            await connection.execute(_PING)
+
+    @asynccontextmanager
+    async def probing(self) -> AsyncGenerator[AsyncConnection]:
+        """A connection of its own for a readiness check, outside the pool, closed on exit; no tenant scope.
 
         Never one of the pool's: a pool that every request holds is a busy service, not a broken one, and a
-        readiness check that waited for it would take every replica out of rotation at the worst moment.
+        readiness check that waited for it would take every replica out of rotation at the worst moment. Each
+        use opens a connection, so a check that keeps passing should remember it did and stop asking.
         """
         async with self._probe.connect() as connection:
-            await connection.execute(_PING)
+            yield connection

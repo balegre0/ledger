@@ -1,11 +1,12 @@
 [project]
 name = "ledger-platform"
 version = "0.1.0"
-description = "The ledger service chassis: settings, logs, health, HTTP, PostgreSQL, events, tracing, gRPC."
+description = "The ledger service chassis: settings, logs, health, HTTP, PostgreSQL and its migrations, events, tracing, gRPC."
 requires-python = ">=3.15"
 dependencies = [
     "ledger-kernel",
     "ledger-contracts",
+    "alembic>=1.20.0",
     "fastapi>=0.143.0",
     "grpcio>=1.84.0",
     "httpx>=0.28.1",

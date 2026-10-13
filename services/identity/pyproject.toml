@@ -13,7 +13,6 @@ dependencies = [
     "grpcio>=1.84.0",
     "prometheus-client>=0.26.0",
     "protobuf>=7.36.2",
-    "psycopg>=3.3.6",
     "pydantic>=2.14.1",
     "sqlalchemy>=2.1.4",
 ]

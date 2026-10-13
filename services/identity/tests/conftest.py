@@ -10,7 +10,7 @@ from prometheus_client import CollectorRegistry
 from pydantic import SecretStr
 from sqlalchemy import text
 
-from ledger_identity.adapters.postgres.migrate import upgrade
+from ledger_identity.adapters.postgres.migrate import MIGRATIONS
 from ledger_identity.main import build
 from ledger_identity.settings import IdentitySettings
 from ledger_kernel.ids import new_id
@@ -52,7 +52,7 @@ def postgres() -> Iterator[Postgres]:
 def database_url(postgres: Postgres) -> str:
     """identity's database, migrated to this version; the service connects as its owner, no superuser."""
     url = postgres.database("identity", role="identity", password="identity-password")
-    upgrade(url)
+    MIGRATIONS.upgrade(url)
     return url
 
 
