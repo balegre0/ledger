@@ -37,9 +37,9 @@ lazy from ledger_kernel.tenancy import Scope
 
 _DRIVERS: Final = ("postgresql+psycopg", "postgresql+psycopg_async")
 """The only driver, in the two spellings SQLAlchemy has for its asynchronous use (one dialect, one
-connection class): transactions are checked through its connection (see ``_is_committable``)."""
+connection class): transactions are checked through its connection (see ``is_committable``)."""
 _OWNED_PARAMETERS: Final = ("application_name", "connect_timeout", "options")
-"""Connection parameters the chassis sets from ``Database.open``'s arguments: a URL must not carry them."""
+"""Connection parameters the chassis sets from ``Database.create``'s arguments: a URL must not carry them."""
 SET_SCOPE: Final = text(
     """
     SELECT set_config('ledger.organization_id', :organization, true),
@@ -363,7 +363,7 @@ class UnitOfWork:
         self._after_commit.add(callback)
 
 
-async def _is_committable(connection: AsyncConnection) -> bool:
+async def is_committable(connection: AsyncConnection) -> bool:
     """False once a statement of the transaction has failed.
 
     The driver knows without a round trip. Anything but a psycopg connection cannot be vouched for.
@@ -412,8 +412,8 @@ class Database:
     """A service's PostgreSQL database, reached through SQLAlchemy's asynchronous psycopg driver.
 
     ``engine`` pools the connections of the service's work; ``probe`` is an engine of the same database
-    without a pool (``NullPool``), on which ``ping`` opens a connection of its own each time. ``open`` builds
-    both.
+    without a pool (``NullPool``), on which ``ping`` opens a connection of its own each time. ``create``
+    builds both.
     """
 
     __slots__ = ("_engine", "_probe")
@@ -425,21 +425,20 @@ class Database:
         self._probe = probe
 
     @classmethod
-    @asynccontextmanager
-    async def open(
+    def create(
         cls,
         url: str,
         *,
         pool_size: int = DEFAULT_POOL_SIZE,
         application_name: str = "ledger",
         limits: DatabaseLimits = DEFAULT_LIMITS,
-    ) -> AsyncGenerator[Database]:
-        """A connection pool to ``url`` (``postgresql+psycopg://``), closed on exit.
+    ) -> Database:
+        """A connection pool to ``url`` (``postgresql+psycopg://``), not yet connected; ``aclose`` closes it.
 
-        ``application_name`` is how PostgreSQL names these connections (``pg_stat_activity``, its logs): the
-        service passes its own name. Beyond ``pool_size`` the pool opens as many again, for bursts. The URL
-        must not carry ``application_name``, ``connect_timeout`` or ``options``: the chassis sets them from
-        its arguments.
+        No I/O: SQLAlchemy connects on first use. ``application_name`` is how PostgreSQL names these
+        connections (``pg_stat_activity``, its logs): the service passes its own name. Beyond ``pool_size``
+        the pool opens as many again, for bursts. The URL must not carry ``application_name``,
+        ``connect_timeout`` or ``options``: the chassis sets them from its arguments.
 
         SQLAlchemy does not echo the values bound to a statement (tenant ids, payloads) in the text of a SQL
         error (``hide_parameters``): that text reaches logs. PostgreSQL's own message can still carry
@@ -466,13 +465,31 @@ class Database:
             connect_args=connect_args,
         )
         probe = create_async_engine(url, poolclass=NullPool, hide_parameters=True, connect_args=connect_args)
+        return cls(engine, probe=probe)
+
+    @classmethod
+    @asynccontextmanager
+    async def open(
+        cls,
+        url: str,
+        *,
+        pool_size: int = DEFAULT_POOL_SIZE,
+        application_name: str = "ledger",
+        limits: DatabaseLimits = DEFAULT_LIMITS,
+    ) -> AsyncGenerator[Database]:
+        """``create``'s pool, closed on exit (``aclose``)."""
+        database = cls.create(url, pool_size=pool_size, application_name=application_name, limits=limits)
         try:
-            yield cls(engine, probe=probe)
+            yield database
         finally:
-            try:
-                await engine.dispose()
-            finally:  # the probe's connections are released even when the pool's close fails
-                await probe.dispose()
+            await database.aclose()
+
+    async def aclose(self) -> None:
+        """Close the pool's connections, then the probe's, the second even when the first close fails."""
+        try:
+            await self._engine.dispose()
+        finally:
+            await self._probe.dispose()
 
     @property
     def engine(self) -> AsyncEngine:
@@ -493,7 +510,7 @@ class Database:
             async with self._engine.begin() as connection:
                 await connection.execute(SET_SCOPE, scope_settings(scope))
                 yield UnitOfWork(connection, callbacks, scope)
-                if not await _is_committable(connection):
+                if not await is_committable(connection):
                     raise AbortedTransactionError
         finally:
             after_commit = callbacks.close()  # rolled back or committed, the unit takes no more callbacks

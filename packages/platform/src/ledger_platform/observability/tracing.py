@@ -121,6 +121,16 @@ class RedactingSpanExporter(SpanExporter):
         return self._exporter.force_flush(timeout_millis)
 
 
+def current_traceparent() -> str | None:
+    """The W3C ``traceparent`` of the current span, or ``None`` outside a valid one (rows store it, §11).
+
+    Whichever provider made the span: the span is read from the context, not from a tracer.
+    """
+    carrier: dict[str, str] = {}
+    _PROPAGATOR.inject(carrier)
+    return carrier.get(_TRACEPARENT)
+
+
 def _carrier(traceparent: str | None) -> dict[str, str]:
     """``traceparent`` to extract from, or nothing to extract when it is absent or too long to be one."""
     if traceparent and len(traceparent) <= _MAX_TRACEPARENT_LENGTH:
@@ -169,9 +179,7 @@ class Tracing:
 
     def current_traceparent(self) -> str | None:
         """The W3C ``traceparent`` of the active span, to carry in an event; ``None`` outside any span."""
-        carrier: dict[str, str] = {}
-        _PROPAGATOR.inject(carrier)
-        return carrier.get(_TRACEPARENT)
+        return current_traceparent()
 
     @contextmanager
     def consuming(self, name: str, traceparent: str | None) -> Generator[Span]:

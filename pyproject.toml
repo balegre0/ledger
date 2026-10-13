@@ -269,7 +269,8 @@ layers = [
     "http | consumer | identity_client",
     "outbox | idempotency | auth | grpc",
     "streams",
-    "data | observability | jetstream",
+    "data | jetstream",
+    "observability",
     "config | runtime | lifecycle | interruptions",
 ]
 
