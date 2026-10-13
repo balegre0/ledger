@@ -3,7 +3,7 @@ name = "ledger-workspace"
 version = "0.0.0"
 description = "Workspace root: the shared tooling of every ledger package and service."
 requires-python = ">=3.15"
-dependencies = ["ledger-kernel", "ledger-contracts", "ledger-platform"]
+dependencies = ["ledger-kernel", "ledger-contracts", "ledger-platform", "ledger-identity"]
 
 [dependency-groups]
 dev = [
@@ -13,6 +13,7 @@ dev = [
     "httpx>=0.28.1",
     "hypothesis>=6.168.5",
     "import-linter>=2.15",
+    "ledger-testing",
     "mypy>=2.4.0",
     "mypy-protobuf>=5.1.0",
     "poethepoet>=0.48.0",
@@ -30,14 +31,17 @@ dev = [
 [tool.uv]
 required-version = ">=0.13.0"
 package = false
+constraint-dependencies = ["cryptography>=50.0.2"]  # joserfc's: the first release with CPython 3.15 wheels of its own
 
 [tool.uv.workspace]
-members = ["libs/*"]
+members = ["libs/*", "services/*"]
 
 [tool.uv.sources]
 ledger-kernel = { workspace = true }
 ledger-contracts = { workspace = true }
 ledger-platform = { workspace = true }
+ledger-testing = { workspace = true }
+ledger-identity = { workspace = true }
 
 # ── Tasks: `uv run poe <task>` ──────────────────────────────────────────────────
 [tool.poe.tasks]
@@ -48,21 +52,26 @@ pyright = { cmd = "basedpyright", help = "Type check #1: basedpyright, mode 'all
 mypy-kernel = { cmd = "mypy libs/kernel" }
 mypy-contracts = { cmd = "mypy libs/contracts" }
 mypy-platform = { cmd = "mypy libs/platform" }
+mypy-testing = { cmd = "mypy libs/testing" }
+mypy-identity = { cmd = "mypy services/identity" }
 mypy-workspace = { cmd = "mypy tests" }
-mypy = { sequence = ["mypy-kernel", "mypy-contracts", "mypy-platform", "mypy-workspace"], help = "Type check #2, one package at a time (each has its own tests), then the workspace's own tests" }
+mypy = { sequence = ["mypy-kernel", "mypy-contracts", "mypy-platform", "mypy-testing", "mypy-identity", "mypy-workspace"], help = "Type check #2, one package at a time (each has its own tests), then the workspace's own tests" }
 types = { sequence = ["pyright", "mypy"], help = "Both type checkers" }
 arch = { cmd = "lint-imports", help = "Architecture contracts (import-linter)" }
 deps-kernel = { cmd = "deptry libs/kernel/src --config libs/kernel/pyproject.toml" }
 deps-contracts = { cmd = "deptry libs/contracts/src --config libs/contracts/pyproject.toml" }
 deps-platform = { cmd = "deptry libs/platform/src --config libs/platform/pyproject.toml" }
-deps = { sequence = ["deps-kernel", "deps-contracts", "deps-platform"], help = "Unused / missing / transitive dependencies, per package" }
+deps-testing = { cmd = "deptry libs/testing/src --config libs/testing/pyproject.toml" }
+deps-identity = { cmd = "deptry services/identity/src --config services/identity/pyproject.toml" }
+deps = { sequence = ["deps-kernel", "deps-contracts", "deps-platform", "deps-testing", "deps-identity"], help = "Unused / missing / transitive dependencies, per package" }
 spell = { cmd = "typos", help = "Spell check" }
 # Poe expands the `**` glob to absolute paths, and protoc only accepts a file that lies under a --proto_path
 # spelled the same way: hence the absolute --proto_path. The *_out directories take no such comparison and
 # stay relative to the project root, where poe runs every task. CI regenerates and diffs the committed code.
 proto = { cmd = "python -m grpc_tools.protoc --proto_path=${POE_ROOT}/libs/contracts/proto --python_out=libs/contracts/src --mypy_out=libs/contracts/src --grpc_python_out=libs/contracts/src --mypy_grpc_out=libs/contracts/src libs/contracts/proto/ledger/**/*.proto", help = "Regenerate the code of every .proto" }
-proto-lint = { cmd = "docker run --rm --volume ${POE_ROOT}/libs/contracts:/workspace --workdir /workspace bufbuild/buf:1.73.0 lint", help = "buf lint" }
+proto-lint = { cmd = "docker run --rm --volume ${POE_ROOT}/libs/contracts:/workspace --workdir /workspace bufbuild/buf:1.73.0@sha256:75d8f756f0919dcded71e67968a91adfe55fe4dd62c4900c57bbfcd7fe625608 lint", help = "buf lint" }
 test = { cmd = "pytest", help = "Tests with coverage" }
+openapi = { cmd = "ledger-identity-openapi services/identity/openapi.json", help = "Regenerate the published OpenAPI documents" }
 check = { sequence = ["format-check", "lint", "suppressions", "types", "arch", "deps", "spell", "proto-lint", "test"], help = "Everything CI runs" }
 
 # Zero suppressions: no Python file outside the generated protobuf code may switch a check off.
@@ -113,7 +122,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"{libs/*/tests,tests}/**" = [
+"{libs/*/tests,services/*/tests,tests}/**" = [
     "S101",    # assert is the point of a test
     "D",       # test names are the documentation
     "PLR2004", # magic values are fine in assertions
@@ -134,10 +143,11 @@ runtime-evaluated-base-classes = [
     "pydantic_settings.BaseSettings",
     "sqlalchemy.orm.DeclarativeBase",
     "ledger_platform.database.PlatformTable",  # SQLAlchemy reads the annotations of its tables at runtime
+    "ledger_identity.adapters.postgres.tables.IdentityTable",
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger"]
+known-first-party = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing", "ledger_identity", "ledger"]
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -146,7 +156,7 @@ exclude = ["*.md"]  # ruff 0.17 formats Python blocks inside Markdown; the docs 
 # ── Type checker #1: basedpyright ───────────────────────────────────────────────
 [tool.basedpyright]
 pythonVersion = "3.15"
-include = ["libs", "tests", "conftest.py"]
+include = ["libs", "services", "tests", "conftest.py"]
 exclude = ["libs/contracts/src/ledger", "**/.venv", "**/__pycache__"]
 typeCheckingMode = "all"
 failOnWarnings = true
@@ -194,7 +204,7 @@ warn_required_dynamic_aliases = true
 # ── Tests ───────────────────────────────────────────────────────────────────────
 [tool.pytest]
 minversion = "9.0"
-testpaths = ["libs", "tests"]
+testpaths = ["libs", "services", "tests"]
 addopts = [
     "--strict-markers",
     "--strict-config",
@@ -209,8 +219,14 @@ asyncio_default_fixture_loop_scope = "function"
 
 [tool.coverage.run]
 branch = true
-source_pkgs = ["ledger_kernel", "ledger_contracts", "ledger_platform"]
-core = "ctrace"
+source_pkgs = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing", "ledger_identity"]
+# Alembic runs a service's migration environment and scripts from their files, as modules named after the file
+# (`env_py`), outside the service's package: coverage, which picks `source_pkgs` by module name, would never
+# trace them. Their directory is named here, which coverage matches by path.
+source = ["services/identity/src/ledger_identity/adapters/postgres/migrations"]
+# sys.monitoring, not the C tracer: lines of a route that run after SQLAlchemy's asynchronous driver switched
+# greenlets are reported unexecuted by the C tracer although they ran; sys.monitoring sees them.
+core = "sysmon"
 
 [tool.coverage.report]
 fail_under = 100
@@ -219,14 +235,14 @@ partial_branches = []  # no "pragma: no branch": every branch counts
 
 # ── Architecture contracts (import-linter) ──────────────────────────────────────
 [tool.importlinter]
-root_packages = ["ledger_kernel", "ledger_contracts", "ledger_platform"]
+root_packages = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing", "ledger_identity"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Production code never imports test tooling"
 type = "forbidden"
-source_modules = ["ledger_kernel", "ledger_contracts", "ledger_platform"]
-forbidden_modules = ["pytest", "hypothesis", "testcontainers", "httpx"]
+source_modules = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_identity"]
+forbidden_modules = ["pytest", "hypothesis", "testcontainers", "ledger_testing"]
 
 [[tool.importlinter.contracts]]
 name = "Packages point down: platform -> contracts -> kernel"
@@ -234,9 +250,10 @@ type = "layers"
 layers = ["ledger_platform", "ledger_contracts", "ledger_kernel"]
 
 # Inside the platform: the service assembles the adapters (HTTP, gRPC, consumers), which use messaging (the
-# outbox, which declares streams again when they vanish, over the streams), which uses the infrastructure, which
-# uses the foundations. Modules of one layer never import each other. The schema, which gathers the tables of the
-# outbox and of the consumers for migrations, sits below the service, whose readiness checks the tables exist.
+# outbox, which declares streams again when they vanish, over the streams) and the idempotency keys, which use the
+# infrastructure, which uses the foundations. Modules of one layer never import each other. The schema, which
+# gathers the tables of the outbox, the consumers and the idempotency keys for migrations, sits below the service,
+# whose readiness checks the tables exist; the migrations, which create them, sit beside the service.
 # Exhaustive: a new module must be given its layer here.
 [[tool.importlinter.contracts]]
 name = "Platform layers: service -> adapters -> messaging -> infrastructure -> foundations"
@@ -244,13 +261,13 @@ type = "layers"
 containers = ["ledger_platform"]
 exhaustive = true
 layers = [
-    "service",
+    "service | migrations",
     "schema",
-    "web | grpc_server | consumer",
-    "outbox",
+    "web | grpc_server | consumer | routes | identity_client",
+    "outbox | idempotency | authorization",
     "streams",
-    "database | tracing | health | logs | jetstream",
-    "settings | options | lifecycle | supervision",
+    "database | tracing | health | logs | jetstream | authentication | request_fields | grpc_client",
+    "settings | options | lifecycle | supervision | interruptions | probe",
 ]
 
 [[tool.importlinter.contracts]]
@@ -264,3 +281,45 @@ name = "Contracts know the wire, not the infrastructure"
 type = "forbidden"
 source_modules = ["ledger_contracts"]
 forbidden_modules = ["pydantic", "sqlalchemy", "nats", "fastapi", "starlette", "structlog", "opentelemetry", "prometheus_client", "psycopg"]
+
+[[tool.importlinter.contracts]]
+name = "Libraries never import services"
+type = "forbidden"
+source_modules = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing"]
+forbidden_modules = ["ledger_identity"]
+
+[[tool.importlinter.contracts]]
+name = "Identity's domain is the standard library and the kernel"
+type = "forbidden"
+source_modules = ["ledger_identity.domain"]
+forbidden_modules = [
+    "ledger_contracts", "ledger_platform",
+    # the kernel contract's list ...
+    "pydantic", "pydantic_settings", "sqlalchemy", "nats", "fastapi", "starlette", "structlog", "google", "grpc",
+    "opentelemetry", "prometheus_client", "psycopg",
+    # ... and every other dependency the services of this repository bring in
+    "httpx", "joserfc", "cryptography", "alembic", "granian",
+]
+
+# Inside identity: the adapters (PostgreSQL, ...) over the settings, over the use cases (application), over the
+# domain; the API sits beside the adapters (it never imports them), and `main` wires both; `openapi` writes
+# the document `main`'s app makes. Exhaustive: a module without a layer is an error.
+[[tool.importlinter.contracts]]
+name = "Identity is hexagonal"
+type = "layers"
+containers = ["ledger_identity"]
+exhaustive = true
+layers = ["openapi", "main", "api | adapters", "settings", "application", "domain"]
+
+[[tool.importlinter.contracts]]
+name = "Identity's use cases know ports, not adapters or frameworks"
+type = "forbidden"
+source_modules = ["ledger_identity.application"]
+forbidden_modules = [
+    "ledger_contracts", "ledger_platform",
+    # the kernel contract's list ...
+    "pydantic", "pydantic_settings", "sqlalchemy", "nats", "fastapi", "starlette", "structlog", "google", "grpc",
+    "opentelemetry", "prometheus_client", "psycopg",
+    # ... and every other dependency the services of this repository bring in
+    "httpx", "joserfc", "cryptography", "alembic", "granian",
+]

@@ -7,10 +7,10 @@ is not a setting: a misspelled name must never mean "silently running with the d
 
 import os
 from enum import StrEnum
-from typing import Annotated, ClassVar, Final, Literal, final, override
+from typing import Annotated, ClassVar, Final, Literal, Self, final, override
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, EnvSettingsSource, SettingsConfigDict
 lazy from pydantic_settings import PydanticBaseSettingsSource
 
@@ -158,3 +158,42 @@ class ServiceSettings(BaseSettings):
             dotenv_settings,
             file_secret_settings,
         )
+
+
+TokenAlgorithm = Literal[
+    "RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"
+]
+"""Signature algorithms a service may accept: asymmetric only, so ``none`` and HMAC cannot be set.
+
+An ordinary alias, not a ``type`` statement: the verifier reads its values at runtime (``get_args``), and the
+value of a ``type`` alias is typed ``Any``, which the type checkers refuse."""
+
+_HTTPS_ENVIRONMENTS: Final = frozenset({"staging", "production"})
+
+
+class _InsecureKeysUrlError(ValueError):
+    """Keys fetched in clear could be swapped on the way, and every token then forged."""
+
+    def __init__(self) -> None:
+        super().__init__("token_jwks_url must be https:// outside the local and test environments")
+
+
+class ApiSettings(ServiceSettings):
+    """Settings of a service with a public API: the chassis's, and the bearer-token policy (§8)."""
+
+    token_issuer: str = Field(default=..., min_length=1, max_length=2048)
+    """``iss`` of the tokens: the identity provider's issuer, e.g. ``https://auth.example.com``."""
+    token_audience: str = Field(default=..., min_length=1, max_length=255)
+    """A value ``aud`` must hold: the Zitadel project id of the platform's API."""
+    token_jwks_url: str = Field(default=..., min_length=1, max_length=2048)
+    """Where the provider publishes its keys: ``<issuer>/oauth/v2/keys`` for Zitadel."""
+    token_algorithms: frozenset[TokenAlgorithm] = Field(default=frozenset({"RS256"}), min_length=1)
+    token_leeway_seconds: Annotated[int, Field(ge=0, le=300)] = 60
+    """How far the provider's clock and ours may disagree, for ``exp``, ``nbf`` and ``iat``."""
+
+    @model_validator(mode="after")
+    def require_https_keys_beyond_a_laptop(self) -> Self:
+        """Refuse keys fetched in clear in staging and production."""
+        if self.environment in _HTTPS_ENVIRONMENTS and not self.token_jwks_url.startswith("https://"):
+            raise _InsecureKeysUrlError
+        return self

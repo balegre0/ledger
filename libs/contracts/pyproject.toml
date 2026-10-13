@@ -15,3 +15,7 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-name = ["ledger_contracts", "ledger"]
 namespace = true
+
+[tool.deptry]
+# The generated gRPC modules import their sibling messages as `ledger.*`: this package's own namespace.
+known_first_party = ["ledger"]

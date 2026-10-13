@@ -33,13 +33,14 @@ from prometheus_client import Histogram
 lazy from prometheus_client import CollectorRegistry
 
 from ledger_kernel.errors import ErrorKind, LedgerError
+from ledger_platform.grpc_client import ERROR_CODE_KEY
 from ledger_platform.options import InvalidOptionError, require_seconds
 
-ERROR_CODE_KEY: Final = "ledger-error-code"
 _STATUS: Final[Mapping[ErrorKind, grpc.StatusCode]] = {
     ErrorKind.INVALID: grpc.StatusCode.INVALID_ARGUMENT,
     ErrorKind.NOT_FOUND: grpc.StatusCode.NOT_FOUND,
     ErrorKind.CONFLICT: grpc.StatusCode.FAILED_PRECONDITION,
+    ErrorKind.UNAUTHENTICATED: grpc.StatusCode.UNAUTHENTICATED,
     ErrorKind.FORBIDDEN: grpc.StatusCode.PERMISSION_DENIED,
     ErrorKind.UNAVAILABLE: grpc.StatusCode.UNAVAILABLE,
     ErrorKind.INTERNAL: grpc.StatusCode.INTERNAL,
@@ -293,8 +294,8 @@ async def _serving(
     server = grpc.aio.server(interceptors=(GuardInterceptor(registry),))
     register(server)
     bound = _bind(server, port)
-    await server.start()
     try:
+        await server.start()
         yield bound
     finally:
         await server.stop(grace)

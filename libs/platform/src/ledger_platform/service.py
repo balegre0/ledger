@@ -19,11 +19,12 @@ The first connection to NATS is retried for ``ServiceLimits.nats_connect_timeout
 start fails (and the process exits). Once connected, NATS is reconnected for as long as it takes: the outbox
 keeps the events meanwhile and the consumers wait. A disconnection and a reconnection are logged, and so are
 the errors of the attempts in between: the first at once, then one a minute (``NATS_ERRORS_LOGGED_EVERY``)
-saying how many were not, never what was being sent.
+saying how many were not, never what was being sent. Both are also told to ``Runtime.interruptions``, for code
+that keeps state fresh from core NATS messages, which miss what was published meanwhile.
 """
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from typing import ClassVar, Final, Never, final
@@ -44,6 +45,7 @@ from ledger_platform.consumer import Consumer, ConsumerMetrics, ConsumerRefusedE
 from ledger_platform.database import DEFAULT_LIMITS, DEFAULT_POOL_SIZE, Database
 from ledger_platform.grpc_server import serve_grpc
 from ledger_platform.health import Health
+from ledger_platform.interruptions import Interruptions
 from ledger_platform.lifecycle import Lifecycle
 from ledger_platform.logs import Throttled, configure_logging
 from ledger_platform.options import InvalidOptionError, require_at_least, require_seconds
@@ -78,10 +80,16 @@ DEFAULT_GRPC_STOP_GRACE: Final = 8.0
 DEFAULT_WORKER_STOP_GRACE: Final = 8.0
 """Seconds the workers are given to stop, all together, like the gRPC server's grace: a handler may be
 finishing a statement."""
+DEFAULT_RESOURCES_CLOSE_TIMEOUT: Final = 1.0
+"""Seconds the service's own resources are given to close: an HTTP client or a gRPC channel closes in
+milliseconds, so one that takes longer is hung."""
 DEFAULT_NATS_DRAIN_TIMEOUT: Final = 4.0
 """Seconds the connection to NATS is given to drain (what it buffered goes out) before it is closed."""
 NATS_ERRORS_LOGGED_EVERY: Final = 60.0
 """Seconds between two log lines of the errors of a connection to NATS that stays unreachable."""
+ABANDONED_CLOSES: Final[set[asyncio.Task[None]]] = set()
+"""Closes of resources that ran past their limit and are still running. The event loop holds a task weakly:
+a reference kept here stops it from being collected, and cancelled, in the middle of the close."""
 _logger = structlog.stdlib.get_logger(__name__)
 
 
@@ -173,6 +181,8 @@ class Runtime[S: ServiceSettings]:
     tracing: Tracing
     registry: CollectorRegistry
     """The registry ``/metrics`` exports, for metrics of the service's own."""
+    interruptions: Interruptions
+    """Told when the connection to NATS is lost and when it is back (``ledger_platform.interruptions``)."""
     opened: object = None
     """What ``Interfaces.resources`` yielded; read it typed with ``resources``."""
 
@@ -225,8 +235,8 @@ def _no_workers[S: ServiceSettings](runtime: Runtime[S]) -> Mapping[str, Work]:
 class Interfaces[S: ServiceSettings]:
     """Where a service meets the rest of the system.
 
-    The HTTP routes and gRPC services clients reach, the resources it reaches others with, and the readiness
-    checks of those.
+    The HTTP routes and gRPC services clients reach, the resources it reaches others with, the readiness
+    checks of those, and the metrics it is watched by.
     """
 
     http: HttpRoutes[S] = _no_routes
@@ -238,11 +248,28 @@ class Interfaces[S: ServiceSettings]:
     """An async context manager that opens what the service talks to beside the chassis (an HTTP client, gRPC
     channels) and yields one object holding them, a dataclass of the service's own: entered at start after
     NATS and the streams, and exited at stop after the gRPC server and the workers have stopped and before
-    NATS drains. Code reads it typed with ``runtime.resources(Kind)``. ``None``: the service opens nothing."""
+    NATS drains. Code reads it typed with ``runtime.resources(Kind)``. ``None``: the service opens nothing.
+
+    The exit runs in another task than the entry (the stop bounds it with ``resources_close_timeout``), so a
+    resource must not hold a scope bound to the task that entered it across its ``yield``: an
+    ``asyncio.timeout``, a ``TaskGroup`` or an anyio cancel scope fails at the close. Clients (an HTTP client,
+    a gRPC channel) do not."""
     checks: Mapping[str, ReadinessCheck[S]] = field(default_factory=dict[str, ReadinessCheck[S]])
     """Readiness checks of the service's own, by name, beside the chassis's (``database``, ``nats``,
     ``workers``, ``schema``, whose names they cannot take): each is handed the runtime and held to the same
-    time limit; while the service is not running it fails."""
+    time limit; while the service is not running it fails.
+
+    A check must never use the pool (``runtime.database.transaction``): every request may hold a pooled
+    connection, and a check waiting for one would take every busy replica out of rotation. It reads on a
+    connection of its own (``runtime.database.probing()``), and a check of what does not change back once it
+    holds (a schema migrated, a table created) remembers that it passed and stops asking, as the chassis's
+    ``schema`` check and ``ledger_platform.migrations.SchemaReadiness`` do: probes come every few seconds."""
+    registry: CollectorRegistry | None = None
+    """Where the service's metrics are kept, which ``/metrics`` exports to Prometheus; ``None``: a new one.
+
+    Given one, metrics made before the service is built (those of an object its routes are built with, such as
+    ``PublishedKeys``'s) are exported beside the service's own. It must be the service's alone: the service
+    registers its metrics in it, and a second service on it would register them again."""
 
 
 @final
@@ -271,10 +298,10 @@ class ServiceLimits:
     the timeout (positive, at most ``MAX_PUBLISH_TIMEOUT``) when the service starts.
 
     A stop takes at most ``stop_budget`` seconds, whatever hangs: the gRPC grace, the workers' grace, the
-    NATS drain and the span flush, one after the other (closing the pool takes milliseconds). Kubernetes kills
-    a pod ``terminationGracePeriodSeconds`` after it asked it to stop (30 by default), and the ASGI server
-    drains its HTTP requests before the chassis's stop begins: that grace must exceed the server's own drain
-    plus ``stop_budget`` (24 seconds by default).
+    resources' close, the NATS drain and the span flush, one after the other (closing the pool takes
+    milliseconds). Kubernetes kills a pod ``terminationGracePeriodSeconds`` after it asked it to stop (30 by
+    default), and the ASGI server drains its HTTP requests before the chassis's stop begins: that grace must
+    exceed the server's own drain plus ``stop_budget`` (25 seconds by default).
     """
 
     database: DatabaseLimits = DEFAULT_LIMITS
@@ -288,6 +315,9 @@ class ServiceLimits:
     """Seconds the gRPC calls in flight are given to finish when the service stops; then they are cut."""
     worker_stop_grace: float = DEFAULT_WORKER_STOP_GRACE
     """Seconds the workers are given to stop, together; one that takes longer is logged and left behind."""
+    resources_close_timeout: float = DEFAULT_RESOURCES_CLOSE_TIMEOUT
+    """Seconds the service's own resources are given to close; one that takes longer is logged and
+    abandoned (``resources.close_abandoned``)."""
     nats_drain_timeout: float = DEFAULT_NATS_DRAIN_TIMEOUT
     """Seconds the connection to NATS is given to drain; then it is closed."""
     span_flush_timeout: float = DEFAULT_SHUTDOWN_TIMEOUT
@@ -299,6 +329,7 @@ class ServiceLimits:
             "nats_connect_timeout": self.nats_connect_timeout,
             "grpc_stop_grace": self.grpc_stop_grace,
             "worker_stop_grace": self.worker_stop_grace,
+            "resources_close_timeout": self.resources_close_timeout,
             "nats_drain_timeout": self.nats_drain_timeout,
             "span_flush_timeout": self.span_flush_timeout,
         }
@@ -320,7 +351,11 @@ class ServiceLimits:
     def stop_budget(self) -> float:
         """The longest a stop takes, in seconds, whatever hangs (see the class)."""
         return (
-            self.grpc_stop_grace + self.worker_stop_grace + self.nats_drain_timeout + self.span_flush_timeout
+            self.grpc_stop_grace
+            + self.worker_stop_grace
+            + self.resources_close_timeout
+            + self.nats_drain_timeout
+            + self.span_flush_timeout
         )
 
 
@@ -344,34 +379,39 @@ class _ConnectionLog:
 
     While NATS is unreachable every attempt to reconnect fails: the first error is logged, then one a minute
     (``NATS_ERRORS_LOGGED_EVERY``) saying how many were not, and the reconnection says how many were left
-    out since.
+    out since. A disconnection (not a close on purpose) and a reconnection are told to ``interruptions``.
     """
 
-    __slots__ = ("_client", "_errors")
+    __slots__ = ("_client", "_errors", "_interruptions")
 
-    def __init__(self, client: Client) -> None:
+    def __init__(self, client: Client, interruptions: Interruptions) -> None:
         self._client = client
+        self._interruptions = interruptions
         self._errors = Throttled(_logger, "nats.error", every=NATS_ERRORS_LOGGED_EVERY)
 
     async def failed(self, error: Exception) -> None:
         self._errors.warning(error=error_type(error), detail=truncate(str(error), _DETAIL_LIMIT))
 
     async def disconnected(self) -> None:
-        if not self._client.is_closed:  # closing it on purpose says nothing worth a warning
+        if not self._client.is_closed:  # closing it on purpose is no interruption
             _logger.warning("nats.disconnected")
+            self._interruptions.interrupted()
 
     async def reconnected(self) -> None:
         unlogged = self._errors.settle()
         _logger.info("nats.reconnected", **({"unlogged_errors": unlogged} if unlogged else {}))
+        self._interruptions.interrupted()
 
 
-async def _connect(client: Client, settings: ServiceSettings, limit: float) -> None:
+async def _connect(
+    client: Client, settings: ServiceSettings, limit: float, interruptions: Interruptions
+) -> None:
     """Connect ``client`` within ``limit`` seconds, or raise ``NatsUnreachableError``.
 
     Once connected, the client reconnects for as long as it takes, until it is closed. The caller closes it in
     every case: a connection cut short by the timeout leaves an attempt in flight.
     """
-    log = _ConnectionLog(client)
+    log = _ConnectionLog(client, interruptions)
     try:
         async with asyncio.timeout(limit):
             await client.connect(
@@ -417,6 +457,40 @@ async def _finish(draining: asyncio.Task[None]) -> None:
     await asyncio.gather(draining, return_exceptions=True)
 
 
+async def _open_resources[R](
+    lifecycle: Lifecycle, resources: AbstractAsyncContextManager[R], limit: float
+) -> R:
+    """Enter ``resources`` now; at the stop, leave them within ``limit`` seconds.
+
+    A close that hangs would hold the whole stop (the pool, NATS and the spans come after it): past ``limit``
+    it is cancelled, logged as ``resources.close_abandoned``, and left behind if it ignores the cancellation.
+    A close that fails within the limit fails the stop, like any other part's.
+    """
+    stack = AsyncExitStack()
+    opened = await stack.enter_async_context(resources)
+    lifecycle.on_close(partial(_close_within, stack, limit))
+    return opened
+
+
+async def _close_within(resources: AsyncExitStack, limit: float) -> None:
+    closing = asyncio.create_task(resources.aclose())
+    _, unfinished = await asyncio.wait((closing,), timeout=limit)
+    if unfinished:
+        ABANDONED_CLOSES.add(closing)
+        closing.add_done_callback(_note_abandoned_close)
+        closing.cancel()
+        _logger.error("resources.close_abandoned", timeout=limit)
+        return
+    await closing
+
+
+def _note_abandoned_close(closing: asyncio.Task[None]) -> None:
+    """How an abandoned close ended, when it did: its error is taken and logged, not reported as lost."""
+    ABANDONED_CLOSES.discard(closing)
+    if not closing.cancelled() and (error := closing.exception()) is not None:
+        _logger.warning("resources.close_failed_after_abandon", exc_info=error)
+
+
 @final
 class Service[S: ServiceSettings]:
     """One service process: the FastAPI app whose lifespan starts and stops everything else (see the module).
@@ -432,6 +506,7 @@ class Service[S: ServiceSettings]:
         "_limits",
         "_registry",
         "_runtime",
+        "_schema_ready",
         "_settings",
         "_started",
         "_supervisor",
@@ -452,7 +527,8 @@ class Service[S: ServiceSettings]:
         self._interfaces: Interfaces[S] = Interfaces() if interfaces is None else interfaces
         self._events: Events[S] = Events() if events is None else events
         self._limits = limits
-        self._registry = CollectorRegistry()
+        given = self._interfaces.registry
+        self._registry = CollectorRegistry() if given is None else given
         self._tracing = Tracing.create(
             service_name=settings.service_name, exporter=_exporter(settings, limits)
         )
@@ -460,6 +536,7 @@ class Service[S: ServiceSettings]:
         self._runtime: Runtime[S] | None = None
         self._grpc_port: int | None = None
         self._started = False
+        self._schema_ready = False
         ProcessCollector(registry=self._registry)
         PlatformCollector(registry=self._registry)
         GCCollector(registry=self._registry)
@@ -538,12 +615,17 @@ class Service[S: ServiceSettings]:
         connection = Client()
         # Closed in every case, so registered before it connects: an attempt cut short is closed too.
         lifecycle.on_close(partial(_disconnect, connection, limits.nats_drain_timeout))
-        await _connect(connection, settings, limits.nats_connect_timeout)
+        interruptions = Interruptions()
+        await _connect(connection, settings, limits.nats_connect_timeout, interruptions)
         jetstream = JetStreamContext(connection)
         for stream in (DEAD_LETTERS, *self._events.streams):
             await ensure_stream(jetstream, stream)
         opener = self._interfaces.resources
-        opened = None if opener is None else await lifecycle.enter(opener(settings))
+        opened = (
+            None
+            if opener is None
+            else await _open_resources(lifecycle, opener(settings), limits.resources_close_timeout)
+        )
         outbox = Outbox(
             tracing=tracing,
             registry=self._registry,
@@ -558,6 +640,7 @@ class Service[S: ServiceSettings]:
             outbox=outbox,
             tracing=tracing,
             registry=self._registry,
+            interruptions=interruptions,
             opened=opened,
         )
         # One stop for every worker started from here on, before NATS drains and after gRPC stops.
@@ -593,9 +676,18 @@ class Service[S: ServiceSettings]:
         await self.runtime().database.ping()
 
     async def _chassis_tables_exist(self) -> None:
-        missing = await self.runtime().database.missing_tables(tuple(CHASSIS_METADATA.tables))
+        """Look for the tables until they are there.
+
+        Then never again: no migration drops them, and every probe would otherwise open a connection of its
+        own to ask.
+        """
+        database = self.runtime().database  # raises while the service is not running
+        if self._schema_ready:
+            return
+        missing = await database.missing_tables(tuple(CHASSIS_METADATA.tables))
         if missing:
             raise _ChassisTablesMissingError(missing)
+        self._schema_ready = True
 
     async def _check_with_runtime(self, check: ReadinessCheck[S]) -> None:
         await check(self.runtime())

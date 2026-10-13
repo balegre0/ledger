@@ -83,12 +83,12 @@ Ten rules hold everywhere:
 
 | Service | Owns | Exposes | Consumes |
 |---|---|---|---|
-| `identity` | organizations, companies (RNC, legal name, fiscal regime), branches, emission points, memberships, roles per company, API clients (mirrors Zitadel machine users) | public REST (`/v1/organizations`, `/v1/companies`...), gRPC `IdentityQuery` (company by id, permissions of a principal) | Zitadel webhooks (Actions v2) for user lifecycle |
+| `identity` | organizations, companies (RNC, legal name; the fiscal regime comes with `fiscal-do`), branches, emission points, memberships, roles per company; API clients mirroring Zitadel machine users come with the Zitadel webhooks | public REST (`/v1/organization`, `/v1/companies`...), gRPC `IdentityQueryService` (company by id, permissions of a principal) | Zitadel webhooks (Actions v2) for user lifecycle, from a later milestone |
 | `catalog` | parties (customers and suppliers: RNC/cédula, names), products and services, tax configuration (ITBIS rates, exemptions, ISC), units | public REST, gRPC `CatalogQuery` | `identity.company.*` |
 | `invoicing` | commercial documents (invoice, credit note, debit note), their lines, totals, lifecycle independent of any country | public REST (`/v1/invoices`...), gRPC `InvoicingQuery` | `fiscal.document.*` (to show fiscal status) |
 | `fiscal-do` | e-NCF sequences and authorized ranges, e-CF XML, DGII tokens, track ids, fiscal states, contingency queue, RFCE summaries, ARECF/ACECF/ANECF, QR and security codes, legal archive index | public REST (`/v1/do/...`: sequences, fiscal status, received documents), gRPC `FiscalDo` | `invoicing.document.issued`, `fiscal.received.*` |
-| `fiscal-receiver` | nothing durable but a short-lived semilla/token store; raw received documents go straight to object storage and an event | DGII-facing endpoints per company: `/fe/{rnc}/autenticacion/api/semilla`, `/validacioncertificado`, `/fe/recepcion/api/ecf`, `/fe/aprobacioncomercial/api/ecf` | gRPC `Vault.Sign`, `IdentityQuery` |
-| `vault` | certificates (encrypted, envelope with KMS), their metadata (subject, RNC, validity), signing audit log | gRPC `Vault` (upload, describe, sign XML, sign semilla, rotate); no public API: uploads come through `identity` | `identity.company.deleted` |
+| `fiscal-receiver` | nothing durable but a short-lived semilla/token store; raw received documents go straight to object storage and an event | DGII-facing endpoints per company: `/fe/{rnc}/autenticacion/api/semilla`, `/validacioncertificado`, `/fe/recepcion/api/ecf`, `/fe/aprobacioncomercial/api/ecf` | gRPC `Vault.Sign`, `IdentityQueryService` |
+| `vault` | certificates (encrypted, envelope with KMS), their metadata (subject, RNC, validity), signing audit log | gRPC `Vault` (upload, describe, sign XML, sign semilla, rotate); no public API: uploads come through `identity` | `identity.company.deactivated` |
 | `webhooks` | client endpoints, secrets, delivery attempts | public REST (`/v1/webhooks`), test delivery | every public-facing event |
 
 Future country services (`fiscal-mx`, `fiscal-co`) consume `invoicing.document.issued` exactly like
@@ -98,9 +98,10 @@ Future country services (`fiscal-mx`, `fiscal-co`) consume `invoicing.document.i
 
 | Library | Contains | May depend on |
 |---|---|---|
-| `kernel` | UUIDv7 ids (a type per entity), exact `Money` and `Currency`, `TaxId` (RNC or cédula; check digit reported, not enforced, because DGII has issued numbers that fail it), clock, the base domain exception hierarchy (a kind and a stable code per error), pagination primitives (with the first list endpoint) | stdlib only |
+| `kernel` | UUIDv7 ids (a type per entity), exact `Money` and `Currency`, `TaxId` (RNC or cédula; check digit reported, not enforced, because DGII has issued numbers that fail it), clock, the base domain exception hierarchy (a kind and a stable code per error), principals and typed permissions, cursor pagination | stdlib only |
 | `contracts` | `.proto` files for gRPC services and event payloads, generated code and stubs, event envelope | `kernel`, protobuf, grpcio |
-| `platform` | the service chassis: settings, logging, tracing, metrics, PostgreSQL transactions (unit of work, row-level security), outbox relay, inbox and consumers, JetStream stream management, gRPC server, HTTP app factory, health, lifecycle, and the `Service` that assembles them. gRPC client helpers and the authorization context come with the first service that needs them (milestone 2) | `kernel`, `contracts`, third-party infrastructure libraries |
+| `platform` | the service chassis: settings, logging, tracing, metrics, PostgreSQL transactions (unit of work, row-level security), outbox relay, inbox and consumers, JetStream stream management, gRPC server, HTTP app factory, health, lifecycle, and the `Service` that assembles them. Built with the first service (milestone 2): bearer-token verification against the identity provider's keys, Alembic migrations run the same way for every service, the authorization context (permissions per company, cached 30 s and dropped on membership events and company deactivation), idempotency keys, cursor pagination, conditional updates, gRPC client helpers | `kernel`, `contracts`, third-party infrastructure libraries |
+| `testing` | what the tests of every package share: PostgreSQL and NATS containers, a local OpenID provider, the logging baseline (a dev dependency) | anything; production code never imports it |
 
 A service may depend on `libs/*`, never on another service. import-linter enforces it.
 
@@ -193,14 +194,19 @@ deleted: a retention job comes with the first service that produces volume.
 
 - `grpc.aio` with generated stubs and `mypy-protobuf` types; one `.proto` package per service and
   major version (`ledger.fiscal_do.v1`).
-- Deadlines always set by the caller and propagated; retries only on idempotent methods
-  (declared in the service config), with hedging off.
-- Errors use the status code of the error's kind and its stable code (`certificate_expired`) in the
-  trailing metadata `ledger-error-code`, mapped back to domain exceptions by `platform` (its client
-  helpers, built with the first gRPC client). An error of kind `INTERNAL`, and any bug, answers `INTERNAL`
-  with generic details and the code `internal`: what went wrong is logged, never sent. The server guards
-  every asynchronous method, whether the request, the response or both stream.
-- Identity and tenant travel in metadata, signed by the gateway (see §8); services trust only that.
+- Deadlines always set by the caller: a fixed deadline per call, at most 30 s (milestone 2). Deriving it from
+  the caller's own remaining deadline, and retries only on idempotent methods (declared in the service config,
+  hedging off), come with the first service-to-service caller (milestone 3).
+- Errors use the status code of the error's kind and its stable code (`certificate_expired`) in the trailing
+  metadata `ledger-error-code`, mapped back to domain exceptions by `platform` (its client helpers,
+  `call_unary`; a code outside the stable shape is not passed on). An error of kind `INTERNAL`, and any
+  bug, answers `INTERNAL` with generic details and the code `internal`: what went wrong is logged, never
+  sent. The server guards every asynchronous method, whether the request, the response or both stream.
+- Between services the mesh authenticates the caller (Linkerd identity); a request names the organization,
+  company and principal it is about, and the callee answers inside that organization only. Accepted risk until
+  the mesh is deployed (deployment milestone): a gRPC server authenticates no caller, so its port is never
+  published outside the services' own network (locally, the compose network), and a mesh policy that admits
+  only the services that call it is required before production.
 - mTLS between pods by the service mesh (Linkerd), so services hold no TLS code: the chassis's server
   listens on a plain port.
 
@@ -211,6 +217,7 @@ Every error has a kind, and each kind has one status per protocol (HTTP answers 
 | `INVALID` (can never succeed as sent) | 422 | `INVALID_ARGUMENT` |
 | `NOT_FOUND` | 404 | `NOT_FOUND` |
 | `CONFLICT` (the current state forbids it) | 409 | `FAILED_PRECONDITION` |
+| `UNAUTHENTICATED` (no credentials, or ones that do not hold) | 401, with `WWW-Authenticate: Bearer` | `UNAUTHENTICATED` |
 | `FORBIDDEN` | 403 | `PERMISSION_DENIED` |
 | `UNAVAILABLE` (a dependency failed; retry may work) | 503 | `UNAVAILABLE` |
 | `INTERNAL` (a defect of ours) | 500, code `internal` | `INTERNAL`, code `internal` |
@@ -262,7 +269,8 @@ invoicing and webhooks consume the result; the client gets a webhook and can rea
 
 ```
 other emitter ─► fiscal-receiver /fe/recepcion/api/ecf (with token from our semilla flow)
-fiscal-receiver: verify the emitter's signature and that the buyer RNC is a company we serve;
+fiscal-receiver: verify the emitter's signature and that the buyer RNC is a company we serve
+                 (one RNC is one active company across every organization, so the route is unambiguous);
                  store raw XML; publish fiscal.received.document; answer the ARECF (signed by vault)
 fiscal-do: index the received document; publish for webhooks
 client: approves or rejects commercially through the API ─► fiscal-do sends ACECF to the emitter
@@ -327,15 +335,35 @@ company can certify while another runs in production.
   simplicity, and rely on `FORCE ROW LEVEL SECURITY` to subject the owner to the policies.
 - SQLAlchemy 2.1 Core with typed tables (no ORM sessions in the domain); psycopg 3, asynchronous, as the
   only driver (the chassis refuses any other); Alembic migrations, reviewed and tested up and down in CI.
+- Migrations run through `platform`'s runner (`ledger_platform.migrations`): a service ships its revisions
+  and its `env.py` is one call. One migration per database at a time (a transaction-level advisory lock,
+  waited for at most 10 minutes; every other lock at most 10 s), one transaction each, never as SQL text, run
+  by a one-shot job before the new version starts. A service's readiness checks its schema on a connection
+  of its own (never the pool's), and remembers once it passed: ready at this version's head or at a revision
+  this version does not know (a newer version migrated during a rollout; schemas only grow, so revisions are
+  expand-only while two versions run), not ready behind or unmigrated.
+- Data migrations run as the tables' owner, which `FORCE ROW LEVEL SECURITY` holds to the policies, so a
+  statement without a scope changes nothing silently. A backfill counts the rows to change per scope past the
+  policies (`rows_by_scope`, which lifts the force for that one read inside the migration's transaction and puts
+  it back whatever happens); the scope is the one the table's policy grants rows to (a tenant under
+  `tenant_isolation`, an organization under `organization_isolation`), never guessed from its columns, and a
+  table under neither is refused. It then runs its statement in each scope (`run_per_scope`), failing the
+  migration unless every scope changed exactly the rows counted.
 - Every connection carries limits, none of them unlimited: connect 5 s, statement 30 s, lock 5 s,
   idle-in-transaction 60 s, wait for a pooled connection 10 s. A missing limit turns one stuck dependency
   into every worker stuck; a migration or batch job passes longer ones. SQLAlchemy does not echo the values
   bound to a statement in its errors (`hide_parameters`), because the text of a SQL error reaches logs.
-- Every tenant-owned table has `organization_id` and `company_id`; **row-level security** shows and
+- A company's data has `organization_id` and `company_id`; **row-level security** shows and
   accepts only the rows where **both** equal the transaction-local settings `ledger.organization_id` and
-  `ledger.company_id`, which `platform` sets at the start of every transaction (binding the organization
-  as well keeps a company id from reaching across organizations). A table's migration enables the policy
-  with the chassis's `tenant_isolation(table)`, which also forces it on the table's owner. A missing
+  `ledger.company_id` (binding the organization as well keeps a company id from reaching across
+  organizations). What an organization owns as a whole (its companies, the memberships in them, its
+  idempotency keys) has `organization_id`, and is shown to a transaction of that organization or of any of
+  its companies. `platform` sets both settings at the start of every transaction from its scope: a `Tenant`,
+  an organization alone, or nothing. A table's migration enables its policy with the chassis's
+  `tenant_isolation(table)` or `organization_isolation(table)`, which also force it on the table's owner.
+  PostgreSQL's referential checks bypass row-level security, so a row refers to another through a foreign
+  key that carries the tenant (`(organization_id, company_id)` to a company, `(company_id, branch_id)` to a
+  branch): a row of one tenant cannot point at another's. A missing
   tenant context fails closed: no rows are seen and none can be written. The chassis's own `outbox` and
   `inbox` are the exceptions: a relay reads the outbox across tenants, and the inbox is claimed before the
   handler runs (§4.1).
@@ -364,14 +392,40 @@ company can certify while another runs in production.
   or client credentials for API clients.
 - Organization in Zitadel = organization in `ledger`. Companies are ours (`identity` service), and
   roles are granted per company: `owner`, `admin`, `accountant`, `issuer`, `viewer`.
-- **Envoy Gateway** validates the access token (JWKS from Zitadel), applies rate limits per client,
-  and forwards the verified claims. Services do not re-validate tokens; they trust only headers set
-  by the gateway, which strips any client-supplied copy.
+  A tax id (RNC or cédula) is one taxpayer: at most one active company holds it, in every organization (a
+  unique index over the active companies, which row-level security does not hide). Registering a held one is
+  409 `tax_id_taken` whichever organization holds it, telling nothing more; a deactivated company frees it.
+  Registering a company is the one act decided at the organization's level, before the company has members:
+  it needs the Zitadel project role `ledger.organization.admin` in the token (403 `forbidden` otherwise), and
+  its caller becomes the company's first owner. Every other act on a company is decided by the actor's role in
+  that company.
+- **Envoy Gateway** validates the access token (JWKS from Zitadel) and applies rate limits per client.
+  Every service validates the token again (defense in depth): issuer, audience (the Zitadel project),
+  signature with a published key (asymmetric algorithms only), times within a small leeway, and that it is
+  an access token (`jti` and `client_id`, RFC 9068), not an ID token of the same project, which Zitadel signs
+  with the same keys, types `JWT` alike and gives the project as an audience too (it carries `azp`). The
+  principal is the token's `sub`; its organization is Zitadel's `urn:zitadel:iam:user:resourceowner:id`, whose
+  ledger id is a UUIDv5 of it, the same in every service.
+  Its roles in the organization come only from `urn:zitadel:iam:org:project:<project id>:roles`, the claim of
+  the project that is the tokens' audience, and only those granted in the token's organization: Zitadel's
+  generic `urn:zitadel:iam:org:project:roles` (the roles of every project the token was asked for) and the
+  claims of other projects are ignored.
 - Authorization is decided in the service, per request: `platform` loads the principal's permissions
-  for the target company through `IdentityQuery` (cached 30 s, invalidated by `identity.membership.*`
-  events) and checks a typed permission (`Permission.INVOICE_ISSUE`).
-- Every request carries one `company_id` and, with it, its organization; together they set the RLS
-  context. Cross-company queries exist only in admin endpoints with a separate permission.
+  for the target company through `IdentityQueryService` (cached 30 s, invalidated by `identity.membership.*`
+  and `identity.company.deactivated` events) and checks a typed permission (`Permission.INVOICE_ISSUE`).
+  The rule: every event that changes what other services may do must invalidate their caches (a membership
+  event drops the member's answer, a deactivation every answer about the company); the TTL only bounds what
+  a lost event costs.
+- A caller without any role in a company gets 404 for it, as if it did not exist; a role without the
+  permission an operation needs gets 403. A change of roles is decided on the role its actor holds once it
+  has the company's lock. A deactivated company grants other services the reading permissions only
+  (`company.read`, `membership.read`, `invoice.read`); identity itself refuses any change of it but a
+  revocation.
+- A request about a company carries its `company_id` (in the path, or the `Ledger-Company-Id` header) and,
+  with it, its organization; together they set the RLS context. A request about the caller's organization as
+  a whole (registering a company, listing the companies it holds a role in, reading the organization) runs in
+  the organization's scope alone and sees only what the organization owns (§7). No request reaches across
+  organizations.
 
 ## 9. Security
 
@@ -382,12 +436,13 @@ company can certify while another runs in production.
 | Certificate checks | Subject RNC must match the company; validity window; chain to an accepted DR certification authority |
 | Secrets | Kubernetes secrets from the cloud secret manager (External Secrets Operator); none in images or repos. Inside a service a secret is never in a `repr`, a log or an error message |
 | Leaks through telemetry | What a client sent never leaves in an error or a trace: messages quote at most an excerpt of the input; a validation problem says where and of what type, never the value; a span records the exception's type only, no message or traceback; tracebacks in logs carry no local variables (a frame that failed to connect holds the database password); an exception whose text can quote data (an error of PostgreSQL or psycopg, a pydantic or FastAPI validation error) is logged by its SQLSTATE and the names of its schema, table, column and constraint, or by the locations and types of its problems, never by its message; an unexpected failure answers a bare `internal` |
+| Tax ids in events | An event carries the RNC or cédula in clear (`identity.company.created`'s `tax_id`): consumers need it (routing by RNC, the XML), events stay inside the tenant's boundary (JetStream inside the cluster, the payload scoped by `ce-organizationid` and `ce-subject`), and webhooks deliver an event only to the tenant it belongs to. Logs, spans, error messages and `repr`s keep masking it (`TaxId` shows its kind and last three digits) |
 | Transport | TLS 1.3 at the edge; mTLS inside (Linkerd); DGII calls verify DGII's certificate |
-| Public API | OAuth 2.0 only; idempotency keys; request size limits; JSON schemas strict (unknown fields rejected) |
+| Public API | OAuth 2.0 only; idempotency keys; request size limits (at the gateway, from the deployment milestone); JSON schemas strict (unknown fields rejected) |
 | Webhooks | HMAC-SHA256 signature with timestamp (replay window 5 min); secrets rotatable with overlap |
 | XML | lxml with entity resolution, DTDs and network access disabled; size limits before parsing |
 | Supply chain | uv lockfile with hashes, Renovate, image signing (cosign), SBOM per image, vulnerability scan in CI |
-| Audit | Append-only audit log per service for security-relevant actions, exported to the log store |
+| Audit | Append-only audit log per service for security-relevant actions, exported to the log store; it comes with vault's signing audit (milestone 3), and until then a membership keeps who changed it last and every change of one is an event |
 | Compliance | Reglamento 587-24 obligations for PSFE (incl. where data and servers are located) checked item by item before choosing the cloud region; see §13 |
 
 ## 10. Public API
@@ -402,7 +457,12 @@ company can certify while another runs in production.
   The operational routes `/livez`, `/readyz` and `/metrics` are outside the OpenAPI document.
 - `Idempotency-Key` required on every `POST`; stored 24 h with the response; a different body with
   the same key is a 422.
-- Cursor pagination, `ETag` + `If-Match` on updates, ISO 8601 dates, amounts as strings.
+  The key belongs to its caller (organization and subject), is claimed in the transaction that does the work
+  and keeps the response with it; a request that fails keeps nothing; a concurrent twin waits for the first
+  and replays its answer (`Idempotent-Replayed: true`).
+- Cursor pagination (`limit` 1-100, opaque `cursor`), `ETag` + `If-Match` on updates (428 without it, 412 when
+  it names no current version; a `PUT` that sets a value outright, such as a membership's role, is exempt: a
+  retry is harmless and racing ones serialize), ISO 8601 dates, amounts as strings.
 - Webhook event types mirror public events (`invoice.fiscal.accepted`...), each with a version.
 - SDKs generated from OpenAPI later (not in this sub-project).
 
@@ -418,7 +478,7 @@ company can certify while another runs in production.
   (the span's name and `http.route` keep the route's template). Milestone 1 builds the tracer provider, the
   propagation through events and FastAPI's own request spans (into the service's provider, continuing the
   caller's `traceparent`; the operational routes are not traced); the instrumentation of SQLAlchemy and gRPC
-  arrives with the first service (milestone 2).
+  arrives with the first call between services (milestone 3).
 - **Metrics:** Prometheus: RED metrics per endpoint and RPC, outbox lag, consumer lag, DLQ size,
   workflow states, DGII latency and error rate per environment, certificates expiring. The chassis
   exports, under names that all start with `ledger_`, the HTTP request duration by method, route
@@ -432,8 +492,9 @@ company can certify while another runs in production.
 - **Logs:** structlog, JSON in production and readable in a terminal, with the standard-library loggers
   going through the same pipeline. Every record carries the service and the environment. Context
   variables carry what a unit of work is about: a consumer binds the event's id and type, its tenant
-  (organization and company) and the trace id for its handler's duration; the request middleware binds
-  the trace id and the company of each request in milestone 2. Never personal data beyond ids, never XML
+  (organization and company) and the trace id for its handler's duration; a record written inside a span
+  carries its `trace_id` and `span_id`, and a request's records its `organization_id`, `subject` and
+  `company_id`, bound by the platform's request dependencies. Never personal data beyond ids, never XML
   bodies or keys, and never the local variables of a traceback's frames.
 - **Health:** every service serves HTTP `/livez`, `/readyz` and `/metrics`. Kubernetes probes use each
   service's HTTP `/livez` and `/readyz` (gRPC health is not needed: every service serves HTTP).
@@ -497,11 +558,11 @@ All verified installable on Python 3.15 (cp315 or abi3 wheels, or pure Python) o
 ledger/
 ├── pyproject.toml             workspace root: shared tool configuration
 ├── uv.lock
-├── libs/{kernel,contracts,platform}/    (contracts/proto is the buf module: the .proto sources)
+├── libs/{kernel,contracts,platform,testing}/    (contracts/proto is the buf module: the .proto sources)
 ├── services/{identity,catalog,invoicing,fiscal-do,fiscal-receiver,vault,webhooks}/
-│   └── <service>/{pyproject.toml, src/, tests/, migrations/, Dockerfile}
+│   └── <service>/{pyproject.toml, src/, tests/, openapi.json, Dockerfile}   (migrations ship in the package)
 ├── Tiltfile                   local development: runs deploy/local, then each service
-├── deploy/{helm/, local/}     Helm charts; compose (PostgreSQL, NATS) for local development
+├── deploy/{helm/, local/}     Helm charts; compose (PostgreSQL, NATS, the services, Zitadel) for local development
 └── docs/                      architecture, ADRs, runbooks, specs
 ```
 
@@ -529,7 +590,7 @@ configuration, not by comments, but its `.pyi` stubs are type-checked against.
 | XML | every e-CF type | golden files validated against DGII's XSDs; signatures verified by an independent verifier (xmlsec1) |
 | Adapters | repositories, outbox, inbox, NATS, gRPC | testcontainers: real PostgreSQL and NATS, connecting as a non-superuser role that owns its database (a superuser would bypass row-level security) |
 | Workflows | emission, approval, annulment | Temporal test environment with time skipping; DGII fake with scripted outages |
-| Contracts | protobuf, events, OpenAPI | buf breaking; schemathesis against the OpenAPI document |
+| Contracts | protobuf, events, OpenAPI | buf breaking; the published OpenAPI document kept equal to the code by a test; schemathesis against it from the deployment milestone |
 | End to end | full stack | compose environment; nightly run against DGII's `TesteCF` with a test certificate |
 | Load | emission throughput | k6 against staging before each release |
 
@@ -540,8 +601,9 @@ configuration, not by comments, but its `.pyi` stubs are type-checked against.
 - Managed PostgreSQL, NATS (Helm, 3 replicas, JetStream file storage), Temporal (Temporal Cloud or
   Helm), Zitadel (Helm), object storage with object lock, cloud KMS.
 - Local development: `tilt up` runs `deploy/local/compose.yaml` (PostgreSQL and NATS with JetStream,
-  each with a health check that proves it is usable) and, from milestone 2, builds and runs each service
-  with live reload; compose runs the infrastructure alone. The local PostgreSQL creates a non-superuser
+  each with a health check that proves it is usable) and, from milestone 2, builds each service's production
+  image and runs it, rebuilding on every change; compose alone runs the same stack, and the profile `zitadel`
+  adds a local Zitadel. The local PostgreSQL creates a non-superuser
   role that owns the database, so that row-level security applies on a laptop as in production.
 - Services are configured only through `LEDGER_*` environment variables. A variable that is not a setting
   (a misspelled name) stops the start, with every problem listed, instead of silently running on a
@@ -576,3 +638,9 @@ Each milestone gets its own implementation plan.
 | PSFE certification requirements (3 certified client emitters, FI-GDF-017, Reglamento 587-24) | Tracked as milestone 7 checklist; find pilot clients during milestones 4-6 |
 | Legal retention period and data location | Confirmed against the primary norms before milestone 8 |
 | AGPL-3.0 (Zitadel) | Used unmodified as a separate service; no linking |
+
+### Known limitations (accepted for now)
+
+| Limitation | Why accepted | Until |
+|---|---|---|
+| identity grants a role, the owner's included, to any well-formed subject id without asking Zitadel whether it exists: an owner can hand ownership to a subject nobody can sign in as and give up its own, leaving the company without a usable owner | The company always keeps an owner; the mistake needs an owner's own act, and support can restore one ([runbook](../../runbooks/identity-orphaned-company.md)) | Subjects are verified against Zitadel, and memberships cleaned up when Zitadel deletes a user, with the Zitadel user-sync work (Actions v2 webhooks) |

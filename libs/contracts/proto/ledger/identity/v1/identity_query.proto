@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package ledger.identity.v1;
+
+// What other services ask the identity service, synchronously. Every request names the organization the
+// caller acts in, and the answer never crosses into another organization's data. Ids are canonical UUIDs
+// (8-4-4-4-12, lowercase).
+service IdentityQueryService {
+  // A company of the organization. NOT_FOUND, code company_not_found, when the organization has none by that
+  // id.
+  rpc GetCompany(GetCompanyRequest) returns (GetCompanyResponse);
+  // What a principal may do in a company of the organization: empty when it holds no role there.
+  rpc GetPermissions(GetPermissionsRequest) returns (GetPermissionsResponse);
+}
+
+message GetCompanyRequest {
+  string organization_id = 1;
+  string company_id = 2;
+}
+
+message GetCompanyResponse {
+  Company company = 1;
+}
+
+// One taxpayer (an RNC or a cedula) of an organization.
+message Company {
+  string id = 1;
+  string organization_id = 2;
+  // Digits only: 9 for an RNC, 11 for a cedula.
+  string tax_id = 3;
+  string legal_name = 4;
+  CompanyStatus status = 5;
+  // One more with every change.
+  int64 version = 6;
+}
+
+enum CompanyStatus {
+  COMPANY_STATUS_UNSPECIFIED = 0;
+  COMPANY_STATUS_ACTIVE = 1;
+  COMPANY_STATUS_INACTIVE = 2;
+}
+
+message GetPermissionsRequest {
+  string organization_id = 1;
+  string company_id = 2;
+  // The principal: the identity provider's id of the user or machine.
+  string subject = 3;
+}
+
+message GetPermissionsResponse {
+  // Stable permission codes ("company.read", "invoice.issue"). A reader ignores a code it does not know: a
+  // newer identity may grant permissions an older reader never checks.
+  repeated string permissions = 1;
+}

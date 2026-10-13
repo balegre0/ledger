@@ -1,10 +1,10 @@
-from typing import Final
+from typing import Final, Literal
 lazy from collections.abc import Mapping
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
-from ledger_platform.settings import LogFormat, ServiceSettings
+from ledger_platform.settings import ApiSettings, LogFormat, ServiceSettings
 
 URL = "postgresql+psycopg://app:s3cret@db:5432/ledger"
 VALID: Final = {"LEDGER_SERVICE_NAME": "invoicing", "LEDGER_DATABASE_URL": URL}
@@ -252,3 +252,67 @@ def test_the_nats_url_never_shows(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "s3cret" not in repr(settings)
     assert "s3cret" not in str(settings)
     assert "s3cret" not in settings.model_dump_json()
+
+
+# ── API settings ────────────────────────────────────────────────────────────────
+
+API_DATABASE_URL = SecretStr("postgresql+psycopg://identity:secret@localhost:5432/identity")
+
+
+def api_settings(
+    environment: Literal["local", "test", "staging", "production"], keys_url: str = "http://localhost/keys"
+) -> ApiSettings:
+    return ApiSettings(
+        service_name="identity",
+        environment=environment,
+        database_url=API_DATABASE_URL,
+        token_issuer="https://issuer.example",
+        token_audience="ledger",
+        token_jwks_url=keys_url,
+    )
+
+
+def test_an_api_service_needs_its_token_policy() -> None:
+    with pytest.raises(ValidationError) as caught:
+        ApiSettings(service_name="identity", database_url=API_DATABASE_URL)
+    assert {error["loc"][0] for error in caught.value.errors()} == {
+        "token_issuer",
+        "token_audience",
+        "token_jwks_url",
+    }
+
+
+def test_the_token_policy_has_safe_defaults() -> None:
+    settings = api_settings("local")
+    assert (settings.token_algorithms, settings.token_leeway_seconds) == (frozenset({"RS256"}), 60)
+
+
+@pytest.mark.parametrize("environment", ["staging", "production"])
+def test_keys_come_over_https_beyond_a_laptop(environment: Literal["staging", "production"]) -> None:
+    with pytest.raises(ValidationError, match="must be https://"):
+        api_settings(environment)
+    assert (
+        api_settings(environment, "https://issuer.example/keys").token_jwks_url
+        == "https://issuer.example/keys"
+    )
+
+
+@pytest.mark.parametrize("environment", ["local", "test"])
+def test_keys_may_come_over_http_on_a_laptop(environment: Literal["local", "test"]) -> None:
+    assert api_settings(environment).token_jwks_url == "http://localhost/keys"
+
+
+@pytest.mark.parametrize("algorithms", ['["HS256"]', '["none"]', '["RS256", "HS512"]', "[]"])
+def test_only_asymmetric_algorithms_can_be_configured(
+    monkeypatch: pytest.MonkeyPatch, algorithms: str
+) -> None:
+    monkeypatch.setenv("LEDGER_TOKEN_ALGORITHMS", algorithms)
+    with pytest.raises(ValidationError):
+        api_settings("local")
+
+
+@pytest.mark.parametrize("leeway", ["-1", "301"])
+def test_the_leeway_is_at_most_five_minutes(monkeypatch: pytest.MonkeyPatch, leeway: str) -> None:
+    monkeypatch.setenv("LEDGER_TOKEN_LEEWAY_SECONDS", leeway)
+    with pytest.raises(ValidationError):
+        api_settings("local")

@@ -1,77 +1,51 @@
 """Fixtures of the platform's tests: a real PostgreSQL and a real NATS server with JetStream."""
 
-import asyncio
-import logging
 lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 
-import psycopg
 import pytest
-import structlog
 from nats.aio.client import Client
 from nats.js import JetStreamContext
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from prometheus_client import CollectorRegistry
-from testcontainers.community.postgres import PostgresContainer
-from testcontainers.core.container import DockerContainer
-from testcontainers.core.wait_strategies import LogMessageWaitStrategy
 
+from ledger_kernel.ids import new_id
 from ledger_platform.database import Database
 from ledger_platform.schema import CHASSIS_METADATA
 from ledger_platform.tracing import Tracing
+from ledger_testing import waiting
+from ledger_testing.containers import Postgres, nats_address, nats_server
+from ledger_testing.logs import restored_logging
 
-POSTGRES_IMAGE = "postgres:18.6"
-NATS_IMAGE = "nats:2.12.15"
-NATS_PORT = 4222
 SMALL_PAYLOAD_CONFIG = "/small-payload.conf"
-
-
-def use_the_plain_baseline() -> None:
-    """structlog as a service logs to a terminal: no colors, and tracebacks as plain text without locals.
-
-    structlog's own defaults render a traceback with ``rich`` and every local variable of every frame, which
-    is slow (seconds for one logged exception) and prints exactly what ``configure_logging`` keeps out of a
-    record. A test that logs gets the production rules, and ``capture_logs`` keeps working on top of them.
-    """
-    structlog.reset_defaults()
-    structlog.configure(
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso", utc=True),
-            structlog.dev.ConsoleRenderer(colors=False, exception_formatter=structlog.dev.plain_traceback),
-        ],
-        cache_logger_on_first_use=False,
-    )
 
 
 @pytest.fixture(autouse=True)
 def restore_logging() -> Iterator[None]:
     """Each test starts from, and leaves, the plain baseline: ``configure_logging`` is process-wide state."""
-    root = logging.getLogger()
-    handlers, level = root.handlers[:], root.level
-    use_the_plain_baseline()
-    yield
-    root.handlers[:] = handlers
-    root.setLevel(level)
-    use_the_plain_baseline()
-    structlog.contextvars.clear_contextvars()
+    with restored_logging():
+        yield
 
 
 @pytest.fixture(scope="session")
-def database_url() -> Iterator[str]:
-    """A real PostgreSQL; the app connects as ``ledger_app``, which owns the database but is no superuser.
+def postgres() -> Iterator[Postgres]:
+    """A real PostgreSQL for the whole session."""
+    with Postgres.started() as server:
+        yield server
 
-    A superuser bypasses row-level security, and so does a table owner unless the table forces it: the tests
-    must run as the kind of role a service runs as.
-    """
-    with PostgresContainer(POSTGRES_IMAGE, driver=None) as container:
-        with psycopg.connect(container.get_connection_url(), autocommit=True) as admin:
-            admin.execute("CREATE ROLE ledger_app LOGIN PASSWORD 'app-password'")
-            admin.execute("CREATE DATABASE ledger OWNER ledger_app")
-        host, port = container.get_container_host_ip(), container.get_exposed_port(5432)
-        yield f"postgresql+psycopg://ledger_app:app-password@{host}:{port}/ledger"
+
+@pytest.fixture(scope="session")
+def database_url(postgres: Postgres) -> str:
+    """The app's database; it connects as ``ledger_app``, which owns the database but is no superuser."""
+    return postgres.database("ledger", role="ledger_app", password="app-password")
+
+
+@pytest.fixture
+def fresh_database_url(postgres: Postgres) -> str:
+    """An empty database of its own, owned by a role of its own: for the tests of the migrations."""
+    name = f"fresh_{new_id().hex[16:]}"  # the random half of a UUIDv7
+    return postgres.database(name, role=name, password="fresh-password")
 
 
 @pytest.fixture
@@ -85,21 +59,11 @@ async def database(database_url: str) -> AsyncGenerator[Database]:
             await connection.run_sync(CHASSIS_METADATA.drop_all)
 
 
-def nats_server(*arguments: str) -> DockerContainer:
-    """A NATS server with JetStream, started with ``arguments`` too, ready once it says so."""
-    return (
-        DockerContainer(NATS_IMAGE)
-        .with_command(["-js", *arguments])
-        .with_exposed_ports(NATS_PORT)
-        .waiting_for(LogMessageWaitStrategy("Server is ready"))
-    )
-
-
 @pytest.fixture(scope="session")
 def nats_url() -> Iterator[str]:
     """A real NATS server with JetStream."""
     with nats_server() as container:
-        yield f"nats://{container.get_container_host_ip()}:{container.get_exposed_port(NATS_PORT)}"
+        yield nats_address(container)
 
 
 @pytest.fixture(scope="session")
@@ -112,7 +76,7 @@ def small_payload_nats_url() -> Iterator[str]:
         b"max_payload: 65536\n", SMALL_PAYLOAD_CONFIG
     )
     with server as container:
-        yield f"nats://{container.get_container_host_ip()}:{container.get_exposed_port(NATS_PORT)}"
+        yield nats_address(container)
 
 
 @pytest.fixture
@@ -169,16 +133,8 @@ def registry() -> CollectorRegistry:
 
 @pytest.fixture
 def eventually() -> Callable[[Callable[[], Awaitable[bool]]], Awaitable[None]]:
-    """Waits until ``check`` is true, for at most five seconds: a bound, it returns as soon as it holds.
+    """Waits until ``check`` is true, for at most five seconds (``ledger_testing.waiting.eventually``).
 
     For what happens in a task of its own, such as a relay or a consumer, whose progress a test cannot await.
     """
-
-    async def wait(check: Callable[[], Awaitable[bool]]) -> None:
-        async with asyncio.timeout(5):
-            while True:
-                if await check():
-                    return
-                await asyncio.sleep(0.02)
-
-    return wait
+    return waiting.eventually

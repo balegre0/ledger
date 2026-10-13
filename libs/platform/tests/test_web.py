@@ -29,6 +29,7 @@ from ledger_kernel.errors import (
     InvalidInputError,
     LedgerError,
     NotFoundError,
+    UnauthenticatedError,
     UnavailableError,
     described,
 )
@@ -36,6 +37,7 @@ from ledger_platform.health import Health
 from ledger_platform.logs import configure_logging
 from ledger_platform.settings import LogFormat, ServiceSettings
 from ledger_platform.web import PROBLEM_JSON, AmbiguousRouteError, ApiInfo, Observability, create_app
+from ledger_testing.clock import Moment
 lazy from ledger_platform.tracing import Tracing
 
 TRACE_ID: Final = "0af7651916cd43dd8448eb211c80319c"
@@ -57,6 +59,12 @@ class BrokenInvariantError(LedgerError):
 
     def __init__(self) -> None:
         super().__init__("the ledger is out of balance by 3")
+
+
+class RefusedTokenError(UnauthenticatedError):
+    """What the platform's token verifier raises (Task 3), as far as the HTTP app can tell: the code."""
+
+    code: ClassVar[str] = "invalid_token"
 
 
 class Item(BaseModel):
@@ -141,6 +149,8 @@ router = APIRouter()
 ERRORS: dict[str, type[LedgerError]] = {
     "invalid": InvalidInputError,
     "conflict": ConflictError,
+    "unauthenticated": UnauthenticatedError,
+    "refused-token": RefusedTokenError,
     "forbidden": ForbiddenError,
     "unavailable": UnavailableError,
     "internal": LedgerError,
@@ -223,6 +233,7 @@ BY_KIND: Final[dict[ErrorKind, type[LedgerError]]] = {
     ErrorKind.INVALID: InvalidInputError,
     ErrorKind.NOT_FOUND: NotFoundError,
     ErrorKind.CONFLICT: ConflictError,
+    ErrorKind.UNAUTHENTICATED: UnauthenticatedError,
     ErrorKind.FORBIDDEN: ForbiddenError,
     ErrorKind.UNAVAILABLE: UnavailableError,
     ErrorKind.INTERNAL: LedgerError,
@@ -231,6 +242,7 @@ STATUS_OF: Final[dict[ErrorKind, HTTPStatus]] = {
     ErrorKind.INVALID: HTTPStatus.UNPROCESSABLE_CONTENT,
     ErrorKind.NOT_FOUND: HTTPStatus.NOT_FOUND,
     ErrorKind.CONFLICT: HTTPStatus.CONFLICT,
+    ErrorKind.UNAUTHENTICATED: HTTPStatus.UNAUTHORIZED,
     ErrorKind.FORBIDDEN: HTTPStatus.FORBIDDEN,
     ErrorKind.UNAVAILABLE: HTTPStatus.SERVICE_UNAVAILABLE,
     ErrorKind.INTERNAL: HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -418,7 +430,7 @@ async def test_liveness_fails_while_a_check_is_wedged_and_recovers_when_it_ends(
     registry: CollectorRegistry, tracing: Tracing
 ) -> None:
     release, ended = asyncio.Event(), asyncio.Event()
-    now = [0.0]
+    moment = Moment()
 
     async def stubborn() -> None:
         while not release.is_set():
@@ -426,14 +438,14 @@ async def test_liveness_fails_while_a_check_is_wedged_and_recovers_when_it_ends(
                 await release.wait()
         ended.set()
 
-    health = Health(timeout=0.02, wedge_after=30, clock=lambda: now[0])
+    health = Health(timeout=0.02, wedge_after=30, clock=moment)
     health.add("nats", stubborn)
     try:
         observability = Observability(health=health, registry=registry, tracer_provider=tracing.provider)
         async with serving(build(observability, router)) as client:
             assert (await client.get("/readyz")).status_code == 503
             assert (await client.get("/livez")).status_code == 200
-            now[0] = 31
+            moment.now = 31
             wedged = await client.get("/livez")
             assert (wedged.status_code, LIVENESS.validate_json(wedged.content)) == (
                 503,
@@ -755,6 +767,25 @@ async def test_a_method_the_route_does_not_take_keeps_its_allow_header(client: h
     }
 
 
+async def test_an_unauthenticated_caller_is_told_how_to_authenticate(client: httpx.AsyncClient) -> None:
+    response = await client.get("/errors/unauthenticated")
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == 'Bearer realm="ledger"'
+    assert response.json()["code"] == "unauthenticated"
+
+
+async def test_a_token_that_was_refused_is_named_in_the_challenge(client: httpx.AsyncClient) -> None:
+    response = await client.get("/errors/refused-token")
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == 'Bearer realm="ledger", error="invalid_token"'
+
+
+async def test_only_an_unauthenticated_caller_gets_the_challenge(client: httpx.AsyncClient) -> None:
+    response = await client.get("/errors/forbidden")
+    assert response.status_code == 403
+    assert "www-authenticate" not in response.headers
+
+
 async def test_an_http_exception_keeps_its_headers_and_does_not_repeat_its_detail(
     client: httpx.AsyncClient,
 ) -> None:
@@ -763,10 +794,10 @@ async def test_an_http_exception_keeps_its_headers_and_does_not_repeat_its_detai
     assert response.headers["www-authenticate"] == 'Bearer realm="ledger"'
     assert response.headers["content-type"] == PROBLEM_JSON
     assert response.json() == {
-        "type": "urn:ledger:error:unauthorized",
+        "type": "urn:ledger:error:unauthenticated",
         "title": "Unauthorized",
         "status": 401,
-        "code": "unauthorized",
+        "code": "unauthenticated",
     }
 
 
@@ -890,7 +921,7 @@ async def test_a_route_added_after_the_app_was_built_is_unregistered_and_said_so
     ("status", "code"),
     [
         (400, "bad_request"),
-        (401, "unauthorized"),
+        (401, "unauthenticated"),
         (403, "forbidden"),
         (404, "not_found"),
         (405, "method_not_allowed"),
