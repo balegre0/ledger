@@ -92,7 +92,8 @@ async def seeded(identity_db: BoundDatabase, organization: OrganizationId | None
             insert(CompanyRecord).values(
                 id=tenant.company,
                 organization_id=tenant.organization,
-                tax_id=str(tenant.company.int)[-9:],  # the random end of a UUIDv7
+                tax_scheme="do.rnc",
+                tax_value=str(tenant.company.int)[-9:],  # the random end of a UUIDv7
                 legal_name="Acme SRL",
                 status="active",
                 version=1,

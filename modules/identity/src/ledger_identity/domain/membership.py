@@ -1,10 +1,11 @@
 """Memberships: who holds which role in a company, and the rules for changing that (§8).
 
 One role per principal and company. The founder of a company is its first owner. Roles are granted and
-revoked by whoever may manage memberships (``MEMBERSHIP_MANAGE``), the owner role by owners only
-(``OWNERSHIP_MANAGE``); the actor is judged on its membership as it is when the change is made, under the
-company's lock. A company always keeps an owner: the last can be neither demoted nor revoked. Roles are
-granted in active companies only, but can always be revoked: taking access away must never be blocked.
+revoked by whoever may manage memberships (``identity.memberships.manage``), the owner role by owners only
+(``identity.ownership.manage``); the actor is judged on its membership as it is when the change is made,
+under the company's lock. A company always keeps an owner: the last can be neither demoted nor revoked.
+Roles are granted in active companies only, but can always be revoked: taking access away must never be
+blocked.
 
 A revoked membership is kept, with its last role and status ``revoked``: its version only grows, so a role
 granted again continues from it, and the version every event carries never goes back (§4.1).
@@ -16,20 +17,15 @@ from typing import final
 lazy from datetime import datetime
 
 from ledger_identity.domain.company import CompanyStatus
-from ledger_identity.domain.errors import (
-    ActorNotAllowedError,
-    InvalidStateError,
-    LastOwnerError,
-    MembershipNotFoundError,
-    OwnersOnlyError,
-)
+from ledger_identity.domain.errors import LastOwnerError, MembershipNotFoundError, OwnersOnlyError
 from ledger_identity.domain.ids import MembershipId
-from ledger_identity.domain.roles import READ_ONLY, Role, permissions_of
+from ledger_identity.domain.roles import MEMBERSHIPS_MANAGE, OWNERSHIP_MANAGE, READ_ONLY, Role, permissions_of
 from ledger_identity.events import MembershipGranted, MembershipRevoked
-from ledger_kernel.access import Permission
+from ledger_kernel.access import PermissionDeniedError
+from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.ids import new_id
 lazy from ledger_identity.domain.company import Company
-lazy from ledger_kernel.access import Principal, SubjectId
+lazy from ledger_kernel.access import Permission, Principal, SubjectId
 lazy from ledger_kernel.tenancy import Tenant
 
 
@@ -58,7 +54,7 @@ class Membership:
 
     def __post_init__(self) -> None:
         if self.version < 1:
-            raise InvalidStateError(field="membership.version", requirement="at least 1")
+            raise InvalidValueError(field="membership.version", requirement="at least 1")
 
     @property
     def active(self) -> bool:
@@ -80,14 +76,18 @@ class Actor:
     permissions: frozenset[Permission]
 
     def require(self, permission: Permission) -> None:
-        """Refuse with ``ActorNotAllowedError`` unless its membership allows ``permission`` now."""
+        """Refuse with ``PermissionDeniedError`` unless its membership allows ``permission`` now.
+
+        The kernel's error, as the platform's ``CompanyAccess.require`` raises: one class per code. Raised
+        here under the company's lock, when the role changed after the request was checked.
+        """
         if permission not in self.permissions:
-            raise ActorNotAllowedError(permission)
+            raise PermissionDeniedError(permission)
 
     @property
     def manages_ownership(self) -> bool:
         """Whether it may grant and take the owner role."""
-        return Permission.OWNERSHIP_MANAGE in self.permissions
+        return OWNERSHIP_MANAGE in self.permissions
 
 
 @final
@@ -109,16 +109,16 @@ class Roster:
     def __post_init__(self) -> None:
         current = self.current
         if current is not None and current.subject != self.subject:
-            raise InvalidStateError(field="roster.current", requirement="the membership of its subject")
+            raise InvalidValueError(field="roster.current", requirement="the membership of its subject")
         if current is not None and current.tenant != self.company.tenant:
-            raise InvalidStateError(field="roster.current", requirement="the membership of its company")
+            raise InvalidValueError(field="roster.current", requirement="the membership of its company")
 
 
 def found(company: Company, founder: Principal, *, now: datetime) -> tuple[Membership, MembershipGranted]:
     """The membership of a company's founder, a principal of its organization: its first owner."""
     company.require_active()
     if founder.organization != company.organization:
-        raise InvalidStateError(field="founder", requirement="a principal of the company's organization")
+        raise InvalidValueError(field="founder", requirement="a principal of the company's organization")
     owner = Membership(
         id=MembershipId(new_id()),
         tenant=company.tenant,
@@ -141,7 +141,7 @@ def found(company: Company, founder: Principal, *, now: datetime) -> tuple[Membe
 
 
 def _require_managing(actor: Actor) -> None:
-    actor.require(Permission.MEMBERSHIP_MANAGE)
+    actor.require(MEMBERSHIPS_MANAGE)
 
 
 def _require_ownership(actor: Actor) -> None:

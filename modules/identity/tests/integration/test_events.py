@@ -16,7 +16,7 @@ lazy from ledger_testing.issuer import LocalIssuer
 ORGANIZATION: Final = organization_of("1001")
 TRACE_ID: Final = "4bf92f3577b34da6a3ce929d0e0e4736"
 TRACEPARENT: Final = f"00-{TRACE_ID}-b7ad6b7169203331-01"
-DUARTE: Final = {"tax_id": "101850043", "legal_name": "Duarte"}
+DUARTE: Final = {"tax_id": {"scheme": "do.rnc", "value": "101850043"}, "legal_name": "Duarte"}
 OUTBOX: Final = """
     SELECT type, version, source, organization_id, company_id, mode, subject, aggregate_version, traceparent,
            payload
@@ -49,7 +49,7 @@ async def test_a_new_company_and_its_owner_are_announced_with_the_change(
         company,
         1,
     )
-    assert registered[9] == {"tax_id": {"digits": "101850043", "kind": "rnc"}, "legal_name": "Duarte"}
+    assert registered[9] == {"tax_id": {"scheme": "do.rnc", "value": "101850043"}, "legal_name": "Duarte"}
     membership = granted[6]
     assert granted[:6] == ("identity.membership.granted", 1, "identity", ORGANIZATION, company, None)
     assert (granted[7], granted[9]) == (1, {"member": "2001", "role": "owner", "previous": None})
@@ -90,7 +90,7 @@ async def test_renames_and_deactivations_are_announced_at_the_company_s_versions
             None,
             UUID(company),
             2,
-            {"tax_id": {"digits": "101850043", "kind": "rnc"}, "legal_name": "Duarte SRL"},
+            {"tax_id": {"scheme": "do.rnc", "value": "101850043"}, "legal_name": "Duarte SRL"},
         ),
         ("identity.company.deactivated", None, UUID(company), 3, {}),  # a live request: still no mode
     ]

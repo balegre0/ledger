@@ -20,11 +20,9 @@ from ledger_identity.application.ports import (
 )
 from ledger_identity.domain.company import CompanyStatus
 from ledger_identity.domain.errors import (
-    ActorNotAllowedError,
     BranchCodeTakenError,
     BranchNotFoundError,
     CompanyInactiveError,
-    CompanyNotFoundError,
     EmissionPointCodeTakenError,
     EmissionPointNotFoundError,
     LastOwnerError,
@@ -37,7 +35,7 @@ from ledger_identity.domain.errors import (
 )
 from ledger_identity.domain.ids import BranchId, EmissionPointId
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN, Organization
-from ledger_identity.domain.roles import READ_ONLY, Role
+from ledger_identity.domain.roles import EVERYTHING, READ_ONLY, Role
 from ledger_identity.domain.text import parse_code, parse_legal_name, parse_name
 from ledger_identity.events import (
     CompanyDeactivated,
@@ -46,11 +44,11 @@ from ledger_identity.events import (
     MembershipGranted,
     MembershipRevoked,
 )
-from ledger_kernel.access import Permission, Principal, SubjectId
-from ledger_kernel.countries.do import TaxId
+from ledger_kernel.access import CompanyNotFoundError, PermissionDeniedError, Principal, SubjectId
 from ledger_kernel.errors import ErrorKind
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.pagination import PageRequest, page_of
+from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Tenant
 lazy from ledger_identity.domain.branches import Branch, EmissionPoint
 lazy from ledger_identity.domain.company import Company
@@ -76,9 +74,9 @@ STRANGER: Final = Principal(
 OWNER: Final = FOUNDER.subject
 ADMIN: Final = SubjectId("2002")
 VIEWER: Final = SubjectId("3001")
-RNC: Final = TaxId.parse("101850043")
-CEDULA: Final = TaxId.parse("00113918205")
-THEIRS: Final = TaxId.parse("401500022")
+RNC: Final = TaxId(TaxIdScheme("do.rnc"), "101850043")
+CEDULA: Final = TaxId(TaxIdScheme("do.cedula"), "00113918205")
+THEIRS: Final = TaxId(TaxIdScheme("do.rnc"), "401500022")
 """The tax id of the other organization's company: one taxpayer is one active company."""
 
 
@@ -615,7 +613,7 @@ async def test_the_actor_acts_with_the_role_it_holds_when_the_change_is_made(sta
     company = await created(state)
     await with_an_admin(state, company)
     await commands.grant_role(state.unit(), company.id, subject=ADMIN, role=Role.VIEWER, actor=OWNER)
-    with pytest.raises(ActorNotAllowedError):
+    with pytest.raises(PermissionDeniedError):
         await commands.grant_role(state.unit(), company.id, subject=VIEWER, role=Role.VIEWER, actor=ADMIN)
     await commands.grant_role(state.unit(), company.id, subject=ADMIN, role=Role.ADMIN, actor=OWNER)
     with pytest.raises(OwnersOnlyError):
@@ -654,9 +652,9 @@ async def test_an_admin_demoted_while_its_grant_waits_for_the_company_is_refused
     company = await created(state)
     await with_an_admin(state, company)
     state.while_waiting = demote(state, company, ADMIN, Role.VIEWER)
-    with pytest.raises(ActorNotAllowedError):
+    with pytest.raises(PermissionDeniedError):
         await commands.grant_role(state.unit(), company.id, subject=VIEWER, role=Role.VIEWER, actor=ADMIN)
-    with pytest.raises(ActorNotAllowedError):
+    with pytest.raises(PermissionDeniedError):
         await commands.revoke_role(state.unit(), company.id, subject=OWNER, actor=ADMIN)
     assert (company.id, VIEWER) not in state.memberships
 
@@ -673,9 +671,9 @@ async def test_an_admin_demoted_while_its_change_of_the_company_waits_is_refused
     company = await created(state)
     await with_an_admin(state, company)
     state.while_waiting = demote(state, company, ADMIN, Role.VIEWER)
-    with pytest.raises(ActorNotAllowedError):
+    with pytest.raises(PermissionDeniedError):
         await commands.deactivate_company(state.unit(LATER), company.id, admits=anything, actor=ADMIN)
-    with pytest.raises(ActorNotAllowedError):
+    with pytest.raises(PermissionDeniedError):
         await commands.rename_company(
             state.unit(LATER), company.id, legal_name=parse_legal_name("X"), admits=anything, actor=ADMIN
         )
@@ -698,7 +696,7 @@ async def test_a_company_is_changed_by_an_actor_with_an_active_role_there_only(s
 async def test_a_refused_actor_is_refused_whatever_version_it_names(state: State) -> None:
     company = await created(state)
     await commands.grant_role(state.unit(), company.id, subject=VIEWER, role=Role.VIEWER, actor=OWNER)
-    with pytest.raises(ActorNotAllowedError):
+    with pytest.raises(PermissionDeniedError):
         await commands.deactivate_company(state.unit(LATER), company.id, admits=nothing, actor=VIEWER)
 
 
@@ -709,11 +707,11 @@ async def test_an_admin_demoted_while_its_opening_waits_for_the_company_opens_no
     )
     await with_an_admin(state, company)
     state.while_waiting = demote(state, company, ADMIN, Role.VIEWER)
-    with pytest.raises(ActorNotAllowedError):
+    with pytest.raises(PermissionDeniedError):
         await commands.open_branch(
             state.unit(), company.id, commands.Opening(parse_code("SUC2"), parse_name("B")), actor=ADMIN
         )
-    with pytest.raises(ActorNotAllowedError):
+    with pytest.raises(PermissionDeniedError):
         await commands.open_emission_point(
             state.unit(),
             company.id,
@@ -797,7 +795,10 @@ async def test_the_organization_is_known_once_it_has_a_company(state: State) -> 
 
 
 async def test_a_principal_lists_the_companies_it_holds_a_role_in_page_by_page(state: State) -> None:
-    mine = [await created(state, TaxId.parse(rnc)) for rnc in ("101850043", "130000012", "401007551")]
+    mine = [
+        await created(state, TaxId(TaxIdScheme("do.rnc"), rnc))
+        for rnc in ("101850043", "130000012", "401007551")
+    ]
     theirs = await created(state, THEIRS, founder=STRANGER)
     first = await queries.companies_of(state.unit(), OWNER, PageRequest(size=2))
     assert first.items == tuple(sorted(mine, key=lambda company: company.id)[:2])
@@ -810,7 +811,7 @@ async def test_a_principal_lists_the_companies_it_holds_a_role_in_page_by_page(s
 
 async def test_permissions_are_the_role_s_or_none(state: State) -> None:
     company = await created(state)
-    assert await queries.permissions_of(state.unit(), company.id, OWNER) == frozenset(Permission)
+    assert await queries.permissions_of(state.unit(), company.id, OWNER) == EVERYTHING
     assert await queries.permissions_of(state.unit(), company.id, VIEWER) == frozenset()
 
 

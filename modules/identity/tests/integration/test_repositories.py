@@ -31,19 +31,18 @@ from ledger_identity.domain.branches import Branch, EmissionPoint
 from ledger_identity.domain.errors import (
     BranchCodeTakenError,
     CompanyInactiveError,
-    CompanyNotFoundError,
     EmissionPointCodeTakenError,
     OwnersOnlyError,
     TaxIdTakenError,
 )
 from ledger_identity.domain.membership import found
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN, Organization
-from ledger_identity.domain.roles import READ_ONLY, Role
+from ledger_identity.domain.roles import EVERYTHING, READ_ONLY, Role
 from ledger_identity.domain.text import parse_code, parse_legal_name, parse_name
-from ledger_kernel.access import Permission, Principal, SubjectId
-from ledger_kernel.countries.do import TaxId
+from ledger_kernel.access import CompanyNotFoundError, Principal, SubjectId
 from ledger_kernel.ids import CompanyId, new_id
 from ledger_kernel.pagination import PageRequest, decode_cursor
+from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import OrganizationScope, Tenant
 from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_testing.database import app_url
@@ -76,8 +75,8 @@ OWNER: Final = FOUNDER.subject
 MEMBER: Final = Principal(
     subject=SubjectId("3001"), organization=FOUNDER.organization, provider_organization="1001"
 )
-RNC: Final = TaxId.parse("101850043")
-THEIRS: Final = TaxId.parse("401500022")
+RNC: Final = TaxId(TaxIdScheme("do.rnc"), "101850043")
+THEIRS: Final = TaxId(TaxIdScheme("do.rnc"), "401500022")
 """The tax id of the other organization's company: one taxpayer is one active company."""
 SHOWING: Final = text(
     """
@@ -157,7 +156,7 @@ async def test_a_company_is_kept_with_its_owner_and_organization(identity_db: Bo
     permissions = await in_unit(
         identity_db, tenant, lambda unit: queries.permissions_of(unit, company.id, OWNER)
     )
-    assert permissions == frozenset(Permission)
+    assert permissions == EVERYTHING
 
 
 async def test_what_a_unit_changes_is_announced_through_the_outbox_when_it_commits(
@@ -215,6 +214,17 @@ async def test_a_tax_id_is_one_active_company_s_in_every_organization(identity_d
         assert (
             await unit.connection.execute(select(func.count()).select_from(CompanyRecord))
         ).scalar_one() == 0
+
+
+async def test_a_tax_id_is_unique_by_its_scheme_and_its_value(identity_db: BoundDatabase) -> None:
+    """The same characters under another scheme are another taxpayer's: they never collide."""
+    rnc = await create(identity_db)
+    cedula = await create(identity_db, founder=STRANGER, tax_id=TaxId(TaxIdScheme("do.cedula"), RNC.value))
+    assert (rnc.tax_id, cedula.tax_id) == (RNC, TaxId(TaxIdScheme("do.cedula"), "101850043"))
+    read = await in_unit(identity_db, cedula.tenant, lambda unit: queries.company(unit, cedula.id))
+    assert read.tax_id == cedula.tax_id
+    with pytest.raises(TaxIdTakenError):
+        await create(identity_db, founder=STRANGER, tax_id=TaxId(TaxIdScheme("do.cedula"), RNC.value))
 
 
 async def test_two_organizations_registering_one_taxpayer_at_once_get_one_company(
@@ -301,7 +311,7 @@ async def test_renames_and_deactivations_are_announced(
 
 async def test_a_principal_pages_through_the_companies_it_holds_a_role_in(identity_db: BoundDatabase) -> None:
     for rnc in ("101850043", "130000012", "401007551"):
-        await create(identity_db, tax_id=TaxId.parse(rnc))
+        await create(identity_db, tax_id=TaxId(TaxIdScheme("do.rnc"), rnc))
     await create(identity_db, founder=STRANGER, tax_id=THEIRS)
     first = await in_unit(
         identity_db,
@@ -331,7 +341,7 @@ async def test_a_principal_pages_through_the_companies_it_holds_a_role_in(identi
 
 async def test_branches_and_emission_points_are_kept_per_company(identity_db: BoundDatabase) -> None:
     company = await create(identity_db)
-    other = await create(identity_db, tax_id=TaxId.parse("130000012"))
+    other = await create(identity_db, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
     branch = await in_unit(
         identity_db,
         company.tenant,
@@ -394,7 +404,7 @@ async def test_branches_and_emission_points_are_kept_per_company(identity_db: Bo
 
 async def test_a_company_scope_sees_no_branch_of_another_company(identity_db: BoundDatabase) -> None:
     company = await create(identity_db)
-    other = await create(identity_db, tax_id=TaxId.parse("130000012"))
+    other = await create(identity_db, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
     branch = await in_unit(
         identity_db,
         company.tenant,
@@ -418,7 +428,7 @@ async def test_a_row_cannot_point_at_a_company_or_a_branch_of_another_tenant(
     identity_db: BoundDatabase,
 ) -> None:
     mine = await create(identity_db)
-    sister = await create(identity_db, tax_id=TaxId.parse("130000012"))
+    sister = await create(identity_db, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
     theirs = await create(identity_db, founder=STRANGER, tax_id=THEIRS)
     branch = await in_unit(
         identity_db,
@@ -540,7 +550,7 @@ async def test_the_repositories_keep_to_the_unit_s_company_without_row_level_sec
     identity_db: BoundDatabase,
 ) -> None:
     company, branch, point = await a_company_with_a_branch_and_a_point(identity_db)
-    sister = await create(identity_db, tax_id=TaxId.parse("130000012"))
+    sister = await create(identity_db, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
 
     async def look(unit: IdentityUnit, connection: AsyncConnection) -> list[object]:
         del connection
@@ -563,7 +573,7 @@ async def test_the_repositories_keep_to_the_unit_s_company_without_row_level_sec
 async def test_a_unit_refuses_to_write_a_row_of_another_tenant(identity_db: BoundDatabase) -> None:
     """Row-level security would refuse each of these too: the repositories do not count on it."""
     company = await create(identity_db)
-    sister = await create(identity_db, tax_id=TaxId.parse("130000012"))
+    sister = await create(identity_db, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
     branch = Branch.open(company, code=parse_code("SUC1"), name=parse_name("S"), now=NOW)
     point = EmissionPoint.open(company, branch, code=parse_code("001"), name=parse_name("Caja"), now=NOW)
     owner, _ = found(company, FOUNDER, now=NOW)
@@ -746,7 +756,7 @@ async def test_permissions_come_from_the_membership_in_the_callers_organization(
 ) -> None:
     company = await create(identity_db)
     permissions = MembershipPermissions(identity_db)
-    assert await permissions.permissions(FOUNDER, company.id) == frozenset(Permission)
+    assert await permissions.permissions(FOUNDER, company.id) == EVERYTHING
     assert await permissions.permissions(PARTNER, company.id) == frozenset()
     assert await permissions.permissions(FOUNDER, CompanyId(new_id())) == frozenset()
 
@@ -779,7 +789,7 @@ async def test_a_deactivated_company_lets_other_modules_read_only_and_identity_s
     )
     assert for_other_services == READ_ONLY
     permissions = MembershipPermissions(identity_db)
-    assert await permissions.permissions(FOUNDER, company.id) == frozenset(Permission)
+    assert await permissions.permissions(FOUNDER, company.id) == EVERYTHING
     with pytest.raises(CompanyInactiveError):  # no role is granted there any more ...
         await grant(Role.VIEWER)
     await in_unit(  # ... but one is still taken away

@@ -12,16 +12,13 @@ from ledger_identity._manifest import MANIFEST
 from ledger_identity.domain.branches import Branch, EmissionPoint
 from ledger_identity.domain.company import Company, CompanyStatus
 from ledger_identity.domain.errors import (
-    ActorNotAllowedError,
     BranchCodeTakenError,
     BranchNotFoundError,
     CompanyInactiveError,
-    CompanyNotFoundError,
     EmissionPointCodeTakenError,
     EmissionPointNotFoundError,
     InvalidCodeError,
     InvalidNameError,
-    InvalidStateError,
     LastOwnerError,
     MembershipNotFoundError,
     OrganizationNotFoundError,
@@ -39,7 +36,18 @@ from ledger_identity.domain.membership import (
     revoke,
 )
 from ledger_identity.domain.organization import Organization
-from ledger_identity.domain.roles import PERMISSIONS, READ_ONLY, Role, permissions_of
+from ledger_identity.domain.roles import (
+    COMPANIES_MANAGE,
+    COMPANIES_READ,
+    EVERYTHING,
+    MEMBERSHIPS_MANAGE,
+    MEMBERSHIPS_READ,
+    OWNERSHIP_MANAGE,
+    PERMISSIONS,
+    READ_ONLY,
+    Role,
+    permissions_of,
+)
 from ledger_identity.domain.text import (
     MAX_CODE,
     MAX_LEGAL_NAME,
@@ -56,10 +64,10 @@ from ledger_identity.events import (
     MembershipGranted,
     MembershipRevoked,
 )
-from ledger_kernel.access import Permission, Principal, SubjectId
-from ledger_kernel.countries.do import TaxId
-from ledger_kernel.errors import ErrorKind
-from ledger_kernel.ids import OrganizationId, new_id
+from ledger_kernel.access import CompanyNotFoundError, PermissionDeniedError, Principal, SubjectId
+from ledger_kernel.errors import ErrorKind, InvalidValueError
+from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.data.codec import payload_of
 lazy from ledger_identity.domain.membership import Membership
@@ -69,7 +77,7 @@ NOW: Final = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
 LATER: Final = NOW + timedelta(hours=1)
 ORGANIZATION: Final = OrganizationId(new_id())
 FOUNDER: Final = Principal(subject=SubjectId("2001"), organization=ORGANIZATION, provider_organization="1001")
-RNC: Final = TaxId.parse("101850043")
+RNC: Final = TaxId(TaxIdScheme("do.rnc"), "101850043")
 OWNER: Final = Actor(SubjectId("2001"), permissions_of(Role.OWNER))
 ADMIN: Final = Actor(SubjectId("2002"), permissions_of(Role.ADMIN))
 VIEWER: Final = Actor(SubjectId("2003"), permissions_of(Role.VIEWER))
@@ -152,27 +160,36 @@ def test_anything_else_is_not_a_code(text: str) -> None:
 
 
 def test_what_each_role_may_do() -> None:
-    everything = frozenset(Permission)
+    assert {
+        "identity.companies.read",
+        "identity.companies.manage",
+        "identity.memberships.read",
+        "identity.memberships.manage",
+        "identity.ownership.manage",
+    } == EVERYTHING
     expected = {
-        Role.OWNER: everything,
-        Role.ADMIN: everything - {Permission.OWNERSHIP_MANAGE},
-        Role.ACCOUNTANT: frozenset(
-            {
-                Permission.COMPANY_READ,
-                Permission.MEMBERSHIP_READ,
-                Permission.INVOICE_READ,
-                Permission.INVOICE_ISSUE,
-            }
-        ),
-        Role.ISSUER: frozenset({Permission.COMPANY_READ, Permission.INVOICE_READ, Permission.INVOICE_ISSUE}),
-        Role.VIEWER: frozenset({Permission.COMPANY_READ, Permission.INVOICE_READ}),
+        Role.OWNER: EVERYTHING,
+        Role.ADMIN: EVERYTHING - {OWNERSHIP_MANAGE},
+        Role.ACCOUNTANT: frozenset({COMPANIES_READ, MEMBERSHIPS_READ}),
+        Role.ISSUER: frozenset({COMPANIES_READ}),
+        Role.VIEWER: frozenset({COMPANIES_READ}),
     }
     assert expected == PERMISSIONS
+    assert {COMPANIES_MANAGE, MEMBERSHIPS_MANAGE} <= PERMISSIONS[Role.ADMIN]
+
+
+def test_the_roles_grant_exactly_what_the_manifest_declares() -> None:
+    declared = {permission.code: frozenset(permission.roles) for permission in MANIFEST.permissions}
+    granted = {
+        permission: frozenset(role.value for role in Role if permission in permissions_of(role))
+        for permission in EVERYTHING
+    }
+    assert granted == declared
 
 
 def test_every_role_reads_its_company_and_only_owners_manage_ownership() -> None:
-    assert all(Permission.COMPANY_READ in permissions_of(role) for role in Role)
-    assert [role for role in Role if Permission.OWNERSHIP_MANAGE in permissions_of(role)] == [Role.OWNER]
+    assert all(COMPANIES_READ in permissions_of(role) for role in Role)
+    assert [role for role in Role if OWNERSHIP_MANAGE in permissions_of(role)] == [Role.OWNER]
 
 
 # ── Organizations and companies ─────────────────────────────────────────────────
@@ -293,7 +310,7 @@ def test_the_founder_of_a_company_is_its_first_owner() -> None:
         company.tenant,
     )
     assert owner.active
-    assert owner.permissions == frozenset(Permission)
+    assert owner.permissions == EVERYTHING
     assert granted == MembershipGranted(
         scope=company.tenant,
         subject=owner.id,
@@ -329,11 +346,11 @@ def test_an_admin_grants_and_changes_roles_below_owner() -> None:
 @pytest.mark.parametrize("role", [Role.VIEWER, Role.OWNER], ids=["viewer", "owner"])
 def test_whoever_may_not_manage_memberships_changes_none(role: Role) -> None:
     company = registered()
-    with pytest.raises(ActorNotAllowedError) as caught:
+    with pytest.raises(PermissionDeniedError) as caught:
         grant(Roster(company, SubjectId("3001"), None, owners=1), role=role, actor=VIEWER, now=NOW)
     assert (caught.value.kind, caught.value.code) == (ErrorKind.FORBIDDEN, "permission_denied")
     viewer = member(company, "3001", Role.VIEWER)
-    with pytest.raises(ActorNotAllowedError):
+    with pytest.raises(PermissionDeniedError):
         revoke(Roster(company, viewer.subject, viewer, owners=1), actor=VIEWER, now=NOW)
 
 
@@ -460,7 +477,7 @@ def test_revoking_a_role_already_revoked_changes_and_announces_nothing() -> None
         revoked,
         None,
     )
-    with pytest.raises(ActorNotAllowedError):
+    with pytest.raises(PermissionDeniedError):
         revoke(Roster(company, viewer.subject, revoked, owners=1), actor=VIEWER, now=LATER)
 
 
@@ -481,9 +498,7 @@ def test_other_services_may_let_a_member_of_a_deactivated_company_read_only() ->
     company = registered()
     issuer = member(company, "3001", Role.ISSUER)
     assert permissions_in(company, issuer) == permissions_of(Role.ISSUER)
-    assert permissions_in(company.deactivate(now=LATER)[0], issuer) == frozenset(
-        {Permission.COMPANY_READ, Permission.INVOICE_READ}
-    )
+    assert permissions_in(company.deactivate(now=LATER)[0], issuer) == frozenset({COMPANIES_READ})
     owner, _ = found(company, FOUNDER, now=NOW)
     assert permissions_in(company.deactivate(now=LATER)[0], owner) == READ_ONLY
     revoked, _ = revoke(Roster(company, issuer.subject, issuer, owners=1), actor=OWNER, now=NOW)
@@ -499,9 +514,9 @@ def test_a_roster_holds_only_the_membership_of_its_own_subject_in_its_own_compan
     company = registered()
     viewer = member(company, "3001", Role.VIEWER)
     assert Roster(company, viewer.subject, viewer, owners=1).current == viewer
-    with pytest.raises(InvalidStateError, match=r"^roster\.current must be the membership of its subject$"):
+    with pytest.raises(InvalidValueError, match=r"^roster\.current must be the membership of its subject$"):
         Roster(company, SubjectId("3002"), viewer, owners=1)
-    with pytest.raises(InvalidStateError, match=r"^roster\.current must be the membership of its company$"):
+    with pytest.raises(InvalidValueError, match=r"^roster\.current must be the membership of its company$"):
         Roster(registered(), viewer.subject, viewer, owners=1)
 
 
@@ -510,7 +525,7 @@ def test_the_founder_of_a_company_belongs_to_its_organization_and_founds_an_acti
         subject=SubjectId("2001"), organization=OTHER_ORGANIZATION, provider_organization="9"
     )
     with pytest.raises(
-        InvalidStateError, match=r"^founder must be a principal of the company's organization$"
+        InvalidValueError, match=r"^founder must be a principal of the company's organization$"
     ):
         found(registered(), stranger, now=NOW)
     with pytest.raises(CompanyInactiveError):
@@ -519,10 +534,10 @@ def test_the_founder_of_a_company_belongs_to_its_organization_and_founds_an_acti
 
 def test_a_version_starts_at_one() -> None:
     company = registered()
-    with pytest.raises(InvalidStateError, match=r"^company\.version must be at least 1$"):
+    with pytest.raises(InvalidValueError, match=r"^company\.version must be at least 1$"):
         replace(company, version=0)
     viewer = member(company, "3001", Role.VIEWER)
-    with pytest.raises(InvalidStateError, match=r"^membership\.version must be at least 1$"):
+    with pytest.raises(InvalidValueError, match=r"^membership\.version must be at least 1$"):
         replace(viewer, version=0)
 
 
@@ -542,7 +557,7 @@ SOME_ID: Final = UUID("01a134e5-8363-74c7-9f6c-aa195c5ba397")
             f"organization {SOME_ID} has no company yet",
         ),
         (
-            CompanyNotFoundError(SOME_ID),
+            CompanyNotFoundError(CompanyId(SOME_ID)),
             ErrorKind.NOT_FOUND,
             "company_not_found",
             f"company {SOME_ID} was not found",
@@ -614,16 +629,16 @@ SOME_ID: Final = UUID("01a134e5-8363-74c7-9f6c-aa195c5ba397")
             "'3001' holds no role in the company",
         ),
         (
-            InvalidStateError(field="roster", requirement="whole"),
+            InvalidValueError(field="roster", requirement="whole"),
             ErrorKind.INTERNAL,
-            "invalid_state",
+            "invalid_value",
             "roster must be whole",
         ),
         (
-            ActorNotAllowedError(Permission.MEMBERSHIP_MANAGE),
+            PermissionDeniedError(MEMBERSHIPS_MANAGE),
             ErrorKind.FORBIDDEN,
             "permission_denied",
-            "this needs the permission membership.manage",
+            "this needs the permission identity.memberships.manage",
         ),
     ],
 )

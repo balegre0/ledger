@@ -42,10 +42,11 @@ lazy from fastapi import Request
 lazy from fastapi.dependencies.models import Dependant
 lazy from starlette.routing import BaseRoute
 
+from ledger_kernel.access import CompanyNotFoundError
 from ledger_kernel.errors import ForbiddenError, InvalidInputError, LedgerError
 from ledger_kernel.ids import CompanyId, parse_uuid
 from ledger_kernel.tenancy import Tenant
-from ledger_platform.auth.access import CompanyAccess, NoCompanyAccessError
+from ledger_platform.auth.access import CompanyAccess
 from ledger_platform.auth.tokens import MissingTokenError
 from ledger_platform.http.request_fields import remember
 lazy from ledger_kernel.access import Permission, Principal
@@ -145,11 +146,11 @@ def authenticated(verifier: Verifier) -> Caller:
 
 
 async def _granted(principal: Principal, company_id: str, source: PermissionSource) -> CompanyAccess:
-    """``principal``'s access to the company ``company_id`` names; ``NoCompanyAccessError`` without a role."""
+    """``principal``'s access to the company ``company_id`` names; ``CompanyNotFoundError`` without a role."""
     company = CompanyId(parse_uuid(company_id))
     permissions = await source.permissions(principal, company)
     if not permissions:
-        raise NoCompanyAccessError(company)
+        raise CompanyNotFoundError(company)
     return CompanyAccess(principal, Tenant(principal.organization, company, None), permissions)
 
 

@@ -2,39 +2,19 @@
 
 A ``PermissionSource`` answers with the permissions a principal holds in a company of its organization
 (identity's, from its memberships). An empty answer means no role there, and the company is then answered as
-not found (``NoCompanyAccessError``): a caller learns nothing of companies it has no part in, its own
-organization's or another's. A role without the permission an operation needs is a ``PermissionDeniedError``.
+not found (the kernel's ``CompanyNotFoundError``): a caller learns nothing of companies it has no part in, its
+own organization's or another's. A role without the permission an operation needs is the kernel's
+``PermissionDeniedError``, the same class a module raises when it checks again under its lock.
 """
 
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
-from typing import ClassVar, Protocol, final
+from typing import Protocol, final
 
-from ledger_kernel.errors import ForbiddenError, NotFoundError
+from ledger_kernel.access import PermissionDeniedError
 lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_kernel.ids import CompanyId
 lazy from ledger_kernel.tenancy import Tenant
-
-
-class PermissionDeniedError(ForbiddenError):
-    """The caller holds a role in the company, but not one that allows this."""
-
-    code: ClassVar[str] = "permission_denied"
-
-    permission: Permission
-
-    def __init__(self, permission: Permission) -> None:
-        super().__init__(f"this needs the permission {permission.value}")
-        self.permission = permission
-
-
-class NoCompanyAccessError(NotFoundError):
-    """The caller holds no role in the company: for it, the company does not exist."""
-
-    code: ClassVar[str] = "company_not_found"
-
-    def __init__(self, company: CompanyId) -> None:
-        super().__init__(f"company {company} was not found")
 
 
 class PermissionSource(Protocol, metaclass=ABCMeta):

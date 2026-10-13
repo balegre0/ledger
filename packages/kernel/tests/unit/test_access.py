@@ -8,14 +8,18 @@ from hypothesis import strategies as st
 from ledger_kernel.access import (
     MAX_PROVIDER_ORGANIZATION_LENGTH,
     MAX_SUBJECT_LENGTH,
+    CompanyNotFoundError,
+    InvalidPermissionError,
     InvalidSubjectError,
     Permission,
+    PermissionDeniedError,
     Principal,
     SubjectId,
+    parse_permission,
     parse_subject,
 )
-from ledger_kernel.errors import InvalidValueError
-from ledger_kernel.ids import OrganizationId, new_id
+from ledger_kernel.errors import ErrorKind, InvalidValueError
+from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 
 SUBJECTS = st.from_regex(rf"[A-Za-z0-9._@:-]{{1,{MAX_SUBJECT_LENGTH}}}", fullmatch=True)
 
@@ -42,17 +46,79 @@ def test_a_huge_subject_is_not_echoed_back() -> None:
     assert caught.value.code == "invalid_subject"
 
 
-def test_permissions_have_stable_dotted_codes() -> None:
-    assert {permission.value for permission in Permission} == {
-        "company.read",
-        "company.manage",
-        "membership.read",
-        "membership.manage",
-        "ownership.manage",
-        "certificate.manage",
-        "invoice.read",
-        "invoice.issue",
-    }
+@pytest.mark.parametrize(
+    "text",
+    [
+        "identity.companies.read",
+        "identity.memberships.manage",
+        "invoicing.documents.issue",
+        "invoicing.documents.void",
+        "do_ecf.certificates.create",
+        "identity.ownership.own",
+    ],
+)
+def test_a_permission_is_module_resource_and_action(text: str) -> None:
+    permission = parse_permission(text)
+    assert permission == text
+    assert type(permission) is str
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "identity.read",
+        "Identity.companies.read",
+        "identity.companies.delete",
+        "identity.companies.read.more",
+        "identity..read",
+        "1identity.companies.read",
+        "identity.companies.read\n",
+        "identity.compañías.read",
+        " identity.companies.read",
+    ],
+    ids=[
+        "empty",
+        "two-parts",
+        "upper-case",
+        "unknown-action",
+        "four-parts",
+        "empty-resource",
+        "leading-digit",
+        "newline",
+        "non-ascii",
+        "space",
+    ],
+)
+def test_anything_else_is_not_a_permission(text: str) -> None:
+    with pytest.raises(
+        InvalidPermissionError, match=r"^not a permission \(<module>\.<resource>\.<action>\): "
+    ) as caught:
+        parse_permission(text)
+    assert (caught.value.kind, caught.value.code) == (ErrorKind.INVALID, "invalid_permission")
+
+
+def test_a_huge_permission_is_not_echoed_back() -> None:
+    with pytest.raises(InvalidPermissionError) as caught:
+        parse_permission("identity." * 10_000)
+    assert len(str(caught.value)) < 120
+
+
+def test_a_denied_permission_is_named_and_forbidden() -> None:
+    error = PermissionDeniedError(parse_permission("identity.companies.manage"))
+    assert str(error) == "this needs the permission identity.companies.manage"
+    assert (error.kind, error.code, error.permission) == (
+        ErrorKind.FORBIDDEN,
+        "permission_denied",
+        Permission("identity.companies.manage"),
+    )
+
+
+def test_a_company_the_caller_may_not_see_is_not_found() -> None:
+    company = CompanyId(new_id())
+    error = CompanyNotFoundError(company)
+    assert str(error) == f"company {company} was not found"
+    assert (error.kind, error.code) == (ErrorKind.NOT_FOUND, "company_not_found")
 
 
 def test_a_principal_is_an_immutable_value_without_roles_by_default() -> None:

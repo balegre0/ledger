@@ -6,7 +6,7 @@ lazy import httpx
 from ledger_testing.api import TestPrincipal, created, document, page
 lazy from ledger_testing.issuer import LocalIssuer
 
-OTHER: Final = {"tax_id": "130000012", "legal_name": "Otra"}
+OTHER: Final = {"tax_id": {"scheme": "do.rnc", "value": "130000012"}, "legal_name": "Otra"}
 
 
 async def another_company(client: httpx.AsyncClient, owner: TestPrincipal) -> str:

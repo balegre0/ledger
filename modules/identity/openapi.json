@@ -92,11 +92,7 @@
             "$ref": "#/components/schemas/CompanyStatus"
           },
           "tax_id": {
-            "title": "Tax Id",
-            "type": "string"
-          },
-          "tax_id_kind": {
-            "$ref": "#/components/schemas/TaxIdKind"
+            "$ref": "#/components/schemas/TaxIdBody"
           },
           "updated_at": {
             "format": "date-time",
@@ -112,7 +108,6 @@
           "id",
           "organization_id",
           "tax_id",
-          "tax_id_kind",
           "legal_name",
           "status",
           "version",
@@ -248,21 +243,14 @@
         "description": "A company to register.",
         "properties": {
           "legal_name": {
-            "description": "As registered with DGII; up to 150 characters.",
+            "description": "As registered with the tax authority.",
             "maxLength": 300,
             "minLength": 1,
             "title": "Legal Name",
             "type": "string"
           },
           "tax_id": {
-            "description": "RNC (9 digits) or cedula (11 digits); hyphens and spaces are ignored.",
-            "examples": [
-              "101-85004-3"
-            ],
-            "maxLength": 20,
-            "minLength": 1,
-            "title": "Tax Id",
-            "type": "string"
+            "$ref": "#/components/schemas/TaxIdBody"
           }
         },
         "required": [
@@ -534,14 +522,35 @@
         "title": "RoleAssignment",
         "type": "object"
       },
-      "TaxIdKind": {
-        "description": "Which identifier.",
-        "enum": [
-          "rnc",
-          "cedula"
+      "TaxIdBody": {
+        "additionalProperties": false,
+        "description": "A tax id qualified by its scheme, which says how the value is read and checked.",
+        "properties": {
+          "scheme": {
+            "description": "A scheme a regime declares, <country>.<name>: do.rnc (RNC) or do.cedula (cédula).",
+            "examples": [
+              "do.rnc"
+            ],
+            "title": "Scheme",
+            "type": "string"
+          },
+          "value": {
+            "description": "As the scheme writes it; separators are ignored (101-85004-3 is read as 101850043).",
+            "examples": [
+              "101-85004-3"
+            ],
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scheme",
+          "value"
         ],
-        "title": "TaxIdKind",
-        "type": "string"
+        "title": "TaxIdBody",
+        "type": "object"
       }
     },
     "securitySchemes": {

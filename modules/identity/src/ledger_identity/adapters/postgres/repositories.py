@@ -39,10 +39,10 @@ from ledger_identity.domain.organization import Organization
 from ledger_identity.domain.roles import Role
 from ledger_identity.domain.text import Code, LegalName, Name
 from ledger_kernel.access import SubjectId
-from ledger_kernel.countries.do import TaxId
 from ledger_kernel.errors import LedgerError
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.pagination import page_of
+from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.data import paged
 lazy from ledger_kernel.pagination import Page, PageRequest
@@ -83,7 +83,8 @@ _ORGANIZATION = select(OrganizationRecord.id, OrganizationRecord.provider_id, Or
 _COMPANY = select(
     CompanyRecord.id,
     CompanyRecord.organization_id,
-    CompanyRecord.tax_id,
+    CompanyRecord.tax_scheme,
+    CompanyRecord.tax_value,
     CompanyRecord.legal_name,
     CompanyRecord.status,
     CompanyRecord.version,
@@ -126,12 +127,12 @@ def _organization(row: Row[UUID, str, datetime]) -> Organization:
     return Organization(id=OrganizationId(identifier), provider_id=provider_id, created_at=created_at)
 
 
-def _company(row: Row[UUID, UUID, str, str, str, int, datetime, datetime]) -> Company:
-    identifier, organization, tax_id, legal_name, status, version, created_at, updated_at = row
+def _company(row: Row[UUID, UUID, str, str, str, str, int, datetime, datetime]) -> Company:
+    identifier, organization, scheme, value, legal_name, status, version, created_at, updated_at = row
     return Company(
         id=CompanyId(identifier),
         organization=OrganizationId(organization),
-        tax_id=TaxId.parse(tax_id),
+        tax_id=TaxId(TaxIdScheme(scheme), value),
         legal_name=LegalName(legal_name),
         status=CompanyStatus(status),
         version=version,
@@ -222,7 +223,8 @@ class PgCompanies(Companies):
             .values(
                 id=company.id,
                 organization_id=company.organization,
-                tax_id=str(company.tax_id),
+                tax_scheme=company.tax_id.scheme,
+                tax_value=company.tax_id.value,
                 legal_name=company.legal_name,
                 status=company.status.value,
                 version=company.version,
@@ -231,7 +233,7 @@ class PgCompanies(Companies):
             )
             # The index, not a lookup: another organization's company is a row this unit cannot see.
             .on_conflict_do_nothing(
-                index_elements=[CompanyRecord.tax_id],
+                index_elements=[CompanyRecord.tax_scheme, CompanyRecord.tax_value],
                 index_where=CompanyRecord.status == CompanyStatus.ACTIVE.value,
             )
             .returning(CompanyRecord.id)
@@ -279,7 +281,7 @@ class PgCompanies(Companies):
         rows = (await self._connection.execute(paged(statement, CompanyRecord.id, request))).all()
         return page_of([_company(row) for row in rows], request, key=lambda company: company.id)
 
-    def _one(self, company: CompanyId) -> Select[UUID, UUID, str, str, str, int, datetime, datetime]:
+    def _one(self, company: CompanyId) -> Select[UUID, UUID, str, str, str, str, int, datetime, datetime]:
         return _COMPANY.where(
             CompanyRecord.organization_id == self._organization, CompanyRecord.id == company
         )

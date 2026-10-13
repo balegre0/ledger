@@ -1,7 +1,8 @@
 """Revision 0001 of schema ``identity``: the chassis's tables, then identity's, under row-level security.
 
 v1's two revisions squashed into one (nothing was in production, §6.5): one active company per tax id in every
-organization is the index ``ux_companies_active_tax_id`` from the start. Every type, length, word and
+organization is the index ``ux_companies_active_tax_id`` from the start, over the tax id's scheme and value
+(§7.3: a tax id is qualified by its scheme). Every type, length, word and
 constraint is spelled out (a revision records what was done and must not move with the models); the tests
 keep the models equal to it. The chassis's tables and the row-level security policies come from their
 versioned builders, whose output never changes (``chassis_schema_v1``, ``rls.policy``).
@@ -58,8 +59,9 @@ def upgrade() -> None:
         "companies",
         sa.Column("id", sa.Uuid(), primary_key=True),
         sa.Column("organization_id", sa.Uuid(), sa.ForeignKey(f"{S}.organizations.id"), nullable=False),
-        sa.Column("tax_id", sa.String(11), nullable=False),
-        sa.Column("legal_name", sa.String(150), nullable=False),
+        sa.Column("tax_scheme", sa.String(34), nullable=False),
+        sa.Column("tax_value", sa.String(40), nullable=False),
+        sa.Column("legal_name", sa.String(300), nullable=False),
         sa.Column("status", sa.String(16), nullable=False),
         sa.Column("version", sa.BigInteger(), nullable=False),
         _moment("created_at"),
@@ -72,7 +74,7 @@ def upgrade() -> None:
     op.create_index(
         "ux_companies_active_tax_id",
         "companies",
-        ["tax_id"],
+        ["tax_scheme", "tax_value"],
         unique=True,
         postgresql_where=sa.text("status = 'active'"),
         schema=S,

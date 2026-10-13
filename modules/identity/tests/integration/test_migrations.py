@@ -171,7 +171,8 @@ def test_one_active_company_holds_a_tax_id_in_every_organization(migrated: Worke
             "USING btree (organization_id, id)"
         ),
         "ux_companies_active_tax_id": (
-            "CREATE UNIQUE INDEX ux_companies_active_tax_id ON identity.companies USING btree (tax_id) "
+            "CREATE UNIQUE INDEX ux_companies_active_tax_id ON identity.companies "
+            "USING btree (tax_scheme, tax_value) "
             "WHERE ((status)::text = 'active'::text)"
         ),
     }

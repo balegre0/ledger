@@ -20,9 +20,8 @@ from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import commands, queries
 from ledger_identity.domain.errors import StaleVersionError
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN
+from ledger_identity.domain.roles import COMPANIES_MANAGE, COMPANIES_READ
 from ledger_identity.domain.text import parse_legal_name
-from ledger_kernel.access import Permission
-from ledger_kernel.countries.do import TaxId
 from ledger_kernel.tenancy import OrganizationScope, Tenant
 from ledger_platform.http import (
     REPLAYED_HEADER,
@@ -68,8 +67,8 @@ def router(context: ApiContext) -> APIRouter:
     caller, database = context.caller, context.database
     in_company = context.in_company
     reader, manager = (
-        allowed(in_company, Permission.COMPANY_READ),
-        allowed(in_company, Permission.COMPANY_MANAGE),
+        allowed(in_company, COMPANIES_READ),
+        allowed(in_company, COMPANIES_MANAGE),
     )
     registrar, member = holding(caller, ORGANIZATION_ADMIN), in_organization(caller)
 
@@ -92,7 +91,8 @@ def router(context: ApiContext) -> APIRouter:
         The caller must hold the identity provider's project role ``ledger.organization.admin``. The request
         acts in ``Ledger-Mode``: its ``Idempotency-Key`` is kept per mode. The company is both modes'.
         """
-        tax_id, legal_name = TaxId.parse(body.tax_id), parse_legal_name(body.legal_name)
+        tax_id = context.tax_ids.parse(body.tax_id.scheme, body.tax_id.value).tax_id
+        legal_name = parse_legal_name(body.legal_name)
         attempt = attempt_of(request, principal, key, body)
         async with database.unit(OrganizationScope(principal.organization, mode)) as unit:
 

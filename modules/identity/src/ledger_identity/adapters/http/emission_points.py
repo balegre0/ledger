@@ -13,8 +13,8 @@ from ledger_identity.adapters.http.models import EmissionPointView
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import commands, queries
 from ledger_identity.domain.ids import BranchId, EmissionPointId
+from ledger_identity.domain.roles import COMPANIES_MANAGE, COMPANIES_READ
 from ledger_identity.domain.text import parse_code, parse_name
-from ledger_kernel.access import Permission
 from ledger_kernel.ids import parse_uuid
 from ledger_platform.http import (
     Page,
@@ -29,6 +29,7 @@ from ledger_platform.http import (
 )
 lazy from ledger_identity.adapters.http.context import ApiContext
 lazy from ledger_identity.adapters.http.models import NewEmissionPoint
+lazy from ledger_kernel.access import Permission
 lazy from ledger_kernel.pagination import PageRequest
 lazy from ledger_kernel.tenancy import Mode
 lazy from ledger_platform.auth import CompanyAccess
@@ -64,7 +65,7 @@ def router(context: ApiContext) -> APIRouter:
 
         return place
 
-    reader, manager = in_branch(Permission.COMPANY_READ), in_branch(Permission.COMPANY_MANAGE)
+    reader, manager = in_branch(COMPANIES_READ), in_branch(COMPANIES_MANAGE)
 
     @points.post("", status_code=HTTPStatus.CREATED, response_model=EmissionPointView, responses=OPEN)
     async def open_emission_point(

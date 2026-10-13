@@ -14,7 +14,7 @@ from structlog.testing import capture_logs
 lazy from fastapi import FastAPI
 lazy from prometheus_client import CollectorRegistry
 
-from ledger_kernel.access import Permission, SubjectId
+from ledger_kernel.access import SubjectId, parse_permission
 from ledger_kernel.errors import LedgerError
 from ledger_kernel.ids import CompanyId, new_id
 from ledger_platform.auth.access import PermissionSource
@@ -39,7 +39,7 @@ from ledger_platform.http.deps import (
 from ledger_platform.http.openapi import precondition_checked
 from ledger_platform.observability.health import Health
 from ledger_testing.issuer import AUDIENCE, ISSUER, PROVIDER_ORGANIZATION, SUBJECT
-lazy from ledger_kernel.access import Principal
+lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_kernel.ids import OrganizationId
 lazy from ledger_platform.auth.access import CompanyAccess
 lazy from ledger_platform.http.deps import Caller, InCompany
@@ -49,6 +49,9 @@ lazy from ledger_testing.issuer import LocalIssuer
 COMPANY: Final = CompanyId(new_id())
 OTHER_COMPANY: Final = CompanyId(new_id())
 OTHER_PROVIDER_ORGANIZATION: Final = "1002"
+COMPANY_READ: Final = parse_permission("identity.companies.read")
+COMPANY_MANAGE: Final = parse_permission("identity.companies.manage")
+INVOICE_READ: Final = parse_permission("invoicing.documents.read")
 PROBLEM: Final = TypeAdapter(dict[str, object])
 BODY: Final = TypeAdapter(dict[str, object])
 MAX_VERSION: Final = 10**18 - 1
@@ -146,7 +149,7 @@ def add_guarded_routes(routes: APIRouter, caller: Caller, in_path: InCompany) ->
 
     @routes.post("/companies/{company_id}/managed")
     async def managed(
-        access: Annotated[CompanyAccess, Depends(allowed(in_path, Permission.COMPANY_MANAGE))],
+        access: Annotated[CompanyAccess, Depends(allowed(in_path, COMPANY_MANAGE))],
     ) -> str:
         return str(access.tenant.company)
 
@@ -175,7 +178,7 @@ def router(verifier: TokenVerifier, grants: Grants) -> APIRouter:
 
     @routes.get("/companies/{company_id}/things")
     async def things(access: Annotated[CompanyAccess, Depends(in_path)]) -> dict[str, object]:
-        access.require(Permission.COMPANY_READ)
+        access.require(COMPANY_READ)
         return {"company": str(access.tenant.company), "context": structlog.contextvars.get_contextvars()}
 
     @routes.get("/things")
@@ -288,7 +291,7 @@ async def test_a_megabyte_of_authorization_is_refused_unread(
 async def test_the_bound_fields_do_not_outlive_the_request(
     client: httpx.AsyncClient, local_issuer: LocalIssuer, grants: Grants
 ) -> None:
-    grants.grant(COMPANY, Permission.INVOICE_READ)
+    grants.grant(COMPANY, INVOICE_READ)
     await client.get("/whoami", headers=bearer(local_issuer.token()))
     refused = await client.get(f"/companies/{COMPANY}/things", headers=bearer(local_issuer.token()))
     assert refused.status_code == 403  # raised by the route, after every field was bound
@@ -311,7 +314,7 @@ async def test_the_api_document_declares_bearer_tokens(client: httpx.AsyncClient
 async def test_a_company_the_caller_holds_a_role_in_is_its_access(
     client: httpx.AsyncClient, local_issuer: LocalIssuer, grants: Grants
 ) -> None:
-    grants.grant(COMPANY, Permission.COMPANY_READ)
+    grants.grant(COMPANY, COMPANY_READ)
     response = await client.get(f"/companies/{COMPANY}/things", headers=bearer(local_issuer.token()))
     assert response.status_code == 200
     body = BODY.validate_json(response.content)
@@ -326,7 +329,7 @@ async def test_a_company_the_caller_holds_a_role_in_is_its_access(
 async def test_a_company_without_a_role_is_not_found(
     client: httpx.AsyncClient, local_issuer: LocalIssuer, grants: Grants
 ) -> None:
-    grants.grant(COMPANY, Permission.COMPANY_READ)
+    grants.grant(COMPANY, COMPANY_READ)
     response = await client.get(f"/companies/{OTHER_COMPANY}/things", headers=bearer(local_issuer.token()))
     assert response.status_code == 404
     assert problem_code(response) == "company_not_found"
@@ -335,7 +338,7 @@ async def test_a_company_without_a_role_is_not_found(
 async def test_a_company_of_another_organization_is_not_found_in_the_path_or_a_header(
     client: httpx.AsyncClient, local_issuer: LocalIssuer, grants: Grants
 ) -> None:
-    grants.grant(COMPANY, Permission.COMPANY_READ, organization=OTHER_PROVIDER_ORGANIZATION)
+    grants.grant(COMPANY, COMPANY_READ, organization=OTHER_PROVIDER_ORGANIZATION)
     token = local_issuer.token()  # the same subject id, in the caller's own organization
     in_path = await client.get(f"/companies/{COMPANY}/things", headers=bearer(token))
     in_header = await client.get("/things", headers=bearer(token) | {COMPANY_HEADER: str(COMPANY)})
@@ -352,7 +355,7 @@ async def test_a_company_of_another_organization_is_not_found_in_the_path_or_a_h
 async def test_a_role_without_the_permission_is_forbidden(
     client: httpx.AsyncClient, local_issuer: LocalIssuer, grants: Grants
 ) -> None:
-    grants.grant(COMPANY, Permission.INVOICE_READ)
+    grants.grant(COMPANY, INVOICE_READ)
     response = await client.get(f"/companies/{COMPANY}/things", headers=bearer(local_issuer.token()))
     assert response.status_code == 403
     assert problem_code(response) == "permission_denied"
@@ -361,8 +364,8 @@ async def test_a_role_without_the_permission_is_forbidden(
 async def test_a_route_allowed_a_permission_refuses_a_role_without_it_and_a_company_without_a_role(
     client: httpx.AsyncClient, local_issuer: LocalIssuer, grants: Grants
 ) -> None:
-    grants.grant(COMPANY, Permission.COMPANY_READ, Permission.COMPANY_MANAGE)
-    grants.grant(OTHER_COMPANY, Permission.COMPANY_READ)
+    grants.grant(COMPANY, COMPANY_READ, COMPANY_MANAGE)
+    grants.grant(OTHER_COMPANY, COMPANY_READ)
     token = bearer(local_issuer.token())
     managed = await client.post(f"/companies/{COMPANY}/managed", headers=token)
     assert (managed.status_code, managed.json()) == (200, str(COMPANY))
@@ -423,7 +426,7 @@ async def test_a_company_id_that_is_not_an_id_is_refused_unechoed(
 async def test_the_company_can_come_in_a_header(
     client: httpx.AsyncClient, local_issuer: LocalIssuer, grants: Grants
 ) -> None:
-    grants.grant(COMPANY, Permission.COMPANY_READ)
+    grants.grant(COMPANY, COMPANY_READ)
     headers = bearer(local_issuer.token()) | {"Ledger-Company": str(COMPANY)}  # §9.7
     response = await client.get("/things", headers=headers)
     assert (response.status_code, BODY.validate_json(response.content)["company"]) == (200, str(COMPANY))
@@ -438,8 +441,8 @@ async def test_the_company_can_come_in_a_header(
 async def test_the_company_header_is_sent_once(
     client: httpx.AsyncClient, local_issuer: LocalIssuer, grants: Grants
 ) -> None:
-    grants.grant(COMPANY, Permission.COMPANY_READ)
-    grants.grant(OTHER_COMPANY, Permission.COMPANY_READ)
+    grants.grant(COMPANY, COMPANY_READ)
+    grants.grant(OTHER_COMPANY, COMPANY_READ)
     headers = [
         ("Authorization", f"Bearer {local_issuer.token()}"),
         (COMPANY_HEADER, str(COMPANY)),
@@ -454,7 +457,7 @@ async def test_the_company_header_is_sent_once(
 async def test_a_route_that_has_its_company_in_the_path_cannot_take_it_from_a_header(
     client: httpx.AsyncClient, local_issuer: LocalIssuer, grants: Grants
 ) -> None:
-    grants.grant(COMPANY, Permission.COMPANY_READ)
+    grants.grant(COMPANY, COMPANY_READ)
     headers = bearer(local_issuer.token()) | {COMPANY_HEADER: str(COMPANY)}
     with capture_logs() as logs:
         response = await client.get(f"/companies/{COMPANY}/of-the-header", headers=headers)
@@ -475,7 +478,7 @@ async def test_a_route_that_has_its_company_in_the_path_cannot_take_it_from_a_he
 async def test_the_log_of_a_server_failure_names_the_caller_and_its_company(
     client: httpx.AsyncClient, local_issuer: LocalIssuer, grants: Grants, how: str, event: str
 ) -> None:
-    grants.grant(COMPANY, Permission.COMPANY_READ)
+    grants.grant(COMPANY, COMPANY_READ)
     with capture_logs() as logs:
         response = await client.get(
             f"/companies/{COMPANY}/broken/{how}", headers=bearer(local_issuer.token())

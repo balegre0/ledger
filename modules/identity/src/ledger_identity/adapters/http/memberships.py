@@ -14,7 +14,8 @@ lazy from fastapi import Response
 from ledger_identity.adapters.http.models import MembershipView
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import commands, queries
-from ledger_kernel.access import Permission, parse_subject
+from ledger_identity.domain.roles import MEMBERSHIPS_MANAGE, MEMBERSHIPS_READ
+from ledger_kernel.access import parse_subject
 from ledger_platform.http import Page, allowed, page_of_items, page_query, problems
 lazy from ledger_identity.adapters.http.context import ApiContext
 lazy from ledger_identity.adapters.http.models import RoleAssignment
@@ -26,8 +27,8 @@ def router(context: ApiContext) -> APIRouter:
     """The routes of memberships."""
     memberships = APIRouter(prefix="/v1/companies/{company_id}/memberships", tags=["memberships"])
     database = context.database
-    reader = allowed(context.in_company, Permission.MEMBERSHIP_READ)
-    manager = allowed(context.in_company, Permission.MEMBERSHIP_MANAGE)
+    reader = allowed(context.in_company, MEMBERSHIPS_READ)
+    manager = allowed(context.in_company, MEMBERSHIPS_MANAGE)
 
     @memberships.get("", response_model=Page[MembershipView], responses=problems(401, 403, 404, 422))
     async def list_memberships(
