@@ -10,8 +10,8 @@ from fastapi import Depends
 
 from ledger_identity.api.models import Problem
 from ledger_identity.domain.errors import StaleVersionError
-from ledger_platform.http.app import PROBLEM_JSON
 from ledger_platform.http.deps import REPLAYED_HEADER, authenticated, company_in_path, precondition_failed
+from ledger_platform.http.problems import PROBLEM_JSON
 lazy from ledger_identity.application.ports import IdentityUnit
 lazy from ledger_identity.settings import IdentitySettings
 lazy from ledger_platform.auth.access import PermissionSource

@@ -34,7 +34,9 @@ from ledger_kernel.errors import (
     described,
 )
 from ledger_platform.config.settings import LogFormat, ServiceSettings
-from ledger_platform.http.app import PROBLEM_JSON, AmbiguousRouteError, ApiInfo, Observability, create_app
+from ledger_platform.http.app import ApiInfo, Observability, create_app
+from ledger_platform.http.metrics import AmbiguousRouteError
+from ledger_platform.http.problems import PROBLEM_JSON
 from ledger_platform.observability.health import Health
 from ledger_platform.observability.logs import configure_logging
 from ledger_testing.clock import Moment

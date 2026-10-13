@@ -156,7 +156,8 @@ from sqlalchemy import Boolean, Column, MetaData, Table, Text, Uuid, false, inse
 from ledger.common.v1.money_pb2 import Money
 from ledger_contracts.envelope import Envelope
 from ledger_kernel.access import Permission
-from ledger_platform.auth.tokens import HttpKeys, PublishedKeys, TokenPolicy, TokenVerifier
+from ledger_platform.auth.keys import HttpKeys, PublishedKeys
+from ledger_platform.auth.tokens import TokenPolicy, TokenVerifier
 from ledger_platform.auth.access import CachedPermissions
 from ledger_platform.consumer import ConsumerSpec
 from ledger_platform.identity_client import RemotePermissions, follow_permission_changes

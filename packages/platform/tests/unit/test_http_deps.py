@@ -19,7 +19,8 @@ from ledger_kernel.errors import LedgerError
 from ledger_kernel.ids import CompanyId, new_id
 from ledger_kernel.pagination import encode_cursor
 from ledger_platform.auth.access import PermissionSource
-from ledger_platform.auth.tokens import TokenPolicy, TokenVerifier, organization_of
+from ledger_platform.auth.providers.zitadel import organization_of
+from ledger_platform.auth.tokens import TokenPolicy, TokenVerifier
 from ledger_platform.http.app import ApiInfo, Observability, create_app
 from ledger_platform.http.deps import (
     COMPANY_HEADER,

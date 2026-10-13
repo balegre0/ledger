@@ -18,7 +18,7 @@ from ledger_contracts.envelope import Envelope
 from ledger_identity.adapters.events import IDENTITY, SOURCE
 from ledger_kernel.access import SubjectId
 from ledger_kernel.ids import CompanyId
-from ledger_platform.auth.tokens import organization_of
+from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_platform.identity_client import PermissionChanges
 from ledger_platform.outbox import OutboxRecord
 from ledger_testing.api import created

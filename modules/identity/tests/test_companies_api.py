@@ -16,7 +16,7 @@ from ledger_identity.domain.roles import Role
 from ledger_kernel.access import SubjectId
 from ledger_kernel.ids import CompanyId, new_id
 from ledger_kernel.tenancy import Tenant
-from ledger_platform.auth.tokens import organization_of
+from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_testing.api import Caller, created, document, page
 from ledger_testing.issuer import LocalIssuer
 from ledger_testing.waiting import eventually, waits_for_a_lock
