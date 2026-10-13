@@ -749,6 +749,7 @@ dependencies = [
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "starlette" },
     { name = "structlog" },
+    { name = "tzdata" },
 ]
 
 [package.metadata]
@@ -771,6 +772,7 @@ requires-dist = [
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.1.4" },
     { name = "starlette", specifier = ">=1.7.0" },
     { name = "structlog", specifier = ">=26.1.0" },
+    { name = "tzdata", specifier = ">=2025.2" },
 ]
 
 [[package]]

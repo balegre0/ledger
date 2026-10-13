@@ -257,12 +257,14 @@ type = "layers"
 layers = ["ledger_platform", "ledger_contracts", "ledger_kernel"]
 
 # Inside the platform, top to bottom. Subpackages are layers; the v1 modules that Task 16 deletes keep the place
-# they had. Peers (`|`) never import each other. Exhaustive: a new module or subpackage must be given its layer.
+# they had. Peers (`|`) never import each other. `runtime` has no layer until Task 16: it is the composition root
+# (it imports every layer) while v1's flat modules still import `runtime.supervision` from below; Task 16 restores
+# the final contract, exhaustive again.
 [[tool.importlinter.contracts]]
 name = "Platform layers"
 type = "layers"
 containers = ["ledger_platform"]
-exhaustive = true
+exhaustive = false
 layers = [
     "service | migrations",
     "schema",
@@ -271,7 +273,7 @@ layers = [
     "streams",
     "data | jetstream",
     "observability",
-    "config | runtime | lifecycle | interruptions",
+    "config | lifecycle | interruptions",
 ]
 
 [[tool.importlinter.contracts]]

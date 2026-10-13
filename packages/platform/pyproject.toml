@@ -22,6 +22,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.1.4",
     "starlette>=1.7.0",
     "structlog>=26.1.0",
+    "tzdata>=2025.2",
 ]
 
 [project.scripts]
@@ -43,3 +44,6 @@ build-backend = "uv_build"
 "opentelemetry-exporter-otlp-proto-grpc" = "opentelemetry"
 "prometheus-client" = "prometheus_client"
 "pydantic-settings" = "pydantic_settings"
+
+[tool.deptry.per_rule_ignores]
+DEP002 = ["tzdata"]  # the IANA database zoneinfo reads where the system has none (Windows); no module imports it

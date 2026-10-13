@@ -1,4 +1,7 @@
-"""Configuration every service shares, from ``LEDGER_*`` environment variables.
+"""Configuration every app shares, from ``LEDGER_*`` environment variables.
+
+``Settings`` is the one class of every app (Decision 14). ``ServiceSettings`` and ``ApiSettings`` are v1's,
+until the last v1 service is gone (Task 16).
 
 Invalid or missing values stop the start with every problem listed, and so does a ``LEDGER_*`` variable that
 is not a setting: a misspelled name must never mean "silently running with the default". Secrets are
@@ -197,3 +200,81 @@ class ApiSettings(ServiceSettings):
         if self.environment in _HTTPS_ENVIRONMENTS and not self.token_jwks_url.startswith("https://"):
             raise _InsecureKeysUrlError
         return self
+
+
+class Settings(BaseSettings):
+    """Settings of every app process (Decision 14): one class, so one environment file serves every app.
+
+    Token settings are optional here; the ``api`` role requires them when it starts. Every field can come from
+    the environment, so none is an argument the constructor demands (``Field(default=...)``: required when
+    validating, optional to the type checkers).
+    """
+
+    model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
+        env_prefix="LEDGER_",
+        extra="forbid",
+        frozen=True,
+        env_ignore_empty=True,
+        hide_input_in_errors=True,  # a validation error must never print a secret
+    )
+
+    environment: Literal["local", "test", "staging", "production"] = "local"
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    log_format: LogFormat = LogFormat.CONSOLE
+    database_url: SecretStr = Field(default=...)
+    """Where units run, through a pooler if any: ``postgresql+psycopg://ledger_app:...@pooler/ledger``."""
+    database_direct_url: SecretStr | None = None
+    """Direct to PostgreSQL (§6.7): the worker's LISTEN connection, and ``ledger-migrate``'s."""
+    http_port: Annotated[int, Field(ge=1, le=65535)] = 8000
+    otlp_endpoint: str | None = None
+    """OTLP/gRPC collector, e.g. ``http://otel-collector:4317``; traces are not exported without it."""
+    token_issuer: str | None = Field(default=None, min_length=1, max_length=2048)
+    """``iss`` of the tokens: the identity provider's issuer, e.g. ``https://auth.example.com``."""
+    token_audience: str | None = Field(default=None, min_length=1, max_length=255)
+    """A value ``aud`` must hold: the Zitadel project id of the platform's API."""
+    token_jwks_url: str | None = Field(default=None, min_length=1, max_length=2048)
+    """Where the provider publishes its keys: ``<issuer>/oauth/v2/keys`` for Zitadel."""
+    token_algorithms: frozenset[TokenAlgorithm] = Field(default=frozenset({"RS256"}), min_length=1)
+    token_leeway_seconds: Annotated[int, Field(ge=0, le=300)] = 60
+    """How far the provider's clock and ours may disagree, for ``exp``, ``nbf`` and ``iat``."""
+
+    @field_validator("database_url", "database_direct_url")
+    @classmethod
+    def require_the_psycopg_driver(cls, url: SecretStr | None) -> SecretStr | None:
+        """Refuse a URL for another driver now, not at the first query."""
+        if url is not None and not url.get_secret_value().startswith(_DATABASE_URL_SCHEME):
+            raise _UnsupportedDatabaseUrlError
+        return url
+
+    @model_validator(mode="after")
+    def require_https_keys_beyond_a_laptop(self) -> Self:
+        """Refuse keys fetched in clear in staging and production."""
+        keys = self.token_jwks_url
+        if self.environment in _HTTPS_ENVIRONMENTS and keys is not None and not keys.startswith("https://"):
+            raise _InsecureKeysUrlError
+        return self
+
+    @property
+    def listen_url(self) -> str:
+        """The direct URL in libpq form (psycopg's LISTEN connection); the database URL when none is set."""
+        url = (self.database_direct_url or self.database_url).get_secret_value()
+        return url.replace(_DATABASE_URL_SCHEME, "postgresql://", 1)
+
+    @classmethod
+    @override
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """The environment is read by a source that refuses undeclared variables."""
+        del env_settings
+        return (
+            init_settings,
+            _FailClosedEnvSettingsSource(settings_cls),
+            dotenv_settings,
+            file_secret_settings,
+        )
