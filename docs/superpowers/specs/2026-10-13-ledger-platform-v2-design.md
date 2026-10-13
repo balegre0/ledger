@@ -315,11 +315,18 @@ type wait in the inbox for the next roll forward (alerted by age), never fail.
 - **An event with no subscriber is never deleted**: it is marked `unrouted_since`, counted by
   `ledger_outbox_unrouted` and alerted; it is fanned out when a routing version adds a subscriber, or deleted by
   an operator.
+- **A row that cannot be fanned out never holds back the others**: a failed batch is redone one row at a time
+  (savepoints of the pass), the failing row's `attempts` is counted (`ledger_outbox_failed`, logged with the
+  error's type only), and at 10 it is set aside, kept and alerted until an operator resets `attempts`.
 - **Ordering.** None promised across aggregates. Default for projections: **version-monotonic upserts** (a
   handler writes only when the event's `aggregate_version` is above the stored one, so order does not matter).
   Opt-in per consumer (`ordered = true` in the manifest): **head-of-line claim per (consumer, subject)**: the
-  runner claims only the oldest unhandled row of each subject, so a subject's events run in order and a failing
-  one blocks only its own subject.
+  runner claims only the first row of each subject that is not dead, in the order (`aggregate_version`, event
+  id) (a missing version sorts first), so a subject's events run in their aggregate's order even when their
+  ids are not, and a failing one blocks only its own subject. One dispatcher fans out a schema at a time (a
+  transaction-level advisory lock per schema), so a subject's rows reach the inbox in id order. A dead row no
+  longer blocks its subject (the rows behind it go on); replaying it is refused while an earlier live row of its
+  subject waits. Events without a subject are not ordered.
 - **Retries**: backoff 1 s, 10 s, 1 min, 5 min, then every 10 min; `max_attempts` 10 (overridable per
   consumer); then `dead`. Operators replay with `ledger-worker replay --consumer X --event evt_…`.
 - **Wake-ups**: one `LISTEN ledger_outbox, ledger_inbox` connection per worker process, opened **directly**
@@ -941,7 +948,7 @@ CREATE TABLE {s}.outbox (
   subject          uuid, aggregate_version bigint,
   occurred_at      timestamptz NOT NULL, traceparent text,
   payload          jsonb NOT NULL CHECK (octet_length(payload::text) <= 65536),
-  attempts         int NOT NULL DEFAULT 0,          -- fan-out passes that failed on this row
+  attempts         int NOT NULL DEFAULT 0,          -- failed fan-outs of this row; set aside at 10
   unrouted_since   timestamptz                       -- no subscriber at fan-out time (kept, alerted)
 ) WITH (fillfactor = 90, autovacuum_vacuum_scale_factor = 0.0, autovacuum_vacuum_threshold = 1000,
         autovacuum_vacuum_cost_delay = 0);
@@ -961,7 +968,8 @@ CREATE TABLE {s}.inbox (
         autovacuum_vacuum_cost_delay = 0);
 CREATE INDEX inbox_due     ON {s}.inbox (consumer, next_attempt_at) WHERE status = 'ready';
 CREATE INDEX inbox_expired ON {s}.inbox (consumer, lease_until)     WHERE status = 'running';
-CREATE INDEX inbox_head    ON {s}.inbox (consumer, subject, event_id) WHERE status <> 'dead';   -- ordered consumers
+CREATE INDEX inbox_head    ON {s}.inbox (consumer, subject, aggregate_version, event_id)
+  WHERE status <> 'dead';                                     -- ordered consumers: head of each subject
 
 CREATE TABLE {s}.jobs (
   kind text NOT NULL, key text NOT NULL,

@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import ClassVar, Final, LiteralString, final
-lazy from collections.abc import Callable, Mapping
+lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 
 import pytest
 from opentelemetry.trace import StatusCode
@@ -25,12 +25,15 @@ from ledger_kernel.events import Event
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.events import Consumer, Dispatcher, InboxRunner
+from ledger_platform.events.inbox import ReplayRefusedError
+from ledger_testing import waiting
 lazy from ledger_kernel.tenancy import Scope
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.notifier import Channel
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
 lazy from ledger_platform.events import RawEvent
 lazy from ledger_platform.observability.tracing import Tracing
+lazy from ledger_testing.postgres import WorkerDatabase
 
 type Subscribe = Callable[[str, Mapping[str, frozenset[str]]], int]
 
@@ -42,6 +45,13 @@ CREATED: Final = "probe.thing.created"
 SCHEMAS: Final = ("probe", "other")
 STATE: Final = "SELECT status, attempts, last_error_code FROM other.inbox WHERE event_id = %s"
 EXPIRE: Final = "UPDATE other.inbox SET lease_until = now() - interval '1 millisecond'"
+TAKE_OVER: Final = (
+    "UPDATE other.inbox SET lease_token = gen_random_uuid(), lease_until = now() + interval '1 minute'"
+)
+LOCK_WAITERS: Final = (
+    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity"
+    " WHERE datname = current_database() AND wait_event_type = 'Lock')"
+)
 _ROWS: Final = TypeAdapter(list[tuple[object, ...]])
 _MOMENT: Final = TypeAdapter(datetime)
 _IDS: Final = TypeAdapter(list[uuid.UUID])
@@ -102,6 +112,8 @@ class Handler:
     calls: list[uuid.UUID] = field(default_factory=list)
     failures: dict[uuid.UUID, list[Exception]] = field(default_factory=dict)
     seen: list[tuple[RawEvent, Scope | None, object]] = field(default_factory=list)
+    during: Callable[[], Awaitable[None]] | None = None
+    """Awaited inside the unit, after the audit and before a failure: a test holds the handler there."""
 
     def fail(self, event: uuid.UUID, *errors: Exception) -> None:
         self.failures[event] = list(errors)
@@ -113,6 +125,8 @@ class Handler:
         )
         self.seen.append((event, unit.scope, user))
         unit.audit(action="other.rename_seen", subject=event.id)
+        if self.during is not None:
+            await self.during()
         pending = self.failures.get(event.id)
         if pending:
             raise pending.pop(0)
@@ -171,14 +185,29 @@ class Bench:
         ((moment,),) = await self.rows("SELECT clock_timestamp()")
         return _MOMENT.validate_python(moment)
 
+    def oldest_unhandled(self) -> float | None:
+        return self.registry.get_sample_value("ledger_inbox_unhandled_oldest_seconds", {"consumer": NAME})
+
     def handled(self, outcome: str) -> float | None:
         return self.registry.get_sample_value(
             "ledger_inbox_handled_total", {"consumer": NAME, "outcome": outcome}
         )
 
 
-def renamed(subject: uuid.UUID = S, name: str = "x") -> Renamed:
-    return Renamed(scope=TENANT, subject=subject, aggregate_version=1, name=name)
+async def waiting_for(check: Callable[[], Awaitable[bool]]) -> None:
+    """Until ``check`` holds (``ledger_testing.waiting.eventually``: a bound, not a delay)."""
+    await waiting.eventually(check)
+
+
+@pytest.fixture
+async def takeover(chassis: WorkerDatabase) -> AsyncGenerator[psycopg.AsyncConnection]:
+    """A second superuser session: another worker taking a row over while the first holds it."""
+    async with await psycopg.AsyncConnection.connect(chassis.admin_url(), autocommit=True) as connection:
+        yield connection
+
+
+def renamed(subject: uuid.UUID | None = S, name: str = "x", version: int | None = 1) -> Renamed:
+    return Renamed(scope=TENANT, subject=subject, aggregate_version=version, name=name)
 
 
 @pytest.fixture
@@ -313,23 +342,56 @@ async def test_a_handler_that_lost_its_lease_commits_nothing(bench: Bench) -> No
     assert bench.handled("lease_lost") == 1
     assert bench.handled("done") == 1
     assert await bench.rows("SELECT count(*) FROM other.audit_events") == [(1,)]
-    assert bench.handler.calls == [event, event]
+    assert bench.handler.calls == [event]  # A never ran it: the fenced extension found another token
 
 
-async def test_a_failure_recorded_after_the_lease_was_lost_changes_nothing(bench: Bench) -> None:
+async def test_a_runner_whose_lease_ran_out_but_was_not_taken_keeps_its_row(bench: Bench) -> None:
     (event,) = await bench.deliver(renamed())
     runner_a, runner_b = bench.runner(), bench.runner()
     (claimed,) = await runner_a.claim_now()
     await bench.superuser.execute(EXPIRE)
-    (taken,) = await runner_b.claim_now()  # B holds it now, with another token
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def hold() -> None:
+        entered.set()
+        await release.wait()
+
+    bench.handler.during = hold
+    handling = asyncio.create_task(runner_a.handle(claimed))
+    await entered.wait()  # A extended its lease first, and holds the row while it works
+    assert await runner_b.claim_now() == []
+    release.set()
+    await handling
+    assert bench.handler.calls == [event]
+    assert await bench.rows("SELECT * FROM other.inbox") == []
+    assert (bench.handled("done"), bench.handled("lease_lost")) == (1, 0)
+
+
+async def test_a_failure_recorded_after_the_row_was_taken_over_changes_nothing(
+    bench: Bench, takeover: psycopg.AsyncConnection
+) -> None:
+    (event,) = await bench.deliver(renamed())
+    (claimed,) = await bench.runner().claim_now()
+    waiting: list[asyncio.Task[object]] = []
+
+    async def taken_over_meanwhile() -> None:
+        """Another worker queues for the row (it is A's while A's unit runs) and gets it at A's rollback."""
+        waiting.append(asyncio.create_task(takeover.execute(TAKE_OVER)))
+
+        async def queued() -> bool:
+            ((found,),) = await bench.rows(LOCK_WAITERS)
+            return found is True
+
+        await waiting_for(queued)
+
+    bench.handler.during = taken_over_meanwhile
     bench.handler.fail(event, UnreachableError())
     with capture_logs() as logs:
-        await runner_a.handle(claimed)
+        await bench.runner().handle(claimed)
+    await waiting[0]
     assert [entry["event"] for entry in logs] == ["inbox.handler_failed", "inbox_lease_lost"]
-    assert await bench.state(event) == ("running", 2, None)
-    assert bench.handled("lease_lost") == 1
-    await runner_b.handle(taken)
-    assert await bench.rows("SELECT * FROM other.inbox") == []
+    assert await bench.state(event) == ("running", 1, None)  # the takeover's, not a recorded retry
+    assert (bench.handled("lease_lost"), bench.handled("retry")) == (1, 0)
 
 
 async def test_an_ordered_consumer_handles_a_subjects_events_in_order(bench: Bench) -> None:
@@ -400,3 +462,72 @@ async def test_a_cancelled_handling_is_raised_and_leaves_its_row_to_the_lease(be
         await running
     assert await bench.state(event) == ("running", 1, None)
     assert (bench.handled("retry"), bench.handled("dead")) == (0, 0)
+
+
+async def test_an_ordered_consumer_follows_aggregate_versions_not_ids(bench: Bench) -> None:
+    second, first = await bench.deliver(renamed(S, "2", version=2), renamed(S, "1", version=1))
+    assert second < first  # published in the wrong order: the ids say second came first
+    assert await bench.runner(ordered=True).run_until_idle() == 2
+    assert bench.handler.calls == [first, second]
+
+
+async def test_events_without_a_subject_are_not_ordered(bench: Bench) -> None:
+    e1, e2 = await bench.deliver(renamed(None, "1"), renamed(None, "2"))
+    bench.handler.fail(e1, UnreachableError())
+    assert await bench.runner(ordered=True).run_once() == 2  # e2 does not wait behind e1
+    assert bench.handler.calls == [e1, e2]
+
+
+async def test_a_dead_row_is_not_replayed_while_an_earlier_row_of_its_subject_waits(bench: Bench) -> None:
+    e1, e2 = await bench.deliver(renamed(S, "1"), renamed(S, "2"))
+    runner = bench.runner(ordered=True)
+    await bench.superuser.execute("UPDATE other.inbox SET status = 'dead' WHERE event_id = %s", (e2,))
+    with pytest.raises(ReplayRefusedError) as refused:
+        await runner.replay(e2)
+    assert refused.value.code == "inbox_replay_refused"
+    assert await bench.state(e2) == ("dead", 0, None)
+    assert await runner.run_until_idle() == 1  # e1; the dead e2 is not claimed
+    assert await runner.replay(e2)
+    assert await runner.run_until_idle() == 1
+    assert bench.handler.calls == [e1, e2]
+
+
+async def test_an_unordered_consumer_replays_whatever_waits_before_it(bench: Bench) -> None:
+    e1, e2 = await bench.deliver(renamed(S, "1"), renamed(S, "2"))
+    await bench.superuser.execute("UPDATE other.inbox SET status = 'dead' WHERE event_id = %s", (e2,))
+    assert await bench.runner().replay(e2)
+    assert await bench.state(e1) == ("ready", 0, None)
+
+
+@final
+class OneWait:
+    """A ``Waker`` that ends the loop at its first wait."""
+
+    def subscribe(self, channel: Channel) -> asyncio.Event:
+        del channel
+        return asyncio.Event()
+
+    async def wait(self, event: asyncio.Event, *, poll: float = 1.0) -> None:
+        del event, poll
+        raise LoopEndedError
+
+
+class LoopEndedError(Exception):
+    def __init__(self) -> None:
+        super().__init__("the test ends the loop")
+
+
+async def test_the_age_of_rows_no_handler_takes_is_exported(bench: Bench) -> None:
+    runner = bench.runner()
+    with pytest.raises(LoopEndedError):
+        await runner.run(OneWait())
+    assert bench.oldest_unhandled() == 0
+    (event,) = await bench.deliver(Created(scope=TENANT, subject=S, aggregate_version=1))
+    await bench.superuser.execute(
+        "UPDATE other.inbox SET next_attempt_at = now() - interval '1 hour' WHERE event_id = %s", (event,)
+    )
+    with pytest.raises(LoopEndedError):
+        await runner.run(OneWait())
+    age = bench.oldest_unhandled()
+    assert age is not None
+    assert 3600 <= age < 3600 + 60

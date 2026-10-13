@@ -1,41 +1,58 @@
 """The fan-out (§3.5): outbox rows of every schema into the inboxes of their consumers, as ``ledger_relay``.
 
 One transaction per schema and pass: claim up to ``batch`` outbox rows (``FOR UPDATE SKIP LOCKED``, oldest
-first), insert one inbox row per subscribed consumer (``ON CONFLICT DO NOTHING``: a repeat is absorbed),
-delete the outbox rows; rows nobody subscribes to are kept and marked ``unrouted_since`` (counted, alerted),
-never deleted. The routing table is cached and reloaded when ``platform.routing.version`` moves (one read per
-pass, in a short transaction of its own); every load makes the unrouted rows of the types it routes due again,
-so a row marked by a dispatcher whose table was a version behind is fanned out at that dispatcher's next pass,
-or by whichever dispatcher starts next. A pass that moved rows signals ``ledger_inbox`` after its commits.
+first), insert one inbox row per subscribed consumer (``ON CONFLICT DO NOTHING``: a repeat is absorbed; the
+inserts are cut under PostgreSQL's 65 535 parameters), delete the outbox rows; rows nobody subscribes to are
+kept and marked ``unrouted_since`` (counted, alerted), never deleted. A schema is fanned out by one dispatcher
+at a time (a transaction-level advisory lock; a dispatcher that finds it held skips the schema this pass), so
+a schema's events reach the inboxes in the order of their ids.
+
+A pass whose batch fails is done again one row at a time, each in a savepoint of the pass (which keeps the
+schema's lock): the good rows go, and a row that still fails has its ``attempts`` counted, rolled back to
+before it (``outbox.fan_out_failed``, ``ledger_outbox_failed_total``, after the commit); at
+``MAX_FAN_OUT_ATTEMPTS`` it is set aside, kept and alerted, until an operator resets its attempts. One poison
+row never holds back the rest.
+
+The routing table is cached and reloaded when ``platform.routing.version`` moves (one read per pass, in a
+short transaction of its own); every load makes the unrouted rows of the types it routes due again, so a row
+marked by a dispatcher whose table was a version behind is fanned out at that dispatcher's next pass, or by
+whichever dispatcher starts next. ``ledger_outbox_unrouted_total`` counts markings, not rows: a row marked
+again after a reload is counted again. Every commit that moved rows signals ``ledger_inbox``.
 
 Times are the database's: ``unrouted_since`` is the relay transaction's ``now()``, and an inbox row is due
 from its insert (the column's default).
 """
 
-import weakref
 from dataclasses import dataclass
 from typing import Final, Never, final
-lazy from collections.abc import Sequence
+from uuid import UUID
+lazy from collections.abc import Iterator, Sequence
 lazy from datetime import datetime
-lazy from uuid import UUID
 
-from prometheus_client import Counter
-from pydantic import TypeAdapter
+import structlog
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import SQLAlchemyError
 lazy from prometheus_client import CollectorRegistry
+lazy from sqlalchemy import ColumnElement
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ledger_kernel.errors import error_type
 from ledger_platform.data.notifier import INBOX, OUTBOX
 from ledger_platform.data.tables import chassis_tables
+from ledger_platform.events.metrics import counter
 from ledger_platform.events.routing import load_routing, routing_version
+from ledger_platform.runtime.supervision import being_cancelled
 lazy from ledger_platform.data.codec import JsonValue
-lazy from ledger_platform.data.database import Database
+lazy from ledger_platform.data.database import AnyTable, Database
 lazy from ledger_platform.data.notifier import Signals
 lazy from ledger_platform.events.routing import Routing
 lazy from ledger_platform.events.wakeups import Waker
 
 _RELAY: Final = text("SET LOCAL ROLE ledger_relay")
+_LOCK: Final = text("SELECT pg_try_advisory_xact_lock(hashtext('ledger.fan_out'), hashtext(:schema))")
+"""One fan-out per schema at a time, for the length of the pass's transaction."""
 _COPIED: Final = (
     "type",
     "version",
@@ -51,7 +68,22 @@ _COPIED: Final = (
 )
 POLL: Final = 1.0
 """Seconds between passes when no NOTIFY arrives (§3.5's safety net)."""
-_COUNTERS: Final[weakref.WeakKeyDictionary[CollectorRegistry, Counter]] = weakref.WeakKeyDictionary()
+MAX_FAN_OUT_ATTEMPTS: Final = 10
+"""Failed fan-outs after which a row is set aside (kept, alerted) until an operator resets its attempts."""
+ROWS_PER_INSERT: Final = 65_535 // (len(_COPIED) + 2)
+"""Inbox rows per ``INSERT``: each binds its consumer, its event id and the envelope."""
+_FAILURES: Final = (SQLAlchemyError, ValidationError)
+"""What fanning out a row can fail with: the database refused it, or the row could not be read."""
+_BOOL: Final = TypeAdapter(bool)
+_IDS: Final = TypeAdapter(list[UUID])
+_SET_ASIDE: Final = TypeAdapter(tuple[int, str])
+_logger = structlog.stdlib.get_logger(__name__)
+
+
+def chunked[T](items: Sequence[T], size: int) -> Iterator[Sequence[T]]:
+    """``items`` in consecutive slices of at most ``size``."""
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
 
 
 @final
@@ -94,27 +126,47 @@ class _OutboxRow:
 _ROWS: Final = TypeAdapter(list[_OutboxRow])
 
 
-def _unrouted_counter(registry: CollectorRegistry | None) -> Counter:
-    """``ledger_outbox_unrouted_total{schema}``: one per registry, shared by its dispatchers."""
-    found = None if registry is None else _COUNTERS.get(registry)
-    if found is not None:
-        return found
-    counter = Counter(
-        "ledger_outbox_unrouted",
-        "Events kept because no consumer subscribed to their type.",
-        ["schema"],
-        registry=registry,
-    )
-    if registry is not None:
-        _COUNTERS[registry] = counter
-    return counter
+@final
+@dataclass(frozen=True, slots=True)
+class _Moved:
+    """What one transaction did with the rows it took."""
+
+    taken: int
+    routed: int
+    unrouted: int
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class _Failure:
+    """A row whose fan-out failed, as its log line names it (the error by its type only)."""
+
+    event_id: UUID
+    event_type: str
+    attempts: int
+    error: str
+
+
+def reraise_when_stopping(error: Exception) -> None:
+    """Raise ``error`` (the one being handled) again when the task is being stopped.
+
+    A clean-up (a rollback on a broken connection) can turn a cancellation into another error; a loop that
+    carries on after errors must end on it all the same.
+    """
+    if being_cancelled():
+        raise error
+
+
+def _due(outbox: AnyTable) -> tuple[ColumnElement[bool], ...]:
+    """Rows to fan out: neither unrouted nor set aside."""
+    return (outbox.c.unrouted_since.is_(None), outbox.c.attempts < MAX_FAN_OUT_ATTEMPTS)
 
 
 @final
 class Dispatcher:
     """See the module."""
 
-    __slots__ = ("_batch", "_database", "_routing", "_schemas", "_signals", "_unrouted")
+    __slots__ = ("_batch", "_database", "_failed", "_routing", "_schemas", "_signals", "_unrouted")
 
     def __init__(
         self,
@@ -130,9 +182,13 @@ class Dispatcher:
         self._signals = signals
         self._batch = batch
         self._routing: Routing | None = None
-        self._unrouted = _unrouted_counter(registry)
-        for schema in self._schemas:
-            self._unrouted.labels(schema=schema)  # exported at zero: a first event must show in increase()
+        self._unrouted = counter(
+            registry, "ledger_outbox_unrouted", "Events marked unrouted: no consumer subscribed.", ["schema"]
+        )
+        self._failed = counter(registry, "ledger_outbox_failed", "Failed fan-outs of one event.", ["schema"])
+        for schema in self._schemas:  # exported at zero: a first event must show in increase()
+            self._unrouted.labels(schema=schema)
+            self._failed.labels(schema=schema)
 
     async def _current(self) -> Routing:
         """The routing table, reloaded when its version moved; a load makes newly routed rows due again."""
@@ -156,51 +212,121 @@ class Dispatcher:
                 .values(unrouted_since=None)
             )
 
-    async def _pass(self, schema: str, routing: Routing) -> tuple[int, bool]:
-        outbox = chassis_tables(schema).outbox
+    @staticmethod
+    async def _enter(connection: AsyncConnection, schema: str) -> bool:
+        """Become the relay and take ``schema``'s fan-out lock; whether it was free."""
+        await connection.execute(_RELAY)
+        return _BOOL.validate_python((await connection.execute(_LOCK, {"schema": schema})).scalar_one())
+
+    @staticmethod
+    async def _deliver(
+        connection: AsyncConnection,
+        outbox: AnyTable,
+        routing: Routing,
+        chosen: ColumnElement[bool],
+        limit: int,
+    ) -> _Moved:
+        """Take the ``chosen`` due rows (at most ``limit``) and fan them out in the transaction."""
         due = (
             select(outbox.c.id, *(outbox.c[column] for column in _COPIED))
-            .where(outbox.c.unrouted_since.is_(None))
+            .where(*_due(outbox), chosen)
             .order_by(outbox.c.id)
-            .limit(self._batch)
+            .limit(limit)
             .with_for_update(skip_locked=True)
         )
-        async with self._database.engine.begin() as connection:
-            await connection.execute(_RELAY)
-            rows = _ROWS.validate_python([dict(row) for row in (await connection.execute(due)).mappings()])
-            deliveries: dict[str, list[dict[str, object]]] = {}
-            routed: list[UUID] = []
-            unrouted: list[UUID] = []
-            for row in rows:
-                routes = routing.routes.get(row.type, ())
-                (routed if routes else unrouted).append(row.id)
-                for route in routes:
-                    deliveries.setdefault(route.schema, []).append(row.delivery(route.consumer))
-            for target, values in deliveries.items():
-                await connection.execute(
-                    insert(chassis_tables(target).inbox).values(values).on_conflict_do_nothing()
-                )
-            if routed:
-                await connection.execute(delete(outbox).where(outbox.c.id.in_(routed)))
-            if unrouted:
-                await connection.execute(
-                    update(outbox).where(outbox.c.id.in_(unrouted)).values(unrouted_since=func.now())
-                )
+        rows = _ROWS.validate_python([dict(row) for row in (await connection.execute(due)).mappings()])
+        deliveries: dict[str, list[dict[str, object]]] = {}
+        routed: list[UUID] = []
+        unrouted: list[UUID] = []
+        for row in rows:
+            routes = routing.routes.get(row.type, ())
+            (routed if routes else unrouted).append(row.id)
+            for route in routes:
+                deliveries.setdefault(route.schema, []).append(row.delivery(route.consumer))
+        for target, values in deliveries.items():
+            inbox = chassis_tables(target).inbox
+            for chunk in chunked(values, ROWS_PER_INSERT):
+                await connection.execute(insert(inbox).values(list(chunk)).on_conflict_do_nothing())
+        if routed:
+            await connection.execute(delete(outbox).where(outbox.c.id.in_(routed)))
         if unrouted:
-            self._unrouted.labels(schema=schema).inc(len(unrouted))
-        return len(rows), bool(routed)
+            await connection.execute(
+                update(outbox).where(outbox.c.id.in_(unrouted)).values(unrouted_since=func.now())
+            )
+        return _Moved(len(rows), len(routed), len(unrouted))
+
+    def _committed(self, schema: str, moved: _Moved, failures: Sequence[_Failure]) -> None:
+        """After the commit: count, log and signal what the pass did."""
+        if moved.unrouted:
+            self._unrouted.labels(schema=schema).inc(moved.unrouted)
+        for failure in failures:
+            _logger.warning(
+                "outbox.fan_out_failed",
+                schema=schema,
+                event_id=str(failure.event_id),
+                event_type=failure.event_type,
+                attempts=failure.attempts,
+                error=failure.error,
+            )
+            self._failed.labels(schema=schema).inc()
+        if moved.routed:
+            self._signals.signal(INBOX)
+
+    async def _pass(self, schema: str, routing: Routing) -> int:
+        """One transaction over ``schema``'s due rows; row by row if the batch fails (see the module).
+
+        The batch and each row run in a savepoint of the pass's transaction, so the schema's lock is held
+        from the first row to the last, and a failure's count commits with the rows that went.
+        """
+        outbox = chassis_tables(schema).outbox
+        failures: list[_Failure] = []
+        async with self._database.engine.begin() as connection:
+            if not await self._enter(connection, schema):
+                return 0
+            try:
+                async with connection.begin_nested():
+                    moved = await self._deliver(
+                        connection, outbox, routing, outbox.c.id.is_not(None), self._batch
+                    )
+            except _FAILURES as error:
+                reraise_when_stopping(error)
+                moved = await self._one_by_one(connection, outbox, routing, failures)
+        self._committed(schema, moved, failures)
+        return moved.taken + len(failures)
+
+    async def _one_by_one(
+        self, connection: AsyncConnection, outbox: AnyTable, routing: Routing, failures: list[_Failure]
+    ) -> _Moved:
+        chosen = select(outbox.c.id).where(*_due(outbox)).order_by(outbox.c.id).limit(self._batch)
+        ids = _IDS.validate_python((await connection.execute(chosen)).scalars().all())
+        taken = routed = unrouted = 0
+        for event_id in ids:
+            try:
+                async with connection.begin_nested():
+                    moved = await self._deliver(connection, outbox, routing, outbox.c.id == event_id, 1)
+            except _FAILURES as error:
+                reraise_when_stopping(error)
+                counted = (
+                    update(outbox)
+                    .where(outbox.c.id == event_id)
+                    .values(attempts=outbox.c.attempts + 1)
+                    .returning(outbox.c.attempts, outbox.c.type)
+                )
+                attempts, event_type = _SET_ASIDE.validate_python(
+                    tuple((await connection.execute(counted)).one())
+                )
+                failures.append(_Failure(event_id, event_type, attempts, error_type(error)))
+                continue
+            taken, routed, unrouted = taken + moved.taken, routed + moved.routed, unrouted + moved.unrouted
+        return _Moved(taken, routed, unrouted)
 
     async def run_once(self) -> int:
-        """One pass over every schema; how many outbox rows it fanned out or marked unrouted."""
+        """One pass over every schema; how many outbox rows it took (fanned out, marked, or failed)."""
         routing = await self._current()
-        handled, delivered = 0, False
+        taken = 0
         for schema in self._schemas:
-            count, moved = await self._pass(schema, routing)
-            handled += count
-            delivered |= moved
-        if delivered:
-            self._signals.signal(INBOX)
-        return handled
+            taken += await self._pass(schema, routing)
+        return taken
 
     async def run_until_idle(self) -> int:
         """Pass until a pass finds nothing (tests drain with it: absence is proved by draining, §14.2)."""

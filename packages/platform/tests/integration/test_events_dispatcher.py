@@ -8,13 +8,14 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import ClassVar, Final, LiteralString, final
-lazy from collections.abc import Callable, Mapping
+lazy from collections.abc import AsyncGenerator, Callable, Mapping
 
 import pytest
 from psycopg import sql
 from pydantic import TypeAdapter
 from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
+from structlog.testing import capture_logs
 lazy import psycopg
 lazy from prometheus_client import CollectorRegistry
 
@@ -23,6 +24,7 @@ from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.data.database import Database
 from ledger_platform.events import Dispatcher, PostgresEventBus
+from ledger_platform.events.dispatcher import ROWS_PER_INSERT, chunked
 from ledger_testing.database import app_url
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.notifier import Channel
@@ -46,8 +48,27 @@ DELIVERED: Final = """
            consumer, status, attempts, next_attempt_at, lease_until, lease_token, last_error_code
     FROM {} ORDER BY event_id
 """
+POISON: Final = """
+    CREATE FUNCTION other.refuse_poison() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+        IF NEW.payload ->> 'name' = 'poison' THEN RAISE EXCEPTION 'refused by the test'; END IF;
+        RETURN NEW;
+    END $$
+"""
+POISON_TRIGGER: Final = """
+    CREATE TRIGGER refuse_poison BEFORE INSERT ON other.inbox
+    FOR EACH ROW EXECUTE FUNCTION other.refuse_poison()
+"""
+COPY_TO_OTHER: Final = """
+    INSERT INTO other.outbox
+    SELECT gen_random_uuid(), type, version, source, organization_id, company_id, mode, subject,
+           aggregate_version, occurred_at, traceparent, payload
+    FROM probe.outbox
+"""
+HOLD_PROBE: Final = "SELECT pg_advisory_xact_lock(hashtext('ledger.fan_out'), hashtext('probe'))"
 _ROWS: Final = TypeAdapter(list[tuple[object, ...]])
 _COUNT: Final = TypeAdapter(int)
+_TEXT: Final = TypeAdapter(str)
 _MOMENT: Final = TypeAdapter(datetime)
 
 
@@ -82,9 +103,12 @@ class Bench:
     superuser: psycopg.AsyncConnection
 
     async def publish(self, count: int = 1) -> None:
+        await self.publish_named(*(f"name-{index}" for index in range(count)))
+
+    async def publish_named(self, *names: str) -> None:
         async with self.probe.unit(TENANT) as uow:
-            for index in range(count):
-                uow.publish(renamed(f"name-{index}"))
+            for name in names:
+                uow.publish(renamed(name))
 
     async def rows(self, query: LiteralString | sql.Composed) -> list[tuple[object, ...]]:
         cursor = await self.superuser.execute(query)
@@ -111,6 +135,21 @@ def renamed(name: str = "x") -> Renamed:
 
 def unrouted(registry: CollectorRegistry, schema: str) -> float | None:
     return registry.get_sample_value("ledger_outbox_unrouted_total", {"schema": schema})
+
+
+def failed(registry: CollectorRegistry, schema: str) -> float | None:
+    return registry.get_sample_value("ledger_outbox_failed_total", {"schema": schema})
+
+
+@pytest.fixture
+async def poisoned(superuser: psycopg.AsyncConnection) -> AsyncGenerator[None]:
+    """``other.inbox`` refuses any event named ``poison``: a row the fan-out can never deliver."""
+    await superuser.execute(POISON)
+    await superuser.execute(POISON_TRIGGER)
+    try:
+        yield
+    finally:
+        await superuser.execute("DROP FUNCTION IF EXISTS other.refuse_poison() CASCADE")
 
 
 @pytest.fixture
@@ -249,3 +288,64 @@ async def test_the_relay_role_reaches_the_queue_tables_only(pool: Database, stat
         await connection.execute(text("SELECT * FROM platform.routing"))
         with pytest.raises(ProgrammingError, match="permission denied"):
             await connection.execute(text(statement))
+
+
+async def test_a_row_that_cannot_be_fanned_out_is_set_aside_and_the_others_go(
+    bench: Bench, registry: CollectorRegistry, poisoned: None
+) -> None:
+    del poisoned
+    bench.subscribe("other", RENAMES)
+    await bench.publish_named("a", "poison", "b")
+    ((poison,),) = await bench.rows("SELECT id FROM probe.outbox WHERE payload ->> 'name' = 'poison'")
+    with capture_logs() as logs:
+        assert (
+            await bench.dispatcher.run_until_idle() == 3 + 9
+        )  # the batch, then the poison alone 9 more times
+    assert await bench.rows("SELECT payload ->> 'name' FROM other.inbox ORDER BY 1") == [("a",), ("b",)]
+    assert await bench.rows("SELECT id, attempts, unrouted_since FROM probe.outbox") == [(poison, 10, None)]
+    assert failed(registry, "probe") == 10
+    assert failed(registry, "other") == 0
+    assert len(logs) == 10
+    for logged in logs:
+        assert _TEXT.validate_python(logged.pop("error")).startswith("sqlalchemy.exc.")
+        assert logged == {
+            "event": "outbox.fan_out_failed",
+            "schema": "probe",
+            "event_id": str(poison),
+            "event_type": "probe.thing.renamed",
+            "attempts": logged["attempts"],
+            "log_level": "warning",
+        }
+    assert [logged["attempts"] for logged in logs] == list(range(1, 11))
+    assert await bench.dispatcher.run_until_idle() == 0  # set aside: kept and alerted, not taken again
+    await bench.superuser.execute("DROP TRIGGER refuse_poison ON other.inbox")
+    await bench.superuser.execute("UPDATE probe.outbox SET attempts = 0")  # the operator's reset
+    assert await bench.dispatcher.run_until_idle() == 1
+    assert await bench.count("other", "inbox") == 3
+
+
+async def test_a_schema_another_dispatcher_is_fanning_out_is_skipped(bench: Bench) -> None:
+    bench.subscribe("other", RENAMES)
+    await bench.publish()
+    async with bench.superuser.transaction():
+        await bench.superuser.execute(HOLD_PROBE)  # another dispatcher's pass over probe
+        assert await bench.dispatcher.run_until_idle() == 0
+        assert await bench.count("probe", "outbox") == 1
+    assert await bench.dispatcher.run_until_idle() == 1
+    assert await bench.count("other", "inbox") == 1
+
+
+async def test_every_committed_pass_that_moved_rows_signals_the_inboxes(bench: Bench) -> None:
+    bench.subscribe("other", RENAMES)
+    await bench.publish()
+    await bench.superuser.execute(COPY_TO_OTHER)
+    assert await bench.dispatcher.run_once() == 2
+    assert bench.signals.sent == ["ledger_inbox", "ledger_inbox"]  # one per schema's commit
+
+
+def test_fan_out_inserts_stay_under_postgresqls_parameter_limit() -> None:
+    assert ROWS_PER_INSERT * 13 <= 65_535 < (ROWS_PER_INSERT + 1) * 13
+    rows = list(range(2 * ROWS_PER_INSERT + 1))
+    assert [len(chunk) for chunk in chunked(rows, ROWS_PER_INSERT)] == [ROWS_PER_INSERT, ROWS_PER_INSERT, 1]
+    assert [item for chunk in chunked(rows, ROWS_PER_INSERT) for item in chunk] == rows
+    assert list(chunked(list[int](), ROWS_PER_INSERT)) == []

@@ -92,7 +92,14 @@ def chassis_tables(schema: str) -> ChassisTables:
         Column("last_error_code", Text),
         Index("inbox_due", "consumer", "next_attempt_at", postgresql_where=text("status = 'ready'")),
         Index("inbox_expired", "consumer", "lease_until", postgresql_where=text("status = 'running'")),
-        Index("inbox_head", "consumer", "subject", "event_id", postgresql_where=text("status <> 'dead'")),
+        Index(
+            "inbox_head",
+            "consumer",
+            "subject",
+            "aggregate_version",
+            "event_id",
+            postgresql_where=text("status <> 'dead'"),
+        ),
     )
     jobs = Table(
         "jobs",

@@ -41,7 +41,10 @@ _V1: Final = (
 ) WITH (fillfactor = 80, {_QUEUE})""",
     "CREATE INDEX inbox_due ON {s}.inbox (consumer, next_attempt_at) WHERE status = 'ready'",
     "CREATE INDEX inbox_expired ON {s}.inbox (consumer, lease_until) WHERE status = 'running'",
-    "CREATE INDEX inbox_head ON {s}.inbox (consumer, subject, event_id) WHERE status <> 'dead'",
+    (
+        "CREATE INDEX inbox_head ON {s}.inbox (consumer, subject, aggregate_version, event_id)"
+        " WHERE status <> 'dead'"
+    ),
     f"""CREATE TABLE {{s}}.jobs (
   kind text NOT NULL, key text NOT NULL,
   organization_id uuid, company_id uuid, mode text,

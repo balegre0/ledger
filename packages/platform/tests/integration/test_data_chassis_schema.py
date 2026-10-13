@@ -53,7 +53,7 @@ INDEXES = {
     "outbox_due": "CREATE INDEX outbox_due ON probe.outbox USING btree (id) WHERE (unrouted_since IS NULL)",
     "inbox_due": index("inbox_due", "inbox", "consumer, next_attempt_at", "= 'ready'"),
     "inbox_expired": index("inbox_expired", "inbox", "consumer, lease_until", "= 'running'"),
-    "inbox_head": index("inbox_head", "inbox", "consumer, subject, event_id", "<> 'dead'"),
+    "inbox_head": index("inbox_head", "inbox", "consumer, subject, aggregate_version, event_id", "<> 'dead'"),
     "jobs_due": index("jobs_due", "jobs", "kind, run_at", "= 'ready'"),
     "jobs_expired": index("jobs_expired", "jobs", "kind, lease_until", "= 'running'"),
     "jobs_parked": index("jobs_parked", "jobs", "kind, company_id, parked_reason", "= 'parked'"),

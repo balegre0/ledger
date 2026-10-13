@@ -2,18 +2,26 @@
 
 A claim, in a short unit of its own, takes due rows of the consumer's own types (``ready`` and due, or
 ``running`` with an expired lease), counts the attempt, and sets a fencing token. Each row is handled in its
-own unit, in the consumer's module role and the event's scope: the handler's writes and the deletion of the
-row (``WHERE lease_token = :token``) commit together; if the deletion finds nothing, another worker took the
-row over and this unit rolls back (``inbox_lease_lost``). A failure is recorded in another unit, fenced the
-same way: retried with backoff, or ``dead`` (kept, replayable) when the error is ``INVALID`` or the attempts
-are spent. An ordered consumer claims only the oldest row of each subject that is not dead (Decision 18).
+own unit, in the consumer's module role and the event's scope. The unit's first statement extends the lease,
+fenced by the token (``WHERE lease_token = :token``): if it finds nothing, another worker took the row over
+and the handler does not run (``inbox_lease_lost``); if it does, the unit holds the row's lock until it ends,
+so no other worker can claim the row while the handler works, however long that takes. The handler's writes
+and the deletion of the row commit together. A failure is recorded in another unit, fenced the same way:
+retried with backoff, or ``dead`` (kept, replayable) when the error is ``INVALID`` or the attempts are spent.
+
+An ordered consumer claims only the first row of each subject that is not dead, in the order
+(``aggregate_version``, event id), a missing version first. Consequences (Decision 18): a dead row no longer
+holds back its subject, so the rows behind it run before it, and so would a replay of it; a replay is
+therefore refused while an earlier row of its subject is still live. Events without a subject are not
+ordered (they have no subject to queue behind).
 
 Every time is the database's (§3.6): due rows and expired leases are compared with the claim unit's
-``now()``, a retry is due ``backoff`` after the statement that records it (``statement_timestamp()``).
+``now()``; a lease extension and a retry run from the statement that writes them (``statement_timestamp()``).
+``ledger_inbox_unhandled_oldest_seconds`` is the age of the consumer's oldest ready row of a type it has no
+handler for (rows of a newer version's types wait for its rollout, §3.5), measured once per drain.
 """
 
 import contextlib
-import weakref
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import ClassVar, Final, Never, NotRequired, TypedDict, Unpack, final
@@ -22,20 +30,20 @@ lazy from datetime import datetime
 lazy from uuid import UUID
 
 import structlog
-from prometheus_client import Counter
 from pydantic import TypeAdapter
-from sqlalchemy import and_, delete, exists, func, or_, update
+from sqlalchemy import and_, delete, exists, func, or_, select, text, tuple_, update
 lazy from prometheus_client import CollectorRegistry
 lazy from sqlalchemy import ColumnElement, RowMapping
 
-from ledger_kernel.errors import ErrorKind, LedgerError
+from ledger_kernel.errors import ConflictError, ErrorKind, LedgerError
 from ledger_platform.data.audit import Actor, acting_as
 from ledger_platform.data.notifier import INBOX
 from ledger_platform.data.queue import DEFAULT_BACKOFF, claim
 from ledger_platform.events.consumers import raw_event_of
-from ledger_platform.events.dispatcher import POLL
-from ledger_platform.runtime.supervision import being_cancelled
+from ledger_platform.events.dispatcher import POLL, reraise_when_stopping
+from ledger_platform.events.metrics import counter, gauge
 lazy from ledger_platform.data.bound import BoundDatabase
+lazy from ledger_platform.data.database import AnyTable
 lazy from ledger_platform.data.queue import Backoff
 lazy from ledger_platform.events.consumers import Consumer, RawEvent
 lazy from ledger_platform.events.wakeups import Waker
@@ -45,8 +53,10 @@ OUTCOMES: Final = ("done", "retry", "dead", "lease_lost")
 """The values of ``ledger_inbox_handled_total``'s ``outcome`` label."""
 DEFAULT_LEASE: Final = timedelta(seconds=60)
 DEFAULT_BATCH: Final = 20
-_COUNTERS: Final[weakref.WeakKeyDictionary[CollectorRegistry, Counter]] = weakref.WeakKeyDictionary()
+_NOTIFY: Final = text("SELECT pg_notify('ledger_inbox', '')")
+_AGE: Final = TypeAdapter(float)
 _ROW: Final = TypeAdapter(dict[str, object])
+_BLOCKED: Final = TypeAdapter(bool)
 _logger = structlog.stdlib.get_logger(__name__)
 
 
@@ -57,6 +67,18 @@ class _LeaseLostError(LedgerError):
 
     def __init__(self) -> None:
         super().__init__("the inbox row's lease was taken over by another worker")
+
+
+class ReplayRefusedError(ConflictError):
+    """A replay that would run an ordered consumer's row before an earlier live row of its subject.
+
+    Replay it once those have run.
+    """
+
+    code: ClassVar[str] = "inbox_replay_refused"
+
+    def __init__(self, consumer: str) -> None:
+        super().__init__(f"{consumer} still has an earlier live event of this subject: replay after it")
 
 
 class RunnerOptions(TypedDict):
@@ -107,33 +129,33 @@ def _claimed(row: RowMapping) -> ClaimedEvent:
     )
 
 
+def _earlier_live(inbox: AnyTable) -> ColumnElement[bool]:
+    """Whether a live row of the same consumer and subject comes before ``inbox``'s row (see the module).
+
+    The order is (``aggregate_version``, event id), a missing version first; a row without a subject has none
+    before it (``NULL = NULL`` is not true).
+    """
+    older = inbox.alias("older")
+    return exists().where(
+        older.c.consumer == inbox.c.consumer,
+        older.c.subject == inbox.c.subject,
+        tuple_(func.coalesce(older.c.aggregate_version, -1), older.c.event_id)
+        < tuple_(func.coalesce(inbox.c.aggregate_version, -1), inbox.c.event_id),
+        older.c.status != "dead",
+    )
+
+
 def _fence(deleted: object) -> None:
     """``_LeaseLostError`` unless the fenced deletion returned the row (it is still this runner's)."""
     if deleted is None:
         raise _LeaseLostError
 
 
-def _handled_counter(registry: CollectorRegistry | None) -> Counter:
-    """``ledger_inbox_handled_total{consumer, outcome}``: one per registry, shared by its runners."""
-    found = None if registry is None else _COUNTERS.get(registry)
-    if found is not None:
-        return found
-    counter = Counter(
-        "ledger_inbox_handled",
-        "Inbox rows handled, by consumer and outcome.",
-        ["consumer", "outcome"],
-        registry=registry,
-    )
-    if registry is not None:
-        _COUNTERS[registry] = counter
-    return counter
-
-
 @final
 class InboxRunner:
     """See the module."""
 
-    __slots__ = ("_backoff", "_batch", "_consumer", "_database", "_handled", "_lease", "_tracing")
+    __slots__ = ("_backoff", "_batch", "_consumer", "_database", "_handled", "_lease", "_tracing", "_waiting")
 
     def __init__(
         self, *, database: BoundDatabase, consumer: Consumer, **options: Unpack[RunnerOptions]
@@ -144,9 +166,21 @@ class InboxRunner:
         self._batch = options.get("batch", DEFAULT_BATCH)
         self._backoff = options.get("backoff", DEFAULT_BACKOFF)
         self._tracing = options.get("tracing")
-        self._handled = _handled_counter(options.get("registry"))
+        registry = options.get("registry")
+        self._handled = counter(
+            registry,
+            "ledger_inbox_handled",
+            "Inbox rows handled, by consumer and outcome.",
+            ["consumer", "outcome"],
+        )
         for outcome in OUTCOMES:
             self._handled.labels(consumer=consumer.name, outcome=outcome)  # exported at zero
+        self._waiting = gauge(
+            registry,
+            "ledger_inbox_unhandled_oldest_seconds",
+            "Age of the oldest ready row of a type the consumer has no handler for.",
+            ["consumer"],
+        )
 
     def _due(self) -> ColumnElement[bool]:
         inbox = self._database.tables.inbox
@@ -159,18 +193,7 @@ class InboxRunner:
                 and_(inbox.c.status == "running", inbox.c.lease_until < now),
             ),
         )
-        if not self._consumer.ordered:
-            return due
-        older = inbox.alias("older")
-        return and_(
-            due,
-            ~exists().where(
-                older.c.consumer == inbox.c.consumer,
-                older.c.subject == inbox.c.subject,
-                older.c.event_id < inbox.c.event_id,
-                older.c.status != "dead",
-            ),
-        )
+        return and_(due, ~_earlier_live(inbox)) if self._consumer.ordered else due
 
     async def claim_now(self) -> Sequence[ClaimedEvent]:
         """Claim the due rows (see the module), oldest first; ``run_once`` handles them (a test seam too)."""
@@ -215,14 +238,20 @@ class InboxRunner:
             # The error leaves the span before it is handled here: a failed handling shows in the trace.
             with self._span(event), acting_as(Actor(f"system:consumer:{name}", str(event.id))):
                 async with self._database.unit(event.scope) as unit:
+                    extended = (
+                        update(inbox)
+                        .where(*self._fenced(row))
+                        .values(lease_until=func.statement_timestamp() + self._lease)
+                        .returning(inbox.c.event_id)
+                    )
+                    _fence((await unit.connection.execute(extended)).first())
                     await self._consumer.handler(event, unit)
                     deleted = delete(inbox).where(*self._fenced(row)).returning(inbox.c.event_id)
                     _fence((await unit.connection.execute(deleted)).first())
         except _LeaseLostError:
             self._lost(row)
         except Exception as error:  # a handler may raise anything; a cancellation is no Exception
-            if being_cancelled():  # a stop that a clean-up (the rollback) turned into another error
-                raise
+            reraise_when_stopping(error)
             dead = (isinstance(error, LedgerError) and error.kind is ErrorKind.INVALID) or (
                 row.attempts >= self._consumer.max_attempts
             )
@@ -269,9 +298,21 @@ class InboxRunner:
     async def replay(self, event_id: UUID) -> bool:
         """Make the consumer's dead row of ``event_id`` ready now with fresh attempts; whether there was one.
 
-        What an operator's replay runs (§3.5); a row in any other state is left as it is.
+        What an operator's replay runs (§3.5); a row in any other state is left as it is. The revived row
+        is announced (``ledger_inbox``) when the unit commits. ``ReplayRefusedError`` for an ordered
+        consumer's row while an earlier row of its subject is live (see the module).
         """
         inbox = self._database.tables.inbox
+        blocked = (
+            select(inbox.c.event_id)
+            .where(
+                inbox.c.consumer == self._consumer.name,
+                inbox.c.event_id == event_id,
+                inbox.c.status == "dead",
+                _earlier_live(inbox),
+            )
+            .exists()
+        )
         revived = (
             update(inbox)
             .where(
@@ -283,7 +324,28 @@ class InboxRunner:
             .returning(inbox.c.event_id)
         )
         async with self._database.unit(None) as unit:
-            return (await unit.connection.execute(revived)).first() is not None
+            if self._consumer.ordered and _BLOCKED.validate_python(
+                (await unit.connection.execute(select(blocked))).scalar_one()
+            ):
+                raise ReplayRefusedError(self._consumer.name)
+            found = (await unit.connection.execute(revived)).first() is not None
+            if found:
+                await unit.connection.execute(_NOTIFY)
+        return found
+
+    async def measure(self) -> None:
+        """Export the age of the oldest ready row of a type the consumer has no handler for (0 if none)."""
+        inbox = self._database.tables.inbox
+        oldest = select(
+            func.coalesce(func.extract("epoch", func.now() - func.min(inbox.c.next_attempt_at)), 0)
+        ).where(
+            inbox.c.consumer == self._consumer.name,
+            inbox.c.status == "ready",
+            inbox.c.type.not_in(sorted(self._consumer.types)),
+        )
+        async with self._database.unit(None) as unit:
+            age = _AGE.validate_python((await unit.connection.execute(oldest)).scalar_one())
+        self._waiting.labels(consumer=self._consumer.name).set(age)
 
     async def run_once(self) -> int:
         """Claim the due rows and handle each, in order; how many were claimed."""
@@ -304,4 +366,5 @@ class InboxRunner:
         woken = wakeups.subscribe(INBOX)
         while True:
             await self.run_until_idle()
+            await self.measure()
             await wakeups.wait(woken, poll=POLL)

@@ -2,8 +2,9 @@
 
 ``run()`` connects, LISTENs on ``ledger_outbox`` and ``ledger_inbox`` and sets every subscriber's event when a
 NOTIFY arrives; when the connection is lost it raises, and the worker's supervisor starts it again
-(subscribers stay subscribed across restarts). Runners never depend on it: they wait for their event *or*
-the poll, whichever comes first, so a NOTIFY lost while the connection was down costs at most one poll.
+(subscribers stay subscribed across restarts). Each (re)connection wakes every subscriber once, so a NOTIFY
+sent while the connection was down costs nothing; TCP keepalives end a half-open connection. Runners never
+depend on it: they wait for their event *or* the poll, whichever comes first.
 """
 
 import asyncio
@@ -66,10 +67,22 @@ class Wakeups:
     async def run(self) -> Never:
         """Listen until the connection fails, then raise its error (see the module)."""
         try:
-            async with await psycopg.AsyncConnection.connect(self._url, autocommit=True) as connection:
+            # TCP keepalives: a half-open connection (a peer that vanished) fails within about a minute
+            # instead of waiting forever, and the supervisor starts a new one.
+            async with await psycopg.AsyncConnection.connect(
+                self._url,
+                autocommit=True,
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=3,
+            ) as connection:
                 for statement in _LISTEN:
                     await connection.execute(statement.encode())
                 self._connected = True
+                for subscribers in self._subscribers.values():  # what was notified while down is not lost
+                    for event in subscribers:
+                        event.set()
                 notifications = connection.notifies()
                 while True:
                     notification = await anext(notifications)

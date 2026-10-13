@@ -13,6 +13,8 @@ lazy from collections.abc import Awaitable, Callable, Mapping
 
 import psycopg
 import pytest
+from pydantic import TypeAdapter
+from sqlalchemy import text
 
 from ledger_kernel.events import Event
 from ledger_kernel.ids import CompanyId, OrganizationId
@@ -31,6 +33,7 @@ lazy from ledger_testing.postgres import WorkerDatabase
 type Eventually = Callable[[Callable[[], Awaitable[bool]]], Awaitable[None]]
 type Subscribe = Callable[[str, Mapping[str, frozenset[str]]], int]
 
+_ID: Final = TypeAdapter(uuid.UUID)
 TENANT: Final = Tenant(OrganizationId(uuid.uuid7()), CompanyId(uuid.uuid7()), Mode.TEST)
 TERMINATE: Final = """
     SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity
@@ -63,6 +66,12 @@ async def test_a_notify_wakes_its_subscribers_only(
 
     try:
         await eventually(connected)
+        # a (re)connection wakes every subscriber once: what was notified while it was down is not lost
+        assert inbox_a.is_set()
+        assert inbox_b.is_set()
+        assert outbox.is_set()
+        for event in (inbox_a, inbox_b, outbox):
+            event.clear()
         await superuser.execute("NOTIFY ledger_inbox")
 
         async def inbox_woken() -> bool:
@@ -114,6 +123,8 @@ async def test_a_lost_connection_is_raised_for_the_supervisor_and_a_restart_list
     restarted: asyncio.Task[object] = asyncio.create_task(wakeups.run())  # what the supervisor does
     try:
         await eventually(connected)
+        assert woken.is_set()  # the reconnection's wake-up
+        woken.clear()
         await superuser.execute("NOTIFY ledger_inbox")
 
         async def woken_up() -> bool:
@@ -226,3 +237,52 @@ async def test_each_runner_drains_then_waits_for_its_own_channel_or_the_poll(
     assert (fan_out.subscribed, fan_out.polls) == (["ledger_outbox"], [1.0, 1.0])
     assert (inbox.subscribed, inbox.polls) == (["ledger_inbox"], [1.0, 1.0])
     assert seen == [Renamed.TYPE]
+
+
+async def test_a_replay_wakes_the_inbox_runners(
+    wakeups: Wakeups,
+    probe: BoundDatabase,
+    other: BoundDatabase,
+    subscribe: Subscribe,
+    eventually: Eventually,
+) -> None:
+    subscribe("other", {"other.renames": frozenset({Renamed.TYPE})})
+    async with probe.unit(TENANT) as uow:
+        uow.publish(Renamed(scope=TENANT, subject=uuid.uuid7(), aggregate_version=1, name="x"))
+    await Dispatcher(probe.database, schemas=("probe", "other"), signals=Silent()).run_until_idle()
+    async with other.unit(None) as uow:
+        found = await uow.connection.execute(
+            text("UPDATE other.inbox SET status = 'dead' RETURNING event_id")
+        )
+        event_id = _ID.validate_python(found.scalar_one())
+
+    async def handle(event: RawEvent, unit: UnitOfWork) -> None:
+        del event, unit
+
+    consumer = Consumer(
+        name="other.renames", types=frozenset({Renamed.TYPE}), max_attempts=10, ordered=False, handler=handle
+    )
+    woken = wakeups.subscribe("ledger_inbox")
+    task: asyncio.Task[object] = asyncio.create_task(wakeups.run())
+
+    async def connected() -> bool:
+        return wakeups.connected
+
+    async def woken_up() -> bool:
+        return woken.is_set()
+
+    try:
+        await eventually(connected)
+        woken.clear()  # the connection's own wake-up
+        assert await InboxRunner(database=other, consumer=consumer).replay(event_id)
+        await eventually(woken_up)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+@final
+class Silent:
+    def signal(self, channel: Channel) -> None:
+        del channel
