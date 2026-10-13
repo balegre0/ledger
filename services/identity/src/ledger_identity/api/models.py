@@ -10,8 +10,11 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from ledger_identity.domain.company import CompanyStatus
+from ledger_identity.domain.roles import Role
 from ledger_kernel.countries.do import TaxIdKind
+lazy from ledger_identity.domain.branches import Branch, EmissionPoint
 lazy from ledger_identity.domain.company import Company
+lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_identity.domain.organization import Organization
 
 
@@ -98,3 +101,117 @@ class OrganizationView(_Shape):
         return cls(
             id=organization.id, provider_id=organization.provider_id, created_at=organization.created_at
         )
+
+
+class NewBranch(_Shape):
+    """A branch to open."""
+
+    code: str = Field(
+        min_length=1, max_length=10, description="1 to 10 upper-case letters and digits.", examples=["SUC1"]
+    )
+    name: str = Field(min_length=1, max_length=200)
+
+
+class BranchView(_Shape):
+    """A branch of a company."""
+
+    id: UUID
+    company_id: UUID
+    code: str
+    name: str
+    created_at: datetime
+
+    @classmethod
+    def of(cls, branch: Branch) -> Self:
+        """The view of ``branch``."""
+        return cls(
+            id=branch.id,
+            company_id=branch.tenant.company,
+            code=branch.code,
+            name=branch.name,
+            created_at=branch.created_at,
+        )
+
+
+class BranchPage(_Shape):
+    """Branches in id order, and the cursor of the next page."""
+
+    items: list[BranchView]
+    next_cursor: str | None
+
+
+class NewEmissionPoint(_Shape):
+    """An emission point to open."""
+
+    code: str = Field(
+        min_length=1, max_length=10, description="1 to 10 upper-case letters and digits.", examples=["001"]
+    )
+    name: str = Field(min_length=1, max_length=200)
+
+
+class EmissionPointView(_Shape):
+    """An emission point of a branch."""
+
+    id: UUID
+    company_id: UUID
+    branch_id: UUID
+    code: str
+    name: str
+    created_at: datetime
+
+    @classmethod
+    def of(cls, point: EmissionPoint) -> Self:
+        """The view of ``point``."""
+        return cls(
+            id=point.id,
+            company_id=point.tenant.company,
+            branch_id=point.branch,
+            code=point.code,
+            name=point.name,
+            created_at=point.created_at,
+        )
+
+
+class EmissionPointPage(_Shape):
+    """Emission points in id order, and the cursor of the next page."""
+
+    items: list[EmissionPointView]
+    next_cursor: str | None
+
+
+class RoleAssignment(_Shape):
+    """The role to hold in a company."""
+
+    role: Role
+
+
+class MembershipView(_Shape):
+    """A principal's role in a company: an active membership, whose last change is the grant of its role."""
+
+    id: UUID
+    company_id: UUID
+    subject: str = Field(description="The identity provider's id of the user or machine.")
+    role: Role
+    version: int = Field(description="One more with every change; a role granted again continues it.")
+    granted_at: datetime
+    granted_by: str
+
+    @classmethod
+    def of(cls, membership: Membership) -> Self:
+        """The view of ``membership``, which is active."""
+        return cls(
+            id=membership.id,
+            company_id=membership.tenant.company,
+            subject=membership.subject,
+            role=membership.role,
+            version=membership.version,
+            granted_at=membership.changed_at,
+            granted_by=membership.changed_by,
+        )
+
+
+class MembershipPage(_Shape):
+    """Memberships in id order, and the cursor of the next page."""
+
+    items: list[MembershipView]
+    next_cursor: str | None
