@@ -89,8 +89,6 @@ RECEIPT_TOLERANCE: Final = timedelta(minutes=2)
 """How long before the moment of signing DGII's reception time of our document may read (clocks differ)."""
 SEND_BUDGET: Final = 300.0
 """Seconds one ``send`` may take in all: the schedule (108 s), the settle delay and the calls' own limits."""
-_NOT_SENT: Final = frozenset({Failure.UNREACHABLE, Failure.THROTTLED, Failure.TIMED_OUT, Failure.NOT_OPEN})
-"""A submission's failures that mean it never left (the client's ``timed_out`` there is before sending)."""
 
 type Clock = Callable[[], datetime]
 type Sleep = Callable[[float], Awaitable[None]]
@@ -352,14 +350,15 @@ class Emitter:
         return signed
 
     async def _submitted[R](self, submit: Awaitable[R], progress: _Progress) -> R:
-        """``submit``'s answer, ``progress.sent`` saying whether the document left (see ``Unknown.sent``)."""
+        """``submit``'s answer, ``progress.sent`` saying whether the document left (see ``Unknown.sent``).
+
+        The ``Authority``'s definition (the DGII client's module): an answer means DGII answered about it;
+        ``OutcomeUnknownError`` that it may be at DGII; any other error that it certainly never left.
+        """
         progress.sent = None
         try:
             answer = await submit
         except OutcomeUnknownError:
-            raise
-        except AuthorityUnavailableError as error:
-            progress.sent = error.failure not in _NOT_SENT
             raise
         except EcfError:
             progress.sent = False

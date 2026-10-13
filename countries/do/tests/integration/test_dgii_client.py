@@ -329,10 +329,8 @@ class Undocumented:
             "submit",
             "unreadable",
         ),
-        Undocumented(GOOD_TOKEN, 404, b"", "submit", "undocumented"),
-        Undocumented(GOOD_TOKEN, 302, b"", "submit", "undocumented"),
-        Undocumented(GOOD_TOKEN, 400, b"not json", "submit", "unreadable"),
-        Undocumented(GOOD_TOKEN, 404, b"", "rfce", "undocumented"),
+        Undocumented(GOOD_TOKEN, 401, b"", "submit", "undocumented"),
+        Undocumented(GOOD_TOKEN, 401, b"", "rfce", "undocumented"),
         Undocumented(GOOD_TOKEN, 429, b"", "submit", "throttled"),
         Undocumented(GOOD_TOKEN, 429, b"", "rfce", "throttled"),
         Undocumented(GOOD_TOKEN, 404, b"", "result", "undocumented"),
@@ -353,10 +351,8 @@ class Undocumented:
         "token-not-json",
         "token-expiry",
         "token-not-a-header-value",
-        "submit-404",
-        "submit-redirect-not-followed",
-        "refusal-unreadable",
-        "rfce-404",
+        "submit-401",
+        "rfce-401",
         "submit-429",
         "rfce-429",
         "result-404",
@@ -415,8 +411,22 @@ class MayHaveTaken:
         MayHaveTaken(500, b"", "submit", "server_error"),
         MayHaveTaken(200, b"not json", "rfce", "unreadable"),
         MayHaveTaken(502, b"", "rfce", "server_error"),
+        MayHaveTaken(404, b"", "submit", "undocumented"),
+        MayHaveTaken(302, b"", "submit", "undocumented"),
+        MayHaveTaken(404, b"", "rfce", "undocumented"),
     ],
-    ids=["not-json", "too-large", "no-track-id", "empty-track-id", "500", "rfce-not-json", "rfce-502"],
+    ids=[
+        "not-json",
+        "too-large",
+        "no-track-id",
+        "empty-track-id",
+        "500",
+        "rfce-not-json",
+        "rfce-502",
+        "submit-404",
+        "submit-redirect-not-followed",
+        "rfce-404",
+    ],
 )
 async def test_a_submission_dgii_may_have_taken_has_an_unknown_outcome(
     signer: KeyPairSigner, clock: ManualClock, sleeps: list[float], case: MayHaveTaken
@@ -927,3 +937,13 @@ async def test_a_client_is_ready_only_when_every_host_the_environment_uses_may_s
 def test_a_client_s_longest_attempt_at_sending_is_its_per_attempt_limit(signer: KeyPairSigner) -> None:
     assert DgiiClient(signer).attempt_limit() == DEFAULT_TIMEOUTS.total
     assert DgiiClient(signer, timeouts=DgiiTimeouts(total=42.0)).attempt_limit() == 42.0
+
+
+@pytest.mark.parametrize("service", ["submit", "rfce"])
+async def test_a_refusal_at_the_door_that_does_not_read_is_still_a_refusal(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float], service: str
+) -> None:
+    transport = scripted_dgii(GOOD_TOKEN, 400, b"not json")
+    async with client_over(transport, signer, clock, sleeps).opened() as dgii:
+        refused = await call(dgii, service)
+    assert refused == Refused((DgiiMessage("400", ""),))

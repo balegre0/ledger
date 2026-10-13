@@ -241,22 +241,14 @@ async def test_an_unknown_outcome_dgii_does_not_resolve_is_parked_never_resent(
     assert emitted.signed.signed_ecf.startswith(b"<?xml")
 
 
-@pytest.mark.parametrize(
-    ("failure", "sent"),
-    [
-        (Failure.UNREACHABLE, False),
-        (Failure.THROTTLED, False),
-        (Failure.TIMED_OUT, False),
-        (Failure.NOT_OPEN, False),
-        (Failure.UNDOCUMENTED, True),
-    ],
-)
-async def test_a_submission_dgii_did_not_take_is_parked_saying_whether_it_left(
-    signer: KeyPairSigner, failure: Failure, *, sent: bool
+@pytest.mark.parametrize("failure", list(Failure))
+async def test_a_submission_dgii_certainly_did_not_take_is_parked_as_never_sent(
+    signer: KeyPairSigner, failure: Failure
 ) -> None:
+    # ``Authority.submit_ecf``: ``AuthorityUnavailableError`` only when DGII certainly did not take it.
     authority = ScriptedAuthority(submissions=[AuthorityUnavailableError(failure, "reception")])
     emitted = await emitter(authority, signer).emit(credit_invoice())
-    assert (emitted.unknown, authority.events) == (Unknown(UNAVAILABLE, failure, sent=sent), ["submit_ecf"])
+    assert (emitted.unknown, authority.events) == (Unknown(UNAVAILABLE, failure, sent=False), ["submit_ecf"])
 
 
 async def test_a_configuration_refused_at_submission_is_parked_as_never_sent(signer: KeyPairSigner) -> None:

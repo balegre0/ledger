@@ -11,11 +11,16 @@ Queries are ``GET``; what carries a document (the signed seed, an e-CF, an RFCE)
   error, and forgotten when the client closes.
 * **Retries.** What cannot change DGII's state (authentication, results, track ids, the directory) is retried
   twice, 0.2 s and 0.5 s apart, after no connection, a broken one or a 5xx. A document sent is never retried.
-* **Submissions DGII may have taken.** When the connection breaks or the time runs out after a document's
-  request may have left, DGII answers a 5xx, or a success that does not read (unreadable, too large, no track
-  id), ``OutcomeUnknownError``: the caller asks DGII (track ids) before sending it again. A 400 is DGII's
-  refusal (``Refused``); a 429, no connection, or an answer DGII does not document means it was not taken
-  (``AuthorityUnavailableError``).
+* **Submissions: one definition of "sent".** A submission ends in exactly one of three ways:
+
+  - *DGII answered about it*: a 2xx that reads (``Received``, or the RFCE's ``Answer``), or a 400, DGII's
+    refusal at the door (``Refused``; its message empty when the body does not read).
+  - *DGII certainly did not take it* (``AuthorityUnavailableError``): no token could be had, no connection,
+    a 429, a 401 even with a renewed token, or too little time left to send it at all.
+  - *It may be at DGII* (``OutcomeUnknownError``): the connection broke or the time ran out after the
+    request may have left, a 5xx, a 2xx that does not read (unreadable, too large, no track id), or any
+    other status DGII does not document (a 404, a redirect). The caller asks DGII (track ids) before
+    anything else, and never resends blindly.
 * **Failures.** ``AuthorityUnavailableError``, its ``failure`` one of ``ports.Failure``.
 * **Time.** Every attempt has a connect timeout and a total one; every call (token, retries and waits
   included) has an overall deadline, a minute by default (``DgiiTimeouts.call``), after which it fails
@@ -456,10 +461,15 @@ class DgiiClient(Authority):
         build = self._send(environment, service, f"{issuer_rnc}{encf}.xml", signed)
         response = await self._authenticated(environment, service, build, idempotent=False)
         if response.status_code == _BAD_REQUEST:
-            refusal = read_answer(_RECEPTION, response, service)
+            try:
+                refusal = read_answer(_RECEPTION, response, service)
+            except AuthorityUnavailableError:
+                return Refused((DgiiMessage(str(_BAD_REQUEST), ""),))
             return Refused((DgiiMessage(refusal.error or str(_BAD_REQUEST), refusal.message or ""),))
-        if not response.is_success:
+        if response.status_code == _UNAUTHORIZED:
             raise AuthorityUnavailableError(Failure.UNDOCUMENTED, service.value)
+        if not response.is_success:
+            raise OutcomeUnknownError(service.value, Failure.UNDOCUMENTED)
         return response
 
     @override

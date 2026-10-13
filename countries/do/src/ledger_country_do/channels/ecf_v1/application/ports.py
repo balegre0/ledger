@@ -158,7 +158,11 @@ class Authority(Protocol, metaclass=ABCMeta):
     async def submit_ecf(
         self, environment: Environment, issuer_rnc: str, encf: Encf, signed: bytes
     ) -> Reception:
-        """Send a signed e-CF to reception; never retried (``OutcomeUnknownError``: DGII may have it)."""
+        """Send a signed e-CF to reception, once, never retried.
+
+        An answer: DGII answered about it (``Received``, or ``Refused`` at the door). ``OutcomeUnknownError``:
+        it may be at DGII. ``AuthorityUnavailableError`` (or any other error): DGII certainly did not take it.
+        """
 
     @abstractmethod
     async def submit_rfce(
