@@ -37,6 +37,7 @@ SUBJECT: Final = uuid.uuid7()
 SCHEMAS: Final = ("platform", "probe", "other")
 RENAMES: Final = {"other.renames": frozenset({"probe.thing.renamed"})}
 ECHO: Final = {"probe.echo": frozenset({"probe.thing.renamed"})}
+CREATED_ECHO: Final = {"probe.echo": frozenset({"probe.thing.created"})}
 PUBLISHED: Final = """
     SELECT id, type, version, source, organization_id, company_id, mode, subject, aggregate_version,
            occurred_at, traceparent, payload
@@ -131,6 +132,11 @@ class Bench:
             for name in names:
                 uow.publish(renamed(name))
 
+    async def publish_created(self, count: int) -> None:
+        async with self.probe.unit(TENANT) as uow:
+            for _ in range(count):
+                uow.publish(Created(scope=TENANT, subject=SUBJECT, aggregate_version=1))
+
     async def rows(self, query: LiteralString | sql.Composed) -> list[tuple[object, ...]]:
         cursor = await self.superuser.execute(query)
         return _ROWS.validate_python([tuple(row) for row in await cursor.fetchall()])
@@ -152,6 +158,10 @@ class Bench:
 
 def renamed(name: str = "x") -> Renamed:
     return Renamed(scope=TENANT, subject=SUBJECT, aggregate_version=1, name=name)
+
+
+def skipped(registry: CollectorRegistry, schema: str = "probe") -> float | None:
+    return registry.get_sample_value("ledger_outbox_skipped", {"schema": schema})
 
 
 def unrouted(registry: CollectorRegistry, schema: str) -> float | None:
@@ -435,11 +445,9 @@ async def test_rows_for_a_broken_inbox_never_hold_back_the_rows_behind_them(benc
     Row by row, the pass goes on past the rows it skipped until a batch's worth went through, and no further.
     """
     bench.subscribe("other", RENAMES)
-    bench.subscribe("probe", {"probe.echo": frozenset({"probe.thing.created"})})
+    bench.subscribe("probe", CREATED_ECHO)
     await bench.publish(2)
-    async with bench.probe.unit(TENANT) as uow:
-        for _ in range(3):
-            uow.publish(Created(scope=TENANT, subject=SUBJECT, aggregate_version=1))
+    await bench.publish_created(3)
     await bench.superuser.execute("REVOKE INSERT ON other.inbox FROM ledger_relay")
     paged = Dispatcher(bench.probe.database, schemas=SCHEMAS, signals=bench.signals, batch=2)
     try:
@@ -460,3 +468,52 @@ async def test_rows_for_a_broken_inbox_never_hold_back_the_rows_behind_them(benc
 def test_a_dispatcher_over_no_schema_is_refused(pool: Database) -> None:
     with pytest.raises(NoSchemasError, match="no schema"):
         Dispatcher(pool, schemas=(), signals=RecordedSignals())
+
+
+@pytest.fixture
+async def broken_backlog(bench: Bench) -> AsyncGenerator[None]:
+    """25 events for an inbox the relay may not write, then one for a healthy inbox."""
+    bench.subscribe("other", RENAMES)
+    bench.subscribe("probe", CREATED_ECHO)
+    await bench.publish(25)
+    await bench.publish_created(1)
+    await bench.superuser.execute("REVOKE INSERT ON other.inbox FROM ledger_relay")
+    try:
+        yield
+    finally:
+        await bench.superuser.execute("GRANT INSERT ON other.inbox TO ledger_relay")
+
+
+async def test_a_pass_scans_ten_batches_at_most_and_the_next_resumes_after_them(
+    bench: Bench, registry: CollectorRegistry, broken_backlog: None
+) -> None:
+    """Batch 2: a pass looks at 20 rows at most; the next one resumes after the rows it skipped."""
+    del broken_backlog
+    paged = Dispatcher(
+        bench.probe.database, schemas=SCHEMAS, signals=bench.signals, batch=2, registry=registry
+    )
+    assert skipped(registry) == 0
+    assert await paged.run_once() == 0  # 20 rows looked at, every one skipped: probe's pass fails
+    assert skipped(registry) == 20
+    assert await paged.run_once() == 1  # resumed after them: 5 more skipped, then the healthy row went
+    assert skipped(registry) == 5
+    assert await bench.rows("SELECT consumer FROM probe.inbox") == [("probe.echo",)]
+    assert await paged.run_once() == 0  # resumed after it: nothing skipped, so the next scan starts over
+    assert skipped(registry) == 0
+    assert await paged.run_once() == 0
+    assert skipped(registry) == 20
+    assert await bench.rows("SELECT DISTINCT attempts FROM probe.outbox") == [(0,)]
+
+
+async def test_a_new_routing_version_starts_the_scan_over(
+    bench: Bench, registry: CollectorRegistry, broken_backlog: None
+) -> None:
+    del broken_backlog
+    paged = Dispatcher(
+        bench.probe.database, schemas=SCHEMAS, signals=bench.signals, batch=2, registry=registry
+    )
+    assert await paged.run_once() == 0
+    bench.subscribe("other", {**RENAMES, "other.audits": frozenset({"probe.thing.archived"})})
+    assert await paged.run_once() == 0  # from the oldest row again: the healthy row is out of reach this pass
+    assert skipped(registry) == 20
+    assert await bench.count("probe", "inbox") == 0

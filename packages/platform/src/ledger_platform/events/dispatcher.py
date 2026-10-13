@@ -9,11 +9,16 @@ a schema's events reach the inboxes in the order of their ids.
 
 A pass whose batch fails is done again one row at a time, each in a savepoint of the pass (which keeps the
 schema's lock), paging on past the rows that fail until a batch's worth went: the good rows go, even behind a
-batch's worth of rows a broken target refuses. A row that still fails is blamed (its ``attempts`` counted,
-``outbox.fan_out_failed``, ``ledger_outbox_failed_total``) only when the error is its own: it could not be
-read, broke a constraint, or a trigger refused it. Any other error (a revoked grant on one target inbox, a
-lost connection) is no row's fault: such a row is skipped uncounted, whatever the rows beside it did, and when
-every row of the pass failed that way the pass is rolled back and fails. A failed pass is logged
+batch's worth of rows a broken target refuses. Such a pass looks at ``SCAN_BATCHES`` batches' worth of rows at
+most, and a pass that skipped rows through no fault of theirs leaves a mark in memory: the schema's next
+row-by-row pass resumes after the last row it looked at, so a broken target's backlog costs each pass a
+bounded scan, never the whole backlog again. The mark is dropped by the first pass that skips none (the one
+after it starts over from the oldest row) and by every new routing version. ``ledger_outbox_skipped{schema}``
+is how many rows the schema's last pass skipped so. A row that still fails is blamed (its ``attempts``
+counted, ``outbox.fan_out_failed``, ``ledger_outbox_failed_total``) only when the error is its own: it could
+not be read, broke a constraint, or a trigger refused it. Any other error (a revoked grant on one target
+inbox, a lost connection) is no row's fault: such a row is skipped uncounted, whatever the rows beside it did,
+and when every row of the pass failed that way the pass is rolled back and fails. A failed pass is logged
 (``outbox.pass_failed``, with the error's type) and counted (``ledger_outbox_pass_failed_total{schema}``), and
 the other schemas still go; only when every schema's pass failed is the error raised, for the supervisor to
 back off. At ``MAX_FAN_OUT_ATTEMPTS`` a row is set aside, kept and alerted, until an operator resets its
@@ -50,7 +55,7 @@ lazy from sqlalchemy.ext.asyncio import AsyncConnection
 from ledger_kernel.errors import LedgerError, error_type
 from ledger_platform.data.notifier import INBOX, OUTBOX
 from ledger_platform.data.tables import chassis_tables
-from ledger_platform.events.metrics import counter
+from ledger_platform.events.metrics import counter, gauge
 from ledger_platform.events.routing import load_routing, routing_version
 from ledger_platform.runtime.supervision import being_cancelled
 lazy from ledger_platform.data.codec import JsonValue
@@ -79,6 +84,8 @@ POLL: Final = 1.0
 """Seconds between passes when no NOTIFY arrives (§3.5's safety net)."""
 MAX_FAN_OUT_ATTEMPTS: Final = 10
 """Failed fan-outs after which a row is set aside (kept, alerted) until an operator resets its attempts."""
+SCAN_BATCHES: Final = 10
+"""Batches' worth of rows a row-by-row pass looks at, at most."""
 ROWS_PER_INSERT: Final = 65_535 // (len(_COPIED) + 2)
 """Inbox rows per ``INSERT``: each binds its consumer, its event id and the envelope."""
 _FAILURES: Final = (SQLAlchemyError, ValidationError)
@@ -200,9 +207,11 @@ class Dispatcher:
         "_database",
         "_failed",
         "_passes_failed",
+        "_resume",
         "_routing",
         "_schemas",
         "_signals",
+        "_skipped",
         "_unrouted",
     )
 
@@ -222,6 +231,14 @@ class Dispatcher:
         self._signals = signals
         self._batch = batch
         self._routing: Routing | None = None
+        self._resume: dict[str, UUID] = {}
+        """Per schema, the row after which the next row-by-row pass resumes (see the module)."""
+        self._skipped = gauge(
+            registry,
+            "ledger_outbox_skipped",
+            "Rows the schema's last pass skipped through no fault of theirs (a broken target).",
+            ["schema"],
+        )
         self._unrouted = counter(
             registry, "ledger_outbox_unrouted", "Events marked unrouted: no consumer subscribed.", ["schema"]
         )
@@ -236,6 +253,7 @@ class Dispatcher:
             self._unrouted.labels(schema=schema)
             self._failed.labels(schema=schema)
             self._passes_failed.labels(schema=schema)
+            self._skipped.labels(schema=schema).set(0)
 
     async def _current(self) -> Routing:
         """The routing table, reloaded when its version moved; a load makes newly routed rows due again."""
@@ -248,6 +266,7 @@ class Dispatcher:
             if fresh.routes:
                 await self._reroute(connection, tuple(fresh.routes))
         self._routing = fresh  # only once committed: a failed reroute is tried again at the next pass
+        self._resume.clear()  # the routes changed: a target that was skipped may be one no longer
         return fresh
 
     async def _reroute(self, connection: AsyncConnection, types: tuple[str, ...]) -> None:
@@ -337,13 +356,18 @@ class Dispatcher:
                     )
             except _FAILURES as error:
                 reraise_when_stopping(error)
-                moved = await self._one_by_one(connection, outbox, routing, failures)
+                moved = await self._one_by_one(connection, schema, routing, failures)
+            else:
+                self._resume.pop(schema, None)
+                self._skipped.labels(schema=schema).set(0)
         self._committed(schema, moved, failures)
         return moved.taken
 
-    async def _due_ids(self, connection: AsyncConnection, outbox: AnyTable) -> AsyncGenerator[UUID]:
-        """The due rows' ids, oldest first, a batch's worth per query, until there are none left."""
-        after: ColumnElement[bool] = outbox.c.id.is_not(None)
+    async def _due_ids(
+        self, connection: AsyncConnection, outbox: AnyTable, start: UUID | None
+    ) -> AsyncGenerator[UUID]:
+        """The due rows' ids after ``start`` (all, without it), oldest first, a batch's worth per query."""
+        after: ColumnElement[bool] = outbox.c.id.is_not(None) if start is None else outbox.c.id > start
         while True:
             page = select(outbox.c.id).where(*_due(outbox), after).order_by(outbox.c.id).limit(self._batch)
             ids = _IDS.validate_python((await connection.execute(page)).scalars().all())
@@ -354,31 +378,41 @@ class Dispatcher:
             after = outbox.c.id > ids[-1]
 
     async def _one_by_one(
-        self, connection: AsyncConnection, outbox: AnyTable, routing: Routing, failures: list[_Failure]
+        self, connection: AsyncConnection, schema: str, routing: Routing, failures: list[_Failure]
     ) -> _Moved:
         """Each due row in a savepoint of its own, past the rows that fail, until a batch's worth went.
 
         Paging on past the skipped rows keeps a batch of rows for a broken target (an inbox that refuses the
-        relay) from holding back the rows of healthy targets behind it.
+        relay) from holding back the rows of healthy targets behind it; the scan is bounded, and resumes where
+        the last one that skipped rows stopped (see the module).
         """
-        taken = routed = unrouted = 0
+        outbox = chassis_tables(schema).outbox
+        limit = SCAN_BATCHES * self._batch
+        taken = routed = unrouted = scanned = skipped = 0
         failed: list[tuple[UUID, Exception]] = []
-        async with aclosing(self._due_ids(connection, outbox)) as due:
+        async with aclosing(self._due_ids(connection, outbox, self._resume.get(schema))) as due:
             async for event_id in due:
+                scanned += 1
                 try:
                     async with connection.begin_nested():
                         moved = await self._deliver(connection, outbox, routing, outbox.c.id == event_id, 1)
                 except _FAILURES as error:
                     reraise_when_stopping(error)
                     failed.append((event_id, error))
-                    continue
-                taken, routed, unrouted = (
-                    taken + moved.taken,
-                    routed + moved.routed,
-                    unrouted + moved.unrouted,
-                )
-                if taken >= self._batch:
+                    skipped += not _row_specific(error)
+                else:
+                    taken, routed, unrouted = (
+                        taken + moved.taken,
+                        routed + moved.routed,
+                        unrouted + moved.unrouted,
+                    )
+                if skipped:
+                    self._resume[schema] = event_id
+                if taken >= self._batch or scanned >= limit:
                     break
+        if not skipped:
+            self._resume.pop(schema, None)
+        self._skipped.labels(schema=schema).set(skipped)
         systemic = [cause for _, cause in failed if not _row_specific(cause)]
         if systemic and len(systemic) == len(failed) and not taken:  # nothing went, through no row's fault
             raise systemic[0]
