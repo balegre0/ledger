@@ -80,6 +80,8 @@ MEMBER: Final = Principal(
     subject=SubjectId("3001"), organization=FOUNDER.organization, provider_organization="1001"
 )
 RNC: Final = TaxId.parse("101850043")
+THEIRS: Final = TaxId.parse("401500022")
+"""The tax id of the other organization's company: one taxpayer is one active company."""
 ROW_LEVEL_SECURITY_OFF: Final = tuple(
     text(statement)
     for statement in (
@@ -194,9 +196,50 @@ async def test_a_unit_that_fails_keeps_and_announces_nothing(database: Database,
     assert (companies, await published(database)) == (0, [])
 
 
-async def test_a_tax_id_is_unique_within_an_organization_only(database: Database, outbox: Outbox) -> None:
+async def test_a_tax_id_is_one_active_company_s_in_every_organization(
+    database: Database, outbox: Outbox
+) -> None:
+    """One RNC is one taxpayer: another organization cannot register it, though it sees none of the first's
+    rows (the unique index enforces it whatever the policies show)."""
     await create(database, outbox)
-    await create(database, outbox, founder=STRANGER)
+    with pytest.raises(TaxIdTakenError):
+        await create(database, outbox)
+    with pytest.raises(TaxIdTakenError):
+        await create(database, outbox, founder=STRANGER)
+    async with database.transaction(STRANGER.organization) as unit:
+        assert (
+            await unit.connection.execute(select(func.count()).select_from(CompanyRecord))
+        ).scalar_one() == 0
+
+
+async def test_two_organizations_registering_one_taxpayer_at_once_get_one_company(
+    database: Database, outbox: Outbox
+) -> None:
+    outcomes = await asyncio.gather(
+        create(database, outbox), create(database, outbox, founder=STRANGER), return_exceptions=True
+    )
+    assert sorted(type(outcome).__name__ for outcome in outcomes) == ["Company", "TaxIdTakenError"]
+
+
+async def deactivate(database: Database, outbox: Outbox, company: Company) -> None:
+    tenant = Tenant(company.organization, company.id)
+    await in_unit(
+        database,
+        outbox,
+        tenant,
+        lambda unit: commands.deactivate_company(unit, company.id, admits=lambda _: True, actor=OWNER),
+    )
+
+
+async def test_a_deactivated_company_frees_its_tax_id_for_any_organization(
+    database: Database, outbox: Outbox
+) -> None:
+    first = await create(database, outbox)
+    await deactivate(database, outbox, first)
+    again = await create(database, outbox)  # the same organization registers the taxpayer again
+    await deactivate(database, outbox, again)
+    theirs = await create(database, outbox, founder=STRANGER)  # or another one does
+    assert len({first.id, again.id, theirs.id}) == 3
     with pytest.raises(TaxIdTakenError):
         await create(database, outbox)
 
@@ -253,7 +296,7 @@ async def test_a_principal_pages_through_the_companies_it_holds_a_role_in(
 ) -> None:
     for rnc in ("101850043", "130000012", "401007551"):
         await create(database, outbox, tax_id=TaxId.parse(rnc))
-    await create(database, outbox, founder=STRANGER)
+    await create(database, outbox, founder=STRANGER, tax_id=THEIRS)
     first = await in_unit(
         database,
         outbox,
@@ -383,7 +426,7 @@ async def test_a_row_cannot_point_at_a_company_or_a_branch_of_another_tenant(
 ) -> None:
     mine = await create(database, outbox)
     sister = await create(database, outbox, tax_id=TaxId.parse("130000012"))
-    theirs = await create(database, outbox, founder=STRANGER)
+    theirs = await create(database, outbox, founder=STRANGER, tax_id=THEIRS)
     branch = await in_unit(
         database,
         outbox,

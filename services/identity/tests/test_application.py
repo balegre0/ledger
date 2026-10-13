@@ -76,6 +76,8 @@ ADMIN: Final = SubjectId("2002")
 VIEWER: Final = SubjectId("3001")
 RNC: Final = TaxId.parse("101850043")
 CEDULA: Final = TaxId.parse("00113918205")
+THEIRS: Final = TaxId.parse("401500022")
+"""The tax id of the other organization's company: one taxpayer is one active company."""
 
 
 def anything(version: int) -> bool:
@@ -149,9 +151,7 @@ class MemoryCompanies(Companies):
     @override
     async def add(self, company: Company) -> bool:
         kept = self._state.companies.values()
-        if any(
-            other.organization == company.organization and other.tax_id == company.tax_id for other in kept
-        ):
+        if any(other.status is CompanyStatus.ACTIVE and other.tax_id == company.tax_id for other in kept):
             return False
         self._state.companies[company.id] = company
         return True
@@ -355,10 +355,18 @@ async def test_a_tax_id_the_organization_has_is_taken(state: State) -> None:
     assert len(state.events) == 2
 
 
-async def test_another_organization_may_register_the_same_tax_id(state: State) -> None:
+async def test_no_organization_may_register_a_tax_id_an_active_company_holds(state: State) -> None:
     await created(state)
+    with pytest.raises(TaxIdTakenError):
+        await created(state, founder=STRANGER)
+    assert len(state.companies) == 1
+
+
+async def test_a_deactivated_company_s_tax_id_may_be_registered_again(state: State) -> None:
+    company = await created(state)
+    await commands.deactivate_company(state.unit(LATER), company.id, admits=anything, actor=OWNER)
     other = await created(state, founder=STRANGER)
-    assert other.organization == STRANGER.organization
+    assert (other.organization, other.tax_id) == (STRANGER.organization, company.tax_id)
 
 
 async def test_a_rename_is_a_new_version_announced(state: State) -> None:
@@ -772,7 +780,7 @@ async def test_the_organization_is_known_once_it_has_a_company(state: State) -> 
 
 async def test_a_principal_lists_the_companies_it_holds_a_role_in_page_by_page(state: State) -> None:
     mine = [await created(state, TaxId.parse(rnc)) for rnc in ("101850043", "130000012", "401007551")]
-    theirs = await created(state, founder=STRANGER)
+    theirs = await created(state, THEIRS, founder=STRANGER)
     first = await queries.companies_of(state.unit(), OWNER, PageRequest(size=2))
     assert first.items == tuple(sorted(mine, key=lambda company: company.id)[:2])
     assert first.next_cursor is not None

@@ -507,7 +507,7 @@ SOME_ID: Final = new_id()
             TaxIdTakenError(),
             ErrorKind.CONFLICT,
             "tax_id_taken",
-            "the organization already has a company with this tax id",
+            "an active company already holds this tax id",
         ),
         (
             BranchCodeTakenError(),

@@ -26,6 +26,7 @@ from ledger_platform.schema import CHASSIS_METADATA, CHASSIS_POLICIES
 from ledger_testing.migrations import (
     check_constraints,
     combined,
+    indexes_of,
     pending_changes,
     policies,
     primary_keys,
@@ -145,6 +146,33 @@ def test_every_primary_key_is_the_models_column_for_column(database_url: str) ->
     }
 
 
+def test_one_active_company_holds_a_tax_id_in_every_organization(database_url: str) -> None:
+    """Alembic does not compare an index's predicate: the partial unique index is read back here."""
+    assert indexes_of(database_url, "companies") == {
+        "companies_pkey": "CREATE UNIQUE INDEX companies_pkey ON public.companies USING btree (id)",
+        "uq_companies_organization": (
+            "CREATE UNIQUE INDEX uq_companies_organization ON public.companies "
+            "USING btree (organization_id, id)"
+        ),
+        "ux_companies_active_tax_id": (
+            "CREATE UNIQUE INDEX ux_companies_active_tax_id ON public.companies USING btree (tax_id) "
+            "WHERE ((status)::text = 'active'::text)"
+        ),
+    }
+
+
+def test_revision_0002_goes_back_to_one_tax_id_per_organization(fresh_database_url: str) -> None:
+    MIGRATIONS.upgrade(fresh_database_url)
+    MIGRATIONS.downgrade(fresh_database_url, "0001")
+    assert set(indexes_of(fresh_database_url, "companies")) == {
+        "companies_pkey",
+        "uq_companies_organization",
+        "uq_companies_tax_id",
+    }
+    MIGRATIONS.upgrade(fresh_database_url)
+    assert pending_changes(fresh_database_url, MODELS) is None
+
+
 def test_two_migrations_started_at_once_both_succeed(fresh_database_url: str) -> None:
     """Two replicas that migrate as they start: one waits for the other's lock, then finds nothing to do."""
     started = [
@@ -161,7 +189,7 @@ def test_two_migrations_started_at_once_both_succeed(fresh_database_url: str) ->
 async def test_the_readiness_check_passes_on_a_database_at_this_version_only(
     database: Database, fresh_database_url: str
 ) -> None:
-    assert MIGRATIONS.head() == "0001"
+    assert MIGRATIONS.head() == "0002"
     await MIGRATIONS.readiness()(database)
     MIGRATIONS.upgrade(fresh_database_url)
     MIGRATIONS.downgrade(fresh_database_url)  # alembic_version is left, empty

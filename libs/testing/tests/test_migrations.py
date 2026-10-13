@@ -5,6 +5,7 @@ from ledger_kernel.ids import new_id
 from ledger_testing.migrations import (
     check_constraints,
     combined,
+    indexes_of,
     pending_changes,
     policies,
     primary_keys,
@@ -52,6 +53,9 @@ def test_a_schema_built_from_the_models_is_read_back_as_them(server: Postgres) -
     assert pending_changes(url, both) is None
     assert check_constraints(url) == {"ck_notes_size": "CHECK ((size > 0))"}
     assert primary_keys(url) == {"notes": ["id"], "tags": ["note_id", "tag"]}
+    assert indexes_of(url, "tags") == {
+        "tags_pkey": "CREATE UNIQUE INDEX tags_pkey ON public.tags USING btree (note_id, tag)"
+    }
     assert policies(url) == [("notes", "mine")]
     assert row_security(url) == {"notes": (True, True), "tags": (False, False)}
 

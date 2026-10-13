@@ -269,7 +269,8 @@ invoicing and webhooks consume the result; the client gets a webhook and can rea
 
 ```
 other emitter ─► fiscal-receiver /fe/recepcion/api/ecf (with token from our semilla flow)
-fiscal-receiver: verify the emitter's signature and that the buyer RNC is a company we serve;
+fiscal-receiver: verify the emitter's signature and that the buyer RNC is a company we serve
+                 (one RNC is one active company across every organization, so the route is unambiguous);
                  store raw XML; publish fiscal.received.document; answer the ARECF (signed by vault)
 fiscal-do: index the received document; publish for webhooks
 client: approves or rejects commercially through the API ─► fiscal-do sends ACECF to the emitter
@@ -389,6 +390,9 @@ company can certify while another runs in production.
   or client credentials for API clients.
 - Organization in Zitadel = organization in `ledger`. Companies are ours (`identity` service), and
   roles are granted per company: `owner`, `admin`, `accountant`, `issuer`, `viewer`.
+  A tax id (RNC or cédula) is one taxpayer: at most one active company holds it, in every organization (a
+  unique index over the active companies, which row-level security does not hide). Registering a held one is
+  409 `tax_id_taken` whichever organization holds it, telling nothing more; a deactivated company frees it.
   Registering a company is the one act decided at the organization's level, before the company has members:
   it needs the Zitadel project role `ledger.organization.admin` in the token (403 `forbidden` otherwise), and
   its caller becomes the company's first owner. Every other act on a company is decided by the actor's role in

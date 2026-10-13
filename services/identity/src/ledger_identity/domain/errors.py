@@ -94,12 +94,15 @@ class MembershipNotFoundError(NotFoundError):
 
 
 class TaxIdTakenError(ConflictError):
-    """The organization already has a company with this tax id."""
+    """An active company, of this organization or another, holds the tax id: one taxpayer, one company.
+
+    The answer is the same wherever that company is: nothing about another organization is told.
+    """
 
     code: ClassVar[str] = "tax_id_taken"
 
     def __init__(self) -> None:
-        super().__init__("the organization already has a company with this tax id")
+        super().__init__("an active company already holds this tax id")
 
 
 class BranchCodeTakenError(ConflictError):

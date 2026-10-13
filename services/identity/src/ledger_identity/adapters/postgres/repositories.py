@@ -5,10 +5,11 @@ repositories of a company's rows (branches, emission points) are bound to the un
 it too. Row-level security enforces the unit's scope again. Tenancy is checked
 twice (§2): a statement that forgot its filter still sees nothing of another tenant, and a policy dropped by
 mistake still leaves every read and change inside the organization. An insert that could collide uses ``ON
-CONFLICT DO NOTHING`` against the constraint that would refuse it, and reads the outcome from ``RETURNING``:
-a taken tax id or code is an answer, not an exception to parse. A row of another organization handed to a
-repository to keep is refused before any statement (``ForeignTenantError``): a defect of the caller, which
-row-level security would refuse as well.
+CONFLICT DO NOTHING`` against the constraint or unique index that would refuse it, and reads the outcome from
+``RETURNING``: a taken tax id or code is an answer, not an exception to parse. The index decides even where
+row-level security hides the row that holds the value (an active company of another organization). A row of
+another organization handed to a repository to keep is refused before any statement (``ForeignTenantError``):
+a defect of the caller, which row-level security would refuse as well.
 """
 
 from typing import ClassVar, final, override
@@ -233,7 +234,11 @@ class PgCompanies(Companies):
                 created_at=company.created_at,
                 updated_at=company.updated_at,
             )
-            .on_conflict_do_nothing(constraint="uq_companies_tax_id")
+            # The index, not a lookup: another organization's company is a row this unit cannot see.
+            .on_conflict_do_nothing(
+                index_elements=[CompanyRecord.tax_id],
+                index_where=CompanyRecord.status == CompanyStatus.ACTIVE.value,
+            )
             .returning(CompanyRecord.id)
         )
         return added.first() is not None

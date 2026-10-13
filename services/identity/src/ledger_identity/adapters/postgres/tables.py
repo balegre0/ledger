@@ -23,6 +23,7 @@ from sqlalchemy import (
     MetaData,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql.schema import SchemaItem
@@ -35,6 +36,8 @@ from ledger_kernel.access import MAX_PROVIDER_ORGANIZATION_LENGTH, MAX_SUBJECT_L
 
 TAX_ID_LENGTH: Final = 11
 """A cédula's eleven digits; an RNC has nine."""
+ACTIVE_TAX_ID: Final = "ux_companies_active_tax_id"
+"""One active company per tax id, in every organization: an RNC or cédula is one taxpayer."""
 WORD_LENGTH: Final = 16
 """For a status or a role: a short word of a closed list, which a check constraint names."""
 
@@ -75,12 +78,17 @@ class OrganizationRecord(IdentityTable):
 
 
 class CompanyRecord(IdentityTable):
-    """A company of an organization, at its current version."""
+    """A company of an organization, at its current version; its tax id is no other active company's."""
 
     __tablename__: str = "companies"
     __table_args__: tuple[SchemaItem, ...] = (
-        UniqueConstraint("organization_id", "tax_id", name="uq_companies_tax_id"),
         UniqueConstraint("organization_id", "id", name="uq_companies_organization"),
+        Index(
+            ACTIVE_TAX_ID,
+            "tax_id",
+            unique=True,
+            postgresql_where=text(f"status = '{CompanyStatus.ACTIVE.value}'"),
+        ),
         _one_of("status", CompanyStatus, name="ck_companies_status"),
         _positive_version("companies"),
     )

@@ -156,7 +156,7 @@ async def test_a_key_belongs_to_its_caller(
     mine = await created(client, "/v1/companies", DUARTE, owner.posting("k-1"))
     theirs = await client.post(
         "/v1/companies",
-        json=DUARTE,
+        json=DUARTE | {"tax_id": "401500022"},
         headers=Caller(issuer, organization="1002", roles=(ORGANIZATION_ADMIN,)).posting("k-1"),
     )
     assert theirs.status_code == 201
@@ -206,9 +206,23 @@ async def test_a_tax_id_the_organization_has_is_a_conflict(
     assert (response.status_code, document(response)["code"]) == (409, "tax_id_taken")
 
 
-async def test_another_organization_registers_the_same_taxpayer_as_its_own(
-    client: httpx.AsyncClient, issuer: LocalIssuer, company: str
+async def test_a_taxpayer_another_organization_holds_is_the_same_conflict_telling_nothing_more(
+    client: httpx.AsyncClient, issuer: LocalIssuer, owner: Caller, company: str
 ) -> None:
+    """One RNC, one active company, wherever it is: the answer is the one the caller's organization gets."""
+    del company
+    ours = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("k-2"))
+    other = Caller(issuer, organization="1002", roles=(ORGANIZATION_ADMIN,))
+    theirs = await client.post("/v1/companies", json=DUARTE, headers=other.posting("k-1"))
+    assert (theirs.status_code, theirs.content) == (409, ours.content)
+    assert document(theirs)["code"] == "tax_id_taken"
+
+
+async def test_a_deactivated_company_s_taxpayer_may_be_registered_again(
+    client: httpx.AsyncClient, issuer: LocalIssuer, owner: Caller, company: str
+) -> None:
+    headers = owner.posting("k-off") | {"If-Match": "*"}
+    assert (await client.post(f"/v1/companies/{company}/deactivate", headers=headers)).status_code == 200
     other = Caller(issuer, organization="1002", roles=(ORGANIZATION_ADMIN,))
     theirs = await created(client, "/v1/companies", DUARTE, other.posting("k-1"))
     assert theirs != company

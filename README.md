@@ -411,6 +411,8 @@ The outbox gauges read the table, so every replica exports the same values: aggr
 - Registering a company needs the identity provider's project role `ledger.organization.admin` (an administrator
   of the organization; 403 `forbidden` without it), and makes the caller its owner. The local Zitadel's bootstrap
   grants it to `ledger-dev`.
+- One RNC or cédula is one active company, in every organization: registering one an active company holds is 409
+  `tax_id_taken`, whichever organization holds it; a deactivated company frees its tax id.
 - Roles per company: `owner`, `admin`, `accountant`, `issuer`, `viewer`. The owner role is granted and taken by
   owners only, a company always keeps one, and a change of roles is decided on the role its actor holds once it
   has the company's lock. A revoked membership is kept, so its version never goes back.
