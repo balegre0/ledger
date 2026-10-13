@@ -4,19 +4,22 @@
 records what the transaction also decides: events (``publish``), jobs (``jobs``) and audit events (``audit``).
 Records are validated at once and written when the block ends, before the commit, in the order they were made:
 the commit makes them real with the module's changes or not at all, and the NOTIFY goes out after it. The unit
-marks itself open on the task (``open_unit``) for the facade guard (§3.4, rule 13).
+marks itself open on the task (``open_unit``) for the facade guard (§3.4, rule 13); so does a purge
+(``Purge``), which is a transaction of the task too.
 """
 
 import hashlib
 from contextvars import ContextVar
 from dataclasses import dataclass
+from functools import partial
 from typing import ClassVar, Final, final
-lazy from collections.abc import Callable, Mapping
+lazy from collections.abc import Awaitable, Callable, Mapping
 lazy from contextvars import Token
 lazy from datetime import datetime, timedelta
 lazy from uuid import UUID
 
-from sqlalchemy import and_, insert, update
+import structlog
+from sqlalchemy import and_, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as upsert
 lazy from sqlalchemy import ColumnElement, Executable
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
@@ -35,6 +38,9 @@ lazy from ledger_platform.data.tables import ChassisTables
 
 type Callback = Callable[[], None]
 """Runs after the commit: a plain function that only schedules or signals."""
+type Step = Callable[[AsyncConnection], Awaitable[None]]
+"""A record's writing, run before the commit on the unit's connection."""
+_logger = structlog.stdlib.get_logger(__name__)
 
 
 class EventTooLargeError(LedgerError):
@@ -91,11 +97,41 @@ class JobPolicy:
     deadline: timedelta | None
 
 
-_OPEN: Final[ContextVar[UnitOfWork | None]] = ContextVar("ledger_open_unit", default=None)
+@final
+class Purge:
+    """A purge transaction (``BoundDatabase.purging``) open on the task: it counts as an open unit."""
+
+    __slots__ = ("_open",)
+
+    def __init__(self) -> None:
+        self._open = True
+
+    @property
+    def is_open(self) -> bool:
+        """Whether the purge's transaction is still open."""
+        return self._open
+
+    def close(self) -> None:
+        """The transaction has ended."""
+        self._open = False
+
+    def mark_open(self) -> Token[OpenTransaction | None]:
+        """Make this the task's open transaction; the token ``unmark_open`` takes."""
+        return _OPEN.set(self)
 
 
-def open_unit() -> UnitOfWork | None:
-    """The unit open on the current task, if any (a closed one inherited by a child task does not count)."""
+def unmark_open(token: Token[OpenTransaction | None]) -> None:
+    """The task's open unit or purge has ended: undo its ``mark_open``."""
+    _OPEN.reset(token)
+
+
+type OpenTransaction = UnitOfWork | Purge
+"""What a task can hold open: a unit, or a purge."""
+_OPEN: Final[ContextVar[OpenTransaction | None]] = ContextVar("ledger_open_unit", default=None)
+
+
+def open_unit() -> OpenTransaction | None:
+    """The unit (or purge) open on the current task, if any; a closed one a child task inherited is none."""
     unit = _OPEN.get()
     return unit if unit is not None and unit.is_open else None
 
@@ -143,6 +179,30 @@ def _digest(value: object) -> bytes | None:
     return None if value is None else hashlib.sha256(canonical_json(encode(value))).digest()
 
 
+def _foreign(jobs: AnyTable, kind: str, key: str, scope: Mapping[str, object]) -> Executable:
+    """The job ``(kind, key)`` if another scope than ``scope`` owns it."""
+    return select(jobs.c.kind).where(
+        jobs.c.kind == kind,
+        jobs.c.key == key,
+        or_(*(jobs.c[column].is_distinct_from(value) for column, value in scope.items())),
+    )
+
+
+async def _execute(statement: Executable, connection: AsyncConnection) -> None:
+    await connection.execute(statement)
+
+
+async def _enqueue(stored: Executable, foreign: Executable, kind: str, connection: AsyncConnection) -> None:
+    """Upsert the job; when nothing was written and the key is another scope's, say so (the kind only).
+
+    The conflicting row stays locked by the upsert, so the second read sees what it conflicted with.
+    """
+    if (await connection.execute(stored)).first() is None and (
+        await connection.execute(foreign)
+    ).first() is not None:
+        _logger.warning("job_enqueue_ignored", kind=kind, reason="key_of_another_scope")
+
+
 @final
 class UnitJobs:
     """The unit's jobs: enqueue, wake one, wake all parked ones of a company and reason (§3.6).
@@ -165,21 +225,24 @@ class UnitJobs:
         *,
         run_at: datetime | None = None,
         payload: Mapping[str, object] | None = None,
+        restart: bool = True,
     ) -> None:
         """A job of ``kind`` keyed ``key`` at ``run_at`` (the unit's time by default), with its kind's limits.
 
         An existing job of that kind and key is left as it is while ready, running or parked, and restarted
-        (attempts 0, the new payload) when done or dead.
+        (attempts 0, the new payload) when done or dead, unless ``restart`` is false: then a key runs at most
+        once (a schedule's slot).
         """
         unit = self._unit
         unit.require_open()
         policy = unit.policy_of(kind)
         jobs = unit.tables.jobs
         now = unit.now
+        scope = _scope_columns(unit.scope)
         fresh = upsert(jobs).values(
             kind=kind,
             key=key,
-            **_scope_columns(unit.scope),
+            **scope,
             status="ready",
             run_at=run_at or now,
             max_attempts=policy.max_attempts,
@@ -189,31 +252,32 @@ class UnitJobs:
             created_at=now,
             updated_at=now,
         )
-        unit.record(
-            fresh.on_conflict_do_update(
-                index_elements=(jobs.c.kind, jobs.c.key),
-                set_={
-                    "status": "ready",
-                    "attempts": 0,
-                    "payload": fresh.excluded.payload,
-                    "run_at": fresh.excluded.run_at,
-                    "max_attempts": fresh.excluded.max_attempts,
-                    "deadline_at": fresh.excluded.deadline_at,
-                    "lease_until": None,
-                    "lease_token": None,
-                    "parked_reason": None,
-                    "last_error_code": None,
-                    "traceparent": fresh.excluded.traceparent,
-                    "updated_at": fresh.excluded.updated_at,
-                },
-                where=and_(
-                    jobs.c.status.in_(("done", "dead")),
-                    jobs.c.organization_id.is_not_distinct_from(fresh.excluded.organization_id),
-                    jobs.c.company_id.is_not_distinct_from(fresh.excluded.company_id),
-                    jobs.c.mode.is_not_distinct_from(fresh.excluded.mode),
-                ),
-            )
+        conflict = (jobs.c.kind, jobs.c.key)
+        restarting = fresh.on_conflict_do_update(
+            index_elements=conflict,
+            set_={
+                "status": "ready",
+                "attempts": 0,
+                "payload": fresh.excluded.payload,
+                "run_at": fresh.excluded.run_at,
+                "max_attempts": fresh.excluded.max_attempts,
+                "deadline_at": fresh.excluded.deadline_at,
+                "lease_until": None,
+                "lease_token": None,
+                "parked_reason": None,
+                "last_error_code": None,
+                "traceparent": fresh.excluded.traceparent,
+                "updated_at": fresh.excluded.updated_at,
+            },
+            where=and_(
+                jobs.c.status.in_(("done", "dead")),
+                jobs.c.organization_id.is_not_distinct_from(fresh.excluded.organization_id),
+                jobs.c.company_id.is_not_distinct_from(fresh.excluded.company_id),
+                jobs.c.mode.is_not_distinct_from(fresh.excluded.mode),
+            ),
         )
+        stored = restarting if restart else fresh.on_conflict_do_nothing(index_elements=conflict)
+        unit.defer(partial(_enqueue, stored.returning(jobs.c.kind), _foreign(jobs, kind, key, scope), kind))
 
     def wake(self, kind: str, key: str) -> None:
         """Make the parked job ``(kind, key)`` ready now; a job in any other state is left as it is."""
@@ -261,6 +325,13 @@ class Binding:
     publishes: frozenset[str]
     policies: Mapping[str, JobPolicy]
 
+    def policy_of(self, kind: str) -> JobPolicy:
+        """``kind``'s policy; ``UndeclaredJobKindError`` if the manifest does not declare it."""
+        policy = self.policies.get(kind)
+        if policy is None:
+            raise UndeclaredJobKindError(kind, self.source)
+        return policy
+
 
 @final
 class UnitOfWork:
@@ -296,7 +367,7 @@ class UnitOfWork:
         self.tables = binding.tables
         self.jobs = UnitJobs(self)
         self._binding = binding
-        self._pending: list[Executable] = []
+        self._pending: list[Step] = []
         self._after_commit: list[Callback] = []
         self._open = True
         self._published = False
@@ -318,18 +389,26 @@ class UnitOfWork:
 
     def record(self, statement: Executable) -> None:
         """Keep ``statement`` to run before the commit (the chassis's own writers use it)."""
+        self.defer(partial(_execute, statement))
+
+    def defer(self, step: Step) -> None:
+        """Keep ``step`` to run before the commit, in order with the records."""
         self.require_open()
-        self._pending.append(statement)
+        self._pending.append(step)
 
     def policy_of(self, kind: str) -> JobPolicy:
         """``kind``'s policy; ``UndeclaredJobKindError`` if the manifest does not declare it."""
-        policy = self._binding.policies.get(kind)
-        if policy is None:
-            raise UndeclaredJobKindError(kind, self._binding.source)
-        return policy
+        return self._binding.policy_of(kind)
 
     def publish(self, event: Event) -> None:
-        """Write ``event`` to the module's outbox when the unit commits (rule 3)."""
+        """Write ``event`` to the module's outbox when the unit commits (rule 3).
+
+        The event must lie inside the unit's scope (``EventScopeMismatchError`` otherwise): in its
+        organization, and in its company and mode where the unit names them. So a moded unit cannot publish a
+        mode-less event (the event would lack the unit's mode), and a company's unit cannot publish an
+        organization-wide event (it would speak for every company). An organization's unit may publish for any
+        of its companies, and a unit without a scope (the platform's own) for anyone.
+        """
         self.require_open()
         if event.TYPE not in self._binding.publishes:
             raise UndeclaredEventTypeError(event.TYPE, self._binding.source)
@@ -398,8 +477,8 @@ class UnitOfWork:
 
     async def flush(self) -> None:
         """Write what was recorded, in order (``BoundDatabase.unit`` calls it before the commit)."""
-        for statement in self._pending:
-            await self.connection.execute(statement)
+        for step in self._pending:
+            await step(self.connection)
         self._pending.clear()
 
     def close(self) -> tuple[Callback, ...]:
@@ -410,11 +489,6 @@ class UnitOfWork:
         self._after_commit.clear()
         return callbacks
 
-    def mark_open(self) -> Token[UnitOfWork | None]:
-        """Make this the task's open unit; the token ``unmark`` takes."""
+    def mark_open(self) -> Token[OpenTransaction | None]:
+        """Make this the task's open unit; the token ``unmark_open`` takes."""
         return _OPEN.set(self)
-
-    @staticmethod
-    def unmark(token: Token[UnitOfWork | None]) -> None:
-        """Undo ``mark_open``."""
-        _OPEN.reset(token)

@@ -405,6 +405,12 @@ async def test_a_unit_inside_an_open_unit_is_refused(database: Database, probe: 
             assert raised.value.code == "unit_nested"
     async with probe.unit(None) as uow:
         assert uow.is_open  # the refusals left nothing behind
+    async with probe.purging():
+        assert open_unit() is not None  # a purge is a transaction of the task too
+        for nested in (probe.unit(None), other.unit(tenant(A, A1)), probe.purging()):
+            with pytest.raises(NestedUnitError):
+                await enter(nested)
+    assert open_unit() is None
 
 
 async def test_a_rolled_back_unit_leaves_nothing_and_signals_nothing(
@@ -598,11 +604,13 @@ async def test_enqueue_ignores_a_live_job_and_restarts_a_finished_one(
         assert await rows(admin, RESTARTED) == [
             ("ready", 0, {"n": finished}, moment, deadline, *unleased, first, moment)
         ]
-    for live in ("running", "parked"):
-        await admin.execute("UPDATE probe.jobs SET status = %s, payload = '{}'", (live,))
-        async with probe.unit(None) as uow:
-            uow.jobs.enqueue(EXPORT, "k1", payload={"n": 9})
-        assert await rows(admin, "SELECT status, payload FROM probe.jobs") == [(live, {})]
+    with capture_logs() as logs:
+        for live in ("running", "parked"):
+            await admin.execute("UPDATE probe.jobs SET status = %s, payload = '{}'", (live,))
+            async with probe.unit(None) as uow:
+                uow.jobs.enqueue(EXPORT, "k1", payload={"n": 9})
+            assert await rows(admin, "SELECT status, payload FROM probe.jobs") == [(live, {})]
+    assert logs == []  # the job's own scope enqueued it again: ignored, as designed, without a word
 
 
 async def test_a_job_key_belongs_to_the_scope_that_enqueued_it(
@@ -612,9 +620,12 @@ async def test_a_job_key_belongs_to_the_scope_that_enqueued_it(
     async with probe.unit(tenant(A, A1)) as uow:
         uow.jobs.enqueue(EXPORT, "shared", payload={"n": 1})
     await admin.execute("UPDATE probe.jobs SET status = 'done'")
-    for stranger in (tenant(B, B1), tenant(A, A2), tenant(A, A1, Mode.LIVE), None):
-        async with probe.unit(stranger) as uow:
-            uow.jobs.enqueue(EXPORT, "shared", payload={"n": 2})
+    with capture_logs() as logs:
+        for stranger in (tenant(B, B1), tenant(A, A2), tenant(A, A1, Mode.LIVE), None):
+            async with probe.unit(stranger) as uow:
+                uow.jobs.enqueue(EXPORT, "shared", payload={"n": 2})
+    dropped = {"event": "job_enqueue_ignored", "kind": EXPORT, "reason": "key_of_another_scope"}
+    assert logs == [{**dropped, "log_level": "warning"}] * 4  # the kind only: never the key, a scope or ids
     state = "SELECT status, organization_id, company_id, mode, payload FROM probe.jobs"
     assert await rows(admin, state) == [("done", A, A1, "test", {"n": 1})]
     async with probe.unit(tenant(A, A1)) as uow:
@@ -716,7 +727,7 @@ async def test_an_audit_needs_an_acting_call_and_an_organization(probe: BoundDat
     assert raised.value.code == "audit_scope_missing"
 
 
-async def seen_later() -> UnitOfWork | None:
+async def seen_later() -> object:
     await asyncio.sleep(0.05)
     return open_unit()
 

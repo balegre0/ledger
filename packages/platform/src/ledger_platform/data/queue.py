@@ -6,8 +6,11 @@ on the claim, so a worker that crashes mid-run still used it. A row whose lease 
 caller's ``due`` says so). Whoever records the outcome names the token; a late writer whose lease was taken
 over records nothing.
 
-Time is the database's: leases run from ``now()``, and callers' ``due`` predicates compare with ``now()``
-too, so every worker measures against one clock, whatever its host's says (§3.6).
+Time is the database's, so every worker measures against one clock, whatever its host's says (§3.6). A lease
+runs from the claiming statement's time (``statement_timestamp()``), not from its transaction's start
+(``now()``, frozen when the transaction began): a claim made late in a transaction still holds its rows for
+the whole lease. Callers claim in short units of their own, where the two differ by milliseconds, and their
+``due`` predicates compare with ``now()``.
 """
 
 from dataclasses import dataclass
@@ -82,7 +85,7 @@ async def claim(
         .where(*(table.c[key] == chosen.c[key] for key in keys))
         .values(
             status="running",
-            lease_until=func.now() + window["lease"],
+            lease_until=func.statement_timestamp() + window["lease"],
             lease_token=func.gen_random_uuid(),
             attempts=table.c.attempts + 1,
             **window.get("extra", _NOTHING),

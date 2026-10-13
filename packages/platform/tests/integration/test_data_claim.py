@@ -1,17 +1,19 @@
 """``claim`` on real PostgreSQL: skip-locked claims, leases, fencing tokens, attempts counted (§3.6).
 
-Due rows and leases are measured on the database's clock (``now()``), the one every worker shares (I3).
+Due rows and leases are measured on the database's clock, the one every worker shares (§3.6): a lease runs
+from the claiming statement's time (``statement_timestamp()``), never from its transaction's frozen start.
 """
 
 import asyncio
 from datetime import timedelta
 from typing import Final
 lazy from collections.abc import AsyncGenerator, Sequence
+lazy from datetime import datetime
 
 import psycopg
 import pytest
-from pydantic import TypeAdapter
-from sqlalchemy import and_, func, or_
+from pydantic import AwareDatetime, TypeAdapter
+from sqlalchemy import and_, func, or_, select
 lazy from sqlalchemy import RowMapping
 
 from ledger_platform.data.bound import BoundDatabase
@@ -25,7 +27,8 @@ lazy from ledger_testing.postgres import WorkerDatabase
 
 KIND: Final = "probe.export"
 LEASE: Final = timedelta(seconds=60)
-_CLAIMED: Final = TypeAdapter(tuple[str, str, int, object, object])
+_CLAIMED: Final = TypeAdapter(tuple[str, str, int, AwareDatetime, AwareDatetime])
+_MOMENT: Final = TypeAdapter(AwareDatetime)
 
 
 class Silent:
@@ -74,13 +77,16 @@ async def claim_due(unit: UnitOfWork, limit: int) -> Sequence[RowMapping]:
     )
 
 
-def shown(rows: Sequence[RowMapping]) -> list[tuple[str, str, int, object, object]]:
-    """The claimed rows by key (``RETURNING`` promises no order)."""
-    return sorted(
+def shown(rows: Sequence[RowMapping]) -> list[tuple[str, str, int, datetime, datetime]]:
+    """The claimed rows by key (``RETURNING`` promises no order), with the time each lease runs from."""
+    claimed = (
         _CLAIMED.validate_python(
             (row["key"], row["status"], row["attempts"], row["lease_until"], row["updated_at"])
         )
         for row in rows
+    )
+    return sorted(
+        (key, status, attempts, until - LEASE, updated) for key, status, attempts, until, updated in claimed
     )
 
 
@@ -108,8 +114,10 @@ async def test_two_claims_at_once_never_share_a_row(
     release.set()
     held, first_unit = await holding
     at, then = first_unit.now, second_unit.now
-    assert shown(held) == [("j1", "running", 1, at + LEASE, at), ("j2", "running", 1, at + LEASE, at)]
-    assert shown(second) == [("j3", "running", 1, then + LEASE, then)]
+    assert [row[:3] for row in shown(held)] == [("j1", "running", 1), ("j2", "running", 1)]
+    assert [row[:3] for row in shown(second)] == [("j3", "running", 1)]
+    assert all(row[3] >= at and row[4] == at for row in shown(held))
+    assert all(row[3] >= then and row[4] == then for row in shown(second))
     cursor = await admin.execute(
         "SELECT count(DISTINCT lease_token) FROM probe.jobs WHERE status = 'running'"
     )
@@ -128,5 +136,22 @@ async def test_an_expired_lease_is_claimed_again_with_a_new_token_and_one_more_a
     await admin.execute("UPDATE probe.jobs SET lease_until = now() - interval '1 second'")
     async with probe.unit(None) as uow:
         (again,) = await claim_due(uow, 1)
-    assert shown([again]) == [("j1", "running", 2, uow.now + LEASE, uow.now)]
+    ((key, status, attempts, leased_from, updated),) = shown([again])
+    assert (key, status, attempts, updated) == ("j1", "running", 2, uow.now)
+    assert leased_from >= uow.now
     assert again["lease_token"] != claimed["lease_token"]
+
+
+async def test_a_lease_runs_from_the_claiming_statement_not_from_its_transactions_start(
+    probe: BoundDatabase,
+) -> None:
+    """A claim late in a transaction still holds its row for the whole lease (``statement_timestamp()``)."""
+    async with probe.unit(None) as uow:
+        uow.jobs.enqueue(KIND, "j1")
+    async with probe.unit(None) as uow:
+        before = _MOMENT.validate_python(
+            (await uow.connection.execute(select(func.clock_timestamp()))).scalar_one()
+        )
+        (claimed,) = await claim_due(uow, 1)
+    ((_, _, _, leased_from, _),) = shown([claimed])
+    assert uow.now < before <= leased_from
