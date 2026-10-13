@@ -5,8 +5,10 @@ description = "The identity service: organizations, companies, branches, emissio
 requires-python = ">=3.15"
 dependencies = [
     "ledger-kernel",
+    "ledger-contracts",
     "ledger-platform",
     "alembic>=1.20.0",
+    "protobuf>=7.36.2",
     "psycopg>=3.3.6",
     "pydantic>=2.14.1",
     "sqlalchemy>=2.1.4",
@@ -17,7 +19,11 @@ ledger-identity-migrate = "ledger_identity.adapters.postgres.migrate:main"
 
 [tool.uv.sources]
 ledger-kernel = { workspace = true }
+ledger-contracts = { workspace = true }
 ledger-platform = { workspace = true }
+
+[tool.deptry.package_module_name_map]
+"ledger-contracts" = ["ledger_contracts", "ledger"]
 
 [build-system]
 requires = ["uv_build>=0.13.0,<0.14.0"]

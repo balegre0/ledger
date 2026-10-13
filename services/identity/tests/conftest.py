@@ -3,11 +3,15 @@
 lazy from collections.abc import AsyncGenerator, Iterator
 
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from prometheus_client import CollectorRegistry
 from sqlalchemy import text
 
 from ledger_identity.adapters.postgres.migrate import upgrade
 from ledger_kernel.ids import new_id
 from ledger_platform.database import Database
+from ledger_platform.outbox import Outbox
+from ledger_platform.tracing import Tracing
 from ledger_testing.containers import Postgres
 from ledger_testing.logs import restored_logging
 
@@ -56,3 +60,9 @@ async def database(database_url: str) -> AsyncGenerator[Database]:
         yield opened
         async with opened.engine.begin() as connection:
             await connection.execute(EMPTY_EVERY_TABLE)
+
+
+@pytest.fixture
+def outbox() -> Outbox:
+    """An outbox of the test's own: its own tracer provider and metrics registry."""
+    return Outbox(tracing=Tracing(TracerProvider()), registry=CollectorRegistry())
