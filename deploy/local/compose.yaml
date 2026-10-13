@@ -78,9 +78,10 @@ services:
       - identity.env
       - path: zitadel/.local/identity.env
         required: false
-    # HTTP only. The gRPC port (50051) stays inside this network: IdentityQueryService authenticates no
-    # caller until the mesh does, so nothing outside the services may reach it.
-    ports: ["127.0.0.1:8000:8000"]
+    # HTTP only, on LEDGER_IDENTITY_PORT (8100 by default, so that it does not collide with the many tools that
+    # take 8000). The gRPC port (50051) stays inside this network: IdentityQueryService authenticates no caller
+    # until the mesh does, so nothing outside the services may reach it.
+    ports: ["127.0.0.1:${LEDGER_IDENTITY_PORT:-8100}:8000"]
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -96,7 +97,10 @@ services:
     # The identity provider of the local stack, optional: `docker compose --profile zitadel up -d --wait`. It
     # answers as zitadel.localhost:8080 on the host (curl and browsers resolve *.localhost to loopback) and in this
     # network (an alias), so a token's issuer is one string for a developer and for identity: Zitadel tells its
-    # instance by the Host header. Machine users only, so no login UI runs. zitadel/README.md has the rest.
+    # instance by the Host header. It serves its console (/ui/console) and login (/ui/login) too, and its first
+    # start makes a human administrator, zitadel-admin@ledger-local.zitadel.localhost with the password
+    # Password1!, which must be changed at the first login (Zitadel v4 makes one whatever is configured). Every
+    # port is bound to 127.0.0.1. zitadel/README.md has the rest.
     profiles: [zitadel]
     image: ghcr.io/zitadel/zitadel:v4.19.2@sha256:956a298405189a8f6cd4ec92e8828b1bd10caa7da8b139c39d251d7053e33784
     # Root, in this local profile only: a new named volume belongs to root, and Zitadel, which runs as an
@@ -111,7 +115,6 @@ services:
       ZITADEL_EXTERNALSECURE: "false"
       ZITADEL_DATABASE_POSTGRES_DSN: postgresql://zitadel:zitadel@postgres:5432/zitadel?sslmode=disable
       ZITADEL_FIRSTINSTANCE_ORG_NAME: ledger-local
-      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORDCHANGEREQUIRED: "false"
       ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME: ledger-bootstrap
       ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: ledger bootstrap
       ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: "2099-01-01T00:00:00Z"

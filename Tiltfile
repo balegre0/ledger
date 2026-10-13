@@ -14,4 +14,10 @@ docker_build(
 dc_resource("postgres", labels=["infrastructure"])
 dc_resource("nats", labels=["infrastructure"])
 dc_resource("identity-migrate", labels=["identity"])
-dc_resource("identity", labels=["identity"], links=[link("http://localhost:8000/docs", "identity API")])
+# The profile `zitadel` (a local identity provider) is not started here: see deploy/local/zitadel/README.md.
+IDENTITY_PORT = os.getenv("LEDGER_IDENTITY_PORT", "8100")
+dc_resource(
+    "identity",
+    labels=["identity"],
+    links=[link("http://localhost:%s/docs" % IDENTITY_PORT, "identity API")],
+)
