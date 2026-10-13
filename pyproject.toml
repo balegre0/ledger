@@ -267,7 +267,7 @@ layers = [
     "service | migrations",
     "schema",
     "http | consumer | identity_client",
-    "outbox | idempotency | auth | grpc",
+    "outbox | idempotency | auth | grpc | jobs",
     "streams",
     "data | jetstream",
     "observability",

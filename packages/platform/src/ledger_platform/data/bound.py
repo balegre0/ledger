@@ -28,7 +28,7 @@ from ledger_platform.data.database import AbortedTransactionError, is_committabl
 from ledger_platform.data.notifier import OUTBOX
 from ledger_platform.data.roles import SchemaRoles, identifier
 from ledger_platform.data.tables import chassis_tables
-from ledger_platform.data.unit_of_work import Binding, UnitOfWork, open_unit
+from ledger_platform.data.unit_of_work import Binding, Purge, UnitOfWork, open_unit
 lazy from ledger_kernel.tenancy import Scope
 lazy from ledger_platform.data.database import Database
 lazy from ledger_platform.data.notifier import Signals
@@ -141,12 +141,19 @@ class BoundDatabase:
         """A transaction in this schema's ``purge`` role: it reads and deletes expired idempotency keys only.
 
         No tenant setting is made (the purge spans organizations, and its policies need none); the purge
-        deletes without ``RETURNING`` the stored responses.
+        deletes without ``RETURNING`` the stored responses. It is the task's open transaction while it lasts
+        (``open_unit``), so a unit opened inside it is refused like one inside a unit.
         """
         self._refuse_nesting()
-        async with self.database.engine.begin() as connection:
-            await connection.execute(self._enter_purge)
-            yield connection
+        purge = Purge()
+        token = purge.mark_open()
+        try:
+            async with self.database.engine.begin() as connection:
+                await connection.execute(self._enter_purge)
+                yield connection
+        finally:
+            purge.close()
+            UnitOfWork.unmark(token)
 
     def _refuse_nesting(self) -> None:
         if open_unit() is not None:

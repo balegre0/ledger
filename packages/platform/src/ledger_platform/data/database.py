@@ -399,11 +399,12 @@ def _run(callbacks: tuple[Callback, ...]) -> None:
             _logger.exception("database.after_commit_failed", callback=_name_of(callback))
 
 
-_SESSION_RESETS: Final = ("RESET ROLE", "RESET ALL")
-"""What a returned connection forgets: a role and any setting made for the session.
+_SESSION_RESET: Final = "RESET ROLE; RESET ALL"
+"""What a returned connection forgets: a role and any setting made for the session, in one round trip.
 
 ``RESET ALL`` goes back to the connection's startup values (``application_name`` and the limits of
-``options``), and neither statement drops psycopg's prepared statements (``DISCARD ALL`` would).
+``options``), and neither statement drops psycopg's prepared statements (``DISCARD ALL`` would). Without
+parameters psycopg sends both in one simple query.
 """
 
 
@@ -430,9 +431,15 @@ class Session(Protocol, metaclass=ABCMeta):
     def rollback(self) -> None:
         """End the open transaction, if any."""
 
+    @property
     @abstractmethod
-    def commit(self) -> None:
-        """Commit the open transaction."""
+    def autocommit(self) -> bool:
+        """Whether each statement runs in a transaction of its own (else the first opens one)."""
+
+    @autocommit.setter
+    @abstractmethod
+    def autocommit(self, value: bool) -> None:
+        """Switch autocommit on or off (outside a transaction)."""
 
 
 def reset_session(
@@ -442,21 +449,25 @@ def reset_session(
 
     Units only ever set transaction-local state (``SET LOCAL``), which the rollback ends; this covers code
     that set session state on a pooled connection (``SET ROLE``, ``SET ledger.x``), deliberately or by
-    mistake, so it never reaches the next borrower. Ends its own transaction (rollback, reset, commit). A
-    connection being closed (``terminate_only``) or collected outside the event loop is left alone: no one
+    mistake, so it never reaches the next borrower. After the rollback the connection runs the two resets in
+    autocommit, as one statement (one round trip, no ``BEGIN`` or ``COMMIT``), and goes back to opening
+    transactions. A reset that fails raises, and the pool invalidates the connection instead of handing it on.
+    A connection being closed (``terminate_only``) or collected outside the event loop is left alone: no one
     borrows it again.
     """
     del connection_record
     if reset_state.terminate_only or not reset_state.asyncio_safe:
         return
     dbapi_connection.rollback()
-    cursor = dbapi_connection.cursor()
+    dbapi_connection.autocommit = True
     try:
-        for statement in _SESSION_RESETS:
-            cursor.execute(statement)
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute(_SESSION_RESET)
+        finally:
+            cursor.close()
     finally:
-        cursor.close()
-    dbapi_connection.commit()
+        dbapi_connection.autocommit = False
 
 
 def _server_options(limits: DatabaseLimits) -> str:
