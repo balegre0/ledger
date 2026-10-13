@@ -292,3 +292,21 @@ forbidden_modules = [
     # ... and every other dependency the services of this repository bring in
     "httpx", "joserfc", "cryptography", "alembic", "granian",
 ]
+
+# Inside identity: the use cases (application) over the domain. Later layers (adapters, api, main) join above
+# `application` as they appear. Exhaustive: a module without a layer is an error.
+[[tool.importlinter.contracts]]
+name = "Identity is hexagonal"
+type = "layers"
+containers = ["ledger_identity"]
+exhaustive = true
+layers = ["application", "domain"]
+
+[[tool.importlinter.contracts]]
+name = "Identity's use cases know ports, not adapters or frameworks"
+type = "forbidden"
+source_modules = ["ledger_identity.application"]
+forbidden_modules = [
+    "ledger_contracts", "ledger_platform", "pydantic", "sqlalchemy", "fastapi", "starlette", "grpc", "nats",
+    "google", "psycopg",
+]
