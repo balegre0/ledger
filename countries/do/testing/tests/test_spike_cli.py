@@ -1,5 +1,7 @@
+import asyncio
 import io
 import logging
+import os
 from datetime import timedelta
 from ipaddress import IPv4Address
 from pathlib import Path
@@ -66,8 +68,9 @@ def fake(issued: Issued, receiver_identity: Issued, clock: ManualClock) -> FakeD
 
 
 @pytest.fixture
-def home(tmp_path: Path) -> Path:
-    """The git-ignored ``.dgii`` directory the secrets live in."""
+def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The project's git-ignored ``.dgii``: the CLI runs from the project's root, here ``tmp_path``."""
+    monkeypatch.chdir(tmp_path)
     found = tmp_path / ".dgii"
     found.mkdir()
     return found
@@ -337,8 +340,11 @@ async def test_dgii_unavailable_parks_the_document_and_exits_one(
         ({"LEDGER_DO_ECF_SPIKE_SEQUENCE_EXPIRES": "2028-12-31"}, "dd-mm-yyyy"),
         ({"LEDGER_DO_ECF_SPIKE_SEQUENCE_EXPIRES": "31-02-2028"}, "dd-mm-yyyy"),
         ({"LEDGER_DO_ECF_SPIKE_ECF_HOST": "http://dgii.example.com"}, "LEDGER_DO_ECF_SPIKE_ECF_HOST"),
-        ({"LEDGER_DO_ECF_SPIKE_P12": "certificate.p12"}, "outside a .dgii directory"),
-        ({"LEDGER_DO_ECF_SPIKE_P12_PASSWORD_FILE": "certificate.password"}, "outside a .dgii directory"),
+        ({"LEDGER_DO_ECF_SPIKE_P12": "certificate.p12"}, "outside the project's .dgii directory"),
+        (
+            {"LEDGER_DO_ECF_SPIKE_P12_PASSWORD_FILE": "certificate.password"},
+            "outside the project's .dgii directory",
+        ),
         ({"LEDGER_DO_ECF_SPIKE_OUT": "out"}, "LEDGER_DO_ECF_SPIKE_OUT names a directory outside"),
     ],
     ids=[
@@ -441,3 +447,132 @@ def test_main_runs_the_cli_and_exits_with_its_code(
 def test_the_default_wiring_tells_utc_time() -> None:
     assert spike.DEFAULT_WIRING.clock().utcoffset() == timedelta(0)
     assert spike.DEFAULT_WIRING.transport is None
+
+
+class Crash(BaseException):
+    """The process dying mid-write: nothing after it runs, no ``except Exception`` catches it."""
+
+
+def crashing_replace(suffix: str) -> Callable[[str | Path, str | Path], None]:
+    """``os.replace`` that dies before replacing a file whose name ends with ``suffix``."""
+    real = os.replace
+
+    def replace(source: str | Path, target: str | Path) -> None:
+        if str(target).endswith(suffix):
+            raise Crash
+        real(source, target)
+
+    return replace
+
+
+async def test_a_crash_while_recording_keeps_the_earlier_entries_and_sends_nothing(
+    fake: FakeDgii, environ: dict[str, str], clock: ManualClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, _ = await run(fake, environ, "emit", "--type", "31", "--sequence", "20", clock=clock)
+    assert first == 0
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "replace", crashing_replace(spike.USED_FILE))
+        with pytest.raises(Crash):
+            await run(fake, environ, "emit", "--type", "31", "--sequence", "21", clock=clock)
+    out = out_of(environ)
+    assert (out / spike.USED_FILE).read_text(encoding="utf-8").split() == ["E310000000020"]
+    assert len(fake.received) == 1
+    assert sorted(path.name for path in out.iterdir() if ".tmp" in path.name) == []
+
+
+async def test_a_crash_while_writing_the_signed_document_leaves_no_partial_file_and_burns_the_number(
+    fake: FakeDgii, environ: dict[str, str], clock: ManualClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "replace", crashing_replace("E310000000022.xml"))
+        with pytest.raises(Crash):
+            await run(fake, environ, "emit", "--type", "31", "--sequence", "22", clock=clock)
+    out = out_of(environ)
+    assert not (out / f"{ISSUER_RNC}E310000000022.xml").exists()
+    assert (out / spike.USED_FILE).read_text(encoding="utf-8").split() == ["E310000000022"]
+    assert fake.received == []
+    assert not (out / spike.LOCK_FILE).exists()
+    again, refusal = await run(fake, environ, "emit", "--type", "31", "--sequence", "22", clock=clock)
+    assert (again, "E310000000022 was already used" in refusal) == (2, True)
+
+
+async def test_concurrent_runs_refuse_to_share_the_journal(
+    fake: FakeDgii, environ: dict[str, str], clock: ManualClock
+) -> None:
+    results = await asyncio.gather(
+        run(fake, environ, "emit", "--type", "31", "--sequence", "23", clock=clock),
+        run(fake, environ, "emit", "--type", "31", "--sequence", "24", clock=clock),
+    )
+    assert sorted(code for code, _ in results) == [0, 2]
+    refused = next(output for code, output in results if code == 2)
+    assert f"{spike.LOCK_FILE} is held by another run" in refused
+    assert len(fake.received) == 1
+    assert not (out_of(environ) / spike.LOCK_FILE).exists()
+    later, _ = await run(fake, environ, "emit", "--type", "31", "--sequence", "24", clock=clock)
+    assert later == 0
+
+
+async def test_a_lock_left_behind_refuses_until_removed(
+    fake: FakeDgii, environ: dict[str, str], clock: ManualClock
+) -> None:
+    out = out_of(environ)
+    out.mkdir()
+    (out / spike.LOCK_FILE).write_text("", encoding="utf-8")
+    code, output = await run(fake, environ, "emit", "--type", "31", "--sequence", "25", clock=clock)
+    assert (code, "is held by another run" in output) == (2, True)
+    assert fake.received == []
+    assert (out / spike.LOCK_FILE).exists()
+
+
+@pytest.mark.parametrize("damage", ["undecodable", "directory"])
+async def test_a_journal_that_does_not_read_stops_before_signing(
+    fake: FakeDgii, environ: dict[str, str], clock: ManualClock, damage: str
+) -> None:
+    out = out_of(environ)
+    out.mkdir()
+    if damage == "directory":
+        (out / spike.USED_FILE).mkdir()
+    else:
+        (out / spike.USED_FILE).write_bytes(b"E310000000001\n\xff\xfe\n")
+    code, output = await run(fake, environ, "emit", "--type", "31", "--sequence", "26", clock=clock)
+    assert (code, f"{spike.USED_FILE} does not read" in output) == (2, True)
+    assert fake.received == []
+    assert not (out / spike.LOCK_FILE).exists()
+
+
+@pytest.fixture
+def elsewhere(tmp_path: Path, issued: Issued) -> Path:
+    """Another ``.dgii`` directory than the project's, holding a copy of the certificate."""
+    found = tmp_path / "elsewhere" / ".dgii"
+    found.mkdir(parents=True)
+    (found / "certificate.p12").write_bytes(bundle(issued, password=PASSWORD))
+    return found
+
+
+async def test_only_the_project_s_own_dgii_directory_holds_secrets(
+    fake: FakeDgii, environ: dict[str, str], clock: ManualClock, elsewhere: Path
+) -> None:
+    moved = elsewhere / "certificate.p12"
+    code, output = await run(fake, {**environ, "LEDGER_DO_ECF_SPIKE_P12": str(moved)}, "auth", clock=clock)
+    assert (code, "LEDGER_DO_ECF_SPIKE_P12 names a file outside" in output) == (2, True)
+    out, _ = await run(fake, {**environ, "LEDGER_DO_ECF_SPIKE_OUT": str(elsewhere)}, "auth", clock=clock)
+    assert out == 2
+    home, _ = await run(fake, {**environ, "LEDGER_DO_ECF_SPIKE_P12": ".dgii"}, "auth", clock=clock)
+    assert home == 2
+
+
+def test_a_directory_is_synced_where_the_system_allows(tmp_path: Path) -> None:
+    (tmp_path / "file").write_bytes(b"x")
+    spike.sync_directory(tmp_path / "file")
+    spike.sync_directory(tmp_path)
+    spike.sync_directory(tmp_path / "absent")
+
+
+async def test_a_signed_document_that_cannot_be_written_is_never_sent(
+    fake: FakeDgii, environ: dict[str, str], clock: ManualClock, home: Path
+) -> None:
+    (home / "out" / f"{ISSUER_RNC}E310000000027.xml").mkdir(parents=True)
+    code, output = await run(fake, environ, "emit", "--type", "31", "--sequence", "27", clock=clock)
+    assert (code, "names a directory where a file could not be written" in output) == (2, True)
+    assert fake.received == []
+    assert (home / "out" / spike.USED_FILE).read_text(encoding="utf-8").split() == ["E310000000027"]

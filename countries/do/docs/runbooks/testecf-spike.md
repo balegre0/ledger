@@ -26,8 +26,9 @@ below.
 ## 2. Secrets, kept out of the repository
 
 Secrets live in `.dgii/` at the repository's root, which `.gitignore` ignores (with `*.p12` and `*.pfx`
-anywhere). The CLI refuses a certificate, a password file or an output directory that is not inside a `.dgii`
-directory. It never prints or logs a token, the password, the key or the certificate.
+anywhere). Run every command from the repository's root: the CLI refuses a certificate, a password file or an
+output directory that is not inside `.dgii/` of the directory it runs in (another `.dgii` elsewhere is
+refused too). It never prints or logs a token, the password, the key or the certificate.
 
 ```powershell
 New-Item -ItemType Directory -Force .dgii | Out-Null
@@ -59,6 +60,14 @@ on loopback only, for the fake).
 TesteCF accepts sequences 1 to 10,000,000 of every type (type 32 to 50,000,000) expiring 31-12-2028, and keeps
 submissions 60 days ([06]). The CLI records every e-NCF in `.dgii/out/used-encf.txt` **before** it signs it,
 and refuses one already there; pick sequences far from any a pilot uses.
+
+Every file the CLI writes (the journal, the signed documents, the summaries) is written crash-safe: a
+temporary file, flushed to disk, then renamed over the name, so a crash leaves the old content or the new,
+never a part. One `emit` runs at a time: it holds `.dgii/out/used-encf.lock` while it works, and a second run
+refuses (`used-encf.lock is held by another run`). A run killed mid-way leaves the lock behind: check that no
+`ledger-dgii-spike` is running, then delete the lock by hand. A journal that does not read
+(`used-encf.txt does not read`) stops the CLI before anything is signed: repair it by hand, never by removing
+an e-NCF from it.
 
 What `emit` does, in order: builds the sample; records its e-NCF; signs it (and its RFCE on that route);
 **writes the signed documents to `.dgii/out` before anything is sent**; sends once; polls; prints DGII's answer,

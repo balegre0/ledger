@@ -2,8 +2,9 @@
 
 Read ``countries/do/docs/runbooks/testecf-spike.md`` first. Settings come from ``LEDGER_DO_ECF_SPIKE_*``
 environment variables. The certificate (``P12``) and its password (``P12_PASSWORD_FILE``) are read from files
-inside a ``.dgii`` directory (git-ignored at the repository's root), and so are the documents written
-(``OUT``): a path elsewhere is refused. The CLI prints what DGII answered and where the documents were
+inside the project's ``.dgii`` directory (git-ignored), and so are the documents written (``OUT``): the
+project is the directory the CLI runs in (the repository's root, as the runbook runs it), and a path anywhere
+else, another ``.dgii`` included, is refused. The CLI prints what DGII answered and where the documents were
 written; it never prints or logs a token, a password, a key or a certificate, and it refuses the live
 environment (``ecf``) whatever the hosts.
 
@@ -11,6 +12,12 @@ environment (``ecf``) whatever the hosts.
 sent, then sends once. Every e-NCF is recorded in ``OUT/used-encf.txt`` before it is signed and is never
 signed or sent again: a document whose fate is unknown is *parked* (``parked:`` with why, and whether it
 may be at DGII), and its e-NCF is asked about by hand, never resent (the runbook).
+
+Every file is written crash-safe: to a temporary file in the same directory, flushed to disk, then renamed
+over its name and the directory synced where the system allows it, so a crash leaves the old file or the new
+one, never a part. One run at a time: ``emit`` holds ``OUT/used-encf.lock`` (created exclusively) from
+before it reads the journal until it ends; a run that finds it refuses. A run that dies leaves it behind,
+to remove by hand once no run is going.
 
 Exit codes: 0 accepted (or accepted with observations; and, with ``--deliver``, received by the buyer or
 delivery not applicable), 1 rejected, still pending, parked, DGII unavailable, or the buyer did not receive
@@ -23,12 +30,13 @@ import json
 import os
 import re
 import sys
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum, auto
 from pathlib import Path
 from typing import Final, TextIO, final
-lazy from collections.abc import Awaitable, Callable, Mapping, Sequence
+lazy from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
 lazy from datetime import date
 
 from cryptography import x509
@@ -62,6 +70,7 @@ lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
 
 PREFIX: Final = "LEDGER_DO_ECF_SPIKE_"
 USED_FILE: Final = "used-encf.txt"
+LOCK_FILE: Final = "used-encf.lock"
 HOME: Final = ".dgii"
 """The git-ignored directory the secrets and the documents written live in."""
 DEFAULT_OUT: Final = f"{HOME}/out"
@@ -86,8 +95,12 @@ _ENVIRONMENTS: Final = "is testecf or certecf"
 _LIVE: Final = "is testecf or certecf: the spike never reaches the live environment"
 _REFUSED: Final = "is refused"
 _DATE: Final = "is a date written dd-mm-yyyy"
-_OUTSIDE_FILE: Final = f"names a file outside a {HOME} directory"
-_OUTSIDE_DIRECTORY: Final = f"names a directory outside a {HOME} directory"
+_OUTSIDE_FILE: Final = f"names a file outside the project's {HOME} directory"
+_OUTSIDE_DIRECTORY: Final = f"names a directory outside the project's {HOME} directory"
+_LOCKED: Final = (
+    f"{LOCK_FILE} is held by another run, or could not be created; if no run is going, remove it by hand"
+)
+_JOURNAL_UNREADABLE: Final = f"{USED_FILE} does not read: repair it by hand, never by dropping an e-NCF"
 _UNREADABLE: Final = "names no readable file"
 _UNWRITABLE: Final = "names a directory where a file could not be written"
 _NOT_OPEN: Final = "does not open with the password file's password"
@@ -143,6 +156,13 @@ class SettingsError(Exception):
         super().__init__(f"{which} {reason}{detail}")
 
 
+class JournalError(Exception):
+    """The e-NCF journal (``used-encf.txt``) cannot be used safely: locked by another run, or unreadable."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"{Setting.OUT.variable}: {reason}")
+
+
 def _required(environ: Mapping[str, str], setting: Setting) -> str:
     value = setting.read(environ)
     if not value.strip():
@@ -150,15 +170,15 @@ def _required(environ: Mapping[str, str], setting: Setting) -> str:
     return value
 
 
-def _at_home(path: Path, *, directory: bool) -> bool:
-    """Whether ``path``, resolved, lies inside a ``.dgii`` directory (or is one, for a ``directory``)."""
-    parts = path.resolve().parts
-    return HOME in (parts if directory else parts[:-1])
+def _inside(path: Path, home: Path, *, directory: bool) -> bool:
+    """Whether ``path``, resolved, lies inside ``home`` (or is it, for a ``directory``)."""
+    resolved = path.resolve()
+    return resolved.is_relative_to(home) and (directory or resolved != home)
 
 
-def _secret_file(environ: Mapping[str, str], setting: Setting) -> Path:
+def _secret_file(environ: Mapping[str, str], setting: Setting, home: Path) -> Path:
     path = Path(_required(environ, setting))
-    if not _at_home(path, directory=False):
+    if not _inside(path, home, directory=False):
         raise SettingsError(setting, _OUTSIDE_FILE)
     return path
 
@@ -207,8 +227,12 @@ class SpikeSettings:
     sequence_expires_on: date
 
     @classmethod
-    def from_environ(cls, environ: Mapping[str, str]) -> SpikeSettings:
-        """The settings; ``SettingsError`` naming the first variable refused."""
+    def from_environ(cls, environ: Mapping[str, str], *, root: Path) -> SpikeSettings:
+        """The settings; ``SettingsError`` naming the first variable refused.
+
+        ``root`` is the project's root: secrets and documents live in its ``.dgii`` directory only.
+        """
+        home = (root / HOME).resolve()
         environment = _environment(environ)
         try:
             issuer = Issuer(
@@ -229,13 +253,13 @@ class SpikeSettings:
         except EcfError as error:
             raise SettingsError(_HOSTS, _REFUSED, error) from error
         out = Path(Setting.OUT.read(environ, DEFAULT_OUT))
-        if not _at_home(out, directory=True):
+        if not _inside(out, home, directory=True):
             raise SettingsError(Setting.OUT, _OUTSIDE_DIRECTORY)
         roots = Setting.TRUSTED_ROOTS.read(environ)
         return cls(
             environment=environment,
-            bundle=_secret_file(environ, Setting.P12),
-            password_file=_secret_file(environ, Setting.P12_PASSWORD_FILE),
+            bundle=_secret_file(environ, Setting.P12, home),
+            password_file=_secret_file(environ, Setting.P12_PASSWORD_FILE, home),
             trusted_roots=Path(roots) if roots.strip() else None,
             issuer=issuer,
             buyer=buyer,
@@ -299,13 +323,56 @@ def _say(out: TextIO, line: str) -> None:
     out.write(line + "\n")
 
 
-def _write(path: Path, data: bytes) -> Path:
+def sync_directory(path: Path) -> None:
+    """Flush ``path``'s directory entries to disk where the system allows it (not on Windows: a no-op)."""
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        with suppress(OSError):
+            os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _write(path: Path, data: bytes) -> Path:
+    """``data`` at ``path``, crash-safe (see the module); ``SettingsError`` if it cannot be written."""
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        try:
+            with temporary.open("xb") as file:
+                file.write(data)
+                file.flush()
+                os.fsync(file.fileno())
+            temporary.replace(path)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+        sync_directory(path.parent)
     except OSError as error:
         raise SettingsError(Setting.OUT, _UNWRITABLE) from error
     return path
+
+
+@contextmanager
+def _locked(out: Path) -> Generator[None]:
+    """``out``'s journal held by this run alone, for the length of the block (see the module)."""
+    lock = out / LOCK_FILE
+    if not out.is_dir():
+        try:
+            out.mkdir(parents=True)
+        except OSError as error:
+            raise SettingsError(Setting.OUT, _UNWRITABLE) from error
+        sync_directory(out.parent)
+    try:
+        os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except OSError as error:
+        raise JournalError(_LOCKED) from error
+    try:
+        yield
+    finally:
+        lock.unlink(missing_ok=True)
 
 
 def _identity(certificate: x509.Certificate) -> str:
@@ -384,7 +451,10 @@ def _draft(options: _Options, settings: SpikeSettings, clock: Callable[[], datet
 def _recorded(settings: SpikeSettings, encf: Encf) -> bool:
     """``encf`` recorded as used, before anything is signed; ``False`` if it was already."""
     used = settings.out / USED_FILE
-    already = used.read_text(encoding="utf-8").split() if used.is_file() else []
+    try:
+        already = used.read_text(encoding="utf-8").split() if used.exists() else []
+    except (OSError, UnicodeDecodeError) as error:
+        raise JournalError(_JOURNAL_UNREADABLE) from error
     if str(encf) in already:
         return False
     _write(used, "\n".join([*already, str(encf)]).encode() + b"\n")
@@ -457,9 +527,16 @@ async def _delivered(signed: Signed, trust: CounterpartyTrust, context: _Run) ->
 
 
 async def _emit(options: _Options, context: _Run) -> int:
-    settings, out = context.settings, context.out
+    settings = context.settings
     trust = settings.trust() if options.deliver else None
     draft = _draft(options, settings, context.wiring.clock)
+    with _locked(settings.out):
+        return await _emitted(draft, trust, context)
+
+
+async def _emitted(draft: EcfDraft, trust: CounterpartyTrust | None, context: _Run) -> int:
+    """``draft`` recorded, signed, written, sent and reported; delivered if ``trust`` (the journal held)."""
+    settings, out = context.settings, context.out
     if not _recorded(settings, draft.encf):
         _say(out, f"error: {draft.encf} was already used; pick a sequence never signed")
         return _USAGE
@@ -490,7 +567,7 @@ async def run(
     except SystemExit as refused:
         return _USAGE if refused.code else 0
     try:
-        settings = SpikeSettings.from_environ(environ)
+        settings = SpikeSettings.from_environ(environ, root=Path.cwd())
         signer = settings.signer()
         _say(out, f"environment: {settings.environment.value}")
         dgii = DgiiClient(
@@ -508,7 +585,7 @@ async def run(
                 return 0
             context = _Run(settings=settings, signer=signer, dgii=dgii, wiring=wiring, out=out)
             return await _emit(options, context)
-    except SettingsError as error:
+    except (SettingsError, JournalError) as error:
         _say(out, f"error: {error}")
         return _USAGE
     except EcfError as error:
