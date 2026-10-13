@@ -631,3 +631,9 @@ Each milestone gets its own implementation plan.
 | PSFE certification requirements (3 certified client emitters, FI-GDF-017, Reglamento 587-24) | Tracked as milestone 7 checklist; find pilot clients during milestones 4-6 |
 | Legal retention period and data location | Confirmed against the primary norms before milestone 8 |
 | AGPL-3.0 (Zitadel) | Used unmodified as a separate service; no linking |
+
+### Known limitations (accepted for now)
+
+| Limitation | Why accepted | Until |
+|---|---|---|
+| identity grants a role, the owner's included, to any well-formed subject id without asking Zitadel whether it exists: an owner can hand ownership to a subject nobody can sign in as and give up its own, leaving the company without a usable owner | The company always keeps an owner; the mistake needs an owner's own act, and support can restore one ([runbook](../../runbooks/identity-orphaned-company.md)) | Subjects are verified against Zitadel, and memberships cleaned up when Zitadel deletes a user, with the Zitadel user-sync work (Actions v2 webhooks) |

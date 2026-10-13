@@ -23,6 +23,7 @@ Python 3.15 · uv workspace · strictly typed in two checkers · zero suppressio
 | `services/identity` | `ledger_identity`: organizations, companies, branches, emission points, memberships; REST under `/v1`, gRPC `IdentityQueryService`, events on the stream `IDENTITY` |
 | `deploy/local` | PostgreSQL, NATS and identity for local development, and a Zitadel behind the compose profile `zitadel`; the `Tiltfile` at the root runs them |
 | `docs/superpowers` | Specs and plans |
+| `docs/runbooks` | What support does when something goes wrong in production |
 
 Dependencies point one way, `platform` to `contracts` to `kernel`, and import-linter enforces it. A service may
 depend on `libs/*`, never on another service.
@@ -486,3 +487,6 @@ Operations, before production:
   role like the migration owner of the first item (each `POST` purges its own organization's).
 - `IdentityQueryService` (port 50051) authenticates no caller until the mesh does: never publish the port beyond
   the services' network, and admit only its callers by mesh policy.
+- identity does not verify with Zitadel that a subject exists before granting it a role, so a company can be left
+  with owners nobody can sign in as (an accepted risk until the Zitadel user sync):
+  [docs/runbooks/identity-orphaned-company.md](docs/runbooks/identity-orphaned-company.md) restores an owner.
