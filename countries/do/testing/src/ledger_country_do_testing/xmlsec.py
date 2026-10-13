@@ -5,8 +5,8 @@ of that code: xmlsec1 1.2.41 of Debian trixie, in a container built from ``xmlse
 pinned by digest, its package by version; Docker keeps the image, built once per machine). The container runs
 the image by the ID the build returned, under a name of its own, without a network, on a read-only root with
 ``/verify`` in memory; it is removed when the block ends, and only it. The document and certificates travel in
-the command, base64-encoded: no host file is shared with the container, so a test runs the same on Windows and
-Linux.
+commands, base64-encoded and cut in pieces each under Linux's limit on one argument, so a document of any size
+gets through: no host file is shared with the container, so a test runs the same on Windows and Linux.
 """
 
 import base64
@@ -30,16 +30,18 @@ CONTEXT: Final = Path(__file__).with_name("xmlsec1")
 _NAME: Final = "ledger-do-xmlsec1-"
 _WORK: Final = "/verify"
 """Where the files land: a directory in memory, the only writable one."""
+_CHUNK: Final = 64 * 1024
+"""Base64 characters per command argument: Linux takes at most 128 KiB in one (``MAX_ARG_STRLEN``)."""
+_APPEND: Final = 'printf %s "$1" >> "/verify/$2"'
 _VERIFY: Final = (
-    'moment="$4"'
-    ' && printf %s "$1" | base64 -d > /verify/signed.xml'
-    ' && printf %s "$2" | base64 -d > /verify/trusted.pem'
-    ' && printf %s "$3" | base64 -d > /verify/untrusted.pem'
-    " && if [ -s /verify/untrusted.pem ]; then set -- --untrusted-pem /verify/untrusted.pem; else set --; fi"
-    ' && exec xmlsec1 --verify --trusted-pem /verify/trusted.pem "$@"'
-    ' --verification-time "$moment" /verify/signed.xml'
+    'moment="$1"'
+    " && cd /verify && base64 -d signed.b64 > signed.xml && base64 -d trusted.b64 > trusted.pem"
+    " && if [ -s untrusted.b64 ]; then base64 -d untrusted.b64 > untrusted.pem"
+    " && set -- --untrusted-pem untrusted.pem; else set --; fi"
+    ' && exec xmlsec1 --verify --trusted-pem trusted.pem "$@" --verification-time "$moment" signed.xml'
 )
 """Decode the three files, then verify; ``--untrusted-pem`` only when intermediates were given."""
+_CLEAN: Final = "rm -f /verify/*"
 _TIME: Final = "%Y-%m-%d %H:%M:%S"
 
 
@@ -87,11 +89,11 @@ class Xmlsec:
         """
         if at.utcoffset() is None:
             raise NaiveMomentError
-        arguments = [
-            _encoded(signed),
-            _encoded(trusted),
-            _encoded(untrusted),
-            at.astimezone(UTC).strftime(_TIME),
-        ]
-        result = self._container.exec(["sh", "-c", _VERIFY, "verify", *arguments])
+        self._container.exec(["sh", "-c", _CLEAN])
+        for name, data in (("signed.b64", signed), ("trusted.b64", trusted), ("untrusted.b64", untrusted)):
+            encoded = _encoded(data)
+            for start in range(0, len(encoded), _CHUNK):
+                self._container.exec(["sh", "-c", _APPEND, "append", encoded[start : start + _CHUNK], name])
+        moment = at.astimezone(UTC).strftime(_TIME)
+        result = self._container.exec(["sh", "-c", _VERIFY, "verify", moment])
         return Verdict(result.exit_code == 0, result.output.decode("utf-8", "replace"))

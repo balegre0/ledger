@@ -29,6 +29,7 @@ ENVELOPED: Final = "http://www.w3.org/2000/09/xmldsig#enveloped-signature"
 XML_NAMESPACE: Final = "http://www.w3.org/XML/1998/namespace"
 """The namespace of ``xml:lang``, ``xml:space``...: C14N 1.0 copies an ancestor's onto ``SignedInfo``."""
 MIN_KEY_BITS: Final = 2048
+"""The shortest RSA key signed or verified with."""
 _HEAD: Final = (("CanonicalizationMethod", C14N), ("SignatureMethod", RSA_SHA256), ("Transform", ENVELOPED))
 PROFILES: Final = frozenset(
     {
@@ -40,25 +41,20 @@ PROFILES: Final = frozenset(
 shape, and the same with the canonicalization written out as a second transform (signxml, .NET)."""
 
 
-def signed_info(
-    digest: str, in_scope: Mapping[str, str] | None = None, *, inherited: Mapping[str, str] | None = None
-) -> str:
+def signed_info(digest: str, in_scope: Mapping[str, str] | None = None) -> str:
     """``SignedInfo`` as text: as it sits in the document (``in_scope`` is ``None``), or standalone.
 
     Standalone, for canonicalization, it declares what is in scope where it sits: the default namespace of
-    ``Signature`` and ``in_scope``, the prefixed namespaces of the document's root, and carries ``inherited``,
-    the root's ``xml:`` attributes by local name, which C14N 1.0 copies onto the apex of a document subset.
-    lxml's C14N of an element inside a document writes a spurious ``xmlns=""`` on grandchildren under a
-    default namespace, which xmlsec1 and .NET reject (v1 M3 Decision 13), hence the standalone form.
+    ``Signature`` and ``in_scope``, the prefixed namespaces of the document's root. lxml's C14N of an element
+    inside a document writes a spurious ``xmlns=""`` on grandchildren under a default namespace, which xmlsec1
+    and .NET reject (v1 M3 Decision 13), hence the standalone form. The signer refuses ``xml:`` attributes on
+    the root, which C14N 1.0 would carry onto ``SignedInfo``, so none is ever carried here.
     """
     if in_scope is None:
         declarations = ""
     else:
         prefixed = "".join(f" xmlns:{prefix}={quoteattr(uri)}" for prefix, uri in sorted(in_scope.items()))
-        carried = "".join(
-            f" xml:{name}={quoteattr(value)}" for name, value in sorted((inherited or {}).items())
-        )
-        declarations = f' xmlns="{DSIG}"{prefixed}{carried}'
+        declarations = f' xmlns="{DSIG}"{prefixed}'
     return (
         f"<SignedInfo{declarations}>"
         f'<CanonicalizationMethod Algorithm="{C14N}"/>'

@@ -24,6 +24,9 @@ from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError
 
 DSIG: Final = "http://www.w3.org/2000/09/xmldsig#"
 SIGNATURE: Final = f"{{{DSIG}}}Signature"
+COMMENT: Final = b"<!--"
+"""How every comment starts: character references cannot make markup, so these bytes find each one (and,
+harmlessly, the same bytes inside a CDATA section or a processing instruction)."""
 MAX_DOCUMENT: Final = 4 * 1024 * 1024
 """The largest document read: a type-32 e-CF of 1,000 lines is a few hundred kilobytes."""
 _DOCTYPE: Final = re.compile(rb"<!DOCTYPE", re.IGNORECASE)

@@ -1,15 +1,24 @@
 import base64
 import hashlib
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Final
 lazy from collections.abc import Callable
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding
+from cryptography.x509.oid import NameOID
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from lxml import etree
 
+from ledger_country_do.channels.ecf_v1.adapters.signing.certificates import (
+    CERTIFICATION_AUTHORITY,
+    NOT_FOR_SIGNING,
+)
 from ledger_country_do.channels.ecf_v1.adapters.signing.profile import (
     C14N,
     ENVELOPED,
@@ -21,21 +30,27 @@ from ledger_country_do.channels.ecf_v1.adapters.signing.signer import (
     DocumentSignedError,
     NotAnRsaKeyError,
     SeedMalformedError,
+    SignerCertificateError,
+    UnsignableDocumentError,
     sign_enveloped,
 )
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import (
+    INBOUND,
+    STRICT,
     SignatureInvalidError,
     verify_enveloped,
 )
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import DSIG, UnreadableDocumentError
-from ledger_country_do_testing.pki import Authority, ec_key, organization, rsa_key
+from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import DSIG, UnreadableDocumentError, texts
+from ledger_country_do_testing.pki import SIGNING, Authority, ec_key, organization, rsa_key
 from ledger_country_do_testing.signatures import (
     OUTSIDE_ROOT,
     SHAPES,
     XMLSEC1_ONLY,
+    forge,
     sign_with_signxml,
     verify_with_signxml,
 )
+lazy from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import VerificationProfile
 lazy from ledger_country_do_testing.pki import Issued
 
 GOLDEN_C14N_INPUT: Final = (
@@ -65,6 +80,18 @@ GOLDEN_SIGNATURE: Final = (
 VALUES: Final = re.compile(r"<(DigestValue|SignatureValue|X509Certificate)>([^<]*)<")
 ECF: Final = SHAPES["ecf"]
 RNC: Final = b"101850043"
+PROFILES_VERIFIED: Final = [STRICT, INBOUND]
+ENCIPHERMENT_ONLY: Final = x509.KeyUsage(
+    digital_signature=False,
+    content_commitment=False,
+    key_encipherment=True,
+    data_encipherment=False,
+    key_agreement=False,
+    key_cert_sign=False,
+    crl_sign=False,
+    encipher_only=False,
+    decipher_only=False,
+)
 
 
 def sign(issued: Issued, document: bytes, *, seed: bool = False) -> bytes:
@@ -75,6 +102,31 @@ def canonical(document: bytes) -> bytes:
     return etree.tostring(
         etree.fromstring(document).getroottree(), method="c14n", exclusive=False, with_comments=False
     )
+
+
+def certificate(
+    key: RSAPrivateKey, *, ca: bool | None = False, usage: x509.KeyUsage | None = SIGNING
+) -> x509.Certificate:
+    """A self-issued certificate of ``key`` with the extensions a test asks for (``None``: left out).
+
+    It never has a subject key identifier.
+    """
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "ODD")])
+    now = datetime.now(UTC)
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=1))
+    )
+    if ca is not None:
+        builder = builder.add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True)
+    if usage is not None:
+        builder = builder.add_extension(usage, critical=True)
+    return builder.sign(key, hashes.SHA256())
 
 
 def test_the_profile_is_dgii_s_and_its_c14n_variant() -> None:
@@ -103,11 +155,15 @@ def test_the_canonical_form_is_c14n_1_0_inclusive_without_comments() -> None:
     assert canonical(GOLDEN_C14N_INPUT) == GOLDEN_C14N
 
 
+@pytest.mark.parametrize("profile", PROFILES_VERIFIED)
 @pytest.mark.parametrize("shape", list(SHAPES))
-def test_our_verifier_accepts_our_signatures(issued: Issued, shape: str) -> None:
+def test_our_verifier_accepts_our_signatures(
+    issued: Issued, shape: str, profile: VerificationProfile
+) -> None:
     signed = sign(issued, SHAPES[shape], seed=shape == "seed")
-    verified = verify_enveloped(signed)
+    verified = verify_enveloped(signed, profile)
     assert verified.certificate == issued.certificate
+    assert verified.intermediates == ()
     assert len(verified.signature_value) > 300
     assert verified.signature_value in signed.decode()
 
@@ -119,11 +175,14 @@ def test_signxml_verifies_our_signatures(issued: Issued, shape: str) -> None:
     )
 
 
+@pytest.mark.parametrize("profile", PROFILES_VERIFIED)
 @pytest.mark.parametrize("prefixed", [False, True], ids=["default-namespace", "ds-prefix"])
 @pytest.mark.parametrize("shape", ["ecf", "default-namespace", "nested-defaults", "references"])
-def test_our_verifier_accepts_signxml_s_signatures(issued: Issued, shape: str, *, prefixed: bool) -> None:
+def test_our_verifier_accepts_signxml_s_signatures(
+    issued: Issued, shape: str, profile: VerificationProfile, *, prefixed: bool
+) -> None:
     signed = sign_with_signxml(SHAPES[shape], issued, prefixed=prefixed)
-    assert verify_enveloped(signed).certificate == issued.certificate
+    assert verify_enveloped(signed, profile).certificate == issued.certificate
 
 
 def test_a_signature_value_wrapped_over_lines_is_read_as_written(issued: Issued) -> None:
@@ -140,10 +199,21 @@ def test_a_tampered_document_fails_both_verifiers(issued: Issued) -> None:
     assert not verify_with_signxml(tampered, trusted=[issued.certificate])
 
 
+@pytest.mark.parametrize("profile", PROFILES_VERIFIED)
+def test_a_comment_cannot_split_a_signed_value(issued: Issued, profile: VerificationProfile) -> None:
+    # C14N without comments reads 1<!---->0 as 10: the digest holds, so the comment itself must be refused.
+    signed = sign(issued, ECF.replace(b"</FechaHoraFirma>", b"</FechaHoraFirma><Estado>10</Estado>"))
+    split = signed.replace(b"<Estado>10<", b"<Estado>1<!---->0<").replace(RNC, b"1018<!-- -->50043")
+    assert canonical(split) == canonical(signed)
+    with pytest.raises(SignatureInvalidError, match="comment"):
+        verify_enveloped(split, profile)
+    assert texts(split, "Estado", "Encabezado/Emisor/RNCEmisor") == ("10", RNC.decode())
+
+
 def test_what_lies_outside_the_root_is_covered_too(issued: Issued) -> None:
     signed = sign(issued, SHAPES[OUTSIDE_ROOT])
     with pytest.raises(SignatureInvalidError, match="changed after it was signed"):
-        verify_enveloped(signed.replace(b"<?pi before?>", b"<?pi after?>"))
+        verify_enveloped(signed.replace(b"<?pi before?>", b"<?pi altered?>"))
 
 
 def test_whitespace_around_the_signature_is_the_document_s_own(issued: Issued) -> None:
@@ -188,18 +258,26 @@ def _transform(algorithm: bytes) -> bytes:
 
 
 _PROFILE: Final = "not DGII's profile"
+XADES: Final = b'<xades:QualifyingProperties xmlns:xades="http://uri.etsi.org/01903/v1.3.2#"/>'
 _SINGLE: Final = "single signature"
+_COMMENT: Final = "comment or a processing instruction"
 MUTATIONS: Final[dict[str, tuple[Callable[[bytes], bytes], str]]] = {
     "sha1": (_swap(rb"xmldsig-more#rsa-sha256", b"xmldsig#rsa-sha1"), _PROFILE),
     "sha1-digest": (_swap(rb"xmlenc#sha256", b"xmldsig#sha1"), _PROFILE),
     "exclusive-c14n": (_swap(rb"TR/2001/REC-xml-c14n-20010315", b"2001/10/xml-exc-c14n#"), _PROFILE),
+    "c14n-1.1": (_swap(rb"TR/2001/REC-xml-c14n-20010315", b"2006/12/xml-c14n11"), _PROFILE),
     "c14n-with-comments": (_swap(rb"REC-xml-c14n-20010315", b"REC-xml-c14n-20010315#WithComments"), _PROFILE),
     "reference": (_swap(rb'URI=""', b'URI="#x"'), _PROFILE),
+    "no-uri": (_swap(rb' URI=""', b""), _PROFILE),
     "reference-type": (_swap(rb'URI=""', b'URI="" Type="urn:x"'), _PROFILE),
     "two-references": (_swap(rb"(<Reference .*</Reference>)", rb"\1\1"), _PROFILE),
     "no-transforms": (_swap(rb"<Transforms>.*</Transforms>", b""), _PROFILE),
     "xpath-transform": (
         _swap(rb"</Transforms>", _transform(b"http://www.w3.org/TR/1999/REC-xpath-19991116")),
+        _PROFILE,
+    ),
+    "xpath-inside": (
+        _swap(rb'(enveloped-signature")/>', rb"\1><XPath>1</XPath></Transform>"),
         _PROFILE,
     ),
     "third-transform": (
@@ -223,18 +301,31 @@ MUTATIONS: Final[dict[str, tuple[Callable[[bytes], bytes], str]]] = {
         _swap(rb'(rsa-sha256")/>', rb"\1><HMACOutputLength>8</HMACOutputLength></SignatureMethod>"),
         _PROFILE,
     ),
+    "transform-id": (_swap(rb"<Transform ", b'<Transform Id="t" '), _PROFILE),
     "object": (_swap(rb"</KeyInfo>", b"</KeyInfo><Object>x</Object>"), _PROFILE),
-    "key-value": (_swap(rb"</X509Data>", b"</X509Data><KeyValue/>"), _PROFILE),
-    "two-certificates": (_swap(rb"(<X509Certificate>[^<]*</X509Certificate>)", rb"\1\1"), _PROFILE),
+    "xades": (_swap(rb"</KeyInfo>", b"</KeyInfo><Object>" + XADES + b"</Object>"), _PROFILE),
+    "manifest": (_swap(rb"</KeyInfo>", b"</KeyInfo><Manifest/>"), _PROFILE),
+    "retrieval-method": (_swap(rb"</X509Data>", b'</X509Data><RetrievalMethod URI="#k"/>'), _PROFILE),
+    "x509-crl": (_swap(rb"</X509Certificate>", b"</X509Certificate><X509CRL>AAAA</X509CRL>"), _PROFILE),
+    "dsa-key-value": (_swap(rb"</X509Data>", b"</X509Data><KeyValue><DSAKeyValue/></KeyValue>"), _PROFILE),
+    "key-info-swapped": (
+        _swap(rb"(<SignatureValue>[^<]*</SignatureValue>)(<KeyInfo>.*</KeyInfo>)", rb"\2\1"),
+        _PROFILE,
+    ),
     "foreign-element": (_swap(rb"</SignedInfo>", b'<x:y xmlns:x="urn:x"/></SignedInfo>'), _PROFILE),
-    "comment-inside": (_swap(rb"</SignedInfo>", b"<!-- c --></SignedInfo>"), _PROFILE),
+    "foreign-attribute": (_swap(rb"<SignedInfo>", b'<SignedInfo xmlns:x="urn:x" x:a="1">'), _PROFILE),
     "text-inside": (_swap(rb"</SignedInfo>", b"x</SignedInfo>"), _PROFILE),
-    "signature-id": (_swap(rb'<Signature xmlns="', b'<Signature Id="s" xmlns="'), _PROFILE),
+    "tail-inside": (_swap(rb"</SignedInfo>", b"</SignedInfo>x"), _PROFILE),
     "no-value": (_swap(rb"<SignatureValue>.*</SignatureValue>", b""), _PROFILE),
     "no-signed-info": (_swap(rb"<SignedInfo>.*</SignedInfo>", b""), _PROFILE),
+    "no-key-info": (_swap(rb"<KeyInfo>.*</KeyInfo>", b""), _PROFILE),
+    "comment-inside": (_swap(rb"</SignedInfo>", b"<!-- c --></SignedInfo>"), _COMMENT),
+    "comment-after": (_swap(rb"</Signature>", b"</Signature><!-- after -->"), _COMMENT),
+    "comment-in-value": (_swap(rb"101850043", b"1018<!---->50043"), _COMMENT),
+    "pi-inside": (_swap(rb"<Encabezado>", b"<?pi in?><Encabezado>"), _COMMENT),
+    "pi-in-signature": (_swap(rb"</KeyInfo>", b"</KeyInfo><?pi in?>"), _COMMENT),
     "two-signatures": (_swap(rb"(<Signature .*</Signature>)", rb"\1\1"), _SINGLE),
     "not-last": (_swap(rb"</Signature>", b"</Signature><After/>"), _SINGLE),
-    "comment-after": (_swap(rb"</Signature>", b"</Signature><!-- after -->"), _SINGLE),
     "nested": (_nested, _SINGLE),
     "removed": (_swap(rb"<Signature .*</Signature>", b""), _SINGLE),
     "not-base64": (_swap(rb"<DigestValue>[^<]*<", b"<DigestValue>!!!<"), "not base64"),
@@ -248,26 +339,110 @@ MUTATIONS: Final[dict[str, tuple[Callable[[bytes], bytes], str]]] = {
 }
 
 
+@pytest.mark.parametrize("profile", PROFILES_VERIFIED)
 @pytest.mark.parametrize("mutation", list(MUTATIONS))
-def test_what_breaks_dgii_s_profile_is_refused(issued: Issued, mutation: str) -> None:
+def test_what_breaks_dgii_s_profile_is_refused(
+    issued: Issued, mutation: str, profile: VerificationProfile
+) -> None:
     mutate, reason = MUTATIONS[mutation]
     with pytest.raises(SignatureInvalidError, match=reason) as caught:
-        verify_enveloped(mutate(sign(issued, ECF)))
+        verify_enveloped(mutate(sign(issued, ECF)), profile)
     assert caught.value.code == "do_ecf_signature_invalid"
     assert RNC.decode() not in str(caught.value)
 
 
-def test_a_signature_as_the_root_is_refused(issued: Issued) -> None:
+@pytest.mark.parametrize("profile", PROFILES_VERIFIED)
+def test_a_signature_as_the_root_is_refused(issued: Issued, profile: VerificationProfile) -> None:
     signed = sign(issued, ECF)
     signature = signed[signed.index(b"<Signature ") : signed.index(b"</ECF>")]
     with pytest.raises(SignatureInvalidError, match=_SINGLE):
-        verify_enveloped(signature.replace(b"</Signature>", signature + b"</Signature>", 1))
+        verify_enveloped(signature.replace(b"</Signature>", signature + b"</Signature>", 1), profile)
 
 
-def test_a_key_shorter_than_2048_bits_is_refused(intermediate: Authority) -> None:
-    short = intermediate.issue(organization(), key=rsa_key(1024))
+@pytest.mark.parametrize("profile", PROFILES_VERIFIED)
+def test_a_key_shorter_than_2048_bits_is_refused(profile: VerificationProfile) -> None:
+    key = rsa_key(1024)
     with pytest.raises(SignatureInvalidError, match="shorter than 2048 bits"):
-        verify_enveloped(sign(short, ECF))
+        verify_enveloped(forge(ECF, key, certificate(key)), profile)
+
+
+@pytest.mark.parametrize("profile", PROFILES_VERIFIED)
+@pytest.mark.parametrize(
+    ("ca", "usage", "reason"),
+    [
+        (True, SIGNING, CERTIFICATION_AUTHORITY),
+        (False, None, NOT_FOR_SIGNING),
+        (False, ENCIPHERMENT_ONLY, NOT_FOR_SIGNING),
+    ],
+    ids=["authority", "no-key-usage", "encipherment-only"],
+)
+def test_a_certificate_that_may_not_sign_signs_nothing(
+    profile: VerificationProfile, usage: x509.KeyUsage | None, reason: str, *, ca: bool
+) -> None:
+    key = rsa_key()
+    made = certificate(key, ca=ca, usage=usage)
+    with pytest.raises(SignatureInvalidError, match=reason):
+        verify_enveloped(forge(ECF, key, made), profile)
+    with pytest.raises(SignerCertificateError, match=reason) as caught:
+        sign_enveloped(ECF, key, made)
+    assert caught.value.code == "do_ecf_signer_certificate"
+
+
+@pytest.mark.parametrize("profile", PROFILES_VERIFIED)
+def test_an_end_entity_without_basic_constraints_signs(profile: VerificationProfile) -> None:
+    key = rsa_key()
+    made = certificate(key, ca=None)
+    assert verify_enveloped(sign_enveloped(ECF, key, made), profile).certificate == made
+
+
+def test_a_subject_key_identifier_named_for_a_certificate_without_one_is_refused() -> None:
+    key = rsa_key()
+    made = certificate(key)
+    identifier = base64.b64encode(bytes(20)).decode()
+    signed = forge(
+        ECF,
+        key,
+        made,
+        edit=lambda text: text.replace("</X509Data>", f"<X509SKI>{identifier}</X509SKI></X509Data>"),
+    )
+    with pytest.raises(SignatureInvalidError, match="names another certificate or key"):
+        verify_enveloped(signed, INBOUND)
+
+
+def test_the_signer_signs_only_with_its_own_certificate_and_a_long_key(issued: Issued) -> None:
+    with pytest.raises(SignerCertificateError, match="not the signing key's"):
+        sign_enveloped(ECF, rsa_key(), issued.certificate)
+    with pytest.raises(SignerCertificateError, match="not the signing key's"):
+        sign_enveloped(ECF, rsa_key(), Authority.root().issue(organization(), key=ec_key()).certificate)
+    short = rsa_key(1024)
+    with pytest.raises(SignerCertificateError, match="shorter than 2048 bits"):
+        sign_enveloped(ECF, short, certificate(short))
+
+
+@pytest.mark.parametrize(
+    ("document", "reason"),
+    [
+        (ECF.replace(b"<Encabezado>", b"<!-- c --><Encabezado>"), "comment"),
+        (ECF.replace(b"<Encabezado>", b"<?pi in?><Encabezado>"), "comment"),
+        (b"<!-- before --><a/>", "comment"),
+        (b'<a xml:lang="es"/>', "xml: attribute"),
+    ],
+    ids=["comment", "pi-inside", "comment-outside", "xml-attribute"],
+)
+def test_what_the_strict_profile_would_refuse_is_not_signed(
+    issued: Issued, document: bytes, reason: str
+) -> None:
+    with pytest.raises(UnsignableDocumentError, match=reason) as caught:
+        sign(issued, document)
+    assert caught.value.code == "do_ecf_document_unsignable"
+
+
+def test_an_xml_attribute_on_the_root_is_strictly_refused(issued: Issued) -> None:
+    assert isinstance(issued.key, RSAPrivateKey)
+    signed = forge(b'<r xml:lang="es-DO"><a xml:space="preserve"> t </a></r>', issued.key, issued.certificate)
+    with pytest.raises(SignatureInvalidError, match="xml: attribute"):
+        verify_enveloped(signed, STRICT)
+    assert verify_enveloped(signed, INBOUND).certificate == issued.certificate
 
 
 @pytest.mark.parametrize(
@@ -326,7 +501,7 @@ NAMESPACES: Final[tuple[dict[str | None, str], ...]] = ({}, {"xsi": "urn:xsi"}, 
 
 @st.composite
 def documents(draw: st.DrawFn) -> bytes:
-    """Well-formed documents: nested elements, attributes, any text XML allows, comments, namespaces."""
+    """Well-formed documents without comments: nested elements, attributes, any text XML allows."""
     root = etree.Element(draw(_NAMES), nsmap=draw(st.sampled_from(NAMESPACES)))
     elements = [root]
     for _ in range(draw(st.integers(0, 8))):
@@ -335,8 +510,7 @@ def documents(draw: st.DrawFn) -> bytes:
         tag = draw(_NAMES) if namespace is None else f"{{{namespace}}}{draw(_NAMES)}"
         child = etree.SubElement(parent, tag, {draw(_NAMES): draw(_TEXT)} if draw(st.booleans()) else {})
         child.text = draw(_TEXT)
-        if draw(st.booleans()):
-            parent.append(etree.Comment(draw(st.sampled_from(["c", " a note "]))))
+        child.tail = draw(_TEXT)
         elements.append(child)
     root.text = draw(_TEXT)
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8")

@@ -1,21 +1,29 @@
-"""signxml as the second implementation of XML signatures: it verifies ours and signs what ours must verify.
+"""signxml as the second implementation of XML signatures; and documents signed as other signers sign them.
 
 signxml shares no code with ``adapters.signing``; the fake DGII uses it to check what it receives and to sign
 the ARECFs it answers. ``excise_empty_xmlns_declarations`` makes signxml undo lxml's spurious ``xmlns=""``
 (its issue 193), without which it cannot verify a signature in the default namespace. signxml resolves
-``URI=""`` to the root element, so a document with nodes outside its root is verified by xmlsec1 instead; and
-it does not carry the root's ``xml:`` attributes onto ``SignedInfo`` as C14N 1.0 says (xmlsec1 does), so it
-neither verifies nor makes a signature of such a document that xmlsec1 accepts (``XMLSEC1_ONLY``). The signing
-key is handed to signxml as an object: it is never serialized.
+``URI=""`` to the root element, so a document with nodes outside its root is verified by xmlsec1 instead
+(``XMLSEC1_ONLY``); nor does it carry the root's ``xml:`` attributes onto ``SignedInfo`` as C14N 1.0 says
+(xmlsec1 does). The signing key is handed to signxml as an object: it is never serialized.
+
+``forge`` signs a document with any variation of DGII's ``Signature`` a test asks for (an ``Id``, a
+``KeyValue``, a chain, ``xml:`` attributes on the root), as counterparties' tools sign: the inbound profile's
+tests verify what it makes, and xmlsec1 proves it right.
 """
 
 import base64
+import copy
+import hashlib
 from abc import ABCMeta, abstractmethod
 from types import MappingProxyType
 from typing import Final, Protocol, cast
-lazy from collections.abc import Collection, Mapping
+lazy from collections.abc import Callable, Collection, Mapping
 
 from cryptography import x509
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.serialization import Encoding
 from lxml import etree
 from signxml.algorithms import (
     CanonicalizationMethod,
@@ -26,15 +34,16 @@ from signxml.algorithms import (
 from signxml.exceptions import InvalidInput, InvalidSignature
 from signxml.signer import XMLSigner
 from signxml.verifier import SignatureConfiguration, XMLVerifier
+lazy from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 lazy from cryptography.hazmat.primitives.asymmetric.types import PrivateKeyTypes
 lazy from signxml.verifier import VerifyResult
 
+from ledger_country_do.channels.ecf_v1.adapters.signing.profile import XML_NAMESPACE, signature
 from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import DSIG, parser, require_readable, texts
 lazy from ledger_country_do_testing.pki import Issued
 
 OUTSIDE_ROOT: Final = "outside-root"
-XML_ATTRIBUTES: Final = "xml-attributes"
-XMLSEC1_ONLY: Final = frozenset({OUTSIDE_ROOT, XML_ATTRIBUTES})
+XMLSEC1_ONLY: Final = frozenset({OUTSIDE_ROOT})
 """The shapes signxml gets wrong (see the module): xmlsec1 alone verifies them."""
 SHAPES: Final[Mapping[str, bytes]] = MappingProxyType(
     {
@@ -44,7 +53,7 @@ SHAPES: Final[Mapping[str, bytes]] = MappingProxyType(
             "<Encabezado><Version>1.0</Version><IdDoc><TipoeCF>31</TipoeCF><eNCF>E310000000001</eNCF></IdDoc>"
             "<Emisor><RNCEmisor>101850043</RNCEmisor>"
             "<RazonSocialEmisor>Ferretería Duarte &amp; Hijos</RazonSocialEmisor></Emisor></Encabezado>"
-            "<!-- a comment --><DetallesItems><Item><NombreItem>Martillo &lt;12&quot;&gt;</NombreItem></Item>"
+            "<DetallesItems><Item><NombreItem>Martillo &lt;12&quot;&gt;</NombreItem></Item>"
             "</DetallesItems><FechaHoraFirma>13-10-2026 09:30:00</FechaHoraFirma></ECF>"
         ).encode(),
         "seed": (
@@ -56,15 +65,12 @@ SHAPES: Final[Mapping[str, bytes]] = MappingProxyType(
         "default-namespace": b'<Doc xmlns="urn:d" a="1"><x:Part xmlns:x="urn:example:x">t</x:Part></Doc>',
         "nested-defaults": b'<r><x xmlns="urn:a"><y><z q="1"/></y></x><w xmlns:p="urn:p"><p:v/></w></r>',
         "references": b'<r>Pe\xc3\xb1a &#241; &#x1F600; &lt; &gt; &amp; "q"<e a="&#9;tab&#10;nl&#13;"/></r>',
-        XML_ATTRIBUTES: b'<r xml:lang="es-DO" xml:space="preserve"><a xml:lang="en"> t </a></r>',
-        OUTSIDE_ROOT: (
-            b'<?xml version="1.0"?><?pi before?><!-- c --><r><!-- in --><?pi x?>t</r><!-- after -->'
-        ),
+        OUTSIDE_ROOT: (b'<?xml version="1.0"?><?pi before?>\n<r>t</r><?pi after?>'),
     }
 )
-"""Documents of every shape a signature must survive: DGII's, namespaces on the root, default and nested
-namespaces, character references, CR and tabs in attributes, astral characters, ``xml:`` attributes on the
-root (which C14N 1.0 carries onto ``SignedInfo``), nodes outside the root."""
+"""Documents of every shape our signer signs and a signature must survive: DGII's, namespaces on the root,
+default and nested namespaces, character references, CR and tabs in attributes, astral characters, processing
+instructions outside the root. None holds a comment: the signer refuses them."""
 _CONFIGURATION: Final = SignatureConfiguration(
     require_x509=True,
     location="./",
@@ -72,6 +78,7 @@ _CONFIGURATION: Final = SignatureConfiguration(
     signature_methods=frozenset({SignatureMethod.RSA_SHA256}),
     digest_algorithms=frozenset({DigestAlgorithm.SHA256}),
 )
+_XML: Final = f"{{{XML_NAMESPACE}}}"
 _CERTIFICATE: Final = f"{{{DSIG}}}Signature/{{{DSIG}}}KeyInfo/{{{DSIG}}}X509Data/{{{DSIG}}}X509Certificate"
 
 
@@ -120,8 +127,9 @@ def verify_with_signxml(signed: bytes, *, trusted: Collection[x509.Certificate] 
 
 def sign_with_signxml(document: bytes, issued: Issued, *, prefixed: bool = False) -> bytes:
     """``document`` signed by signxml (enveloped, C14N 1.0, RSA-SHA256), the namespace default or ``ds:``."""
-    # signxml types ``namespaces`` ``dict[str, str]`` yet documents ``None`` as the default namespace's key:
-    # its signer is bound to ``_Signs`` through ``object``.
+    # signxml types ``namespaces`` ``dict[str, str]`` yet documents ``None`` as the default namespace's
+    # key (https://github.com/XML-Security/signxml/issues/275): its signer is bound to ``_Signs`` through
+    # ``object``.
     made = XMLSigner(
         method=SignatureConstructionMethod.enveloped,
         signature_algorithm=SignatureMethod.RSA_SHA256,
@@ -134,3 +142,44 @@ def sign_with_signxml(document: bytes, issued: Issued, *, prefixed: bool = False
     require_readable(document)
     signed = signer.sign(etree.fromstring(document, parser()), key=issued.key, cert=[issued.certificate])
     return etree.tostring(signed, xml_declaration=True, encoding="UTF-8")
+
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+def forge(
+    document: bytes,
+    key: RSAPrivateKey,
+    certificate: x509.Certificate,
+    *,
+    edit: Callable[[str], str] | None = None,
+) -> bytes:
+    """``document`` signed with ``key``, its ``Signature`` DGII's shape as ``edit`` changes it (as text).
+
+    The digest and the signature value are computed after the edit, as a counterparty's tool would: inclusive
+    C14N 1.0 of the document, then of ``SignedInfo`` with every namespace in scope and the root's ``xml:``
+    attributes. For tests only: nothing checks what it is asked to sign.
+    """
+    require_readable(document)
+    root = etree.fromstring(document, parser())
+    tree = root.getroottree()
+    digest = _b64(
+        hashlib.sha256(etree.tostring(tree, method="c14n", exclusive=False, with_comments=False)).digest()
+    )
+    text = signature(digest, "", _b64(certificate.public_bytes(Encoding.DER)))
+    root.append(etree.fromstring((text if edit is None else edit(text)).encode(), parser()))
+    signed_info = root[-1][0]
+    standalone = etree.Element(signed_info.tag, nsmap=signed_info.nsmap)
+    standalone.attrib.update(signed_info.attrib)
+    standalone.attrib.update({name: value for name, value in root.attrib.items() if name.startswith(_XML)})
+    standalone.text = signed_info.text
+    standalone.extend(copy.deepcopy(child) for child in signed_info)
+    root[-1][1].text = _b64(
+        key.sign(
+            etree.tostring(standalone, method="c14n", exclusive=False, with_comments=False),
+            padding.PKCS1v15(),
+            hashes.SHA256(),
+        )
+    )
+    return etree.tostring(tree, xml_declaration=True, encoding="UTF-8")
