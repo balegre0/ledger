@@ -11,6 +11,7 @@ import contextlib
 import json
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from typing import Final, final
@@ -30,6 +31,24 @@ _LIFETIME: Final = timedelta(minutes=5)
 _END_OF_HEAD: Final = b"\r\n\r\n"
 _ADDRESS: Final = TypeAdapter(tuple[str, int] | tuple[str, int, int, int])
 """An internet address as a socket reports it: host and port, plus flow and scope for IPv6."""
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class IssuerKeys:
+    """The provider's first signing key, made once and shared by every ``LocalIssuer`` of a session (§14.2).
+
+    An RSA key takes a noticeable part of a second to make: a session makes one, not one per test.
+    """
+
+    first: RSAKey
+
+    @classmethod
+    def generate(cls) -> IssuerKeys:
+        """A new RSA key, ``kid`` ``key-1``."""
+        return cls(
+            RSAKey.generate_key(_KEY_SIZE, {"kid": "key-1", "use": "sig", "alg": "RS256"}, private=True)
+        )
 
 
 def _answer_of(status: HTTPStatus, body: bytes, encoding: str | None) -> bytes:
@@ -60,7 +79,9 @@ class LocalIssuer:
         "requests",
     )
 
-    def __init__(self, *, issuer: str = ISSUER, audience: str = AUDIENCE) -> None:
+    def __init__(
+        self, *, issuer: str = ISSUER, audience: str = AUDIENCE, keys: IssuerKeys | None = None
+    ) -> None:
         self.issuer = issuer
         self.audience = audience
         self.fetches = 0
@@ -77,13 +98,23 @@ class LocalIssuer:
         self._published: list[str] = []
         self._handlers: set[asyncio.Task[None]] = set()
         self._port = 0
-        self._current = self.rotate()
+        if keys is None:
+            self._current = self.rotate()
+        else:
+            self._keys["key-1"] = keys.first
+            self._published.append("key-1")
+            self._current = "key-1"
 
     @classmethod
     @asynccontextmanager
-    async def started(cls, *, issuer: str = ISSUER, audience: str = AUDIENCE) -> AsyncGenerator[LocalIssuer]:
-        """An issuer whose JWKS endpoint listens on 127.0.0.1 for the length of the block."""
-        local = cls(issuer=issuer, audience=audience)
+    async def started(
+        cls, *, keys: IssuerKeys | None = None, issuer: str = ISSUER, audience: str = AUDIENCE
+    ) -> AsyncGenerator[LocalIssuer]:
+        """An issuer whose JWKS endpoint listens on 127.0.0.1 for the length of the block.
+
+        ``keys`` are the session's (``issuer_keys``); without them the issuer makes a key of its own.
+        """
+        local = cls(issuer=issuer, audience=audience, keys=keys)
         server = await asyncio.start_server(local._accept, "127.0.0.1", 0)
         local._port = _ADDRESS.validate_python(server.sockets[0].getsockname())[1]
         try:

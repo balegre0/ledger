@@ -2,7 +2,6 @@ import asyncio
 import contextlib
 import inspect
 import logging
-import socket
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -63,6 +62,7 @@ from ledger_platform.service import (
     UnexpectedResourcesError,
 )
 from ledger_platform.streams import StreamSpec, ensure_stream
+from ledger_testing.ports import occupy_a_port, port_of
 lazy from ledger_platform.consumer import ConsumerApi, Handler
 lazy from ledger_platform.data.database import UnitOfWork
 lazy from ledger_platform.service import Runtime, RuntimeDependency
@@ -514,13 +514,6 @@ def running_port(service: Service[ServiceSettings]) -> int:
 async def silent(connection: Subscribing, subject: str) -> None:
     """Listen on ``subject`` and never answer: a JetStream publish to it waits for its acknowledgement."""
     await connection.subscribe(subject)
-
-
-def occupy_a_port() -> socket.socket:
-    """A listening socket on every interface, the way grpc's ``[::]`` listens: nobody else binds its port."""
-    if socket.has_dualstack_ipv6():
-        return socket.create_server(("::", 0), family=socket.AF_INET6, dualstack_ipv6=True)
-    return socket.create_server(("", 0))
 
 
 async def session_setting(database: Database, name: str) -> str:
@@ -1148,7 +1141,7 @@ async def test_a_start_that_fails_halfway_releases_what_had_started(
 ) -> None:
     del infrastructure
     with occupy_a_port() as taken:
-        port = ADDRESS.validate_python(taken.getsockname())[1]
+        port = port_of(taken)
         payments = Payments(configured(database_url, nats_url, grpc_port=port))
         with pytest.raises(GrpcBindError):
             async with running(payments.service):

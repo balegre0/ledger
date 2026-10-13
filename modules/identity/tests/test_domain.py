@@ -2,6 +2,7 @@ import unicodedata
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Final
+from uuid import UUID
 
 import pytest
 from hypothesis import given
@@ -497,7 +498,8 @@ def test_a_version_starts_at_one() -> None:
 
 # ── Errors ──────────────────────────────────────────────────────────────────────
 
-SOME_ID: Final = new_id()
+SOME_ID: Final = UUID("01a134e5-8363-74c7-9f6c-aa195c5ba397")
+"""A fixed id: it is part of the test ids below, which every xdist worker must collect alike."""
 
 
 @pytest.mark.parametrize(

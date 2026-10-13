@@ -1,55 +1,16 @@
-"""Real PostgreSQL and NATS servers for tests, in containers, at the versions the services run on."""
+"""Real NATS servers for tests, in containers, at the version the services run on.
 
-from contextlib import contextmanager
-from typing import Final, final
-lazy from collections.abc import Generator
+PostgreSQL is ``ledger_testing.postgres``'s: one server per run, shared by every xdist worker.
+"""
 
-import psycopg
-from psycopg import sql
-from testcontainers.community.postgres import PostgresContainer
+from typing import Final
+
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.wait_strategies import LogMessageWaitStrategy
 
-POSTGRES_IMAGE: Final = "postgres:18.6"
-NATS_IMAGE: Final = "nats:2.12.15"
+from ledger_testing.images import image
+
 NATS_PORT: Final = 4222
-_POSTGRES_PORT: Final = 5432
-
-
-@final
-class Postgres:
-    """A PostgreSQL server; every database it makes belongs to a login role of its own that is no superuser.
-
-    A superuser bypasses row-level security, and so does a table's owner unless the table forces it: tests
-    connect as the kind of role a service connects as, never as the administrator.
-    """
-
-    __slots__ = ("_container",)
-
-    def __init__(self, container: PostgresContainer) -> None:
-        self._container = container
-
-    @classmethod
-    @contextmanager
-    def started(cls) -> Generator[Postgres]:
-        """A server for the length of the block."""
-        with PostgresContainer(POSTGRES_IMAGE, driver=None) as container:
-            yield cls(container)
-
-    def database(self, name: str, *, role: str, password: str) -> str:
-        """A new database ``name`` owned by the new role ``role``: its SQLAlchemy URL, psycopg driver."""
-        with psycopg.connect(self._container.get_connection_url(), autocommit=True) as admin:
-            admin.execute(
-                sql.SQL("CREATE ROLE {} LOGIN PASSWORD {} NOSUPERUSER NOBYPASSRLS").format(
-                    sql.Identifier(role), sql.Literal(password)
-                )
-            )
-            admin.execute(
-                sql.SQL("CREATE DATABASE {} OWNER {}").format(sql.Identifier(name), sql.Identifier(role))
-            )
-        host = self._container.get_container_host_ip()
-        port = self._container.get_exposed_port(_POSTGRES_PORT)
-        return f"postgresql+psycopg://{role}:{password}@{host}:{port}/{name}"
 
 
 def libpq_url(url: str) -> str:
@@ -58,9 +19,9 @@ def libpq_url(url: str) -> str:
 
 
 def nats_server(*arguments: str) -> DockerContainer:
-    """A NATS server with JetStream, started with ``arguments`` too, ready once it says so."""
+    """A NATS server with JetStream (the pinned image) and ``arguments``, ready once it says so."""
     return (
-        DockerContainer(NATS_IMAGE)
+        DockerContainer(image("nats"))
         .with_command(["-js", *arguments])
         .with_exposed_ports(NATS_PORT)
         .waiting_for(LogMessageWaitStrategy("Server is ready"))

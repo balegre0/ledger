@@ -7,7 +7,7 @@ from http import HTTPStatus
 from time import time
 from typing import Final
 from uuid import NAMESPACE_URL, uuid5
-lazy from collections.abc import AsyncGenerator, Callable, MutableMapping
+lazy from collections.abc import Callable, MutableMapping
 
 import pytest
 from hypothesis import given
@@ -122,14 +122,8 @@ def now() -> int:
 
 
 @pytest.fixture
-async def issuer() -> AsyncGenerator[LocalIssuer]:
-    async with LocalIssuer.started() as started:
-        yield started
-
-
-@pytest.fixture
-def policy(issuer: LocalIssuer) -> TokenPolicy:
-    return TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=issuer.keys_url, fetch_timeout=1.0)
+def policy(local_issuer: LocalIssuer) -> TokenPolicy:
+    return TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=local_issuer.keys_url, fetch_timeout=1.0)
 
 
 @pytest.fixture
@@ -167,8 +161,10 @@ async def refused(verifier: TokenVerifier, token: str) -> TokenProblem:
 # ── Accepted ────────────────────────────────────────────────────────────────────
 
 
-async def test_a_token_of_the_provider_proves_who_calls(issuer: LocalIssuer, verifier: TokenVerifier) -> None:
-    token = issuer.token(subject="394763379928989699", organization="394763327332483075")
+async def test_a_token_of_the_provider_proves_who_calls(
+    local_issuer: LocalIssuer, verifier: TokenVerifier
+) -> None:
+    token = local_issuer.token(subject="394763379928989699", organization="394763327332483075")
     principal = await verifier.verify(token)
     assert principal.subject == "394763379928989699"
     assert principal.provider_organization == "394763327332483075"
@@ -177,20 +173,20 @@ async def test_a_token_of_the_provider_proves_who_calls(issuer: LocalIssuer, ver
 
 
 async def test_the_roles_of_this_project_granted_in_the_callers_organization_are_read(
-    issuer: LocalIssuer, verifier: TokenVerifier
+    local_issuer: LocalIssuer, verifier: TokenVerifier
 ) -> None:
     ours = {"operator": {PROVIDER_ORGANIZATION: "ledger.test"}, "auditor": {"9999": "other.test"}}
-    token = issuer.token(claims={project_roles_claim(AUDIENCE): ours})
+    token = local_issuer.token(claims={project_roles_claim(AUDIENCE): ours})
     assert (await verifier.verify(token)).roles == frozenset({"operator"})
 
 
 async def test_roles_of_no_project_or_of_another_project_do_not_count(
-    issuer: LocalIssuer, verifier: TokenVerifier
+    local_issuer: LocalIssuer, verifier: TokenVerifier
 ) -> None:
     """Zitadel's generic claim gathers the roles of whatever projects the token was asked for: a role there,
     or under another project's id, was granted for something else than this API."""
     granted = {"ledger.organization.admin": {PROVIDER_ORGANIZATION: "ledger.test"}}
-    token = issuer.token(
+    token = local_issuer.token(
         claims={
             "urn:zitadel:iam:org:project:roles": granted,
             project_roles_claim("another-project"): granted,
@@ -204,10 +200,10 @@ def test_the_roles_of_a_project_are_in_a_claim_named_after_it() -> None:
 
 
 async def test_an_audience_among_others_or_alone_is_enough(
-    issuer: LocalIssuer, verifier: TokenVerifier
+    local_issuer: LocalIssuer, verifier: TokenVerifier
 ) -> None:
-    assert await accepted(verifier, issuer.token(claims={"aud": ["zitadel", AUDIENCE]}))
-    assert await accepted(verifier, issuer.token(claims={"aud": AUDIENCE}))
+    assert await accepted(verifier, local_issuer.token(claims={"aud": ["zitadel", AUDIENCE]}))
+    assert await accepted(verifier, local_issuer.token(claims={"aud": AUDIENCE}))
 
 
 def test_an_organization_id_is_the_same_wherever_it_is_derived() -> None:
@@ -221,59 +217,67 @@ def test_an_organization_id_is_the_same_wherever_it_is_derived() -> None:
 
 
 async def test_an_expired_token_is_refused_beyond_the_leeway(
-    issuer: LocalIssuer, verifier: TokenVerifier
+    local_issuer: LocalIssuer, verifier: TokenVerifier
 ) -> None:
-    assert await refused(verifier, issuer.token(claims={"exp": now() - 90})) is TokenProblem.EXPIRED
-    assert await accepted(verifier, issuer.token(claims={"exp": now() - 30}))
+    assert await refused(verifier, local_issuer.token(claims={"exp": now() - 90})) is TokenProblem.EXPIRED
+    assert await accepted(verifier, local_issuer.token(claims={"exp": now() - 30}))
 
 
 @pytest.mark.parametrize("claim", ["nbf", "iat"])
 async def test_a_token_from_the_future_is_refused_beyond_the_leeway(
-    issuer: LocalIssuer, verifier: TokenVerifier, claim: str
+    local_issuer: LocalIssuer, verifier: TokenVerifier, claim: str
 ) -> None:
-    assert await refused(verifier, issuer.token(claims={claim: now() + 90})) is TokenProblem.NOT_YET_VALID
-    assert await accepted(verifier, issuer.token(claims={claim: now() + 30}))
+    assert (
+        await refused(verifier, local_issuer.token(claims={claim: now() + 90})) is TokenProblem.NOT_YET_VALID
+    )
+    assert await accepted(verifier, local_issuer.token(claims={claim: now() + 30}))
 
 
 async def test_the_leeway_holds_up_to_its_edge_and_exp_is_exclusive(
-    issuer: LocalIssuer, policy: TokenPolicy
+    local_issuer: LocalIssuer, policy: TokenPolicy
 ) -> None:
     moment = now()
     stopped = TokenVerifier(policy, clock=lambda: moment)
     leeway = policy.leeway
-    assert await accepted(stopped, issuer.token(claims={"exp": moment - leeway + 1}))
-    assert await refused(stopped, issuer.token(claims={"exp": moment - leeway})) is TokenProblem.EXPIRED
-    assert await accepted(stopped, issuer.token(claims={"nbf": moment + leeway, "iat": moment + leeway}))
+    assert await accepted(stopped, local_issuer.token(claims={"exp": moment - leeway + 1}))
+    assert await refused(stopped, local_issuer.token(claims={"exp": moment - leeway})) is TokenProblem.EXPIRED
+    assert await accepted(
+        stopped, local_issuer.token(claims={"nbf": moment + leeway, "iat": moment + leeway})
+    )
     for claim in ("nbf", "iat"):
-        late = issuer.token(claims={claim: moment + leeway + 1})
+        late = local_issuer.token(claims={claim: moment + leeway + 1})
         assert await refused(stopped, late) is TokenProblem.NOT_YET_VALID
 
 
-async def test_the_leeway_comes_from_the_policy(issuer: LocalIssuer, policy: TokenPolicy) -> None:
+async def test_the_leeway_comes_from_the_policy(local_issuer: LocalIssuer, policy: TokenPolicy) -> None:
     strict = TokenVerifier(TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=policy.keys_url, leeway=0))
-    assert await refused(strict, issuer.token(claims={"exp": now() - 30})) is TokenProblem.EXPIRED
+    assert await refused(strict, local_issuer.token(claims={"exp": now() - 30})) is TokenProblem.EXPIRED
 
 
-async def test_a_time_may_have_a_fraction_of_a_second(issuer: LocalIssuer, verifier: TokenVerifier) -> None:
+async def test_a_time_may_have_a_fraction_of_a_second(
+    local_issuer: LocalIssuer, verifier: TokenVerifier
+) -> None:
     times = {"exp": now() + 60.5, "nbf": now() - 0.5, "iat": now() - 0.5}
-    assert await accepted(verifier, issuer.token(claims=times))
+    assert await accepted(verifier, local_issuer.token(claims=times))
 
 
 @pytest.mark.parametrize("claim", ["exp", "nbf", "iat"])
 @pytest.mark.parametrize("value", [b"NaN", b"Infinity", b"-Infinity", b"true", b"1e400"])
 async def test_a_time_that_is_not_a_finite_number_is_refused(
-    issuer: LocalIssuer, verifier: TokenVerifier, claim: str, value: bytes
+    local_issuer: LocalIssuer, verifier: TokenVerifier, claim: str, value: bytes
 ) -> None:
-    claims = TOKEN_CLAIMS.validate_json(payload_of(issuer.token()))
+    claims = TOKEN_CLAIMS.validate_json(payload_of(local_issuer.token()))
     claims[claim] = "@"
     payload = json.dumps(claims).encode().replace(b'"@"', value)
-    token = jws.serialize_compact({"alg": "RS256", "kid": "key-1"}, payload, issuer.signing_key())
+    token = jws.serialize_compact({"alg": "RS256", "kid": "key-1"}, payload, local_issuer.signing_key())
     assert await refused(verifier, token) is TokenProblem.CLAIMS
 
 
-async def test_the_verifier_reads_the_time_from_its_clock(issuer: LocalIssuer, policy: TokenPolicy) -> None:
+async def test_the_verifier_reads_the_time_from_its_clock(
+    local_issuer: LocalIssuer, policy: TokenPolicy
+) -> None:
     tomorrow = TokenVerifier(policy, clock=lambda: time() + 86_400)
-    assert await refused(tomorrow, issuer.token()) is TokenProblem.EXPIRED
+    assert await refused(tomorrow, local_issuer.token()) is TokenProblem.EXPIRED
 
 
 # ── Claims ──────────────────────────────────────────────────────────────────────
@@ -321,9 +325,9 @@ async def test_the_verifier_reads_the_time_from_its_clock(issuer: LocalIssuer, p
     ],
 )
 async def test_a_token_with_wrong_or_missing_claims_is_refused(
-    issuer: LocalIssuer, verifier: TokenVerifier, claims: dict[str, object], problem: TokenProblem
+    local_issuer: LocalIssuer, verifier: TokenVerifier, claims: dict[str, object], problem: TokenProblem
 ) -> None:
-    assert await refused(verifier, issuer.token(claims=claims)) is problem
+    assert await refused(verifier, local_issuer.token(claims=claims)) is problem
 
 
 # ── Access tokens, not ID tokens ─────────────────────────────────────────────────
@@ -333,22 +337,24 @@ async def test_a_token_with_wrong_or_missing_claims_is_refused(
     "typ", ["JWT", "jwt", "at+jwt", "AT+JWT", "application/jwt", "application/at+jwt", None]
 )
 async def test_a_token_typed_as_an_access_token_or_untyped_is_accepted(
-    issuer: LocalIssuer, verifier: TokenVerifier, typ: str | None
+    local_issuer: LocalIssuer, verifier: TokenVerifier, typ: str | None
 ) -> None:
     header: dict[str, object] = {"alg": "RS256", "kid": "key-1"}
     if typ is not None:
         header["typ"] = typ
-    assert await accepted(verifier, signed(issuer.signing_key(), header, payload_of(issuer.token())))
+    assert await accepted(
+        verifier, signed(local_issuer.signing_key(), header, payload_of(local_issuer.token()))
+    )
 
 
 @pytest.mark.parametrize("typ", ["logout+jwt", "secevent+jwt", "JOSE", "id_token+jwt", ""])
 async def test_a_token_typed_as_something_else_is_refused_before_any_key_is_fetched(
-    issuer: LocalIssuer, verifier: TokenVerifier, typ: str
+    local_issuer: LocalIssuer, verifier: TokenVerifier, typ: str
 ) -> None:
     header: dict[str, object] = {"alg": "RS256", "kid": "key-1", "typ": typ}
-    token = signed(issuer.signing_key(), header, payload_of(issuer.token()))
+    token = signed(local_issuer.signing_key(), header, payload_of(local_issuer.token()))
     assert await refused(verifier, token) is TokenProblem.WRONG_KIND
-    assert issuer.fetches == 0
+    assert local_issuer.fetches == 0
 
 
 @pytest.mark.parametrize(
@@ -385,13 +391,13 @@ async def test_a_token_typed_as_something_else_is_refused_before_any_key_is_fetc
     ],
 )
 async def test_a_token_without_the_claims_of_an_access_token_or_with_an_id_token_s_is_refused(
-    issuer: LocalIssuer, verifier: TokenVerifier, claims: dict[str, object]
+    local_issuer: LocalIssuer, verifier: TokenVerifier, claims: dict[str, object]
 ) -> None:
-    assert await refused(verifier, issuer.token(claims=claims)) is TokenProblem.WRONG_KIND
+    assert await refused(verifier, local_issuer.token(claims=claims)) is TokenProblem.WRONG_KIND
 
 
 async def test_an_id_token_of_the_provider_for_the_same_project_is_refused(
-    issuer: LocalIssuer, verifier: TokenVerifier
+    local_issuer: LocalIssuer, verifier: TokenVerifier
 ) -> None:
     """Zitadel v4.19.2's ID tokens, a login's and a token exchange's, as issued: same issuer, keys, ``typ``
     and organization claim, and the project among their audiences. Only what makes them ID tokens tells them
@@ -408,19 +414,21 @@ async def test_an_id_token_of_the_provider_for_the_same_project_is_refused(
         "jti": None,
         "nbf": None,
     }
-    assert await refused(verifier, issuer.token(claims=id_token)) is TokenProblem.WRONG_KIND
+    assert await refused(verifier, local_issuer.token(claims=id_token)) is TokenProblem.WRONG_KIND
     exchanged = {
         "aud": [AUDIENCE, "394880531453509636"],
         "azp": "394880531453509636",
         "jti": None,
         "nbf": None,
     }
-    assert await refused(verifier, issuer.token(claims=exchanged)) is TokenProblem.WRONG_KIND
+    assert await refused(verifier, local_issuer.token(claims=exchanged)) is TokenProblem.WRONG_KIND
 
 
-async def test_a_refusal_says_what_was_wrong_in_a_word(issuer: LocalIssuer, verifier: TokenVerifier) -> None:
+async def test_a_refusal_says_what_was_wrong_in_a_word(
+    local_issuer: LocalIssuer, verifier: TokenVerifier
+) -> None:
     with pytest.raises(InvalidTokenError) as caught:
-        await verifier.verify(issuer.token(claims={"exp": now() - 600}))
+        await verifier.verify(local_issuer.token(claims={"exp": now() - 600}))
     assert str(caught.value) == "the access token was refused: expired"
     assert (caught.value.kind, caught.value.code) == (ErrorKind.UNAUTHENTICATED, "invalid_token")
 
@@ -438,16 +446,16 @@ def test_no_token_at_all_is_an_error_of_its_own() -> None:
 
 
 async def test_an_unsigned_token_is_refused_before_any_key_is_fetched(
-    issuer: LocalIssuer, verifier: TokenVerifier
+    local_issuer: LocalIssuer, verifier: TokenVerifier
 ) -> None:
     assert await refused(verifier, unsigned({"alg": "none", "kid": "key-1"})) is TokenProblem.ALGORITHM
-    assert issuer.fetches == 0
+    assert local_issuer.fetches == 0
 
 
 async def test_an_hmac_token_keyed_with_the_public_key_is_refused(
-    issuer: LocalIssuer, verifier: TokenVerifier
+    local_issuer: LocalIssuer, verifier: TokenVerifier
 ) -> None:
-    secret = OctKey.import_key(issuer.published())
+    secret = OctKey.import_key(local_issuer.published())
     forged = jwt.encode(
         {"alg": "HS256", "kid": "key-1"}, {"iss": ISSUER, "aud": AUDIENCE, "sub": "1"}, secret
     )
@@ -455,31 +463,33 @@ async def test_an_hmac_token_keyed_with_the_public_key_is_refused(
 
 
 async def test_an_algorithm_the_policy_does_not_allow_is_refused(
-    issuer: LocalIssuer, policy: TokenPolicy
+    local_issuer: LocalIssuer, policy: TokenPolicy
 ) -> None:
     only_es256 = TokenPolicy(
         issuer=ISSUER, audience=AUDIENCE, keys_url=policy.keys_url, algorithms=frozenset({"ES256"})
     )
-    assert await refused(TokenVerifier(only_es256), issuer.token()) is TokenProblem.ALGORITHM
+    assert await refused(TokenVerifier(only_es256), local_issuer.token()) is TokenProblem.ALGORITHM
 
 
-async def test_a_tampered_token_fails_its_signature(issuer: LocalIssuer, verifier: TokenVerifier) -> None:
-    header, _, signature = issuer.token().split(".")
+async def test_a_tampered_token_fails_its_signature(
+    local_issuer: LocalIssuer, verifier: TokenVerifier
+) -> None:
+    header, _, signature = local_issuer.token().split(".")
     claims = {"iss": ISSUER, "aud": AUDIENCE, "sub": "root", "exp": now() + 60, ORGANIZATION_CLAIM: "1"}
     assert await refused(verifier, f"{header}.{segment(claims)}.{signature}") is TokenProblem.SIGNATURE
 
 
 async def test_a_signed_payload_that_is_not_a_json_object_is_malformed(
-    issuer: LocalIssuer, verifier: TokenVerifier
+    local_issuer: LocalIssuer, verifier: TokenVerifier
 ) -> None:
-    array = jws.serialize_compact({"alg": "RS256", "kid": "key-1"}, b"[1, 2, 3]", issuer.signing_key())
+    array = jws.serialize_compact({"alg": "RS256", "kid": "key-1"}, b"[1, 2, 3]", local_issuer.signing_key())
     assert await refused(verifier, array) is TokenProblem.MALFORMED
 
 
 async def test_a_signed_payload_that_is_not_json_is_malformed(
-    issuer: LocalIssuer, verifier: TokenVerifier
+    local_issuer: LocalIssuer, verifier: TokenVerifier
 ) -> None:
-    token = jws.serialize_compact({"alg": "RS256", "kid": "key-1"}, b"not json", issuer.signing_key())
+    token = jws.serialize_compact({"alg": "RS256", "kid": "key-1"}, b"not json", local_issuer.signing_key())
     assert await refused(verifier, token) is TokenProblem.MALFORMED
 
 
@@ -489,22 +499,24 @@ async def test_a_signed_payload_that_is_not_json_is_malformed(
     ids=["empty", "word", "two-parts", "four-parts", "non-ascii", "bad-base64", "no-kid"],
 )
 async def test_text_that_is_not_a_signed_jwt_is_malformed(
-    issuer: LocalIssuer, verifier: TokenVerifier, token: str
+    local_issuer: LocalIssuer, verifier: TokenVerifier, token: str
 ) -> None:
     assert await refused(verifier, token) is TokenProblem.MALFORMED
-    assert issuer.fetches == 0
+    assert local_issuer.fetches == 0
 
 
-async def test_a_huge_token_is_refused_unread(issuer: LocalIssuer, verifier: TokenVerifier) -> None:
-    huge = issuer.token(claims={"padding": "x" * MAX_TOKEN_LENGTH})
+async def test_a_huge_token_is_refused_unread(local_issuer: LocalIssuer, verifier: TokenVerifier) -> None:
+    huge = local_issuer.token(claims={"padding": "x" * MAX_TOKEN_LENGTH})
     assert await refused(verifier, huge) is TokenProblem.MALFORMED
-    assert issuer.fetches == 0
+    assert local_issuer.fetches == 0
 
 
-async def test_a_megabyte_header_is_refused_unread(issuer: LocalIssuer, verifier: TokenVerifier) -> None:
+async def test_a_megabyte_header_is_refused_unread(
+    local_issuer: LocalIssuer, verifier: TokenVerifier
+) -> None:
     header = segment({"alg": "RS256", "kid": "key-1", "padding": "x" * 1_000_000})
     assert await refused(verifier, f"{header}.{segment({})}.c2lnbmF0dXJl") is TokenProblem.MALFORMED
-    assert issuer.fetches == 0
+    assert local_issuer.fetches == 0
 
 
 @pytest.mark.parametrize("pointer", ["jku", "x5u"])
@@ -516,10 +528,12 @@ async def test_keys_a_token_points_to_are_never_fetched(verifier: TokenVerifier,
     assert impostor.fetches == 0
 
 
-async def test_a_key_a_token_carries_is_never_trusted(issuer: LocalIssuer, verifier: TokenVerifier) -> None:
+async def test_a_key_a_token_carries_is_never_trusted(
+    local_issuer: LocalIssuer, verifier: TokenVerifier
+) -> None:
     own = RSAKey.generate_key(2048, {"kid": "key-1"}, private=True)
     header = {"alg": "RS256", "kid": "key-1", "jwk": own.as_dict(private=False)}
-    forged = jwt.encode(header, TOKEN_CLAIMS.validate_json(payload_of(issuer.token())), own)
+    forged = jwt.encode(header, TOKEN_CLAIMS.validate_json(payload_of(local_issuer.token())), own)
     assert await refused(verifier, forged) is TokenProblem.SIGNATURE
 
 
@@ -553,10 +567,10 @@ async def test_a_published_key_on_another_curve_than_the_algorithm_s_is_refused(
     ],
 )
 async def test_a_critical_header_list_that_is_not_one_is_malformed(
-    issuer: LocalIssuer, verifier: TokenVerifier, crit: object
+    local_issuer: LocalIssuer, verifier: TokenVerifier, crit: object
 ) -> None:
     header: dict[str, object] = {"alg": "RS256", "kid": "key-1", "crit": crit}
-    token = signed(issuer.signing_key(), header, payload_of(issuer.token()))
+    token = signed(local_issuer.signing_key(), header, payload_of(local_issuer.token()))
     assert await refused(verifier, token) is TokenProblem.MALFORMED
 
 
@@ -570,9 +584,9 @@ async def test_no_value_of_a_registered_header_makes_the_verifier_fail_otherwise
 
 
 async def test_an_algorithm_the_published_key_does_not_fit_is_refused(
-    issuer: LocalIssuer, policy: TokenPolicy
+    local_issuer: LocalIssuer, policy: TokenPolicy
 ) -> None:
-    _, payload, signature = issuer.token().split(".")
+    _, payload, signature = local_issuer.token().split(".")
     retitled = f"{segment({'alg': 'ES256', 'kid': 'key-1'})}.{payload}.{signature}"
     assert await refused(rsa_or_ec(policy), retitled) is TokenProblem.ALGORITHM
 
@@ -595,88 +609,88 @@ async def test_no_payload_or_signature_under_a_valid_header_breaks_the_verifier(
 # ── Keys ────────────────────────────────────────────────────────────────────────
 
 
-async def test_the_keys_are_fetched_once_and_kept(issuer: LocalIssuer, verifier: TokenVerifier) -> None:
+async def test_the_keys_are_fetched_once_and_kept(local_issuer: LocalIssuer, verifier: TokenVerifier) -> None:
     for _ in range(5):
-        await verifier.verify(issuer.token())
-    assert issuer.fetches == 1
+        await verifier.verify(local_issuer.token())
+    assert local_issuer.fetches == 1
 
 
 async def test_the_keys_are_fetched_again_once_they_are_old(
-    issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
+    local_issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
 ) -> None:
-    old = issuer.token()
+    old = local_issuer.token()
     await verifier.verify(old)
     moment.now += policy.keys_ttl
-    issuer.rotate()
-    issuer.retire("key-1")
+    local_issuer.rotate()
+    local_issuer.retire("key-1")
     assert await accepted(verifier, old)  # held, and only past its time to live: answered at once
     await eventually(lambda: unknown(verifier, old))
-    assert issuer.fetches == 2
+    assert local_issuer.fetches == 2
 
 
 async def test_a_key_the_copy_lacks_refreshes_it_but_no_more_than_once_per_floor(
-    issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
+    local_issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
 ) -> None:
-    await verifier.verify(issuer.token())
+    await verifier.verify(local_issuer.token())
     moment.now += policy.refresh_floor
-    issuer.rotate()
-    assert await accepted(verifier, issuer.token())  # signed with the key just published
-    assert issuer.fetches == 2
+    local_issuer.rotate()
+    assert await accepted(verifier, local_issuer.token())  # signed with the key just published
+    assert local_issuer.fetches == 2
     for number in range(20):
         assert await refused(verifier, unsigned({"alg": "RS256", "kid": f"invented-{number}"})) is (
             TokenProblem.UNKNOWN_KEY
         )
-    assert issuer.fetches == 2  # within the floor: invented ids cost nothing
+    assert local_issuer.fetches == 2  # within the floor: invented ids cost nothing
     moment.now += policy.refresh_floor
     assert (
         await refused(verifier, unsigned({"alg": "RS256", "kid": "invented-again"}))
         is TokenProblem.UNKNOWN_KEY
     )
-    assert issuer.fetches == 3
+    assert local_issuer.fetches == 3
 
 
 async def test_a_retired_key_stops_working_once_the_refresh_it_set_off_completes(
-    issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
+    local_issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
 ) -> None:
-    old = issuer.token()
+    old = local_issuer.token()
     assert await accepted(verifier, old)
-    issuer.rotate()
-    issuer.retire("key-1")
+    local_issuer.rotate()
+    local_issuer.retire("key-1")
     moment.now += policy.keys_ttl
     assert await accepted(verifier, old)
     await eventually(lambda: unknown(verifier, old))
 
 
 async def test_keys_past_their_ceiling_are_refreshed_before_the_request_is_answered(
-    issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
+    local_issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
 ) -> None:
-    old = issuer.token()
+    old = local_issuer.token()
     assert await accepted(verifier, old)
-    issuer.rotate()
-    issuer.retire("key-1")
+    local_issuer.rotate()
+    local_issuer.retire("key-1")
     moment.now += policy.keys_max_age
     assert await refused(verifier, old) is TokenProblem.UNKNOWN_KEY
 
 
 async def test_keys_past_their_ceiling_still_work_when_the_refresh_fails(
-    issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
+    local_issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
 ) -> None:
-    await verifier.verify(issuer.token())
-    issuer.failure = (HTTPStatus.SERVICE_UNAVAILABLE, b"")
+    await verifier.verify(local_issuer.token())
+    local_issuer.failure = (HTTPStatus.SERVICE_UNAVAILABLE, b"")
     moment.now += policy.keys_max_age
     with capture_logs() as logs:
-        assert await accepted(verifier, issuer.token())
+        assert await accepted(verifier, local_issuer.token())
     assert [log["event"] for log in logs] == ["tokens.keys_past_ceiling", "tokens.keys_unavailable"]
 
 
 async def test_past_the_ceiling_a_hung_provider_stalls_one_request_and_no_more(
-    issuer: LocalIssuer, moment: Moment
+    local_issuer: LocalIssuer, moment: Moment
 ) -> None:
-    patient = TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=issuer.keys_url, fetch_timeout=1.0)
+    patient = TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=local_issuer.keys_url, fetch_timeout=1.0)
     verifier = TokenVerifier(patient, keys=PublishedKeys(patient, clock=moment))
-    old = issuer.token()
+    old = local_issuer.token()
     await verifier.verify(old)
-    issuer.delay = 30.0
+    local_issuer.delay = 30.0
     moment.now += patient.keys_max_age
     with capture_logs() as logs:
         assert await accepted(verifier, old)  # waited once, for a refresh that failed
@@ -686,9 +700,9 @@ async def test_past_the_ceiling_a_hung_provider_stalls_one_request_and_no_more(
             answers = [group.create_task(accepted(verifier, old)) for _ in range(20)]
         assert all(answer.result() for answer in answers)
         await eventually(lambda: logged(logs, 3))  # the refresh behind them failed too
-        issuer.delay = 0.0
-        issuer.rotate()
-        issuer.retire("key-1")
+        local_issuer.delay = 0.0
+        local_issuer.rotate()
+        local_issuer.retire("key-1")
         moment.now += patient.refresh_floor
         assert await accepted(verifier, old)  # still not waiting: the refresh runs behind
         await eventually(lambda: unknown(verifier, old))  # the provider is back: the copy is fresh again
@@ -697,80 +711,80 @@ async def test_past_the_ceiling_a_hung_provider_stalls_one_request_and_no_more(
 
 
 async def test_once_refreshed_past_the_ceiling_the_next_crossing_waits_again(
-    issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
+    local_issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
 ) -> None:
-    await verifier.verify(issuer.token())
-    issuer.failure = (HTTPStatus.SERVICE_UNAVAILABLE, b"")
+    await verifier.verify(local_issuer.token())
+    local_issuer.failure = (HTTPStatus.SERVICE_UNAVAILABLE, b"")
     moment.now += policy.keys_max_age
     with capture_logs():
-        assert await accepted(verifier, issuer.token())  # waited, failed: held keys served from now on
-        issuer.failure = None
+        assert await accepted(verifier, local_issuer.token())  # waited, failed: held keys served from now on
+        local_issuer.failure = None
         moment.now += policy.refresh_floor
-        old = issuer.token()
-        issuer.rotate()
-        issuer.retire("key-1")
+        old = local_issuer.token()
+        local_issuer.rotate()
+        local_issuer.retire("key-1")
         assert await accepted(verifier, old)
         await eventually(lambda: unknown(verifier, old))
-    newest = issuer.token()
-    issuer.rotate()
-    issuer.retire("key-2")
+    newest = local_issuer.token()
+    local_issuer.rotate()
+    local_issuer.retire("key-2")
     moment.now += policy.keys_max_age
     with capture_logs():
         assert await refused(verifier, newest) is TokenProblem.UNKNOWN_KEY  # waited: no failure since
 
 
 async def test_the_age_of_the_keys_held_is_exported(
-    issuer: LocalIssuer, policy: TokenPolicy, moment: Moment
+    local_issuer: LocalIssuer, policy: TokenPolicy, moment: Moment
 ) -> None:
     registry = CollectorRegistry()
     verifier = TokenVerifier(policy, keys=PublishedKeys(policy, clock=moment, registry=registry))
     assert registry.get_sample_value("ledger_auth_keys_age_seconds") == math.inf  # none held yet
-    await verifier.verify(issuer.token())
+    await verifier.verify(local_issuer.token())
     assert registry.get_sample_value("ledger_auth_keys_age_seconds") == 0.0
     moment.now += 42.5
     assert registry.get_sample_value("ledger_auth_keys_age_seconds") == 42.5
 
 
 async def test_a_keys_document_without_a_key_with_an_id_keeps_the_keys_held(
-    issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
+    local_issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
 ) -> None:
-    await verifier.verify(issuer.token())
-    keys = KEY_SET.validate_json(issuer.published())["keys"]
+    await verifier.verify(local_issuer.token())
+    keys = KEY_SET.validate_json(local_issuer.published())["keys"]
     nameless = [{name: value for name, value in key.items() if name != "kid"} for key in keys]
-    issuer.failure = (HTTPStatus.OK, json.dumps({"keys": nameless}).encode())
+    local_issuer.failure = (HTTPStatus.OK, json.dumps({"keys": nameless}).encode())
     moment.now += policy.keys_max_age
     with capture_logs() as logs:
-        assert await accepted(verifier, issuer.token())
+        assert await accepted(verifier, local_issuer.token())
     assert [log["event"] for log in logs] == ["tokens.keys_past_ceiling", "tokens.keys_unavailable"]
 
 
 async def test_without_keys_no_token_can_be_checked_and_the_provider_is_not_hammered(
-    issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
+    local_issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
 ) -> None:
-    issuer.failure = (HTTPStatus.INTERNAL_SERVER_ERROR, b"oops")
+    local_issuer.failure = (HTTPStatus.INTERNAL_SERVER_ERROR, b"oops")
     with capture_logs() as logs, pytest.raises(TokenKeysUnavailableError):
-        await verifier.verify(issuer.token())
+        await verifier.verify(local_issuer.token())
     with pytest.raises(TokenKeysUnavailableError) as caught:
-        await verifier.verify(issuer.token())
-    assert issuer.fetches == 1
+        await verifier.verify(local_issuer.token())
+    assert local_issuer.fetches == 1
     assert (caught.value.kind, caught.value.code) == (ErrorKind.UNAVAILABLE, "token_keys_unavailable")
     assert [log["event"] for log in logs] == ["tokens.keys_unavailable"]
-    issuer.failure = None
+    local_issuer.failure = None
     moment.now += policy.refresh_floor
-    assert await accepted(verifier, issuer.token())
+    assert await accepted(verifier, local_issuer.token())
 
 
 async def test_the_keys_held_keep_working_while_the_provider_is_down(
-    issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
+    local_issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
 ) -> None:
-    await verifier.verify(issuer.token())
-    issuer.failure = (HTTPStatus.SERVICE_UNAVAILABLE, b"")
+    await verifier.verify(local_issuer.token())
+    local_issuer.failure = (HTTPStatus.SERVICE_UNAVAILABLE, b"")
     moment.now += policy.keys_ttl
     with capture_logs() as logs:
-        assert await accepted(verifier, issuer.token())
+        assert await accepted(verifier, local_issuer.token())
         await eventually(lambda: logged(logs))
-        assert await accepted(verifier, issuer.token())
-    assert issuer.fetches == 2
+        assert await accepted(verifier, local_issuer.token())
+    assert local_issuer.fetches == 2
 
 
 @pytest.mark.parametrize(
@@ -785,97 +799,97 @@ async def test_the_keys_held_keep_working_while_the_provider_is_down(
     ids=["garbage", "empty", "broken-key", "too-large", "redirect"],
 )
 async def test_a_keys_document_that_cannot_be_used_is_no_keys(
-    issuer: LocalIssuer, verifier: TokenVerifier, answer: tuple[HTTPStatus, bytes]
+    local_issuer: LocalIssuer, verifier: TokenVerifier, answer: tuple[HTTPStatus, bytes]
 ) -> None:
-    issuer.failure = answer
+    local_issuer.failure = answer
     with capture_logs(), pytest.raises(TokenKeysUnavailableError):
-        await verifier.verify(issuer.token())
+        await verifier.verify(local_issuer.token())
 
 
 async def test_keys_are_asked_for_uncompressed_and_a_compressed_answer_is_no_keys(
-    issuer: LocalIssuer, verifier: TokenVerifier
+    local_issuer: LocalIssuer, verifier: TokenVerifier
 ) -> None:
-    issuer.encoding = "gzip"
-    issuer.failure = (HTTPStatus.OK, gzip.compress(issuer.published()))
+    local_issuer.encoding = "gzip"
+    local_issuer.failure = (HTTPStatus.OK, gzip.compress(local_issuer.published()))
     with capture_logs(), pytest.raises(TokenKeysUnavailableError):
-        await verifier.verify(issuer.token())
-    assert b"\r\naccept-encoding: identity\r\n" in issuer.requests[0].lower()
+        await verifier.verify(local_issuer.token())
+    assert b"\r\naccept-encoding: identity\r\n" in local_issuer.requests[0].lower()
 
 
 async def test_a_provider_that_does_not_answer_in_time_is_no_keys(
-    issuer: LocalIssuer, policy: TokenPolicy
+    local_issuer: LocalIssuer, policy: TokenPolicy
 ) -> None:
-    issuer.delay = 30.0
+    local_issuer.delay = 30.0
     impatient = TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=policy.keys_url, fetch_timeout=0.1)
     with capture_logs(), pytest.raises(TokenKeysUnavailableError):
-        await TokenVerifier(impatient).verify(issuer.token())
+        await TokenVerifier(impatient).verify(local_issuer.token())
 
 
 async def test_requests_that_find_the_keys_stale_together_share_one_fetch(
-    issuer: LocalIssuer, verifier: TokenVerifier
+    local_issuer: LocalIssuer, verifier: TokenVerifier
 ) -> None:
     async with asyncio.TaskGroup() as group:
         for _ in range(10):
-            group.create_task(verifier.verify(issuer.token()))
-    assert issuer.fetches == 1
+            group.create_task(verifier.verify(local_issuer.token()))
+    assert local_issuer.fetches == 1
 
 
 async def test_a_service_fetches_with_one_client_held_for_its_run(
-    issuer: LocalIssuer, policy: TokenPolicy, moment: Moment
+    local_issuer: LocalIssuer, policy: TokenPolicy, moment: Moment
 ) -> None:
     keys = HttpKeys()
     async with keys.opened() as fetch:
         verifier = TokenVerifier(policy, keys=PublishedKeys(policy, fetch=fetch, clock=moment))
-        old = issuer.token()
+        old = local_issuer.token()
         assert await accepted(verifier, old)
-        issuer.rotate()
-        issuer.retire("key-1")
+        local_issuer.rotate()
+        local_issuer.retire("key-1")
         moment.now += policy.keys_ttl
         assert await accepted(verifier, old)
         await eventually(lambda: unknown(verifier, old))
-    assert issuer.fetches == 2
+    assert local_issuer.fetches == 2
     with pytest.raises(KeysClientClosedError) as caught:
-        await keys(issuer.keys_url)
+        await keys(local_issuer.keys_url)
     assert (caught.value.kind, caught.value.code) == (ErrorKind.INTERNAL, "keys_client_closed")
 
 
 async def test_the_environment_s_proxies_do_not_reach_the_key_fetch(
-    issuer: LocalIssuer, policy: TokenPolicy, monkeypatch: pytest.MonkeyPatch
+    local_issuer: LocalIssuer, policy: TokenPolicy, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     for name in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
         monkeypatch.setenv(name, UNREACHABLE_PROXY)
     for name in ("NO_PROXY", "no_proxy"):
         monkeypatch.delenv(name, raising=False)
-    assert await accepted(TokenVerifier(policy), issuer.token())
+    assert await accepted(TokenVerifier(policy), local_issuer.token())
     async with HttpKeys().opened() as fetch:
-        assert await fetch(issuer.keys_url) == issuer.published()
+        assert await fetch(local_issuer.keys_url) == local_issuer.published()
 
 
 async def test_a_flood_of_invented_key_ids_at_once_costs_one_fetch(
-    issuer: LocalIssuer, verifier: TokenVerifier
+    local_issuer: LocalIssuer, verifier: TokenVerifier
 ) -> None:
-    await verifier.verify(issuer.token())
+    await verifier.verify(local_issuer.token())
     async with asyncio.TaskGroup() as group:
         floods = [
             group.create_task(refused(verifier, unsigned({"alg": "RS256", "kid": f"invented-{number}"})))
             for number in range(50)
         ]
     assert {flood.result() for flood in floods} == {TokenProblem.UNKNOWN_KEY}
-    assert issuer.fetches == 1
+    assert local_issuer.fetches == 1
 
 
 async def test_requests_with_a_key_held_never_wait_for_a_provider_that_stalls(
-    issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
+    local_issuer: LocalIssuer, verifier: TokenVerifier, moment: Moment, policy: TokenPolicy
 ) -> None:
-    await verifier.verify(issuer.token())
-    issuer.delay = 30.0
+    await verifier.verify(local_issuer.token())
+    local_issuer.delay = 30.0
     moment.now += policy.keys_ttl
     with capture_logs() as logs:
         async with asyncio.timeout(policy.fetch_timeout / 4), asyncio.TaskGroup() as group:
-            answers = [group.create_task(accepted(verifier, issuer.token())) for _ in range(20)]
+            answers = [group.create_task(accepted(verifier, local_issuer.token())) for _ in range(20)]
         assert all(answer.result() for answer in answers)
         await eventually(lambda: logged(logs))  # the one refresh behind them gave up on its own
-    assert issuer.fetches == 2
+    assert local_issuer.fetches == 2
 
 
 async def test_a_request_that_goes_away_does_not_cancel_the_fetch_others_wait_for() -> None:

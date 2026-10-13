@@ -1,4 +1,4 @@
-"""Fixtures of the platform's tests: a real PostgreSQL and a real NATS server with JetStream."""
+"""Fixtures of the platform's tests: databases on the run's PostgreSQL (``ledger_testing``'s), and NATS."""
 
 lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 
@@ -15,34 +15,27 @@ from ledger_platform.data.database import Database
 from ledger_platform.observability.tracing import Tracing
 from ledger_platform.schema import CHASSIS_METADATA
 from ledger_testing import waiting
-from ledger_testing.containers import Postgres, nats_address, nats_server
-from ledger_testing.logs import restored_logging
+from ledger_testing.containers import nats_address, nats_server
+lazy from ledger_testing.postgres import PostgresServer, Template
 
 SMALL_PAYLOAD_CONFIG = "/small-payload.conf"
 
 
-@pytest.fixture(autouse=True)
-def restore_logging() -> Iterator[None]:
-    """Each test starts from, and leaves, the plain baseline: ``configure_logging`` is process-wide state."""
-    with restored_logging():
-        yield
+def pytest_ledger_template(template: Template) -> None:
+    """The platform's tests of the v1 chassis make databases of their own: nothing in the template."""
+    del template
 
 
 @pytest.fixture(scope="session")
-def postgres() -> Iterator[Postgres]:
-    """A real PostgreSQL for the whole session."""
-    with Postgres.started() as server:
-        yield server
-
-
-@pytest.fixture(scope="session")
-def database_url(postgres: Postgres) -> str:
-    """The app's database; it connects as ``ledger_app``, which owns the database but is no superuser."""
-    return postgres.database("ledger", role="ledger_app", password="app-password")
+def database_url(postgres: PostgresServer, worker_name: str) -> str:
+    """This worker's app database; it connects as a role that owns the database but is no superuser."""
+    return postgres.database(
+        f"ledger_{worker_name}_v1", role=f"ledger_app_{worker_name}", password="app-password"
+    )
 
 
 @pytest.fixture
-def fresh_database_url(postgres: Postgres) -> str:
+def fresh_database_url(postgres: PostgresServer) -> str:
     """An empty database of its own, owned by a role of its own: for the tests of the migrations."""
     name = f"fresh_{new_id().hex[16:]}"  # the random half of a UUIDv7
     return postgres.database(name, role=name, password="fresh-password")

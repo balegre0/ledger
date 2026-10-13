@@ -13,6 +13,7 @@ from ledger_testing.issuer import (
     ORGANIZATION_CLAIM,
     PROVIDER_ORGANIZATION,
     SUBJECT,
+    IssuerKeys,
     LocalIssuer,
 )
 
@@ -110,3 +111,31 @@ def test_the_signing_key_is_the_newest_unless_another_is_named() -> None:
     assert issuer.signing_key().kid == "key-2"
     assert issuer.signing_key("key-1").kid == "key-1"
     assert issuer.token(kid="key-1").count(".") == 2
+
+
+def test_issuers_sharing_keys_publish_the_same_key_and_accept_each_other_s_tokens() -> None:
+    keys = IssuerKeys.generate()
+    first, second = LocalIssuer(keys=keys), LocalIssuer(keys=keys)
+    assert kids(first) == kids(second) == ["key-1"]
+    assert first.published() == second.published()
+    assert claims_of(second, first.token(subject="3001"))["sub"] == "3001"
+    assert first.rotate() == "key-2"
+    assert kids(first) == ["key-1", "key-2"]
+    assert kids(second) == ["key-1"]
+
+
+def test_a_new_key_set_is_a_new_key() -> None:
+    assert IssuerKeys.generate().first.thumbprint() != IssuerKeys.generate().first.thumbprint()
+
+
+async def test_a_started_issuer_signs_with_the_keys_it_was_given(issuer_keys: IssuerKeys) -> None:
+    async with LocalIssuer.started(keys=issuer_keys) as issuer:
+        assert issuer.signing_key() is issuer_keys.first
+
+
+async def test_the_plugins_issuer_signs_with_the_session_s_keys(
+    local_issuer: LocalIssuer, issuer_keys: IssuerKeys
+) -> None:
+    async with httpx.AsyncClient() as client:
+        response = await client.get(local_issuer.keys_url)
+    assert response.content == local_issuer.published() == LocalIssuer(keys=issuer_keys).published()

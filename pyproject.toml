@@ -21,6 +21,7 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
     "pytest-randomly>=5.0.0",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.17.0",
     "testcontainers>=4.15.0",
     "types-grpcio>=1.84.0.20260928",
@@ -70,7 +71,7 @@ spell = { cmd = "typos", help = "Spell check" }
 # stay relative to the project root, where poe runs every task. CI regenerates and diffs the committed code.
 proto = { cmd = "python -m grpc_tools.protoc --proto_path=${POE_ROOT}/contracts/proto --python_out=contracts/src --mypy_out=contracts/src --grpc_python_out=contracts/src --mypy_grpc_out=contracts/src contracts/proto/ledger/**/*.proto", help = "Regenerate the code of every .proto" }
 proto-lint = { cmd = "docker run --rm --volume ${POE_ROOT}/contracts:/workspace --workdir /workspace bufbuild/buf:1.73.0@sha256:75d8f756f0919dcded71e67968a91adfe55fe4dd62c4900c57bbfcd7fe625608 lint", help = "buf lint" }
-test = { cmd = "pytest", help = "Tests with coverage" }
+test = { cmd = "pytest -n auto", help = "Tests with coverage, in parallel" }
 openapi = { cmd = "ledger-identity-openapi modules/identity/openapi.json", help = "Regenerate the published OpenAPI documents" }
 check = { sequence = ["format-check", "lint", "suppressions", "types", "arch", "deps", "spell", "proto-lint", "test"], help = "Everything CI runs" }
 
@@ -131,7 +132,6 @@ ignore = [
     "S603",    # a test may run this interpreter on code of its own
     "INP001",  # tests are not a package: each package's tests/ is its own root
 ]
-"conftest.py" = ["INP001"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -156,7 +156,7 @@ exclude = ["*.md"]  # ruff 0.17 formats Python blocks inside Markdown; the docs 
 # ── Type checker #1: basedpyright ───────────────────────────────────────────────
 [tool.basedpyright]
 pythonVersion = "3.15"
-include = ["packages", "modules", "contracts", "tests", "conftest.py"]
+include = ["packages", "modules", "contracts", "tests"]
 exclude = ["contracts/src/ledger", "**/.venv", "**/__pycache__"]
 typeCheckingMode = "all"
 failOnWarnings = true

@@ -316,9 +316,8 @@ async def test_a_failed_connection_keeps_what_libpq_says(
         with pytest.raises(OperationalError) as failed:
             await unreachable.ping()
     output = logged(failed.value, LogFormat.JSON, capsys)
-    assert (
-        'password authentication failed for user "ledger_app"' in exception_values(output)["OperationalError"]
-    )
+    role = make_url(database_url).username
+    assert f'password authentication failed for user "{role}"' in exception_values(output)["OperationalError"]
     assert "wrong-password" not in output
 
 

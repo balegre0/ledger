@@ -1,14 +1,8 @@
-"""Fixtures of the toolkit's own tests: one real PostgreSQL for the session."""
+"""The testing package's own tests: its hook prepares nothing, they make the databases they need."""
 
-lazy from collections.abc import Iterator
-
-import pytest
-
-from ledger_testing.containers import Postgres
+lazy from ledger_testing.postgres import Template
 
 
-@pytest.fixture(scope="session")
-def server() -> Iterator[Postgres]:
-    """A real PostgreSQL; each test makes the databases it needs in it."""
-    with Postgres.started() as started:
-        yield started
+def pytest_ledger_template(template: Template) -> None:
+    """The testing package's own tests need nothing in the template."""
+    del template

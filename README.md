@@ -37,14 +37,14 @@ real PostgreSQL and a real NATS, and the protobuf lint runs in a container.
 uv sync               # the workspace into .venv (CI runs uv sync --locked)
 uv run poe check      # the whole gate, as CI runs it; Docker must be running
 uv run poe fmt        # format and autofix
-uv run poe test       # only the tests, with coverage
+uv run poe test       # only the tests, in parallel (xdist), with coverage
 uv run poe proto      # regenerate libs/contracts/src/ledger after editing a .proto; commit the result
 uv run poe openapi    # regenerate services/identity/openapi.json after changing identity's API; commit the result
 uv run poe            # every task
 ```
 
-On Windows psycopg's asynchronous driver needs a selector event loop; the root `conftest.py` gives the tests
-one. Services run in Linux containers, and CI runs on Linux.
+On Windows psycopg's asynchronous driver needs a selector event loop; the `ledger_testing` pytest plugin gives
+the tests one. Services run in Linux containers, and CI runs on Linux.
 
 ### The local stack
 

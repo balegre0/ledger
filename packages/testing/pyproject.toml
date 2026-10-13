@@ -10,10 +10,14 @@ dependencies = [
     "joserfc>=1.7.5",
     "psycopg[binary]>=3.3.6",
     "pydantic>=2.14.1",
+    "pytest>=9.1.1",
     "sqlalchemy>=2.1.4",
     "structlog>=26.1.0",
     "testcontainers>=4.15.0",
 ]
+
+[project.entry-points.pytest11]
+ledger = "ledger_testing.plugin"
 
 [tool.uv.sources]
 ledger-kernel = { workspace = true }

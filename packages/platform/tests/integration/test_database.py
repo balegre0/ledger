@@ -136,11 +136,14 @@ async def libpq_parameters(database: Database) -> dict[str, str]:
 
 
 async def sessions_named(database: Database, application_name: str) -> int:
-    """How many sessions PostgreSQL holds for ``application_name``."""
+    """How many sessions PostgreSQL holds for ``application_name`` on the test's database."""
     named = (
         select(func.count())
         .select_from(text("pg_stat_activity"))
-        .where(column("application_name", Text) == application_name)
+        .where(
+            column("application_name", Text) == application_name,
+            column("datname", Text) == func.current_database(),
+        )
     )
     async with database.transaction(None) as unit:
         return (await unit.connection.execute(named)).scalar_one()

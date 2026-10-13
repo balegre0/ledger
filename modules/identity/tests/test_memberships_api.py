@@ -50,8 +50,8 @@ class Members:
 
 
 @pytest.fixture
-def members(client: httpx.AsyncClient, issuer: LocalIssuer, company: str) -> Members:
-    return Members(client, issuer, company)
+def members(client: httpx.AsyncClient, local_issuer: LocalIssuer, company: str) -> Members:
+    return Members(client, local_issuer, company)
 
 
 async def test_an_owner_gives_a_role_changes_it_takes_it_away_and_gives_it_again(members: Members) -> None:
@@ -81,16 +81,16 @@ async def test_an_owner_gives_a_role_changes_it_takes_it_away_and_gives_it_again
 
 
 async def test_the_memberships_of_a_company_are_listed_to_whoever_may_read_them(
-    client: httpx.AsyncClient, issuer: LocalIssuer, members: Members
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, members: Members
 ) -> None:
     await members.assign("3001", "accountant")
     await members.assign("3002", "viewer")
     await members.assign("3003", "viewer")
     await members.revoke("3003")
     path = f"/v1/companies/{members.company}/memberships"
-    listed = page(await client.get(path, headers=Caller(issuer, subject="3001").bearer()))
+    listed = page(await client.get(path, headers=Caller(local_issuer, subject="3001").bearer()))
     assert sorted(str(item["subject"]) for item in listed["items"]) == ["2001", "3001", "3002"]
-    refused = await client.get(path, headers=Caller(issuer, subject="3002").bearer())
+    refused = await client.get(path, headers=Caller(local_issuer, subject="3002").bearer())
     assert (refused.status_code, document(refused)["code"]) == (403, "permission_denied")
 
 
@@ -151,9 +151,9 @@ async def test_revoking_a_role_nobody_holds_is_not_found(members: Members) -> No
 
 
 async def test_memberships_of_another_organization_are_out_of_reach(
-    client: httpx.AsyncClient, issuer: LocalIssuer, company: str
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, company: str
 ) -> None:
-    stranger = Caller(issuer, organization="1002").bearer()
+    stranger = Caller(local_issuer, organization="1002").bearer()
     response = await client.put(
         f"/v1/companies/{company}/memberships/3001", json={"role": "owner"}, headers=stranger
     )

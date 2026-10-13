@@ -12,7 +12,7 @@ from ledger_testing.migrations import (
     row_security,
     tables_of,
 )
-lazy from ledger_testing.containers import Postgres
+lazy from ledger_testing.postgres import PostgresServer
 
 
 def models() -> tuple[MetaData, MetaData]:
@@ -31,9 +31,9 @@ def models() -> tuple[MetaData, MetaData]:
     return first, second
 
 
-def migrated(server: Postgres, models: MetaData) -> str:
+def migrated(postgres: PostgresServer, models: MetaData) -> str:
     name = f"schema_{new_id().hex[16:]}"
-    url = server.database(name, role=name, password="schema-password")
+    url = postgres.database(name, role=name, password="schema-password")
     engine = create_engine(url, poolclass=NullPool)
     try:
         with engine.begin() as connection:
@@ -46,9 +46,9 @@ def migrated(server: Postgres, models: MetaData) -> str:
     return url
 
 
-def test_a_schema_built_from_the_models_is_read_back_as_them(server: Postgres) -> None:
+def test_a_schema_built_from_the_models_is_read_back_as_them(postgres: PostgresServer) -> None:
     both = combined(*models())
-    url = migrated(server, both)
+    url = migrated(postgres, both)
     assert tables_of(url) == {"notes", "tags"}
     assert pending_changes(url, both) is None
     assert check_constraints(url) == {"ck_notes_size": "CHECK ((size > 0))"}
@@ -60,7 +60,7 @@ def test_a_schema_built_from_the_models_is_read_back_as_them(server: Postgres) -
     assert row_security(url) == {"notes": (True, True), "tags": (False, False)}
 
 
-def test_a_model_the_schema_lacks_is_a_pending_change(server: Postgres) -> None:
+def test_a_model_the_schema_lacks_is_a_pending_change(postgres: PostgresServer) -> None:
     first, second = models()
-    url = migrated(server, first)
+    url = migrated(postgres, first)
     assert "tags" in (pending_changes(url, combined(first, second)) or "")

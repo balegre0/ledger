@@ -128,19 +128,19 @@ async def test_a_retry_with_its_fields_in_another_order_is_the_same_request(
     "roles", [(), ("ledger.viewer",)], ids=["a-machine-user-without-roles", "a-viewer-of-the-organization"]
 )
 async def test_registering_a_company_without_the_organization_s_admin_role_is_forbidden(
-    client: httpx.AsyncClient, issuer: LocalIssuer, roles: tuple[str, ...]
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, roles: tuple[str, ...]
 ) -> None:
-    member = Caller(issuer, subject="2002", roles=roles)
+    member = Caller(local_issuer, subject="2002", roles=roles)
     response = await client.post("/v1/companies", json=DUARTE, headers=member.posting("k-1"))
     assert (response.status_code, document(response)["code"]) == (403, "forbidden")
     assert page(await client.get("/v1/companies", headers=member.bearer()))["items"] == []
 
 
 async def test_the_role_is_checked_before_what_the_request_must_carry(
-    client: httpx.AsyncClient, issuer: LocalIssuer
+    client: httpx.AsyncClient, local_issuer: LocalIssuer
 ) -> None:
     """As every route checks the caller's permission before its Idempotency-Key and its body."""
-    response = await client.post("/v1/companies", json={}, headers=Caller(issuer).bearer())
+    response = await client.post("/v1/companies", json={}, headers=Caller(local_issuer).bearer())
     assert (response.status_code, document(response)["code"]) == (403, "forbidden")
 
 
@@ -152,13 +152,13 @@ async def test_a_key_reused_for_another_body_is_refused(client: httpx.AsyncClien
 
 
 async def test_a_key_belongs_to_its_caller(
-    client: httpx.AsyncClient, issuer: LocalIssuer, owner: Caller
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: Caller
 ) -> None:
     mine = await created(client, "/v1/companies", DUARTE, owner.posting("k-1"))
     theirs = await client.post(
         "/v1/companies",
         json=DUARTE | {"tax_id": "401500022"},
-        headers=Caller(issuer, organization="1002", roles=(ORGANIZATION_ADMIN,)).posting("k-1"),
+        headers=Caller(local_issuer, organization="1002", roles=(ORGANIZATION_ADMIN,)).posting("k-1"),
     )
     assert theirs.status_code == 201
     assert "idempotent-replayed" not in theirs.headers
@@ -208,23 +208,23 @@ async def test_a_tax_id_the_organization_has_is_a_conflict(
 
 
 async def test_a_taxpayer_another_organization_holds_is_the_same_conflict_telling_nothing_more(
-    client: httpx.AsyncClient, issuer: LocalIssuer, owner: Caller, company: str
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: Caller, company: str
 ) -> None:
     """One RNC, one active company, wherever it is: the answer is the one the caller's organization gets."""
     del company
     ours = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("k-2"))
-    other = Caller(issuer, organization="1002", roles=(ORGANIZATION_ADMIN,))
+    other = Caller(local_issuer, organization="1002", roles=(ORGANIZATION_ADMIN,))
     theirs = await client.post("/v1/companies", json=DUARTE, headers=other.posting("k-1"))
     assert (theirs.status_code, theirs.content) == (409, ours.content)
     assert document(theirs)["code"] == "tax_id_taken"
 
 
 async def test_a_deactivated_company_s_taxpayer_may_be_registered_again(
-    client: httpx.AsyncClient, issuer: LocalIssuer, owner: Caller, company: str
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: Caller, company: str
 ) -> None:
     headers = owner.posting("k-off") | {"If-Match": "*"}
     assert (await client.post(f"/v1/companies/{company}/deactivate", headers=headers)).status_code == 200
-    other = Caller(issuer, organization="1002", roles=(ORGANIZATION_ADMIN,))
+    other = Caller(local_issuer, organization="1002", roles=(ORGANIZATION_ADMIN,))
     theirs = await created(client, "/v1/companies", DUARTE, other.posting("k-1"))
     assert theirs != company
 
@@ -233,17 +233,17 @@ async def test_a_deactivated_company_s_taxpayer_may_be_registered_again(
 
 
 async def test_a_token_that_cannot_be_trusted_is_refused_without_being_repeated(
-    client: httpx.AsyncClient, issuer: LocalIssuer
+    client: httpx.AsyncClient, local_issuer: LocalIssuer
 ) -> None:
     claims: dict[str, object] = {
-        "iss": issuer.issuer,
-        "aud": issuer.audience,
+        "iss": local_issuer.issuer,
+        "aud": local_issuer.audience,
         "sub": "2001",
         "exp": FAR_FUTURE,
     }
     unsigned = f"{segment({'alg': 'none', 'kid': 'key-1'})}.{segment(claims)}."
-    expired = issuer.token(claims={"exp": 1_000_000, "nbf": 0, "iat": 0})
-    forged = LocalIssuer().token()  # signed with a key of its own, under the kid ``issuer`` publishes
+    expired = local_issuer.token(claims={"exp": 1_000_000, "nbf": 0, "iat": 0})
+    forged = LocalIssuer().token()  # signed with a key of its own, under the kid ``local_issuer`` publishes
     for token, problem in (
         (unsigned, "algorithm"),
         (expired, "expired"),
@@ -262,9 +262,9 @@ async def test_a_token_that_cannot_be_trusted_is_refused_without_being_repeated(
 
 
 async def test_a_token_for_another_audience_is_refused(
-    client: httpx.AsyncClient, issuer: LocalIssuer
+    client: httpx.AsyncClient, local_issuer: LocalIssuer
 ) -> None:
-    token = issuer.token(claims={"aud": ["another-api"]})
+    token = local_issuer.token(claims={"aud": ["another-api"]})
     response = await client.get("/v1/companies", headers={"Authorization": f"Bearer {token}"})
     assert (response.status_code, document(response)["detail"]) == (
         401,
@@ -273,12 +273,12 @@ async def test_a_token_for_another_audience_is_refused(
 
 
 async def test_an_id_token_of_the_same_project_is_refused_as_no_access_token(
-    client: httpx.AsyncClient, issuer: LocalIssuer, owner: Caller, company: str
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: Caller, company: str
 ) -> None:
     """Shaped as Zitadel v4's ID token of a login: signed by the provider, the project among its audiences."""
-    id_token = issuer.token(
+    id_token = local_issuer.token(
         claims={
-            "aud": ["web-app", issuer.audience],
+            "aud": ["web-app", local_issuer.audience],
             "azp": "web-app",
             "client_id": "web-app",
             "nonce": "a1b2c3d4",
@@ -300,20 +300,20 @@ async def test_an_id_token_of_the_same_project_is_refused_as_no_access_token(
 
 
 async def test_without_a_key_ever_fetched_a_token_cannot_be_checked(
-    client: httpx.AsyncClient, issuer: LocalIssuer, owner: Caller
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: Caller
 ) -> None:
-    issuer.failure = (HTTPStatus.BAD_GATEWAY, b"down")
+    local_issuer.failure = (HTTPStatus.BAD_GATEWAY, b"down")
     response = await client.get("/v1/companies", headers=owner.bearer())
     assert (response.status_code, document(response)["code"]) == (503, "token_keys_unavailable")
 
 
 async def test_keys_held_keep_working_while_the_provider_is_down(
-    client: httpx.AsyncClient, issuer: LocalIssuer, owner: Caller
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: Caller
 ) -> None:
     assert (await client.get("/v1/companies", headers=owner.bearer())).status_code == 200
-    issuer.failure = (HTTPStatus.BAD_GATEWAY, b"down")
+    local_issuer.failure = (HTTPStatus.BAD_GATEWAY, b"down")
     assert (await client.get("/v1/companies", headers=owner.bearer())).status_code == 200
-    assert issuer.fetches == 1
+    assert local_issuer.fetches == 1
 
 
 async def test_the_age_of_the_provider_s_keys_is_a_metric_of_the_service(
@@ -331,7 +331,7 @@ async def test_the_age_of_the_provider_s_keys_is_a_metric_of_the_service(
 
 
 async def test_a_caller_pages_through_the_companies_it_holds_a_role_in(
-    client: httpx.AsyncClient, issuer: LocalIssuer, owner: Caller
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: Caller
 ) -> None:
     for number, rnc in enumerate(("101850043", "130000012", "401007551")):
         payload = {"tax_id": rnc, "legal_name": f"Company {number}"}
@@ -344,8 +344,10 @@ async def test_a_caller_pages_through_the_companies_it_holds_a_role_in(
         )
     )
     assert (len(rest["items"]), rest["next_cursor"]) == (1, None)
-    partner = page(await client.get("/v1/companies", headers=Caller(issuer, subject="2002").bearer()))
-    stranger = page(await client.get("/v1/companies", headers=Caller(issuer, organization="1002").bearer()))
+    partner = page(await client.get("/v1/companies", headers=Caller(local_issuer, subject="2002").bearer()))
+    stranger = page(
+        await client.get("/v1/companies", headers=Caller(local_issuer, organization="1002").bearer())
+    )
     assert (partner["items"], stranger["items"]) == ([], [])
 
 
@@ -379,10 +381,10 @@ type Reach = tuple[str, str, dict[str, str]]
     ids=["read", "change", "deactivate"],
 )
 async def test_a_company_is_not_found_by_whoever_holds_no_role_in_it(
-    client: httpx.AsyncClient, issuer: LocalIssuer, company: str, reach: Reach
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, company: str, reach: Reach
 ) -> None:
     method, suffix, extra = reach
-    for caller in (Caller(issuer, subject="2002"), Caller(issuer, organization="1002")):
+    for caller in (Caller(local_issuer, subject="2002"), Caller(local_issuer, organization="1002")):
         response = await client.request(
             method,
             f"/v1/companies/{company}{suffix}",
@@ -390,7 +392,7 @@ async def test_a_company_is_not_found_by_whoever_holds_no_role_in_it(
             headers=caller.bearer() | extra,
         )
         assert (response.status_code, document(response)["code"]) == (404, "company_not_found")
-    owner = Caller(issuer)
+    owner = Caller(local_issuer)
     unknown = await client.request(
         method, f"/v1/companies/{new_id()}{suffix}", headers=owner.bearer() | extra
     )
@@ -404,10 +406,10 @@ async def test_a_company_is_not_found_by_whoever_holds_no_role_in_it(
 
 
 async def test_a_viewer_reads_but_does_not_change(
-    client: httpx.AsyncClient, issuer: LocalIssuer, service: Service[IdentitySettings], company: str
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, service: Service[IdentitySettings], company: str
 ) -> None:
     await grant(service, company, "3001", Role.VIEWER)
-    viewer = Caller(issuer, subject="3001")
+    viewer = Caller(local_issuer, subject="3001")
     assert (await client.get(f"/v1/companies/{company}", headers=viewer.bearer())).status_code == 200
     listed = page(await client.get("/v1/companies", headers=viewer.bearer()))
     assert [item["id"] for item in listed["items"]] == [company]
@@ -422,10 +424,10 @@ async def test_a_viewer_reads_but_does_not_change(
 
 
 async def test_a_caller_without_the_permission_is_refused_before_its_preconditions_are_read(
-    client: httpx.AsyncClient, issuer: LocalIssuer, service: Service[IdentitySettings], company: str
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, service: Service[IdentitySettings], company: str
 ) -> None:
     await grant(service, company, "3001", Role.VIEWER)
-    viewer = Caller(issuer, subject="3001")
+    viewer = Caller(local_issuer, subject="3001")
     unconditional = await client.patch(
         f"/v1/companies/{company}", json={"legal_name": "X"}, headers=viewer.bearer()
     )
@@ -436,7 +438,7 @@ async def test_a_caller_without_the_permission_is_refused_before_its_preconditio
 
 async def test_an_admin_demoted_while_its_deactivation_waits_for_the_company_cannot_deactivate(
     client: httpx.AsyncClient,
-    issuer: LocalIssuer,
+    local_issuer: LocalIssuer,
     service: Service[IdentitySettings],
     database_url: str,
     company: str,
@@ -444,7 +446,7 @@ async def test_an_admin_demoted_while_its_deactivation_waits_for_the_company_can
     await grant(service, company, "2002", Role.ADMIN)
     runtime = service.runtime()
     tenant = Tenant(organization_of("1001"), CompanyId(UUID(company)), None)
-    headers = Caller(issuer, subject="2002").posting("k-off") | {"If-Match": '"1"'}
+    headers = Caller(local_issuer, subject="2002").posting("k-off") | {"If-Match": '"1"'}
     async with runtime.database.transaction(tenant) as transaction:  # holds the company's lock
         await commands.grant_role(
             bind(transaction, runtime.outbox),
@@ -457,7 +459,7 @@ async def test_an_admin_demoted_while_its_deactivation_waits_for_the_company_can
         await eventually(partial(waits_for_a_lock, database_url))
     refused = await waiting
     assert (refused.status_code, document(refused)["code"]) == (403, "permission_denied")
-    read = await client.get(f"/v1/companies/{company}", headers=Caller(issuer).bearer())
+    read = await client.get(f"/v1/companies/{company}", headers=Caller(local_issuer).bearer())
     assert (document(read)["status"], read.headers["etag"]) == ("active", '"1"')
 
 

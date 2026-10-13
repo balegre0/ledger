@@ -1,0 +1,10 @@
+# Every container image the repository runs, pinned once. ledger_testing reads these values; compose.yaml and the
+# Dockerfile name the same strings, and `ledger-devtools check` fails when they differ (Task 19).
+[images]
+postgres = "postgres:18.6"
+nats = "nats:2.12.15"
+nats_alpine = "nats:2.12.15-alpine"
+zitadel = "ghcr.io/zitadel/zitadel:v4.19.2@sha256:956a298405189a8f6cd4ec92e8828b1bd10caa7da8b139c39d251d7053e33784"
+uv = "ghcr.io/astral-sh/uv:0.13.0-trixie-slim@sha256:11bee95ce27982f00acb0c85aa1b5ee6203a9bb958b7def6f27ead851d454e8d"
+distroless = "gcr.io/distroless/cc-debian13:nonroot@sha256:e792ab3d241a468a4fd7519ddbbebe66b49b5f365771716ea688ad40b6c6f1c2"
+buf = "bufbuild/buf:1.73.0@sha256:75d8f756f0919dcded71e67968a91adfe55fe4dd62c4900c57bbfcd7fe625608"

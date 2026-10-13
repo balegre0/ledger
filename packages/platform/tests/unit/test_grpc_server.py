@@ -1,6 +1,5 @@
 import asyncio
 import contextlib
-import socket
 from dataclasses import dataclass
 from math import inf, isfinite, nan
 from typing import ClassVar, Final
@@ -11,7 +10,6 @@ import pytest
 from hypothesis import example, given
 from hypothesis import strategies as st
 from prometheus_client import CollectorRegistry
-from pydantic import TypeAdapter
 from structlog.testing import capture_logs
 
 from ledger_kernel.errors import (
@@ -31,6 +29,7 @@ from ledger_platform.grpc.server import (
     InvalidGrpcOptionError,
     serve_grpc,
 )
+from ledger_testing.ports import occupy_a_port, port_of
 
 TIMEOUT: Final = 5
 SECRET: Final = "card 4111111111111111"
@@ -69,7 +68,6 @@ EXPECTED: Final[Mapping[ErrorKind, tuple[grpc.StatusCode, str]]] = {
     ErrorKind.INTERNAL: (grpc.StatusCode.INTERNAL, "internal"),
 }
 BY_PAYLOAD: Final = {kind.value.encode(): error for kind, error in ERRORS.items()}
-ADDRESS: Final = TypeAdapter(tuple[str, int] | tuple[str, int, int, int])
 """An internet address as a socket reports it: host and port, plus flow and scope for IPv6."""
 
 
@@ -546,18 +544,6 @@ async def test_a_server_that_cannot_start_is_stopped(
             pass
     assert len(servers) == 1
     assert stopped == [0.5]
-
-
-def occupy_a_port() -> socket.socket:
-    """A listening socket on every interface, the way grpc's ``[::]`` listens: nobody else binds its port."""
-    if socket.has_dualstack_ipv6():
-        return socket.create_server(("::", 0), family=socket.AF_INET6, dualstack_ipv6=True)
-    return socket.create_server(("", 0))
-
-
-def port_of(listener: socket.socket) -> int:
-    """The port a socket listens on; ``getsockname`` answers ``Any``, its shape is the family's."""
-    return ADDRESS.validate_python(listener.getsockname())[1]
 
 
 async def test_a_port_that_is_taken_is_a_startup_error() -> None:

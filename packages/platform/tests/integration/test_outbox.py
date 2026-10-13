@@ -14,7 +14,19 @@ import pytest
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js import JetStreamContext
 from prometheus_client import CollectorRegistry
-from sqlalchemy import Boolean, DateTime, String, column, delete, func, select, text, type_coerce, update
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    String,
+    Text,
+    column,
+    delete,
+    func,
+    select,
+    text,
+    type_coerce,
+    update,
+)
 from sqlalchemy.event import listen, remove
 from structlog.testing import capture_logs
 lazy from nats.aio.client import Client
@@ -1206,7 +1218,9 @@ async def test_a_stop_that_a_clean_up_turned_into_another_error_ends_the_relay(
 async def waiting_for_a_lock(database: Database) -> bool:
     async with database.transaction(None) as unit:
         waiting = (
-            select(func.count()).select_from(text("pg_locks")).where(column("granted", Boolean).is_(False))
+            select(func.count())
+            .select_from(text("pg_locks JOIN pg_stat_activity USING (pid)"))
+            .where(column("granted", Boolean).is_(False), column("datname", Text) == func.current_database())
         )
         return (await unit.connection.execute(waiting)).scalar_one() > 0
 

@@ -19,10 +19,10 @@ from ledger_platform.data.database import Database
 from ledger_platform.observability.tracing import Tracing
 from ledger_platform.outbox import Outbox
 from ledger_testing.api import Caller, created
-from ledger_testing.containers import Postgres, nats_address, nats_server
-from ledger_testing.issuer import LocalIssuer
-from ledger_testing.logs import restored_logging
+from ledger_testing.containers import nats_address, nats_server
 lazy from ledger_platform.service import Service
+lazy from ledger_testing.issuer import LocalIssuer
+lazy from ledger_testing.postgres import PostgresServer, Template
 
 EMPTY_EVERY_TABLE = text(
     """
@@ -35,30 +35,22 @@ COMPANY: Final = {"tax_id": "101850043", "legal_name": "Duarte"}
 """What the ``company`` fixture registers."""
 
 
-@pytest.fixture(autouse=True)
-def restore_logging() -> Iterator[None]:
-    """Each test starts from, and leaves, the plain baseline: building a service configures logging."""
-    with restored_logging():
-        yield
+def pytest_ledger_template(template: Template) -> None:
+    """identity's tests run on a database of their own: nothing in the template yet."""
+    del template
 
 
 @pytest.fixture(scope="session")
-def postgres() -> Iterator[Postgres]:
-    """A real PostgreSQL for the whole session."""
-    with Postgres.started() as server:
-        yield server
-
-
-@pytest.fixture(scope="session")
-def database_url(postgres: Postgres) -> str:
-    """identity's database, migrated to this version; the service connects as its owner, no superuser."""
-    url = postgres.database("identity", role="identity", password="identity-password")
+def database_url(postgres: PostgresServer, worker_name: str) -> str:
+    """This worker's identity database, migrated; the service connects as its owner, no superuser."""
+    name = f"identity_{worker_name}"
+    url = postgres.database(name, role=name, password="identity-password")
     MIGRATIONS.upgrade(url)
     return url
 
 
 @pytest.fixture
-def fresh_database_url(postgres: Postgres) -> str:
+def fresh_database_url(postgres: PostgresServer) -> str:
     """An empty database of its own, owned by a role of its own: for the tests of the migrations."""
     name = f"fresh_{new_id().hex[16:]}"  # the random half of a UUIDv7
     return postgres.database(name, role=name, password="fresh-password")
@@ -87,14 +79,7 @@ def nats_url() -> Iterator[str]:
 
 
 @pytest.fixture
-async def issuer() -> AsyncGenerator[LocalIssuer]:
-    """The identity provider the service trusts in the tests."""
-    async with LocalIssuer.started() as started:
-        yield started
-
-
-@pytest.fixture
-def settings_for(nats_url: str, issuer: LocalIssuer) -> Callable[[str], IdentitySettings]:
+def settings_for(nats_url: str, local_issuer: LocalIssuer) -> Callable[[str], IdentitySettings]:
     """identity's settings on a database: the test's NATS and identity provider, any free gRPC port."""
 
     def settings(database_url: str) -> IdentitySettings:
@@ -103,9 +88,9 @@ def settings_for(nats_url: str, issuer: LocalIssuer) -> Callable[[str], Identity
             database_url=SecretStr(database_url),
             nats_url=SecretStr(nats_url),
             grpc_port=0,
-            token_issuer=issuer.issuer,
-            token_audience=issuer.audience,
-            token_jwks_url=issuer.keys_url,
+            token_issuer=local_issuer.issuer,
+            token_audience=local_issuer.audience,
+            token_jwks_url=local_issuer.keys_url,
         )
 
     return settings
@@ -131,10 +116,10 @@ async def client(service: Service[IdentitySettings]) -> AsyncGenerator[httpx.Asy
 
 
 @pytest.fixture
-def owner(issuer: LocalIssuer) -> Caller:
+def owner(local_issuer: LocalIssuer) -> Caller:
     """Subject ``2001`` of the provider's organization ``1001``, its administrator (``ORGANIZATION_ADMIN``):
     it owns every company it registers."""
-    return Caller(issuer, roles=(ORGANIZATION_ADMIN,))
+    return Caller(local_issuer, roles=(ORGANIZATION_ADMIN,))
 
 
 @pytest.fixture

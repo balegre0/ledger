@@ -374,7 +374,9 @@ async def inbox(database: Database) -> list[tuple[str, UUID]]:
 async def waiting_for_a_lock(database: Database) -> bool:
     async with database.transaction(None) as unit:
         waiting = (
-            select(func.count()).select_from(text("pg_locks")).where(column("granted", Boolean).is_(False))
+            select(func.count())
+            .select_from(text("pg_locks JOIN pg_stat_activity USING (pid)"))
+            .where(column("granted", Boolean).is_(False), column("datname", Text) == func.current_database())
         )
         return (await unit.connection.execute(waiting)).scalar_one() > 0
 

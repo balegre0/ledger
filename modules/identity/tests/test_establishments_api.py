@@ -139,14 +139,14 @@ async def test_an_emission_point_needs_a_branch_that_exists(
 
 
 async def test_a_viewer_reads_branches_and_opens_none(
-    client: httpx.AsyncClient, issuer: LocalIssuer, owner: Caller, company: str
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: Caller, company: str
 ) -> None:
     await branch(client, owner, company)
     granted = await client.put(
         f"/v1/companies/{company}/memberships/3001", json={"role": "viewer"}, headers=owner.bearer()
     )
     assert granted.status_code == 201
-    viewer = Caller(issuer, subject="3001")
+    viewer = Caller(local_issuer, subject="3001")
     assert (await client.get(f"/v1/companies/{company}/branches", headers=viewer.bearer())).status_code == 200
     refused = await client.post(
         f"/v1/companies/{company}/branches", json={"code": "SUC9", "name": "X"}, headers=viewer.posting("b-v")
@@ -179,10 +179,10 @@ async def test_nothing_opens_in_a_deactivated_company(
 
 
 async def test_another_organization_finds_no_establishment_of_the_company(
-    client: httpx.AsyncClient, issuer: LocalIssuer, owner: Caller, company: str
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: Caller, company: str
 ) -> None:
     branch_id = await branch(client, owner, company)
-    stranger = Caller(issuer, organization="1002")
+    stranger = Caller(local_issuer, organization="1002")
     paths = [
         f"/v1/companies/{company}/branches",
         f"/v1/companies/{company}/branches/{branch_id}",
