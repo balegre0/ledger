@@ -9,7 +9,9 @@ organization's own rows, in a mode (API clients, idempotency keys) or in none (i
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import final
+from uuid import UUID
 
+from ledger_kernel.errors import InvalidValueError
 lazy from ledger_kernel.ids import CompanyId, OrganizationId
 
 
@@ -18,6 +20,14 @@ class Mode(StrEnum):
 
     TEST = "test"
     LIVE = "live"
+
+
+def _require(owner: str, organization: object, mode: object) -> None:
+    """Refuse a scope built from parts its fields do not hold: it decides which rows a unit sees."""
+    if type(organization) is not UUID:
+        raise InvalidValueError(field=f"{owner}.organization", requirement="a UUID")
+    if mode is not None and type(mode) is not Mode:
+        raise InvalidValueError(field=f"{owner}.mode", requirement="a Mode or None")
 
 
 @final
@@ -29,6 +39,11 @@ class Tenant:
     company: CompanyId
     mode: Mode | None
 
+    def __post_init__(self) -> None:
+        _require("tenant", self.organization, self.mode)
+        if type(self.company) is not UUID:
+            raise InvalidValueError(field="tenant.company", requirement="a UUID")
+
 
 @final
 @dataclass(frozen=True, slots=True)
@@ -37,6 +52,9 @@ class OrganizationScope:
 
     organization: OrganizationId
     mode: Mode | None
+
+    def __post_init__(self) -> None:
+        _require("organization_scope", self.organization, self.mode)
 
     @property
     def company(self) -> None:

@@ -6,6 +6,7 @@ from ledger_kernel.jurisdiction import (
     InvalidCountryError,
     InvalidSubdivisionError,
     Jurisdiction,
+    is_country,
     parse_country,
     parse_jurisdiction,
 )
@@ -47,3 +48,10 @@ def test_a_jurisdiction_built_by_our_code_from_bad_parts_is_a_defect() -> None:
         Jurisdiction(CountryCode("XX"))
     with pytest.raises(InvalidValueError):
         Jurisdiction(CountryCode("US"), "MX-CMX")
+
+
+def test_a_country_is_an_assigned_upper_case_code() -> None:
+    assert is_country("DO")
+    assert not is_country("EU")
+    assert not is_country("do")
+    assert not is_country(7)

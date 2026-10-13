@@ -1,10 +1,12 @@
 """The base of every event (§3.5): a fact a module or a channel announces, as a frozen dataclass.
 
-A subclass sets ``TYPE`` (``<module>.<aggregate>.<past_participle>``) and ``VERSION`` and adds its payload as
-fields. The envelope fields are here: ``scope`` (whose data; ``None`` for no tenant's), ``subject`` (the
-aggregate's id) and ``aggregate_version`` (its version after the change, so projections apply only newer
-ones). The platform's codec turns the payload into JSON and ``uow.publish`` writes it to the producer's
-outbox.
+A subclass sets ``TYPE`` (``<module>.<aggregate>.<past_participle>``, declared by the class itself, never
+inherited) and ``VERSION`` (an ``int`` from 1) and adds its payload as fields. A base that only shares fields
+between events sets ``ABSTRACT = True`` in its own body; its subclasses are not abstract unless they say so.
+
+The envelope fields are here: ``scope`` (whose data; ``None`` for no tenant's), ``subject`` (the aggregate's
+id) and ``aggregate_version`` (its version after the change, so projections apply only newer ones). The
+platform's codec turns the payload into JSON and ``uow.publish`` writes it to the producer's outbox.
 """
 
 import re
@@ -19,7 +21,10 @@ _TYPE: Final = re.compile(r"[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*", 
 
 
 class InvalidEventClassError(LedgerError):
-    """An event class without a well-formed ``TYPE`` or with a ``VERSION`` below 1: a defect, found early."""
+    """An event class without its own well-formed ``TYPE`` or without an ``int`` ``VERSION`` from 1.
+
+    A defect of the class, found when it is declared.
+    """
 
     code: ClassVar[str] = "invalid_event_class"
 
@@ -35,6 +40,8 @@ class Event:
 
     TYPE: ClassVar[str]
     VERSION: ClassVar[int]
+    ABSTRACT: ClassVar[bool] = False
+    """``True`` in the body of a base that only shares fields: its ``TYPE`` and ``VERSION`` go unchecked."""
     scope: Scope | None
     subject: UUID | None
     aggregate_version: int | None
@@ -42,9 +49,13 @@ class Event:
     @override
     def __init_subclass__(cls) -> None:
         super().__init_subclass__()
-        try:
-            type_name, version = cls.TYPE, cls.VERSION
-        except AttributeError as error:
-            raise InvalidEventClassError(cls.__qualname__) from error
-        if _TYPE.fullmatch(type_name) is None or version < 1:
+        own = cls.__dict__
+        if "ABSTRACT" in own and cls.ABSTRACT:
+            return
+        if "TYPE" not in own or not hasattr(cls, "VERSION"):
+            raise InvalidEventClassError(cls.__qualname__)
+        type_name: object = cls.TYPE
+        version: object = cls.VERSION
+        well_formed = type(type_name) is str and _TYPE.fullmatch(type_name) is not None
+        if not well_formed or type(version) is not int or version < 1:
             raise InvalidEventClassError(cls.__qualname__)

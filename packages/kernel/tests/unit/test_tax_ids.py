@@ -13,13 +13,36 @@ from ledger_kernel.tax_ids import (
 
 def test_a_scheme_is_a_country_and_a_name() -> None:
     assert parse_scheme("do.rnc") == "do.rnc"
-    assert parse_scheme("eu.vat") == "eu.vat"
+    assert parse_scheme("es.nif") == "es.nif"
 
 
-@pytest.mark.parametrize("text", ["rnc", "DO.rnc", "do.", "do.RNC", "dom.rnc", "do.rnc.x", ""])
-def test_anything_else_is_not_a_scheme(text: str) -> None:
-    with pytest.raises(InvalidTaxIdSchemeError):
-        parse_scheme(text)
+@pytest.mark.parametrize(
+    "text",
+    ["rnc", "DO.rnc", "do.", "do.RNC", "dom.rnc", "do.rnc.x", "", "eu.vat", "xx.id", 7, None],
+    ids=[
+        "no-country",
+        "upper-country",
+        "no-name",
+        "upper-name",
+        "long-country",
+        "three-parts",
+        "empty",
+        "group-of-countries",
+        "unassigned-country",
+        "number",
+        "none",
+    ],
+)
+def test_anything_else_is_not_a_scheme(text: object) -> None:
+    with pytest.raises(InvalidTaxIdSchemeError) as caught:
+        parse_scheme(text)  # the boundary hands over whatever it got
+    assert caught.value.code == "invalid_tax_id_scheme"
+    assert len(str(caught.value)) < 100
+
+
+def test_a_value_that_is_not_text_is_named_by_its_type() -> None:
+    with pytest.raises(InvalidTaxIdSchemeError, match="int: 7"):
+        parse_scheme(7)
 
 
 def test_repr_masks_all_but_the_last_three_characters() -> None:
@@ -29,7 +52,7 @@ def test_repr_masks_all_but_the_last_three_characters() -> None:
 
 
 def test_a_short_value_is_masked_whole() -> None:
-    assert repr(TaxId(TaxIdScheme("xx.id"), "12")) == "TaxId(scheme='xx.id', value='***')"
+    assert repr(TaxId(TaxIdScheme("mx.rfc"), "12")) == "TaxId(scheme='mx.rfc', value='***')"
 
 
 @pytest.mark.parametrize("value", ["", "12 34", "x" * 41, "ñ123"])
@@ -38,7 +61,7 @@ def test_a_tax_id_built_from_a_bad_value_is_a_defect(value: str) -> None:
         TaxId(TaxIdScheme("do.rnc"), value)
 
 
-@pytest.mark.parametrize("scheme", ["DO.rnc", "rnc", ""])
+@pytest.mark.parametrize("scheme", ["DO.rnc", "rnc", "", "eu.vat"])
 def test_a_tax_id_built_with_a_bad_scheme_is_a_defect(scheme: str) -> None:
     with pytest.raises(InvalidValueError, match=r"^tax_id\.scheme must be a scheme key$"):
         TaxId(TaxIdScheme(scheme), "101850043")

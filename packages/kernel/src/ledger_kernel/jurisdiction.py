@@ -1,11 +1,13 @@
 """Where a company is: a country (ISO 3166-1 alpha-2) and, where law differs inside it, a subdivision.
 
-A subdivision is an ISO 3166-2 code of its country (``US-CA``).
+A subdivision is written as ISO 3166-2 writes it (``US-CA``). Only its shape is checked: the country's code, a
+dash and one to three upper-case letters or digits. Whether ISO 3166-2 assigns it is not checked
+here: a subdivision matters where a regime is keyed by it, and the regime pack names it.
 """
 
 import re
 from dataclasses import dataclass
-from typing import ClassVar, Final, NewType, final
+from typing import ClassVar, Final, NewType, TypeIs, final
 
 from ledger_kernel.errors import InvalidInputError, InvalidValueError, described
 
@@ -37,7 +39,7 @@ class InvalidCountryError(InvalidInputError):
 
 
 class InvalidSubdivisionError(InvalidInputError):
-    """Text that is not an ISO 3166-2 code of the country it was given with."""
+    """Text not shaped like an ISO 3166-2 code of the country it was given with."""
 
     code: ClassVar[str] = "invalid_subdivision"
 
@@ -45,9 +47,14 @@ class InvalidSubdivisionError(InvalidInputError):
         super().__init__(f"not an ISO 3166-2 subdivision of the country: {described(value)}")
 
 
+def is_country(text: object) -> TypeIs[CountryCode]:
+    """Whether ``text`` is an assigned ISO 3166-1 alpha-2 code, upper case."""
+    return type(text) is str and text in _ASSIGNED
+
+
 def parse_country(text: object) -> CountryCode:
     """Read a country code; anything but an assigned upper-case alpha-2 code is an ``InvalidCountryError``."""
-    if type(text) is not str or text not in _ASSIGNED:
+    if not is_country(text):
         raise InvalidCountryError(text)
     return CountryCode(text)
 
@@ -63,19 +70,19 @@ def _is_subdivision_of(country: str, subdivision: object) -> bool:
 @final
 @dataclass(frozen=True, slots=True)
 class Jurisdiction:
-    """A country and, where law differs inside it, one of its subdivisions."""
+    """A country and, where law differs inside it, one of its subdivisions (checked by shape only)."""
 
     country: CountryCode
     subdivision: str | None = None
 
     def __post_init__(self) -> None:
-        if self.country not in _ASSIGNED:
+        if not is_country(self.country):
             raise InvalidValueError(
                 field="jurisdiction.country", requirement="an assigned ISO 3166-1 alpha-2 code"
             )
         if self.subdivision is not None and not _is_subdivision_of(self.country, self.subdivision):
             raise InvalidValueError(
-                field="jurisdiction.subdivision", requirement="an ISO 3166-2 code of its country"
+                field="jurisdiction.subdivision", requirement="shaped like an ISO 3166-2 code of its country"
             )
 
 

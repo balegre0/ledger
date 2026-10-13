@@ -381,6 +381,7 @@ def test_an_amount_keeps_its_value_and_is_written_without_a_positive_exponent(
         ("BHD", 48, 3),
         ("CLF", 990, 4),
         ("XCG", 532, 2),
+        ("XAD", 396, 2),
     ],
 )
 def test_the_iso_4217_table_has_each_currency_minor_units(code: str, numeric: int, minor_units: int) -> None:
@@ -430,3 +431,39 @@ def test_quantized_rounds_with_the_mode_asked(mode: RoundingMode, expected: str)
 def test_quantized_refuses_impossible_places(places: int) -> None:
     with pytest.raises(InvalidValueError):
         Money.of("1", DOP).quantized(places, RoundingMode.HALF_UP)
+
+
+@pytest.mark.parametrize(
+    ("amount", "factor", "places", "mode", "expected"),
+    [
+        ("10.03", "0.18", 2, RoundingMode.HALF_UP, "1.81"),
+        ("10.25", "0.18", 2, RoundingMode.HALF_EVEN, "1.84"),
+        ("-10.05", "0.18", 2, RoundingMode.HALF_UP, "-1.81"),
+        ("0.000000000000000000000001", "0.18", 24, RoundingMode.HALF_UP, "0"),
+        ("0.000000000000000000000009", "0.18", 24, RoundingMode.UP, "0.000000000000000000000002"),
+    ],
+    ids=["half-up", "half-even", "negative", "below-the-scale", "up-at-the-scale"],
+)
+def test_times_multiplies_exactly_then_rounds_once(
+    amount: str, factor: str, places: int, mode: RoundingMode, expected: str
+) -> None:
+    assert Money.of(amount, DOP).times(Decimal(factor), places, mode) == Money.of(expected, DOP)
+
+
+def test_times_takes_a_widest_amount_that_exact_arithmetic_refuses() -> None:
+    widest = Money.of(WIDEST, DOP)
+    with pytest.raises(InvalidAmountError):
+        _ = widest * Decimal("0.18")
+    assert widest.times(Decimal("0.18"), 2, RoundingMode.HALF_UP) == Money.of("22222222022222222.06", DOP)
+
+
+@pytest.mark.parametrize("places", [-1, 25, True])
+def test_times_refuses_impossible_places(places: int) -> None:
+    with pytest.raises(InvalidValueError):
+        Money.of("1", DOP).times(Decimal(1), places, RoundingMode.HALF_UP)
+
+
+def test_times_refuses_a_float_factor() -> None:
+    scale = operator.methodcaller("times", json.loads("0.18"), 2, RoundingMode.HALF_UP)
+    with pytest.raises(InvalidAmountError, match="unsupported type"):
+        scale(dop("1"))

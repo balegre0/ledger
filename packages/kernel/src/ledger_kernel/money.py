@@ -85,8 +85,8 @@ PKR 586 2  PLN 985 2  PYG 600 0  QAR 634 2  RON 946 2  RSD 941 2  RUB 643 2  RWF
 SCR 690 2  SDG 938 2  SEK 752 2  SGD 702 2  SHP 654 2  SLE 925 2  SOS 706 2  SRD 968 2  SSP 728 2  STN 930 2
 SVC 222 2  SYP 760 2  SZL 748 2  THB 764 2  TJS 972 2  TMT 934 2  TND 788 3  TOP 776 2  TRY 949 2  TTD 780 2
 TWD 901 2  TZS 834 2  UAH 980 2  UGX 800 0  USD 840 2  USN 997 2  UYI 940 0  UYU 858 2  UYW 927 4  UZS 860 2
-VED 926 2  VES 928 2  VND 704 0  VUV 548 0  WST 882 2  XAF 950 0  XCD 951 2  XCG 532 2  XOF 952 0  XPF 953 0
-YER 886 2  ZAR 710 2  ZMW 967 2  ZWG 924 2
+VED 926 2  VES 928 2  VND 704 0  VUV 548 0  WST 882 2  XAD 396 2  XAF 950 0  XCD 951 2  XCG 532 2  XOF 952 0
+XPF 953 0  YER 886 2  ZAR 710 2  ZMW 967 2  ZWG 924 2
 """
 
 
@@ -194,6 +194,14 @@ def _require_representable(amount: Decimal) -> None:
         raise InvalidAmountError(AmountProblem.TOO_PRECISE, str(amount))
 
 
+def _rounded(amount: Decimal, places: int, mode: RoundingMode) -> Decimal:
+    """``amount`` rounded to ``places`` (0 to ``MAX_SCALE``) with ``mode``."""
+    if type(places) is not int or not 0 <= places <= MAX_SCALE:
+        raise InvalidValueError(field="places", requirement=f"an int from 0 to {MAX_SCALE}")
+    context = Context(prec=_PRECISION, rounding=_DECIMAL_MODES[mode], traps=list(_FAILURES))
+    return _operate(context.quantize, amount, _WHOLE.scaleb(-places))
+
+
 def _operate(operation: Callable[[Decimal, Decimal], Decimal], left: Decimal, right: Decimal) -> Decimal:
     """Run a decimal operation; any decimal failure becomes an ``InvalidAmountError``."""
     try:
@@ -258,10 +266,17 @@ class Money:
 
         Losing digits is the point here, so ``Inexact`` is not a failure.
         """
-        if type(places) is not int or not 0 <= places <= MAX_SCALE:
-            raise InvalidValueError(field="places", requirement=f"an int from 0 to {MAX_SCALE}")
-        context = Context(prec=_PRECISION, rounding=_DECIMAL_MODES[mode], traps=list(_FAILURES))
-        return Money(_operate(context.quantize, self.amount, _WHOLE.scaleb(-places)), self.currency)
+        return Money(_rounded(self.amount, places, mode), self.currency)
+
+    def times(self, factor: Decimal | int, places: int, mode: RoundingMode) -> Money:
+        """``self * factor`` computed exactly, then rounded once to ``places`` with ``mode``.
+
+        For a product that may hold more places than money does (a 24-place base times a rate): ``*`` refuses
+        it, ``times`` rounds it. A product too wide to compute exactly is an ``InvalidAmountError``.
+        """
+        _require_type(factor, _FACTOR_TYPES)
+        product = _operate(_EXACT.multiply, self.amount, Decimal(factor))
+        return Money(_rounded(product, places, mode), self.currency)
 
     def __add__(self, other: Money) -> Money:
         if not _is_money(other):

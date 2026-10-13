@@ -16,6 +16,16 @@ def test_a_timeline_lists_its_values_newest_first() -> None:
     assert Timeline(newest, oldest).entries == (newest, oldest)
 
 
+def test_a_timeline_is_a_value() -> None:
+    timeline = Timeline(Since(date(2026, 1, 1), 18))
+    assert timeline == Timeline(Since(date(2026, 1, 1), 18))
+    assert hash(timeline) == hash(Timeline(Since(date(2026, 1, 1), 18)))
+    assert timeline != Timeline(Since(date(2026, 1, 1), 16))
+    assert (
+        repr(timeline) == "Timeline(entries=(Since(since=datetime.date(2026, 1, 1), value=18, until=None),))"
+    )
+
+
 def test_before_the_oldest_value_nothing_is_in_effect() -> None:
     with pytest.raises(NotInEffectError) as caught:
         Timeline(Since(date(2013, 1, 1), 16)).at(date(2012, 12, 31))

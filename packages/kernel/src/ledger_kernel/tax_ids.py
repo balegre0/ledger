@@ -11,10 +11,15 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import ClassVar, Final, NewType, final, override
 
-from ledger_kernel.errors import InvalidInputError, InvalidValueError, excerpt
+from ledger_kernel.errors import InvalidInputError, InvalidValueError, described, excerpt
+from ledger_kernel.jurisdiction import is_country
 
 TaxIdScheme = NewType("TaxIdScheme", str)
-"""``<cc>.<name>``: ``do.rnc``, ``do.cedula``, ``mx.rfc``, ``eu.vat``."""
+"""``<cc>.<name>``: ``do.rnc``, ``do.cedula``, ``mx.rfc``, ``es.nif``.
+
+``<cc>`` is one assigned ISO 3166-1 country, never a group of them: a VAT id is issued by one member state, so
+the EU's are per country (``es.nif``, ``fr.tva``), not one ``eu.vat`` (ADR 0006).
+"""
 
 MAX_TAX_ID_LENGTH: Final = 40
 _SCHEME: Final = re.compile(r"[a-z]{2}\.[a-z][a-z0-9_]{0,30}", re.ASCII)
@@ -31,12 +36,13 @@ class TaxIdCheck(StrEnum):
 
 
 class InvalidTaxIdSchemeError(InvalidInputError):
-    """Text that is not a scheme key."""
+    """Not a scheme key: not text, not ``<cc>.<name>``, or ``<cc>`` not an assigned country's code."""
 
     code: ClassVar[str] = "invalid_tax_id_scheme"
 
-    def __init__(self, text: str) -> None:
-        super().__init__(f"not a tax id scheme (<country>.<name>): {excerpt(text)}")
+    def __init__(self, value: object) -> None:
+        shown = excerpt(value) if isinstance(value, str) else described(value)
+        super().__init__(f"not a tax id scheme (<country>.<name>): {shown}")
 
 
 class InvalidTaxIdError(InvalidInputError):
@@ -48,14 +54,19 @@ class InvalidTaxIdError(InvalidInputError):
         super().__init__(f"not a valid {scheme} identifier: {problem}")
 
 
-def parse_scheme(text: str) -> TaxIdScheme:
-    """Read a scheme key: two lower-case letters, a dot, a lower-case name."""
-    if _SCHEME.fullmatch(text) is None:
+def _is_scheme(text: object) -> bool:
+    return type(text) is str and _SCHEME.fullmatch(text) is not None and is_country(text[:2].upper())
+
+
+def parse_scheme(text: object) -> TaxIdScheme:
+    """Read a scheme key: an assigned country's code in lower case, a dot, a lower-case name."""
+    if type(text) is not str or not _is_scheme(text):
         raise InvalidTaxIdSchemeError(text)
     return TaxIdScheme(text)
 
 
-def _is_storable(value: object) -> bool:
+def is_storable(value: object) -> bool:
+    """Whether ``value`` can be a normalized tax id: 1 to 40 printable ASCII characters, no space."""
     return (
         type(value) is str
         and 1 <= len(value) <= MAX_TAX_ID_LENGTH
@@ -74,9 +85,9 @@ class TaxId:
     value: str
 
     def __post_init__(self) -> None:
-        if type(self.scheme) is not str or _SCHEME.fullmatch(self.scheme) is None:
+        if not _is_scheme(self.scheme):
             raise InvalidValueError(field="tax_id.scheme", requirement="a scheme key")
-        if not _is_storable(self.value):
+        if not is_storable(self.value):
             raise InvalidValueError(
                 field="tax_id.value",
                 requirement=f"1 to {MAX_TAX_ID_LENGTH} printable ASCII characters, no space",

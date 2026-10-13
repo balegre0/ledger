@@ -47,10 +47,15 @@ class Since[T]:
 
 
 @final
+@dataclass(frozen=True, slots=True, init=False)
 class Timeline[T]:
-    """Dated values, newest first; ``at(day)`` is the one in effect on ``day``."""
+    """Dated values, newest first; ``at(day)`` is the one in effect on ``day``.
 
-    __slots__ = ("_entries",)
+    A value: equal, hashed and shown by its entries.
+    """
+
+    entries: tuple[Since[T], ...]
+    """Every value, newest first."""
 
     def __init__(self, *entries: Since[T]) -> None:
         if not entries:
@@ -63,16 +68,11 @@ class Timeline[T]:
                 raise InvalidTimelineError(TimelineProblem.NOT_NEWEST_FIRST)
             if older.until is not None and older.until > newer.since:
                 raise InvalidTimelineError(TimelineProblem.OVERLAPPING)
-        self._entries = entries
-
-    @property
-    def entries(self) -> tuple[Since[T], ...]:
-        """Every value, newest first."""
-        return self._entries
+        object.__setattr__(self, "entries", entries)  # frozen: set once, here
 
     def at(self, day: date) -> T:
         """The value in effect on ``day``; ``NotInEffectError`` when there is none."""
-        for entry in self._entries:
+        for entry in self.entries:
             if entry.since <= day:
                 if entry.until is not None and day >= entry.until:
                     raise NotInEffectError(day)
