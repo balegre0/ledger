@@ -27,7 +27,7 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
     ExportTraceServiceResponse,
 )
 from opentelemetry.sdk.trace import TracerProvider
-from prometheus_client import CollectorRegistry
+from prometheus_client import CollectorRegistry, Gauge
 from pydantic import SecretStr, TypeAdapter
 from sqlalchemy import Text, literal_column, select
 from sqlalchemy.pool import QueuePool
@@ -1541,6 +1541,23 @@ async def test_the_metrics_of_the_process_are_exported(
     assert "\npython_gc_objects_collected_total{" in metrics
     if sys.platform == "linux":  # the process collector reads /proc
         assert "\nprocess_resident_memory_bytes " in metrics
+
+
+async def test_metrics_made_before_the_service_are_exported_with_its_own_through_the_registry_it_is_given(
+    database_url: str, nats_url: str, infrastructure: JetStreamContext
+) -> None:
+    del infrastructure
+    registry = CollectorRegistry()
+    Gauge("ledger_test_made_before", "A metric made before the service.", registry=registry).set(7)
+    settings = ServiceSettings(
+        service_name="given", database_url=SecretStr(database_url), nats_url=SecretStr(nats_url)
+    )
+    service = Service(settings=settings, version="1.0", interfaces=Interfaces(registry=registry))
+    async with running(service) as client:
+        metrics = (await client.get("/metrics")).text
+        assert service.runtime().registry is registry
+    assert "\nledger_test_made_before 7.0\n" in metrics
+    assert "\npython_info{" in metrics
 
 
 # ── Resources that will not close ───────────────────────────────────────────────

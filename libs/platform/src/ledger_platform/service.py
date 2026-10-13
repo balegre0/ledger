@@ -235,8 +235,8 @@ def _no_workers[S: ServiceSettings](runtime: Runtime[S]) -> Mapping[str, Work]:
 class Interfaces[S: ServiceSettings]:
     """Where a service meets the rest of the system.
 
-    The HTTP routes and gRPC services clients reach, the resources it reaches others with, and the readiness
-    checks of those.
+    The HTTP routes and gRPC services clients reach, the resources it reaches others with, the readiness
+    checks of those, and the metrics it is watched by.
     """
 
     http: HttpRoutes[S] = _no_routes
@@ -258,6 +258,12 @@ class Interfaces[S: ServiceSettings]:
     """Readiness checks of the service's own, by name, beside the chassis's (``database``, ``nats``,
     ``workers``, ``schema``, whose names they cannot take): each is handed the runtime and held to the same
     time limit; while the service is not running it fails."""
+    registry: CollectorRegistry | None = None
+    """Where the service's metrics are kept, which ``/metrics`` exports to Prometheus; ``None``: a new one.
+
+    Given one, metrics made before the service is built (those of an object its routes are built with, such as
+    ``PublishedKeys``'s) are exported beside the service's own. It must be the service's alone: the service
+    registers its metrics in it, and a second service on it would register them again."""
 
 
 @final
@@ -515,7 +521,8 @@ class Service[S: ServiceSettings]:
         self._interfaces: Interfaces[S] = Interfaces() if interfaces is None else interfaces
         self._events: Events[S] = Events() if events is None else events
         self._limits = limits
-        self._registry = CollectorRegistry()
+        given = self._interfaces.registry
+        self._registry = CollectorRegistry() if given is None else given
         self._tracing = Tracing.create(
             service_name=settings.service_name, exporter=_exporter(settings, limits)
         )

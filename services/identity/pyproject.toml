@@ -8,6 +8,8 @@ dependencies = [
     "ledger-contracts",
     "ledger-platform",
     "alembic>=1.20.0",
+    "fastapi>=0.143.0",
+    "prometheus-client>=0.26.0",
     "protobuf>=7.36.2",
     "psycopg>=3.3.6",
     "pydantic>=2.14.1",
@@ -16,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 ledger-identity-migrate = "ledger_identity.adapters.postgres.migrate:main"
+ledger-identity-openapi = "ledger_identity.openapi:main"
 
 [tool.uv.sources]
 ledger-kernel = { workspace = true }
@@ -24,6 +27,7 @@ ledger-platform = { workspace = true }
 
 [tool.deptry.package_module_name_map]
 "ledger-contracts" = ["ledger_contracts", "ledger"]
+"prometheus-client" = "prometheus_client"
 
 [build-system]
 requires = ["uv_build>=0.13.0,<0.14.0"]

@@ -71,6 +71,7 @@ spell = { cmd = "typos", help = "Spell check" }
 proto = { cmd = "python -m grpc_tools.protoc --proto_path=${POE_ROOT}/libs/contracts/proto --python_out=libs/contracts/src --mypy_out=libs/contracts/src --grpc_python_out=libs/contracts/src --mypy_grpc_out=libs/contracts/src libs/contracts/proto/ledger/**/*.proto", help = "Regenerate the code of every .proto" }
 proto-lint = { cmd = "docker run --rm --volume ${POE_ROOT}/libs/contracts:/workspace --workdir /workspace bufbuild/buf:1.73.0 lint", help = "buf lint" }
 test = { cmd = "pytest", help = "Tests with coverage" }
+openapi = { cmd = "ledger-identity-openapi services/identity/openapi.json", help = "Regenerate the published OpenAPI documents" }
 check = { sequence = ["format-check", "lint", "suppressions", "types", "arch", "deps", "spell", "proto-lint", "test"], help = "Everything CI runs" }
 
 # Zero suppressions: no Python file outside the generated protobuf code may switch a check off.
@@ -223,7 +224,9 @@ source_pkgs = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_t
 # (`env_py`), outside the service's package: coverage, which picks `source_pkgs` by module name, would never
 # trace them. Their directory is named here, which coverage matches by path.
 source = ["services/identity/src/ledger_identity/adapters/postgres/migrations"]
-core = "ctrace"
+# sys.monitoring, not the C tracer: lines of a route that run after SQLAlchemy's asynchronous driver switched
+# greenlets are reported unexecuted by the C tracer although they ran; sys.monitoring sees them.
+core = "sysmon"
 
 [tool.coverage.report]
 fail_under = 100
@@ -299,14 +302,14 @@ forbidden_modules = [
 ]
 
 # Inside identity: the adapters (PostgreSQL, ...) over the settings, over the use cases (application), over the
-# domain. Later layers (api, main) join above `adapters` as they appear. Exhaustive: a module without a layer
-# is an error.
+# domain; the API sits beside the adapters (it never imports them), and `main` wires both; `openapi` writes
+# the document `main`'s app makes. Exhaustive: a module without a layer is an error.
 [[tool.importlinter.contracts]]
 name = "Identity is hexagonal"
 type = "layers"
 containers = ["ledger_identity"]
 exhaustive = true
-layers = ["adapters", "settings", "application", "domain"]
+layers = ["openapi", "main", "api | adapters", "settings", "application", "domain"]
 
 [[tool.importlinter.contracts]]
 name = "Identity's use cases know ports, not adapters or frameworks"
