@@ -76,8 +76,8 @@ The spec is authoritative; where it is silent or contradicts itself, this plan d
 3. **A fourth RLS scope, `company`** (`organization_id` and `company_id`, no mode), for company rows shared by both modes (identity's branches and emission points now, establishments in v2-M2). §6.3 lists three scopes and no home for those rows.
 4. **An idempotent route is a moded route.** `idempotency_keys` is under the `moded_organization` scope (§6.4) with `mode NOT NULL` in its primary key, so a key can only be stored in a moded unit: every route that takes `Idempotency-Key` requires `Ledger-Mode` (400 `mode_required` without it, §9.7). In this milestone identity's `POST`s therefore require the header; API-client credentials that carry their mode come with v2-M2.
 5. **400 answers.** The kind table (§9.6) has no 400, but `mode_required` and `version_unknown` are 400 (§9.2, §9.7). The platform's HTTP layer gets `BadRequestError(InvalidInputError)`, answered 400; the kind stays `INVALID`.
-6. **Expired idempotency keys are purged under forced RLS** by a dedicated setting: the `SELECT` and `DELETE` policies of `idempotency_keys` also admit rows with `expires_at < now()` when the unit set `ledger.purge = 'on'`, which only `BoundDatabase.purging()` does. Nothing else can see another organization's keys, and what a purge can see is expired by definition.
-7. **Per-table grants to `ledger_relay` are applied by `ledger-migrate`** after each schema's revisions (`GRANT SELECT, UPDATE, DELETE ON <s>.outbox`, `INSERT ON <s>.inbox`, `SELECT ON <s>.subscriptions`, and `SELECT ON platform.routing`): the tables do not exist when `init.sql` runs. `init.sql` makes roles, schemas, schema `USAGE` and default privileges.
+6. **Expired idempotency keys are purged under forced RLS** by a dedicated role, never a setting (Task 8 review): each schema has a `NOLOGIN` role `<s>_purge`, granted to its login like `<s>_rw` (`INHERIT FALSE, SET TRUE`), with `SELECT, DELETE` on `<s>.idempotency_keys` only, and two extra policies `TO <s>_purge` (`FOR SELECT` and `FOR DELETE`, `USING (expires_at < now())`). `BoundDatabase.purging()` enters it with `SET LOCAL ROLE <s>_purge`. The `rw` role sees nothing more whatever it sets (`ledger.purge` means nothing); what the purge role can see is expired by definition, and it can neither insert nor update.
+7. **Per-table grants to `ledger_relay` are applied by `ledger-migrate`** as the schema's owner after each schema's revisions (`SchemaMigrations.upgrade` runs `roles.migrated_statements`: `GRANT SELECT, DELETE ON <s>.outbox`, `UPDATE (attempts, unrouted_since) ON <s>.outbox`, `INSERT ON <s>.inbox`, `SELECT ON <s>.subscriptions`, `SELECT ON platform.routing`, and `REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON <s>.alembic_version FROM <s>_rw`): the tables do not exist when `init.sql` runs. `init.sql` makes roles (created if missing, then `ALTER ROLE` to exactly their options), schemas, schema `USAGE`, default privileges, and closes the database to `PUBLIC` (`CONNECT`, `TEMPORARY`, schema `public`, `EXECUTE` on the owners' functions).
 8. **The `platform` schema runs `chassis_schema_v1` too** (its schedules enqueue jobs into `platform.jobs`), then adds `routing` and `schedule_leases`.
 9. **Platform schedules are `platform.purge_idempotency_keys` and `platform.purge_done_jobs`.** §3.2 names `platform.purge_inbox`, but §6.4 says handled inbox rows are deleted by their handler and dead ones are kept; the purges §6.4 asks for are idempotency keys and done jobs.
 10. **Audit rows take their actor from the running call.** `uow.audit(...)` (§5.3) receives neither actor nor call id, so the runtime binds an `Actor(name, call_id)` in a context variable (`ledger_platform.data.audit.acting_as`) wherever it makes a `Call` or `SystemCall`; an audit without one raises `MissingActorError`.
@@ -5163,7 +5163,7 @@ Tests (each a behaviour; write them in full):
 - `test_audit_writes_who_did_what_with_hashes_never_data` — within `acting_as(Actor("user:2001", "req-1"))`: the row's `actor`, `call_id`, `action="probe.rename"`, `subject_type="probe"`, `subject_id`, `before_hash == sha256(canonical_json(encode(old)))`, `after_hash` likewise, `detail == {"field": "name"}`; without an actor, `MissingActorError` at `audit`.
 - `test_the_open_unit_is_known_to_the_task_and_forgotten_after` — `open_unit()` is the unit inside; `None` after; a task created inside and awaited after the block sees `None` (the unit is closed even though the context variable was copied).
 - `test_a_caught_statement_failure_never_commits` — inside a unit, a failing statement caught without a savepoint: the block's exit raises `AbortedTransactionError` and nothing commits.
-- `test_a_purging_connection_sees_expired_keys_of_every_organization_only` — Decision 6, through `probe.purging()`.
+- `test_a_purging_connection_sees_expired_keys_of_every_organization_only` — Decision 6, through `probe.purging()` (role `probe_purge`): expired keys of A and B, never a live one; it cannot insert or update; a `probe.unit(None)` that sets `ledger.purge = 'on'` sees nothing.
 
 `packages/platform/tests/integration/test_data_notifier.py`:
 
@@ -5834,7 +5834,6 @@ lazy from ledger_platform.data.notifier import Signals
 lazy from ledger_platform.data.tables import ChassisTables
 lazy from ledger_platform.data.unit_of_work import JobPolicy
 
-_PURGE: Final = text("SELECT set_config('ledger.purge', 'on', true)")
 _logger = structlog.stdlib.get_logger(__name__)
 
 
@@ -5858,7 +5857,8 @@ class BoundDatabase:
         roles = SchemaRoles(schema=schema)
         self.database = database
         self.schema = roles.schema
-        self._role = text(f"SET LOCAL ROLE {roles.rw}")
+        self._role = text(f"SET LOCAL ROLE {identifier(roles.rw)}")
+        self._purge = text(f"SET LOCAL ROLE {identifier(roles.purge)}")
         self._source = source
         self._signals = signals
         self._publishes = publishes
@@ -5899,10 +5899,9 @@ class BoundDatabase:
 
     @asynccontextmanager
     async def purging(self) -> AsyncGenerator[AsyncConnection]:
-        """A transaction in this module's role that may read and delete expired idempotency keys (Decision 6)."""
+        """A transaction in this schema's ``purge`` role: it reads and deletes expired idempotency keys only."""
         async with self.database.engine.begin() as connection:
-            await connection.execute(self._role)
-            await connection.execute(_PURGE)
+            await connection.execute(self._purge)
             yield connection
 ```
 
