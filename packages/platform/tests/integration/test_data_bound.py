@@ -1,7 +1,8 @@
 """``BoundDatabase`` on real PostgreSQL: role, scope, records, and what a pooled connection keeps (§5.3).
 
 The pool has one connection, so every unit of a test runs on the same PostgreSQL session (each test asserts it
-through ``pg_backend_pid``): whatever a unit left behind, the next one would see.
+through ``pg_backend_pid``): whatever a unit left behind, the next one would see. A unit's time is the
+database's (``now()``, the transaction's start), so the tests read it from the unit.
 """
 
 import asyncio
@@ -13,6 +14,8 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import ClassVar, Final, LiteralString, final
 lazy from collections.abc import AsyncGenerator, Callable
+lazy from contextlib import AbstractAsyncContextManager
+lazy from datetime import datetime
 
 import psycopg
 import pytest
@@ -27,11 +30,12 @@ from ledger_kernel.events import Event
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tenancy import Mode, OrganizationScope, Tenant
 from ledger_platform.data.audit import Actor, MissingActorError, acting_as
-from ledger_platform.data.bound import BoundDatabase
-from ledger_platform.data.codec import canonical_json, encode
+from ledger_platform.data.bound import BoundDatabase, NestedUnitError
+from ledger_platform.data.codec import canonical_json, encode, jsonb_size, payload_of
 from ledger_platform.data.database import AbortedTransactionError, ClosedUnitOfWorkError, Database
 from ledger_platform.data.roles import InvalidSchemaNameError
 from ledger_platform.data.unit_of_work import (
+    EventScopeMismatchError,
     EventTooLargeError,
     JobPolicy,
     MissingAuditScopeError,
@@ -40,9 +44,9 @@ from ledger_platform.data.unit_of_work import (
     open_unit,
 )
 from ledger_testing.database import app_url
+lazy from ledger_kernel.tenancy import Scope
 lazy from ledger_platform.data.notifier import Channel
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
-lazy from ledger_testing.clock import ManualClock
 lazy from ledger_testing.postgres import WorkerDatabase
 
 A, B = OrganizationId(uuid.uuid7()), OrganizationId(uuid.uuid7())
@@ -73,8 +77,10 @@ _SETTINGS: Final = text(
     """
 )
 _PID: Final = text("SELECT pg_backend_pid()")
+_TIMEOUT: Final = text("SELECT current_setting('statement_timeout')")
 DIVIDE_BY_ZERO: Final = text("SELECT 1 / 0")
 _NUMBER: Final = TypeAdapter(int)
+_TEXT: Final = TypeAdapter(str)
 COUNTS: Final = """
     SELECT (SELECT count(*) FROM probe.outbox), (SELECT count(*) FROM probe.jobs),
            (SELECT count(*) FROM probe.audit_events)
@@ -110,6 +116,7 @@ PARK: Final = """
                                                ELSE 'certificate_missing' END
     WHERE key <> 'a-ready'
 """
+JOB_STATES: Final = "SELECT kind, key, status, run_at, parked_reason FROM probe.jobs ORDER BY kind, key"
 KEY: Final = r"""
     INSERT INTO probe.idempotency_keys
         (organization_id, mode, principal, route, key, request_hash, response_body, created_at, expires_at)
@@ -127,6 +134,8 @@ INSERT_KEY: Final = text(
 OUTBOX_COUNT: Final = text("SELECT count(*) FROM probe.outbox")
 PURGE: Final = text("DELETE FROM probe.idempotency_keys WHERE expires_at < now()")
 """What the purge runs: a plain ``DELETE``, never ``RETURNING`` the stored responses (ruling 1)."""
+AWKWARD: Final = 'quote " backslash \\ newline \n tab \t bell \x07 unit \x1f delete \x7f é ü 😀 / end'
+"""Every escape PostgreSQL's ``jsonb`` output and Python's ``json`` could disagree on."""
 
 
 @final
@@ -177,9 +186,7 @@ def signals() -> RecordedSignals:
     return RecordedSignals()
 
 
-def bind(
-    database: Database, signals: RecordedSignals, clock: ManualClock, schema: str = "probe"
-) -> BoundDatabase:
+def bind(database: Database, signals: RecordedSignals, schema: str = "probe") -> BoundDatabase:
     return BoundDatabase(
         database,
         schema=schema,
@@ -190,13 +197,12 @@ def bind(
             SWEEP: JobPolicy(max_attempts=3, deadline=None),
         },
         signals=signals,
-        clock=clock,
     )
 
 
 @pytest.fixture
-def probe(database: Database, signals: RecordedSignals, clock: ManualClock) -> BoundDatabase:
-    return bind(database, signals, clock)
+def probe(database: Database, signals: RecordedSignals) -> BoundDatabase:
+    return bind(database, signals)
 
 
 async def rows(
@@ -240,27 +246,38 @@ def tenant(organization: OrganizationId, company: CompanyId, mode: Mode | None =
     return Tenant(organization, company, mode)
 
 
-async def test_a_unit_runs_in_its_modules_role_with_its_scope(probe: BoundDatabase) -> None:
+def renamed(scope: Scope | None, name: str = "x") -> Renamed:
+    return Renamed(scope=scope, subject=None, aggregate_version=None, name=name)
+
+
+async def enter(context: AbstractAsyncContextManager[object]) -> None:
+    async with context:
+        pass
+
+
+async def test_a_unit_runs_in_its_modules_role_with_its_scope_at_the_databases_time(
+    probe: BoundDatabase,
+) -> None:
     assert probe.schema == "probe"
     assert probe.tables.outbox.schema == "probe"
     async with probe.unit(tenant(A, A1, Mode.LIVE)) as uow:
         settings = tuple((await uow.connection.execute(_SETTINGS)).one())
+        database_now = (await uow.connection.execute(select(func.now()))).scalar_one()
         assert uow.scope == tenant(A, A1, Mode.LIVE)
     assert settings == ("probe_rw", str(A), str(A1), "live")
+    assert uow.now == database_now  # the transaction's start, as every now() of the unit reads it
     async with probe.unit(OrganizationScope(A, None)) as uow:
         settings = tuple((await uow.connection.execute(_SETTINGS)).one())
     assert settings == ("probe_rw", str(A), "", "")
 
 
-def test_a_schema_name_that_cannot_be_a_role_is_refused(
-    database: Database, signals: RecordedSignals, clock: ManualClock
-) -> None:
+def test_a_schema_name_that_cannot_be_a_role_is_refused(database: Database, signals: RecordedSignals) -> None:
     with pytest.raises(InvalidSchemaNameError):
-        bind(database, signals, clock, schema="Probe; DROP")
+        bind(database, signals, schema="Probe; DROP")
 
 
 async def test_one_pooled_connection_never_carries_a_scope_or_a_role_into_the_next_unit(
-    database: Database, probe: BoundDatabase, signals: RecordedSignals, clock: ManualClock
+    database: Database, probe: BoundDatabase, signals: RecordedSignals
 ) -> None:
     """Review Focus 1: A in test writes; no scope, B, A live, A mode-less see nothing; A in test sees it.
 
@@ -276,7 +293,7 @@ async def test_one_pooled_connection_never_carries_a_scope_or_a_role_into_the_ne
             seen.append(await count(uow))
             pids.add(await pid_of(uow))
     assert seen == [0, 0, 0, 0, 1]
-    other = bind(database, signals, clock, schema="other")
+    other = bind(database, signals, schema="other")
 
     async def reaching_into_probe() -> None:
         async with other.unit(tenant(A, A1)) as uow:
@@ -296,7 +313,7 @@ async def swallowing_a_failure(
     """A unit whose statement fails and whose block goes on as if it had not (a defect of the caller)."""
     async with probe.unit(scope) as uow:
         if publishing:
-            uow.publish(Renamed(scope=None, subject=None, aggregate_version=None, name="x"))
+            uow.publish(renamed(None))
         with contextlib.suppress(DBAPIError):
             await uow.connection.execute(DIVIDE_BY_ZERO)
 
@@ -360,6 +377,36 @@ async def test_a_unit_cancelled_inside_a_statement_leaves_nothing_to_the_next(
         assert await count(uow) == 0
 
 
+async def test_a_connection_returned_to_the_pool_forgets_what_its_session_set(database: Database) -> None:
+    """M8: the pool resets every connection it takes back (``RESET ROLE``, ``RESET ALL``), not only units."""
+    async with database.engine.connect() as connection:
+        await connection.execute(text('SET ROLE "probe_rw"'))
+        await connection.execute(text(f"SET ledger.organization_id = '{A}'"))
+        await connection.execute(text("SET statement_timeout = '1s'"))
+        await connection.commit()
+        pid = _NUMBER.validate_python((await connection.execute(_PID)).scalar_one())
+    async with database.engine.connect() as connection:
+        await connection.execute(text('SET ROLE "probe_rw"'))
+        with contextlib.suppress(DBAPIError):
+            await connection.execute(DIVIDE_BY_ZERO)  # returned in a failed transaction
+    async with database.engine.connect() as connection:
+        timeout = _TEXT.validate_python((await connection.execute(_TIMEOUT)).scalar_one())
+    assert timeout == "30s"  # the pool's own limit (a startup option), not the session's
+    assert await pooled(database) == (*CLEAN, pid)  # the same session, reset rather than replaced
+
+
+async def test_a_unit_inside_an_open_unit_is_refused(database: Database, probe: BoundDatabase) -> None:
+    """M1 and rule 13: one task holds one unit; a second one, of any module, would hold two transactions."""
+    other = bind(database, RecordedSignals(), schema="other")
+    async with probe.unit(None):
+        for nested in (probe.unit(None), other.unit(tenant(A, A1)), probe.purging()):
+            with pytest.raises(NestedUnitError) as raised:
+                await enter(nested)
+            assert raised.value.code == "unit_nested"
+    async with probe.unit(None) as uow:
+        assert uow.is_open  # the refusals left nothing behind
+
+
 async def test_a_rolled_back_unit_leaves_nothing_and_signals_nothing(
     probe: BoundDatabase, signals: RecordedSignals, admin: psycopg.AsyncConnection
 ) -> None:
@@ -382,19 +429,74 @@ async def test_a_rolled_back_unit_leaves_nothing_and_signals_nothing(
 
 
 async def test_publish_writes_the_envelope_with_the_units_time_and_signals_after_commit(
-    probe: BoundDatabase, signals: RecordedSignals, clock: ManualClock, admin: psycopg.AsyncConnection
+    probe: BoundDatabase, signals: RecordedSignals, admin: psycopg.AsyncConnection
 ) -> None:
-    scope = tenant(A, A1)
-    async with probe.unit(scope) as uow:
-        uow.publish(Renamed(scope=scope, subject=SUBJECT, aggregate_version=3, name="x"))
-        uow.publish(Renamed(scope=OrganizationScope(A, None), subject=None, aggregate_version=None, name="y"))
+    async with probe.unit(OrganizationScope(A, None)) as uow:
+        uow.publish(Renamed(scope=tenant(A, A1), subject=SUBJECT, aggregate_version=3, name="x"))
+        uow.publish(renamed(OrganizationScope(A, None), "y"))
         assert signals.sent == []
     assert signals.sent == ["ledger_outbox"]  # one signal per commit, however many events it wrote
-    renamed, version = Renamed.TYPE, Renamed.VERSION
+    kind, version, now = Renamed.TYPE, Renamed.VERSION, uow.now
     assert await rows(admin, OUTBOX) == [
-        (renamed, version, "probe", A, A1, "test", SUBJECT, 3, clock(), None, {"name": "x"}, 0, None),
-        (renamed, version, "probe", A, None, None, None, None, clock(), None, {"name": "y"}, 0, None),
+        (kind, version, "probe", A, A1, "test", SUBJECT, 3, now, None, {"name": "x"}, 0, None),
+        (kind, version, "probe", A, None, None, None, None, now, None, {"name": "y"}, 0, None),
     ]
+
+
+@pytest.mark.parametrize(
+    ("unit_scope", "allowed", "refused"),
+    [
+        (
+            tenant(A, A1),
+            [tenant(A, A1)],
+            [
+                tenant(A, A2),
+                tenant(A, A1, Mode.LIVE),
+                tenant(A, A1, None),
+                tenant(B, B1),
+                None,
+                OrganizationScope(A, Mode.TEST),
+            ],
+        ),
+        (
+            tenant(A, A1, None),
+            [tenant(A, A1, None), tenant(A, A1, Mode.LIVE)],
+            [tenant(A, A2, None), OrganizationScope(A, None), tenant(B, B1, None), None],
+        ),
+        (
+            OrganizationScope(A, None),
+            [
+                tenant(A, A1),
+                tenant(A, A2, Mode.LIVE),
+                OrganizationScope(A, Mode.LIVE),
+                OrganizationScope(A, None),
+            ],
+            [tenant(B, B1), OrganizationScope(B, None), None],
+        ),
+        (
+            OrganizationScope(A, Mode.LIVE),
+            [tenant(A, A1, Mode.LIVE), OrganizationScope(A, Mode.LIVE)],
+            [tenant(A, A1), OrganizationScope(A, None), OrganizationScope(B, Mode.LIVE)],
+        ),
+        (None, [tenant(A, A1), OrganizationScope(B, None), None], []),
+    ],
+)
+async def test_an_event_is_published_only_inside_the_units_scope(
+    probe: BoundDatabase,
+    admin: psycopg.AsyncConnection,
+    unit_scope: Scope | None,
+    allowed: list[Scope | None],
+    refused: list[Scope | None],
+) -> None:
+    """I1: same organization; the company and the mode too when the unit names them."""
+    async with probe.unit(unit_scope) as uow:
+        for scope in refused:
+            with pytest.raises(EventScopeMismatchError, match="outside the unit's scope") as raised:
+                uow.publish(renamed(scope))
+            assert raised.value.code == "event_scope_mismatch"
+        for scope in allowed:
+            uow.publish(renamed(scope))
+    assert await rows(admin, "SELECT count(*) FROM probe.outbox") == [(len(allowed),)]
 
 
 async def test_a_unit_that_publishes_nothing_signals_nothing(
@@ -411,7 +513,7 @@ async def test_publish_carries_the_current_traceparent(
     tracer = TracerProvider().get_tracer("test")
     with tracer.start_as_current_span("rename") as span:
         async with probe.unit(None) as uow:
-            uow.publish(Renamed(scope=None, subject=None, aggregate_version=None, name="x"))
+            uow.publish(renamed(None))
             uow.jobs.enqueue(EXPORT, "k1")
     context = span.get_span_context()
     expected = f"00-{context.trace_id:032x}-{context.span_id:016x}-{context.trace_flags:02x}"
@@ -426,17 +528,27 @@ async def test_an_undeclared_event_type_and_an_oversized_payload_are_refused_at_
         with pytest.raises(UndeclaredEventTypeError, match=r"^probe publishes probe\.item\.archived"):
             uow.publish(Archived(scope=None, subject=None, aggregate_version=None))
         with pytest.raises(EventTooLargeError, match=r"above 65536$"):
-            uow.publish(Renamed(scope=None, subject=None, aggregate_version=None, name="x" * 70_000))
+            uow.publish(renamed(None, "x" * 70_000))
         largest = 65_536 - len('{"name": ""}')
-        uow.publish(Renamed(scope=None, subject=None, aggregate_version=None, name="x" * largest))
+        uow.publish(renamed(None, "x" * largest))
     assert await rows(admin, "SELECT octet_length(payload::text) FROM probe.outbox") == [(65_536,)]
+
+
+async def test_the_payload_size_is_the_one_postgresql_prints(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection
+) -> None:
+    event = Renamed(scope=None, subject=None, aggregate_version=None, name=AWKWARD * 3)
+    async with probe.unit(None) as uow:
+        uow.publish(event)
+    stored = await rows(admin, "SELECT octet_length(payload::text), payload FROM probe.outbox")
+    assert stored == [(jsonb_size(payload_of(event)), {"name": AWKWARD * 3})]
 
 
 async def test_recording_after_the_unit_ended_is_refused(probe: BoundDatabase) -> None:
     async with probe.unit(tenant(A, A1)) as uow:
         inside = uow.is_open
     assert (inside, uow.is_open) == (True, False)
-    event = Renamed(scope=None, subject=None, aggregate_version=None, name="x")
+    event = renamed(None)
     with acting_as(ACTOR):
         refused: tuple[Callable[[], None], ...] = (
             lambda: uow.publish(event),
@@ -452,71 +564,72 @@ async def test_recording_after_the_unit_ended_is_refused(probe: BoundDatabase) -
 
 
 async def test_enqueue_writes_a_ready_job_with_its_kinds_policy(
-    probe: BoundDatabase, clock: ManualClock, admin: psycopg.AsyncConnection
+    probe: BoundDatabase, admin: psycopg.AsyncConnection
 ) -> None:
-    later = clock() + timedelta(minutes=5)
     async with probe.unit(tenant(A, A1, Mode.LIVE)) as uow:
+        later = uow.now + timedelta(minutes=5)
         uow.jobs.enqueue(EXPORT, "k1", payload={"amount": Decimal("1.50")})
         uow.jobs.enqueue(SWEEP, "k2", run_at=later)
-    now = clock()
+    now = uow.now
     deadline = now + timedelta(hours=1)
     unleased = (None, None, 0)
+    scope = (A, A1, "live", "ready")
     assert await rows(admin, JOBS) == [
-        (
-            EXPORT,
-            "k1",
-            A,
-            A1,
-            "live",
-            "ready",
-            now,
-            *unleased,
-            5,
-            deadline,
-            None,
-            {"amount": "1.50"},
-            None,
-            None,
-            now,
-            now,
-        ),
-        (SWEEP, "k2", A, A1, "live", "ready", later, *unleased, 3, None, None, {}, None, None, now, now),
+        (EXPORT, "k1", *scope, now, *unleased, 5, deadline, None, {"amount": "1.50"}, None, None, now, now),
+        (SWEEP, "k2", *scope, later, *unleased, 3, None, None, {}, None, None, now, now),
     ]
 
 
 async def test_enqueue_ignores_a_live_job_and_restarts_a_finished_one(
-    probe: BoundDatabase, clock: ManualClock, admin: psycopg.AsyncConnection
+    probe: BoundDatabase, admin: psycopg.AsyncConnection
 ) -> None:
-    first = clock()
     async with probe.unit(None) as uow:
         uow.jobs.enqueue(EXPORT, "k1", payload={"n": 1})
         uow.jobs.enqueue(EXPORT, "k1", payload={"n": 2})
+    first = uow.now
     assert await rows(admin, "SELECT status, payload FROM probe.jobs") == [("ready", {"n": 1})]
     for finished in ("done", "dead"):
         await admin.execute(FINISH, (finished,))
-        moment = clock.advance(timedelta(minutes=1))
         async with probe.unit(None) as uow:
             uow.jobs.enqueue(EXPORT, "k1", payload={"n": finished})
+        moment = uow.now
+        deadline = moment + timedelta(hours=1)
+        unleased = (None, None, None, None)
         assert await rows(admin, RESTARTED) == [
-            (
-                "ready",
-                0,
-                {"n": finished},
-                moment,
-                moment + timedelta(hours=1),
-                None,
-                None,
-                None,
-                None,
-                first,
-                moment,
-            )
+            ("ready", 0, {"n": finished}, moment, deadline, *unleased, first, moment)
         ]
     for live in ("running", "parked"):
         await admin.execute("UPDATE probe.jobs SET status = %s, payload = '{}'", (live,))
         async with probe.unit(None) as uow:
             uow.jobs.enqueue(EXPORT, "k1", payload={"n": 9})
         assert await rows(admin, "SELECT status, payload FROM probe.jobs") == [(live, {})]
+
+
+async def test_a_job_key_belongs_to_the_scope_that_enqueued_it(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection
+) -> None:
+    """M4: another tenant's enqueue or wake of the same kind and key leaves the first one's job alone."""
+    async with probe.unit(tenant(A, A1)) as uow:
+        uow.jobs.enqueue(EXPORT, "shared", payload={"n": 1})
+    await admin.execute("UPDATE probe.jobs SET status = 'done'")
+    for stranger in (tenant(B, B1), tenant(A, A2), tenant(A, A1, Mode.LIVE), None):
+        async with probe.unit(stranger) as uow:
+            uow.jobs.enqueue(EXPORT, "shared", payload={"n": 2})
+    state = "SELECT status, organization_id, company_id, mode, payload FROM probe.jobs"
+    assert await rows(admin, state) == [("done", A, A1, "test", {"n": 1})]
+    async with probe.unit(tenant(A, A1)) as uow:
+        uow.jobs.enqueue(EXPORT, "shared", payload={"n": 3})
+    assert await rows(admin, state) == [("ready", A, A1, "test", {"n": 3})]
+    await admin.execute("UPDATE probe.jobs SET status = 'parked', parked_reason = 'certificate_missing'")
+    for outsider in (tenant(B, B1), tenant(A, A2), tenant(A, A1, Mode.LIVE), OrganizationScope(B, None)):
+        async with probe.unit(outsider) as uow:
+            uow.jobs.wake(EXPORT, "shared")
+    assert await rows(admin, "SELECT status FROM probe.jobs") == [("parked",)]
+    for waker in (OrganizationScope(A, None), None):
+        async with probe.unit(waker) as uow:
+            uow.jobs.wake(EXPORT, "shared")
+        assert await rows(admin, "SELECT status FROM probe.jobs") == [("ready",)]
+        await admin.execute("UPDATE probe.jobs SET status = 'parked'")
 
 
 async def test_an_undeclared_job_kind_is_refused(probe: BoundDatabase) -> None:
@@ -531,61 +644,63 @@ async def test_an_undeclared_job_kind_is_refused(probe: BoundDatabase) -> None:
                 record()
 
 
+async def enqueued(probe: BoundDatabase, scope: Scope | None, *keys: tuple[str, str]) -> datetime:
+    async with probe.unit(scope) as uow:
+        for kind, key in keys:
+            uow.jobs.enqueue(kind, key)
+    return uow.now
+
+
 async def test_wake_and_wake_all_ready_only_the_parked_jobs_they_name(
-    probe: BoundDatabase, clock: ManualClock, admin: psycopg.AsyncConnection
+    probe: BoundDatabase, admin: psycopg.AsyncConnection
 ) -> None:
-    async with probe.unit(tenant(A, A1)) as uow:
-        for key in ("a-missing", "a-unavailable", "a-ready"):
-            uow.jobs.enqueue(EXPORT, key)
-        uow.jobs.enqueue(SWEEP, "a-other-kind")
-    async with probe.unit(tenant(B, B1)) as uow:
-        uow.jobs.enqueue(EXPORT, "b-missing")
-        uow.jobs.enqueue(EXPORT, "b-later")
+    """M5: ``wake_all`` keeps to the unit's mode as well as the company and reason it names."""
+    at_a = await enqueued(
+        probe,
+        tenant(A, A1),
+        (EXPORT, "a-missing"),
+        (EXPORT, "a-unavailable"),
+        (EXPORT, "a-ready"),
+        (SWEEP, "a-other-kind"),
+    )
+    at_a_live = await enqueued(probe, tenant(A, A1, Mode.LIVE), (EXPORT, "a-live"))
+    at_b = await enqueued(probe, tenant(B, B1), (EXPORT, "b-missing"), (EXPORT, "b-later"))
     await admin.execute(PARK)
-    enqueued = clock()
-    woken = clock.advance(timedelta(minutes=3))
-    async with probe.unit(None) as uow:
+    async with probe.unit(tenant(A, A1)) as uow:
         uow.jobs.wake_all(EXPORT, A1, "certificate_missing")
-        uow.jobs.wake(EXPORT, "b-missing")
         uow.jobs.wake(EXPORT, "a-ready")  # not parked: left as it is
-    assert await rows(
-        admin, "SELECT kind, key, status, run_at, parked_reason FROM probe.jobs ORDER BY kind, key"
-    ) == [
-        (EXPORT, "a-missing", "ready", woken, None),
-        (EXPORT, "a-ready", "ready", enqueued, None),
-        (EXPORT, "a-unavailable", "parked", enqueued, "signer_unavailable"),
-        (EXPORT, "b-later", "parked", enqueued, "certificate_missing"),
-        (EXPORT, "b-missing", "ready", woken, None),
-        (SWEEP, "a-other-kind", "parked", enqueued, "certificate_missing"),
+    woken_a = uow.now
+    async with probe.unit(tenant(B, B1)) as uow:
+        uow.jobs.wake(EXPORT, "b-missing")
+    woken_b = uow.now
+    assert await rows(admin, JOB_STATES) == [
+        (EXPORT, "a-live", "parked", at_a_live, "certificate_missing"),
+        (EXPORT, "a-missing", "ready", woken_a, None),
+        (EXPORT, "a-ready", "ready", at_a, None),
+        (EXPORT, "a-unavailable", "parked", at_a, "signer_unavailable"),
+        (EXPORT, "b-later", "parked", at_b, "certificate_missing"),
+        (EXPORT, "b-missing", "ready", woken_b, None),
+        (SWEEP, "a-other-kind", "parked", at_a, "certificate_missing"),
     ]
 
 
 async def test_audit_writes_who_did_what_with_hashes_never_data(
-    probe: BoundDatabase, clock: ManualClock, admin: psycopg.AsyncConnection
+    probe: BoundDatabase, admin: psycopg.AsyncConnection
 ) -> None:
     old, new = {"name": "old", "tax_id": "101850043"}, {"name": "new", "tax_id": "101850043"}
     with acting_as(ACTOR):
         async with probe.unit(tenant(A, A1, Mode.LIVE)) as uow:
             uow.audit(action="probe.rename", subject=SUBJECT, before=old, after=new, detail={"field": "name"})
+        renamed_at = uow.now
         async with probe.unit(OrganizationScope(A, None)) as uow:
             uow.audit(action="probe.create", subject="item-7")
+        created_at = uow.now
     before = hashlib.sha256(canonical_json(encode(old))).digest()
     after = hashlib.sha256(canonical_json(encode(new))).digest()
+    renaming = ("probe.rename", "probe", str(SUBJECT), before, after, {"field": "name"})
     assert await rows(admin, AUDIT) == [
-        (
-            clock(),
-            A,
-            A1,
-            "live",
-            *ACTED,
-            "probe.rename",
-            "probe",
-            str(SUBJECT),
-            before,
-            after,
-            {"field": "name"},
-        ),
-        (clock(), A, None, None, *ACTED, "probe.create", "probe", "item-7", None, None, {}),
+        (renamed_at, A, A1, "live", *ACTED, *renaming),
+        (created_at, A, None, None, *ACTED, "probe.create", "probe", "item-7", None, None, {}),
     ]
 
 

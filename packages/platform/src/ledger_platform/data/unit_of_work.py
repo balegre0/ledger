@@ -16,9 +16,9 @@ lazy from contextvars import Token
 lazy from datetime import datetime, timedelta
 lazy from uuid import UUID
 
-from sqlalchemy import insert, update
+from sqlalchemy import and_, insert, update
 from sqlalchemy.dialects.postgresql import insert as upsert
-lazy from sqlalchemy import Executable
+lazy from sqlalchemy import ColumnElement, Executable
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ledger_kernel.errors import LedgerError
@@ -30,6 +30,7 @@ from ledger_platform.observability.tracing import current_traceparent
 lazy from ledger_kernel.events import Event
 lazy from ledger_kernel.ids import CompanyId
 lazy from ledger_kernel.tenancy import Scope
+lazy from ledger_platform.data.database import AnyTable
 lazy from ledger_platform.data.tables import ChassisTables
 
 type Callback = Callable[[], None]
@@ -61,6 +62,15 @@ class UndeclaredJobKindError(LedgerError):
 
     def __init__(self, kind: str, module: str) -> None:
         super().__init__(f"{module} enqueues {kind}, which its manifest does not declare")
+
+
+class EventScopeMismatchError(LedgerError):
+    """An event about data outside its unit's scope: a defect of the producer (another tenant's event)."""
+
+    code: ClassVar[str] = "event_scope_mismatch"
+
+    def __init__(self, event_type: str) -> None:
+        super().__init__(f"a {event_type} event is outside the unit's scope")
 
 
 class MissingAuditScopeError(LedgerError):
@@ -101,13 +111,47 @@ def _scope_columns(scope: Scope | None) -> dict[str, object]:
     }
 
 
+def _within(unit: Scope | None, event: Scope | None) -> bool:
+    """Whether ``event`` is inside ``unit``: same organization, and company and mode where ``unit`` has them.
+
+    A unit without a scope (the platform's own) may publish for anyone; an organization's unit for any of its
+    companies.
+    """
+    if unit is None:
+        return True
+    if event is None or event.organization != unit.organization:
+        return False
+    if unit.company is not None and event.company != unit.company:
+        return False
+    return unit.mode is None or event.mode == unit.mode
+
+
+def _in_scope(jobs: AnyTable, scope: Scope | None) -> tuple[ColumnElement[bool], ...]:
+    """The jobs a unit of ``scope`` may wake: its organization's, and its company's and mode's where named."""
+    if scope is None:
+        return ()
+    mode = scope.mode
+    company = scope.company
+    return (
+        jobs.c.organization_id == scope.organization,
+        *(() if company is None else (jobs.c.company_id == company,)),
+        *(() if mode is None else (jobs.c.mode == mode.value,)),
+    )
+
+
 def _digest(value: object) -> bytes | None:
     return None if value is None else hashlib.sha256(canonical_json(encode(value))).digest()
 
 
 @final
 class UnitJobs:
-    """The unit's jobs: enqueue, wake one, wake all parked ones of a company and reason (§3.6)."""
+    """The unit's jobs: enqueue, wake one, wake all parked ones of a company and reason (§3.6).
+
+    A job's key is unique per kind in the whole schema, across tenants: a key must embed a globally unique id
+    (the document's, the event's), never a number a tenant counts. A job belongs to the scope that enqueued
+    it: another scope's enqueue of the same key never restarts it, and a unit wakes only the jobs inside its
+    own scope (a unit without one, the platform's, wakes any).
+    """
 
     __slots__ = ("_unit",)
 
@@ -162,7 +206,12 @@ class UnitJobs:
                     "traceparent": fresh.excluded.traceparent,
                     "updated_at": fresh.excluded.updated_at,
                 },
-                where=jobs.c.status.in_(("done", "dead")),
+                where=and_(
+                    jobs.c.status.in_(("done", "dead")),
+                    jobs.c.organization_id.is_not_distinct_from(fresh.excluded.organization_id),
+                    jobs.c.company_id.is_not_distinct_from(fresh.excluded.company_id),
+                    jobs.c.mode.is_not_distinct_from(fresh.excluded.mode),
+                ),
             )
         )
 
@@ -174,12 +223,17 @@ class UnitJobs:
         jobs = unit.tables.jobs
         unit.record(
             update(jobs)
-            .where(jobs.c.kind == kind, jobs.c.key == key, jobs.c.status == "parked")
+            .where(
+                jobs.c.kind == kind,
+                jobs.c.key == key,
+                jobs.c.status == "parked",
+                *_in_scope(jobs, unit.scope),
+            )
             .values(status="ready", run_at=unit.now, parked_reason=None, updated_at=unit.now)
         )
 
     def wake_all(self, kind: str, company: CompanyId, reason: str) -> None:
-        """Make every job of ``kind`` parked for ``company`` with ``reason`` ready now."""
+        """Ready every job of ``kind`` parked for ``company`` with ``reason``, inside the unit's scope."""
         unit = self._unit
         unit.require_open()
         unit.policy_of(kind)
@@ -191,6 +245,7 @@ class UnitJobs:
                 jobs.c.company_id == company,
                 jobs.c.status == "parked",
                 jobs.c.parked_reason == reason,
+                *_in_scope(jobs, unit.scope),
             )
             .values(status="ready", run_at=unit.now, parked_reason=None, updated_at=unit.now)
         )
@@ -237,7 +292,7 @@ class UnitOfWork:
         self.scope = scope
         """Whose rows the unit may touch: row-level security enforces it, repositories name it too (§2)."""
         self.now = now
-        """The unit's time, read once from the clock: every record of the unit carries it."""
+        """The unit's time: the database's ``now()`` (the transaction's start); every record carries it."""
         self.tables = binding.tables
         self.jobs = UnitJobs(self)
         self._binding = binding
@@ -278,6 +333,8 @@ class UnitOfWork:
         self.require_open()
         if event.TYPE not in self._binding.publishes:
             raise UndeclaredEventTypeError(event.TYPE, self._binding.source)
+        if not _within(self.scope, event.scope):
+            raise EventScopeMismatchError(event.TYPE)
         payload = payload_of(event)
         size = jsonb_size(payload)
         if size > MAX_PAYLOAD:

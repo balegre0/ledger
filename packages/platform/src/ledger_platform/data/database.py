@@ -9,19 +9,20 @@ show nothing and accept nothing (fail closed). A transaction commits only if eve
 it succeeded, and what runs after the commit can no longer change the outcome.
 """
 
+from abc import ABCMeta, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from functools import partial
 from math import ceil
 from types import BuiltinFunctionType, FunctionType, MethodType
-from typing import ClassVar, Final, final
+from typing import ClassVar, Final, Protocol, final
 lazy from collections.abc import AsyncGenerator, Callable, Sequence
 
 import psycopg
 import structlog
 from psycopg.pq import TransactionStatus
-from sqlalchemy import MetaData, Text, func, select, text, type_coerce
+from sqlalchemy import MetaData, Text, event, func, select, text, type_coerce
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import DeclarativeBase
@@ -29,6 +30,7 @@ from sqlalchemy.pool import NullPool
 lazy from sqlalchemy import Column, Table
 lazy from sqlalchemy.engine import URL
 lazy from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+lazy from sqlalchemy.pool import ConnectionPoolEntry, PoolResetState
 lazy from sqlalchemy.sql.base import ReadOnlyColumnCollection
 
 from ledger_kernel.errors import LedgerError
@@ -397,6 +399,66 @@ def _run(callbacks: tuple[Callback, ...]) -> None:
             _logger.exception("database.after_commit_failed", callback=_name_of(callback))
 
 
+_SESSION_RESETS: Final = ("RESET ROLE", "RESET ALL")
+"""What a returned connection forgets: a role and any setting made for the session.
+
+``RESET ALL`` goes back to the connection's startup values (``application_name`` and the limits of
+``options``), and neither statement drops psycopg's prepared statements (``DISCARD ALL`` would).
+"""
+
+
+class Cursor(Protocol, metaclass=ABCMeta):
+    """What ``reset_session`` uses of a DB-API cursor."""
+
+    @abstractmethod
+    def execute(self, operation: str, /) -> object:
+        """Run ``operation``."""
+
+    @abstractmethod
+    def close(self) -> None:
+        """Release the cursor."""
+
+
+class Session(Protocol, metaclass=ABCMeta):
+    """What ``reset_session`` uses of a DB-API connection (SQLAlchemy hands it the adapted psycopg one)."""
+
+    @abstractmethod
+    def cursor(self) -> Cursor:
+        """A cursor on the connection."""
+
+    @abstractmethod
+    def rollback(self) -> None:
+        """End the open transaction, if any."""
+
+    @abstractmethod
+    def commit(self) -> None:
+        """Commit the open transaction."""
+
+
+def reset_session(
+    dbapi_connection: Session, connection_record: ConnectionPoolEntry | None, reset_state: PoolResetState
+) -> None:
+    """The pool's ``reset`` hook: a connection goes back with no role and no session setting.
+
+    Units only ever set transaction-local state (``SET LOCAL``), which the rollback ends; this covers code
+    that set session state on a pooled connection (``SET ROLE``, ``SET ledger.x``), deliberately or by
+    mistake, so it never reaches the next borrower. Ends its own transaction (rollback, reset, commit). A
+    connection being closed (``terminate_only``) or collected outside the event loop is left alone: no one
+    borrows it again.
+    """
+    del connection_record
+    if reset_state.terminate_only or not reset_state.asyncio_safe:
+        return
+    dbapi_connection.rollback()
+    cursor = dbapi_connection.cursor()
+    try:
+        for statement in _SESSION_RESETS:
+            cursor.execute(statement)
+    finally:
+        cursor.close()
+    dbapi_connection.commit()
+
+
 def _server_options(limits: DatabaseLimits) -> str:
     """Startup options that give every session of the pool the server-side limits (in milliseconds)."""
     timeouts = {
@@ -464,6 +526,7 @@ class Database:
             hide_parameters=True,
             connect_args=connect_args,
         )
+        event.listen(engine.sync_engine, "reset", reset_session)
         probe = create_async_engine(url, poolclass=NullPool, hide_parameters=True, connect_args=connect_args)
         return cls(engine, probe=probe)
 

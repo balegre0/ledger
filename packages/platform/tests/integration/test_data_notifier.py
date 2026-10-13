@@ -1,14 +1,17 @@
 """``Notifier`` on real PostgreSQL: NOTIFYs coalesced per channel and window, failures logged (§3.5)."""
 
+import asyncio
 import socket
+from datetime import timedelta
 from typing import Final
 lazy from collections.abc import AsyncGenerator
 
 import psycopg
 import pytest
+from sqlalchemy import text
 from structlog.testing import capture_logs
 
-from ledger_platform.data.database import Database
+from ledger_platform.data.database import Database, DatabaseLimits
 from ledger_platform.data.notifier import INBOX, OUTBOX, Notifier
 from ledger_platform.data.roles import APP
 from ledger_testing.database import TEST_LOGINS, app_url, libpq_as
@@ -71,6 +74,32 @@ async def test_a_signal_after_the_window_closed_sends_again(
     notifier.signal(OUTBOX)
     await notifier.aclose()
     assert await received(listener) == [("ledger_outbox", ""), ("ledger_outbox", "")]
+
+
+async def test_an_exhausted_pool_never_piles_up_senders(
+    chassis: WorkerDatabase, listener: psycopg.AsyncConnection
+) -> None:
+    """I2: one sender per channel. Signals while it waits for a connection mark the channel dirty; it sends
+    once more after, instead of one waiting task per window."""
+    limits = DatabaseLimits(pool_timeout=timedelta(milliseconds=300))
+    database = Database.create(app_url(chassis), pool_size=1, limits=limits)
+    notifier = Notifier(database, window=0.01)
+    try:
+        async with database.engine.connect() as first, database.engine.connect() as second:
+            await first.execute(text("SELECT 1"))
+            await second.execute(text("SELECT 1"))  # the pool (one, and one more for bursts) is taken
+            with capture_logs() as logs:
+                notifier.signal(OUTBOX)
+                for _ in range(5):  # 50 ms apart: each would have started a sender of its own
+                    await asyncio.sleep(0.05)
+                    notifier.signal(OUTBOX)
+                await notifier.aclose()
+        notifier.signal(OUTBOX)
+        await notifier.aclose()
+    finally:
+        await database.aclose()
+    assert [log["event"] for log in logs] == ["notifier.notify_failed"] * 2
+    assert await received(listener) == [("ledger_outbox", "")]
 
 
 async def test_a_failed_notify_is_logged_and_not_raised() -> None:

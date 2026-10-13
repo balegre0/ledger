@@ -1,16 +1,20 @@
 """One JSON codec for event payloads, job payloads and audit hashes (§3.5).
 
-``Decimal`` as a string, never a float; UUIDs as strings; aware dates and times as ISO 8601; enumerations as
-their value; a ``Currency`` as its code; other dataclasses (``Money``, ``TaxId``) as objects of their fields;
-tuples and lists as arrays; mappings with text keys as objects. Anything else is a defect of the code that
-built the value, named by its path (``$.price.amount``) and its type, never shown.
+``Decimal`` as a string; UUIDs as strings; dates as ISO 8601, aware times in UTC (``...+00:00``, so equal
+instants have equal bytes); enumerations as their value; a ``Currency`` as its code; other dataclasses
+(``Money``, ``TaxId``) as objects of their fields; tuples and lists as arrays; mappings with text keys as
+objects. Floats are refused: amounts and rates are ``Decimal`` (§7.4), and a float's text is not the same in
+Python and PostgreSQL, so the payload limit could not be checked exactly. Text with a NUL character is refused
+too: ``jsonb`` cannot store it. Anything else is a defect of the code that built the value, named by its path
+(``$.price.amount``) and its type, never shown; a mapping key appears in the path only when it looks like a
+name (``$.name``), otherwise by its position (``$[#2]``), since keys can be data.
 """
 
 import json
-import math
+import re
 from collections.abc import Mapping
 from dataclasses import fields, is_dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum
 from typing import ClassVar, Final, TypeIs
@@ -22,11 +26,14 @@ from ledger_kernel.errors import LedgerError
 from ledger_kernel.money import Currency
 lazy from ledger_kernel.events import Event
 
-type JsonValue = str | int | float | bool | list[JsonValue] | dict[str, JsonValue] | None
+type JsonValue = str | int | bool | list[JsonValue] | dict[str, JsonValue] | None
 MAX_PAYLOAD: Final = 65_536
 """An event's payload, in bytes as PostgreSQL prints ``jsonb`` (the outbox's check)."""
 _ENVELOPE: Final = frozenset({"scope", "subject", "aggregate_version"})
 _ANYTHING: Final = TypeAdapter(object)
+_NAME: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,31}", re.ASCII)
+"""A mapping key shown in an error path: up to 32 characters of a name, nothing that could be data."""
+_NUL: Final = "\x00"
 
 
 class UnencodableValueError(LedgerError):
@@ -42,7 +49,9 @@ def encode(value: object, path: str = "$") -> JsonValue:
     """``value``'s JSON form (see the module); ``path`` names it in an error."""
     match value:
         case Enum(value=str() | int() as plain):
-            return plain
+            return encode(plain, path)
+        case str() if _NUL in value:
+            raise UnencodableValueError(path, "text with a NUL character")
         case None | bool() | int() | str():
             return value
         case _ if _is_array(value):
@@ -67,16 +76,16 @@ def _attribute(value: object, name: str) -> object:
 
 
 def _scalar(value: object, path: str) -> JsonValue:
-    """A number, an id, a date or a currency; anything else must be a dataclass instance (``_fields``)."""
+    """A decimal, an id, a date or a currency; anything else must be a dataclass instance (``_fields``)."""
     match value:
-        case float() if math.isfinite(value):
-            return value
         case Decimal() if value.is_finite():
             return format(value, "f")
         case UUID():
             return str(value)
         case datetime() if value.tzinfo is None:
             raise UnencodableValueError(path, "naive datetime")
+        case datetime():
+            return value.astimezone(UTC).isoformat()
         case date():
             return value.isoformat()
         case Currency():
@@ -96,10 +105,13 @@ def _fields(value: object, path: str) -> JsonValue:
 
 def _object(value: Mapping[object, object], path: str) -> dict[str, JsonValue]:
     encoded: dict[str, JsonValue] = {}
-    for key, item in value.items():
+    for index, (key, item) in enumerate(value.items()):
         if not isinstance(key, str):
             raise UnencodableValueError(path, "mapping with a key that is not text")
-        encoded[key] = encode(item, f"{path}.{key}")
+        if _NUL in key:
+            raise UnencodableValueError(path, "mapping key with a NUL character")
+        member = f".{key}" if _NAME.fullmatch(key) else f"[#{index}]"
+        encoded[key] = encode(item, path + member)
     return encoded
 
 
@@ -120,5 +132,8 @@ def canonical_json(value: JsonValue) -> bytes:
 
 
 def jsonb_size(value: JsonValue) -> int:
-    """The size of ``value`` as PostgreSQL prints ``jsonb`` (``", "`` and ``": "`` separators), in bytes."""
+    """The size of ``value`` as PostgreSQL prints ``jsonb`` (``", "`` and ``": "`` separators), in bytes.
+
+    Exact for what ``encode`` makes: text escapes the same way in both, and there are no floats.
+    """
     return len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode())

@@ -4,32 +4,57 @@ The runtime makes one per module from its manifest (schema, the event types it p
 module never names a role or a schema. ``unit(scope)`` begins with ``SET LOCAL ROLE <schema>_rw`` and the
 scope's settings, ``purging()`` with ``SET LOCAL ROLE <schema>_purge`` and no setting at all: both are
 transaction-local, so a pooled (or pgbouncer) connection carries neither into the next transaction, whether
-this one committed, rolled back, failed or was cancelled.
+this one committed, rolled back, failed or was cancelled (the pool also resets every connection it takes
+back: ``Database``). One task holds one unit at a time (rule 13): a unit or a purge opened inside an open unit
+is refused.
+
+A unit's time is the database's: ``now()``, the transaction's start, read with the scope. Every time a unit
+writes (``occurred_at``, ``run_at``, ``deadline_at``) and every due or lease comparison (``now()`` in SQL)
+are on that one clock, whatever the host's says (§3.6).
 """
 
 from contextlib import asynccontextmanager
 from types import MappingProxyType
-from typing import NotRequired, TypedDict, Unpack, final
+from typing import ClassVar, Final, NotRequired, TypedDict, Unpack, final
 lazy from collections.abc import AsyncGenerator, Mapping
 
 import structlog
+from pydantic import AwareDatetime, TypeAdapter
 from sqlalchemy import text
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ledger_kernel.clock import utc_now
-from ledger_platform.data.database import SET_SCOPE, AbortedTransactionError, is_committable, scope_settings
+from ledger_kernel.errors import LedgerError
+from ledger_platform.data.database import AbortedTransactionError, is_committable, scope_settings
 from ledger_platform.data.notifier import OUTBOX
 from ledger_platform.data.roles import SchemaRoles, identifier
 from ledger_platform.data.tables import chassis_tables
-from ledger_platform.data.unit_of_work import Binding, UnitOfWork
-lazy from ledger_kernel.clock import Clock
+from ledger_platform.data.unit_of_work import Binding, UnitOfWork, open_unit
 lazy from ledger_kernel.tenancy import Scope
 lazy from ledger_platform.data.database import Database
 lazy from ledger_platform.data.notifier import Signals
 lazy from ledger_platform.data.tables import ChassisTables
 lazy from ledger_platform.data.unit_of_work import Callback, JobPolicy
 
+_BEGIN: Final = text(
+    """
+    SELECT set_config('ledger.organization_id', :organization, true),
+           set_config('ledger.company_id', :company, true),
+           set_config('ledger.mode', :mode, true),
+           now()
+    """
+)
+"""The unit's scope (``scope_settings``) and its time, in one round trip."""
+_MOMENT: Final = TypeAdapter(AwareDatetime)
 _logger = structlog.stdlib.get_logger(__name__)
+
+
+class NestedUnitError(LedgerError):
+    """A unit opened while the task holds one: two transactions and their locks (rule 13), a defect."""
+
+    code: ClassVar[str] = "unit_nested"
+
+    def __init__(self, schema: str) -> None:
+        super().__init__(f"a {schema} transaction was opened inside an open unit: finish that unit first")
 
 
 class Declared(TypedDict):
@@ -39,8 +64,6 @@ class Declared(TypedDict):
     """The event types it publishes (``UndeclaredEventTypeError`` for any other); none by default."""
     jobs: NotRequired[Mapping[str, JobPolicy]]
     """Its job kinds and their limits (``UndeclaredJobKindError`` for any other); none by default."""
-    clock: NotRequired[Clock]
-    """Where a unit reads its time; ``utc_now`` by default."""
 
 
 def _run(callbacks: tuple[Callback, ...]) -> None:
@@ -56,7 +79,7 @@ def _run(callbacks: tuple[Callback, ...]) -> None:
 class BoundDatabase:
     """One module's units (see the module)."""
 
-    __slots__ = ("_binding", "_clock", "_enter_purge", "_enter_rw", "_signals", "database", "schema")
+    __slots__ = ("_binding", "_enter_purge", "_enter_rw", "_signals", "database", "schema")
 
     def __init__(
         self,
@@ -73,7 +96,6 @@ class BoundDatabase:
         self._enter_rw = text(f"SET LOCAL ROLE {identifier(roles.rw)}")
         self._enter_purge = text(f"SET LOCAL ROLE {identifier(roles.purge)}")
         self._signals = signals
-        self._clock = declared.get("clock", utc_now)
         self._binding = Binding(
             tables=chassis_tables(roles.schema),
             source=source,
@@ -94,10 +116,13 @@ class BoundDatabase:
         raises ``AbortedTransactionError``. After the commit, and only then, ``ledger_outbox`` is signalled
         once if the unit published, and the after-commit callbacks run.
         """
+        self._refuse_nesting()
         async with self.database.engine.begin() as connection:
             await connection.execute(self._enter_rw)
-            await connection.execute(SET_SCOPE, scope_settings(scope))
-            unit = UnitOfWork(connection, scope=scope, now=self._clock(), binding=self._binding)
+            began = (await connection.execute(_BEGIN, scope_settings(scope))).one()
+            unit = UnitOfWork(
+                connection, scope=scope, now=_MOMENT.validate_python(began[3]), binding=self._binding
+            )
             token = unit.mark_open()
             try:
                 yield unit
@@ -118,6 +143,11 @@ class BoundDatabase:
         No tenant setting is made (the purge spans organizations, and its policies need none); the purge
         deletes without ``RETURNING`` the stored responses.
         """
+        self._refuse_nesting()
         async with self.database.engine.begin() as connection:
             await connection.execute(self._enter_purge)
             yield connection
+
+    def _refuse_nesting(self) -> None:
+        if open_unit() is not None:
+            raise NestedUnitError(self.schema)

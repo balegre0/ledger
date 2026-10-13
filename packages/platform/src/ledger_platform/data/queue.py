@@ -5,6 +5,9 @@ A claim selects due rows ``FOR UPDATE SKIP LOCKED`` (two workers never claim one
 on the claim, so a worker that crashes mid-run still used it. A row whose lease ran out is due again (the
 caller's ``due`` says so). Whoever records the outcome names the token; a late writer whose lease was taken
 over records nothing.
+
+Time is the database's: leases run from ``now()``, and callers' ``due`` predicates compare with ``now()``
+too, so every worker measures against one clock, whatever its host's says (§3.6).
 """
 
 from dataclasses import dataclass
@@ -12,7 +15,6 @@ from datetime import timedelta
 from types import MappingProxyType
 from typing import Final, NotRequired, TypedDict, Unpack, final
 lazy from collections.abc import Mapping, Sequence
-lazy from datetime import datetime
 
 from sqlalchemy import func, select, update
 lazy from sqlalchemy import ColumnElement, RowMapping
@@ -49,8 +51,6 @@ class Window(TypedDict):
     """The order in which due rows are taken (oldest first, usually)."""
     limit: int
     """At most this many rows."""
-    now: datetime
-    """The claim's time: the lease runs from it."""
     lease: timedelta
     """How long the claimer holds a row before it is due again."""
     extra: NotRequired[Mapping[str, object]]
@@ -82,7 +82,7 @@ async def claim(
         .where(*(table.c[key] == chosen.c[key] for key in keys))
         .values(
             status="running",
-            lease_until=window["now"] + window["lease"],
+            lease_until=func.now() + window["lease"],
             lease_token=func.gen_random_uuid(),
             attempts=table.c.attempts + 1,
             **window.get("extra", _NOTHING),
