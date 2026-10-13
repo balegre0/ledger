@@ -16,6 +16,7 @@ ARECFs are written here as text and signed by signxml with the simulator's own c
 verifier is tested against a signer that shares no code with its own.
 """
 
+import re
 from http import HTTPStatus
 from typing import Final, final
 from xml.sax.saxutils import escape
@@ -51,6 +52,11 @@ SIGNATURE_ERROR: Final = 2
 DUPLICATE: Final = 3
 NOT_THIS_BUYER: Final = 4
 _MOMENT: Final = "%d-%m-%Y %H:%M:%S"
+_ARECF_RNC: Final = re.compile(r"[0-9]{9}|[0-9]{11}")
+_ARECF_ENCF: Final = re.compile(r"[a-zA-Z0-9]{13}|[a-zA-Z0-9]{11}|[a-zA-Z0-9]{9}")
+"""The ARECF's ``RNCType`` and ``eNCFType`` (*Formato Acuse de Recibo v1.0*): what an ARECF can name."""
+NO_ACKNOWLEDGEMENT: Final = "El RNC Emisor, el RNC Comprador o el eNCF no son válidos para un acuse de recibo"
+"""The fake's words: DGII documents no answer to an e-CF its acknowledgement could not name."""
 
 
 def arecf(issuer_rnc: str, buyer_rnc: str, encf: str, *, reason: int | None, at: datetime) -> bytes:
@@ -75,7 +81,8 @@ class ReceiverServices:
 
     def __init__(self, state: FakeState) -> None:
         self._state = state
-        self._seen: set[tuple[str, str]] = set()
+        self._seen: set[tuple[str, str, str]] = set()
+        """``(environment, issuer, e-NCF)`` received: each environment is its own (TesteCF, CerteCF)."""
 
     def handlers(self) -> dict[tuple[str, str], Handler]:
         """Each service's handler by method and lower-case path after the environment's segment."""
@@ -143,13 +150,14 @@ class ReceiverServices:
         del environment
         return await validate_seed(request, self._state.check, self._state.receiver_credentials)
 
-    def _reason(self, document: bytes, issuer: str, buyer: str, encf: str, ecf_type: str) -> int | None:
+    def _reason(self, document: bytes, environment: str, named: tuple[str, str, str, str]) -> int | None:
+        ecf_type, issuer, buyer, encf = named
         format_ = ECF_FORMATS.get(ecf_type)
         if format_ is None or schema_problems(format_, document):
             return SPECIFICATION_ERROR
         if not self._state.check.verify(document):
             return SIGNATURE_ERROR
-        if (issuer, encf) in self._seen:
+        if (environment, issuer, encf) in self._seen:
             return DUPLICATE
         accepted = self._state.receiver_rncs
         if accepted is not None and buyer not in accepted:
@@ -168,9 +176,11 @@ class ReceiverServices:
             "Encabezado/Comprador/RNCComprador",
             "Encabezado/IdDoc/eNCF",
         )
-        reason = self._reason(document, issuer, buyer, encf, ecf_type)
+        if not (_ARECF_RNC.fullmatch(issuer) and _ARECF_RNC.fullmatch(buyer) and _ARECF_ENCF.fullmatch(encf)):
+            return bad_request(NO_ACKNOWLEDGEMENT)
+        reason = self._reason(document, environment, (ecf_type, issuer, buyer, encf))
         if reason is None:
-            self._seen.add((issuer, encf))
+            self._seen.add((environment, issuer, encf))
         now = self._state.clock()
         self._state.received.append(
             Received(

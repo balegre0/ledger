@@ -186,3 +186,37 @@ async def test_the_simulator_takes_a_signed_commercial_approval(
     assert (
         await http.post(f"{SIMULATOR}/aprobacioncomercial/api/ecf", files=xml(approval))
     ).status_code == 401
+
+
+async def test_each_environment_remembers_its_own_receptions(
+    http: httpx.AsyncClient, signer: KeyPairSigner, fake: FakeDgii
+) -> None:
+    fake.state.receiver_requires_auth = False
+    document = await signed_credit_invoice(signer)
+    states: list[tuple[str | None, ...]] = []
+    for environment in ("testecf", "certecf", "certecf", "testecf"):
+        answer = await http.post(f"/{environment}/emisorreceptor/fe/recepcion/api/ecf", files=xml(document))
+        states.append(
+            texts(
+                answer.content, "DetalleAcusedeRecibo/Estado", "DetalleAcusedeRecibo/CodigoMotivoNoRecibido"
+            )
+        )
+    assert states == [("0", None), ("0", None), ("1", "3"), ("1", "3")]
+
+
+async def test_what_an_acknowledgement_cannot_name_is_refused_and_not_recorded(
+    http: httpx.AsyncClient, signer: KeyPairSigner, fake: FakeDgii
+) -> None:
+    fake.state.receiver_requires_auth = False
+    document = await signed_credit_invoice(signer)
+    unacknowledgeable = (
+        document.replace(b"<RNCComprador>131098193</RNCComprador>", b"<RNCComprador>13109819</RNCComprador>"),
+        document.replace(b"<RNCEmisor>101850043</RNCEmisor>", b"<RNCEmisor>1018500430</RNCEmisor>"),
+        document.replace(b"<eNCF>E310000000001</eNCF>", b"<eNCF>E31-000000001</eNCF>"),
+        b"<ECF />",
+    )
+    for sent in unacknowledgeable:
+        answer = await http.post(f"{SIMULATOR}/recepcion/api/ecf", files=xml(sent))
+        assert answer.status_code == 400
+        assert json_object(answer)["trackId"] is None
+    assert fake.received == []
