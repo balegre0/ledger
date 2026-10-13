@@ -11,9 +11,9 @@ empty ``Signature`` element in the place the signature will take.
 
 import hashlib
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.resources import files
-from typing import ClassVar, Final, final
+from typing import ClassVar, Final, final, override
 
 from lxml import etree
 
@@ -58,21 +58,35 @@ class CorrectionDriftError(SchemaDriftError):
 @final
 @dataclass(frozen=True, slots=True)
 class Violation:
-    """One way a document breaks its schema: where (line, element path) and what libxml2 says, cut short."""
+    """One way a document breaks its schema, as data.
+
+    ``line`` and ``path`` (the element path: names, never values) say where; ``kind`` is libxml2's error type
+    (``SCHEMAV_CVC_PATTERN_VALID``...). ``message`` is libxml2's own text, cut short: it may quote a value of
+    the document (an amount, a tax id), so it stays out of every ``repr`` and error message; read it only
+    where the document itself may be shown.
+    """
 
     line: int
     path: str
-    message: str
+    kind: str
+    message: str = field(repr=False)
+
+    @override
+    def __str__(self) -> str:
+        return f"{self.path} ({self.kind}, line {self.line})"
 
 
 class SchemaViolationError(EcfInvalidError):
-    """A document DGII's schema refuses, with where and why (at most ``MAX_VIOLATIONS``, each cut short)."""
+    """A document DGII's schema refuses: ``violations`` say where and how (at most ``MAX_VIOLATIONS``).
+
+    Its message names each violation's path, kind and line, never libxml2's text (which may quote values).
+    """
 
     code: ClassVar[str] = "do_ecf_schema_invalid"
 
     def __init__(self, format_: Format, found: tuple[Violation, ...]) -> None:
         self.violations: tuple[Violation, ...] = found
-        listed = "; ".join(f"{violation.path}: {violation.message}" for violation in found)
+        listed = "; ".join(str(violation) for violation in found)
         super().__init__(f"DGII's schema {format_.value} refuses the document: {listed}")
 
 
@@ -130,7 +144,12 @@ def violations(format_: Format, document: bytes, *, unsigned: bool = False) -> t
     if checking.validate(root):
         return ()
     return tuple(
-        Violation(line=entry.line, path=entry.path or "", message=truncate(entry.message, _MESSAGE))
+        Violation(
+            line=entry.line,
+            path=entry.path or "",
+            kind=entry.type_name,
+            message=truncate(entry.message, _MESSAGE),
+        )
         for entry in list(checking.error_log)[:MAX_VIOLATIONS]
     )
 
