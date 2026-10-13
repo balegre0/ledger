@@ -135,33 +135,44 @@ def upgrade() -> None:
     run_per_scope(connection, sa.update(PAYMENTS).where(missing).values(currency="DOP"), expected)
 ```
 
-The service itself (this code was run against the local stack, and passes this repository's lint and both type
-checkers once it sits in a package):
+The service itself (this code builds and passes this repository's lint and both type checkers once it sits in a
+package; `unguarded_routes(app.routes)` finds nothing):
 
 ```python
-"""payments: records payments and announces each one as an event."""
+"""payments: records payments of a company and announces each one as an event."""
 
+from contextlib import asynccontextmanager
+from functools import partial
 from typing import Annotated
-lazy from collections.abc import Sequence
+lazy from collections.abc import AsyncGenerator, Mapping, Sequence
 
+import grpc
 from fastapi import APIRouter, Depends
+from prometheus_client import CollectorRegistry
 from sqlalchemy import Boolean, Column, MetaData, Table, Text, Uuid, false, insert, update
 
 from ledger.common.v1.money_pb2 import Money
 from ledger_contracts.envelope import Envelope
-from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, parse_id
+from ledger_kernel.access import Permission
+from ledger_platform.authentication import HttpKeys, PublishedKeys, TokenPolicy, TokenVerifier
+from ledger_platform.authorization import CachedPermissions
 from ledger_platform.consumer import ConsumerSpec
+from ledger_platform.identity_client import RemotePermissions, follow_permission_changes
+from ledger_platform.routes import allowed, authenticated, company_in_path
 from ledger_platform.service import Events, Interfaces, Service, ServiceLimits
-from ledger_platform.settings import ServiceSettings
+from ledger_platform.settings import ApiSettings
 from ledger_platform.streams import StreamSpec
+lazy from ledger_platform.authorization import CompanyAccess, PermissionSource
 lazy from ledger_platform.database import UnitOfWork
 lazy from ledger_platform.service import Runtime, RuntimeDependency
+lazy from ledger_platform.supervision import Work
 
 
-class PaymentsSettings(ServiceSettings):
-    """The chassis's settings and one of the service's own: ``LEDGER_CURRENCY``."""
+class PaymentsSettings(ApiSettings):
+    """The chassis's settings, the bearer-token policy, and two of the service's own."""
 
     currency: str = "DOP"
+    identity_address: str = "identity:50051"
 
 
 PAYMENTS = Table(
@@ -175,20 +186,39 @@ PAYMENTS = Table(
 )
 STREAM = StreamSpec(name="PAYMENTS", subjects=("payments.>",))
 RECORDED = "payments.payment.recorded"
+SETTINGS = PaymentsSettings()
+REGISTRY = CollectorRegistry()
+POLICY = TokenPolicy.of(SETTINGS)
+KEYS = HttpKeys()  # the identity provider's keys, fetched while the service runs (its resources)
+VERIFIER = TokenVerifier(POLICY, keys=PublishedKeys(POLICY, fetch=KEYS, registry=REGISTRY))
+
+
+@asynccontextmanager
+async def resources(settings: PaymentsSettings) -> AsyncGenerator[CachedPermissions]:
+    """What the service reaches others with, open while it runs: the keys' client, identity's channel."""
+    async with KEYS.opened(), grpc.aio.insecure_channel(settings.identity_address) as identity:
+        yield CachedPermissions(RemotePermissions(identity))
 
 
 def routes(runtime: RuntimeDependency[PaymentsSettings]) -> Sequence[APIRouter]:
     """The HTTP routes, made once when the service is built."""
     router = APIRouter()
 
-    @router.post("/organizations/{organization}/companies/{company}/payments", status_code=202)
+    async def permissions(
+        current: Annotated[Runtime[PaymentsSettings], Depends(runtime)],
+    ) -> PermissionSource:
+        return current.resources(CachedPermissions)
+
+    # 401 without a token, 404 without a role in the path's company, 403 without the permission there.
+    issuing = allowed(company_in_path(authenticated(VERIFIER), permissions), Permission.INVOICE_ISSUE)
+
+    @router.post("/v1/companies/{company_id}/payments", status_code=202)
     async def record(
-        organization: str,
-        company: str,
+        access: Annotated[CompanyAccess, Depends(issuing)],
         amount: str,
         current: Annotated[Runtime[PaymentsSettings], Depends(runtime)],
     ) -> dict[str, str]:
-        tenant = Tenant(OrganizationId(parse_id(organization)), CompanyId(parse_id(company)))  # else a 422
+        tenant = access.tenant  # the caller's organization, and a company it holds a role in
         payment = Money(amount=amount, currency=current.settings.currency)
         event = Envelope.wrap(payment, source="payments", tenant=tenant)
         async with current.database.transaction(tenant) as unit:
@@ -218,24 +248,36 @@ def consumers(runtime: Runtime[PaymentsSettings]) -> Sequence[ConsumerSpec]:
     return (ConsumerSpec(name="payments-settle", stream=STREAM.name, subject=RECORDED, handler=settle),)
 
 
+def workers(runtime: Runtime[PaymentsSettings]) -> Mapping[str, Work]:
+    """Every replica drops the permissions identity announces have changed."""
+    cache = runtime.resources(CachedPermissions)
+    return {
+        "permission changes": partial(follow_permission_changes, runtime.nats, cache, runtime.interruptions)
+    }
+
+
 service = Service(
-    settings=PaymentsSettings(),
+    settings=SETTINGS,
     version="0.1.0",
-    interfaces=Interfaces(http=routes),
-    events=Events(streams=(STREAM,), consumers=consumers),
+    interfaces=Interfaces(http=routes, resources=resources, registry=REGISTRY),
+    events=Events(streams=(STREAM,), consumers=consumers, workers=workers),
     limits=ServiceLimits(nats_connect_timeout=30.0),  # every wait has a limit; this one is not the default
 )
 app = service.app  # any ASGI server runs it; its lifespan starts and stops the whole service
 ```
 
-The tenant comes from the URL only so that the example stays short. A real route declares
-`company_in_path(authenticated(verifier), permissions)` (`ledger_platform.routes`): the caller is the principal its
-bearer token proves, the company the path's, and a caller without a role there gets a 404; its `POST`s run through
-`Idempotency`, its updates check `If-Match`. identity's routes are the example. Beside `Money`, `ledger_contracts`
-holds identity's messages; a service declares its own event messages (`ledger.events.<service>.v1.PaymentRecorded`)
-in `libs/contracts/proto`. `Runtime` and `RuntimeDependency` are `lazy` imports although a route signature uses
-them: a lazy import resolves on first use, which is when FastAPI reads the signature (the types of a pydantic
-model's fields stay ordinary imports).
+Every route takes its caller and its company from what the platform proves: `authenticated(verifier)` checks the
+bearer token, `company_in_path(caller, permissions)` takes the path's `company_id` with the caller's organization
+(the `Tenant` its transaction is scoped to) and asks the permission source what the caller may do there, and
+`allowed(..., permission)` refuses without the permission. A route about the organization as a whole declares
+`holding(caller, role)` (a role the identity provider granted) or `in_organization(caller)` instead. The
+permissions come from identity (`RemotePermissions`, over the resources' gRPC channel), cached for 30 s and kept
+honest by the `follow_permission_changes` worker. The example's `POST` takes no `Idempotency-Key` only to stay
+short: a real one runs through `Idempotency`, and its updates check `If-Match`; identity's routes are the example.
+Beside `Money`, `ledger_contracts` holds identity's messages; a service declares its own event messages
+(`ledger.events.<service>.v1.PaymentRecorded`) in `libs/contracts/proto`. `Runtime`, `RuntimeDependency` and
+`CompanyAccess` are `lazy` imports although a route signature uses them: a lazy import resolves on first use, which
+is when FastAPI reads the signature (the types of a pydantic model's fields stay ordinary imports).
 
 The example runs no gRPC server; identity runs one (`ledger.identity.v1.IdentityQueryService`). With a `.proto`
 service and the code `poe proto` generates from it, the registration is one function, passed as
