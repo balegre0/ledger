@@ -63,13 +63,17 @@ class Failure(StrEnum):
     UNREACHABLE = "unreachable"
     """No connection, or none in time."""
     BROKEN = "broken"
-    """The connection broke, or the time ran out, after a query was sent."""
+    """The connection broke, or an attempt's time ran out, after the request was sent."""
     SERVER_ERROR = "server_error"
-    """A 5xx or a 429."""
+    """A 5xx."""
+    THROTTLED = "throttled"
+    """A 429: DGII asks for fewer calls."""
+    TIMED_OUT = "timed_out"
+    """The call's overall deadline passed."""
     UNDOCUMENTED = "undocumented"
     """An answer DGII does not document for the service."""
     UNREADABLE = "unreadable"
-    """An answer that does not read as the service's, or over its size limit."""
+    """An answer that does not read as the service's, in an encoding refused, or over its size limit."""
     REFUSED = "refused"
     """DGII refused the signed seed (its signature or certificate)."""
     NOT_OPEN = "not_open"
@@ -87,12 +91,20 @@ class AuthorityUnavailableError(EcfUnavailableError):
 
 
 class OutcomeUnknownError(EcfUnavailableError):
-    """The connection broke after a document may have reached DGII: ask DGII before sending it again."""
+    """A document was sent and DGII may have taken it, its answer unknown: ask DGII before sending it again.
+
+    ``reason``: the connection broke or the time ran out after sending (``broken``, ``timed_out``), DGII
+    answered a 5xx (``server_error``), or a success that does not read as the service's (``unreadable``,
+    ``undocumented``: no track id).
+    """
 
     code: ClassVar[str] = "do_ecf_dgii_outcome_unknown"
 
-    def __init__(self, service: str) -> None:
-        super().__init__(f"DGII's {service}: the connection broke after sending; the outcome is unknown")
+    def __init__(self, service: str, reason: Failure) -> None:
+        self.reason: Failure = reason
+        super().__init__(
+            f"DGII's {service}: the document may have reached DGII ({reason}); its outcome is unknown"
+        )
 
 
 class Authority(Protocol, metaclass=ABCMeta):
@@ -102,7 +114,7 @@ class Authority(Protocol, metaclass=ABCMeta):
     async def submit_ecf(
         self, environment: Environment, issuer_rnc: str, encf: Encf, signed: bytes
     ) -> Reception:
-        """Send a signed e-CF to reception; never retried (``OutcomeUnknownError``: the connection broke)."""
+        """Send a signed e-CF to reception; never retried (``OutcomeUnknownError``: DGII may have it)."""
 
     @abstractmethod
     async def submit_rfce(

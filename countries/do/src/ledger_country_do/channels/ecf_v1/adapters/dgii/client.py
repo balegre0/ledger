@@ -4,24 +4,32 @@ Queries are ``GET``; what carries a document (the signed seed, an e-CF, an RFCE)
 
 * **Authentication.** DGII's seed, read by the hardened parser before anything signs it, is signed by the
   ``XmlSigner`` (``sign_seed``) and exchanged at ``validarsemilla`` for a token cached per environment until
-  five minutes before it expires (never longer than an hour), fetched once at a time; a 401 drops it and the
-  call is made once more with a new one. Tokens live in memory only: never stored, logged, shown in a ``repr``
-  or put in an error, and forgotten when the client closes.
-* **Retries.** What cannot change DGII's state (seed, its validation, results, track ids, the directory) is
-  retried twice, 0.2 s and 0.5 s apart. A document sent is never retried: when the connection breaks or the
-  time runs out after its request may have left, ``OutcomeUnknownError`` tells the caller to ask DGII for the
-  e-NCF's track ids first.
-* **Failures.** No connection, a broken one, the time up, a 5xx or 429, an answer DGII does not document,
-  unreadable, or larger than 1 MiB once decompressed (read as it streams, never whole first):
-  ``AuthorityUnavailableError`` (``failure``: ``unreachable``, ``broken``, ``server_error``, ``undocumented``,
-  ``unreadable``, ``refused`` (the signed seed), ``not_open``). DGII's refusal of a document (400 at
-  reception) is an answer: ``Refused``.
-* **Transport.** Every attempt has a connect timeout and a total one. Redirects are not followed; the
-  environment's proxies and ``.netrc`` are ignored (``trust_env=False``); TLS is always verified; the live
-  environment only on DGII's hosts (``endpoints``). Every file sent is named ``RNC + e-NCF + .xml`` (DT-DGII).
+  five minutes before it expires (never longer than an hour), fetched once at a time. A seed serves once, so
+  a failed exchange starts again from a fresh seed: the two are retried together, never the validation alone.
+  A 401 drops the token that was refused (not one another call has renewed since) and the call is made once
+  more with a new one. Tokens live in memory only: never stored, logged, shown in a ``repr`` or put in an
+  error, and forgotten when the client closes.
+* **Retries.** What cannot change DGII's state (authentication, results, track ids, the directory) is retried
+  twice, 0.2 s and 0.5 s apart, after no connection, a broken one or a 5xx. A document sent is never retried.
+* **Submissions DGII may have taken.** When the connection breaks or the time runs out after a document's
+  request may have left, DGII answers a 5xx, or a success that does not read (unreadable, too large, no track
+  id), ``OutcomeUnknownError``: the caller asks DGII (track ids) before sending it again. A 400 is DGII's
+  refusal (``Refused``); a 429, no connection, or an answer DGII does not document means it was not taken
+  (``AuthorityUnavailableError``).
+* **Failures.** ``AuthorityUnavailableError``, its ``failure`` one of ``ports.Failure``.
+* **Time.** Every attempt has a connect timeout and a total one; every call (token, retries and waits
+  included) has an overall deadline, a minute by default (``DgiiTimeouts.call``), after which it fails
+  ``timed_out`` (or, for a document already sent, its outcome is unknown).
+* **Answers.** ``Accept-Encoding: gzip``: an answer is plain or a single gzip layer, any other encoding is
+  refused; it is decompressed here as it streams and refused once it passes 1 MiB, never read whole first.
+* **Transport.** Redirects are not followed; the environment's proxies and ``.netrc`` are ignored
+  (``trust_env=False``); TLS is always verified; hosts are ``https`` origins (``endpoints``); the live
+  environment only on DGII's hosts and never over an injected transport. Every file sent is named
+  ``RNC + e-NCF + .xml`` (DT-DGII).
 """
 
 import asyncio
+import zlib
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -31,7 +39,12 @@ lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 import httpx
 from pydantic import TypeAdapter, ValidationError
 
-from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import OFFICIAL_HOSTS, Service, offered
+from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import (
+    OFFICIAL_HOSTS,
+    LiveHostRefusedError,
+    Service,
+    offered,
+)
 from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import (
     DirectoryAnswer,
     ReceptionAnswer,
@@ -50,6 +63,7 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
     Refused,
 )
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError
+from ledger_country_do.channels.ecf_v1.domain.notation import SANTO_DOMINGO
 from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import MessageAnswer
@@ -61,6 +75,12 @@ MAX_ANSWER: Final = 1024 * 1024
 TOKEN_MARGIN: Final = timedelta(minutes=5)
 TOKEN_CEILING: Final = timedelta(hours=1)
 RETRY_DELAYS: Final = (0.2, 0.5)
+ACCEPTED_ENCODING: Final = "gzip"
+_PLAIN: Final = "identity"
+_GZIP_WINDOW: Final = 31
+"""``zlib``'s ``wbits`` for exactly one gzip member (16 + a 32 KiB window)."""
+_DGII_OFFSET: Final = "-0400"
+"""Santo Domingo's offset, all year (no daylight saving: ``notation.SANTO_DOMINGO``)."""
 _SERVER_ERROR: Final = 500
 _TOO_MANY: Final = 429
 _UNAUTHORIZED: Final = 401
@@ -77,10 +97,12 @@ type Sleep = Callable[[float], Awaitable[None]]
 @final
 @dataclass(frozen=True, slots=True)
 class DgiiTimeouts:
-    """How long a call may take: to connect, and in all (each attempt)."""
+    """How long DGII is waited for, in seconds: to connect and in all, per attempt; and per call, overall."""
 
     connect: float = 5.0
     total: float = 20.0
+    call: float = 60.0
+    """A call's deadline: its token, every attempt, the waits between them."""
 
 
 DEFAULT_TIMEOUTS: Final = DgiiTimeouts()
@@ -127,6 +149,18 @@ def _messages(found: list[MessageAnswer]) -> tuple[DgiiMessage, ...]:
     return tuple(DgiiMessage(str(message.code), message.text) for message in found)
 
 
+def _received_at(text: str) -> datetime | None:
+    """``fechaRecepcion``: ISO 8601 or DGII's ``dd-MM-yyyy HH:mm:ss``; Santo Domingo's time if no zone."""
+    try:
+        moment = datetime.fromisoformat(text.strip())
+    except ValueError:
+        try:
+            return datetime.strptime(f"{text.strip()} {_DGII_OFFSET}", "%d-%m-%Y %H:%M:%S %z")
+        except ValueError:
+            return None
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=SANTO_DOMINGO)
+
+
 def read_answer[T](model: TypeAdapter[T], response: httpx.Response, service: Service) -> T:
     """``response``'s JSON as ``model``; ``AuthorityUnavailableError`` (``unreadable``) otherwise."""
     if len(response.content) > MAX_ANSWER:
@@ -137,13 +171,32 @@ def read_answer[T](model: TypeAdapter[T], response: httpx.Response, service: Ser
         raise AuthorityUnavailableError(Failure.UNREADABLE, service.value) from error
 
 
+def _submitted[T](model: TypeAdapter[T], response: httpx.Response, service: Service) -> T:
+    """A submission's 2xx answer as ``model``; one that does not read leaves the outcome unknown."""
+    try:
+        return read_answer(model, response, service)
+    except AuthorityUnavailableError as error:
+        raise OutcomeUnknownError(service.value, Failure.UNREADABLE) from error
+
+
 async def _bounded(response: httpx.Response) -> bytes | None:
-    """The body as it streams, decompressed; ``None`` once it passes ``MAX_ANSWER``."""
+    """The body, plain or one gzip layer decompressed as it streams; ``None`` if unreadable or too large."""
+    encodings = [
+        each.strip().lower() for each in response.headers.get_list("content-encoding", split_commas=True)
+    ]
+    if encodings not in ([], [_PLAIN], [ACCEPTED_ENCODING]):
+        return None
+    inflater = zlib.decompressobj(wbits=_GZIP_WINDOW) if encodings == [ACCEPTED_ENCODING] else None
     body = bytearray()
-    async for chunk in response.aiter_bytes():
-        body += chunk
-        if len(body) > MAX_ANSWER:
-            return None
+    try:
+        async for chunk in response.aiter_raw():
+            body += chunk if inflater is None else inflater.decompress(chunk, MAX_ANSWER + 1 - len(body))
+            if len(body) > MAX_ANSWER:
+                return None
+    except zlib.error:
+        return None
+    if inflater is not None and (not inflater.eof or inflater.unused_data):
+        return None
     return bytes(body)
 
 
@@ -193,12 +246,22 @@ class DgiiClient(Authority):
             raise AuthorityUnavailableError(Failure.NOT_OPEN, service.value)
         return self._http
 
+    def _url(self, service: Service, environment: Environment) -> str:
+        if environment.live and self._transport is not None:
+            raise LiveHostRefusedError
+        return self._hosts.url(service, environment)
+
+    def _deadline(self) -> float:
+        return asyncio.get_running_loop().time() + self._timeouts.call
+
     async def _attempt(
-        self, request: httpx.Request, service: Service, *, idempotent: bool
+        self, request: httpx.Request, service: Service, *, idempotent: bool, deadline: float
     ) -> httpx.Response | AuthorityUnavailableError:
+        """One request: its answer, or a failure worth retrying; any other failure is raised."""
         http = self._client(service)
+        loop = asyncio.get_running_loop()
         try:
-            async with asyncio.timeout(self._timeouts.total):
+            async with asyncio.timeout_at(min(loop.time() + self._timeouts.total, deadline)):
                 streamed = await http.send(request, stream=True)
                 try:
                     body = await _bounded(streamed)
@@ -207,25 +270,51 @@ class DgiiClient(Authority):
         except httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout:
             return AuthorityUnavailableError(Failure.UNREACHABLE, service.value)
         except (httpx.TransportError, TimeoutError) as error:
-            if idempotent:
-                return AuthorityUnavailableError(Failure.BROKEN, service.value)
-            raise OutcomeUnknownError(service.value) from error
+            reason = Failure.TIMED_OUT if loop.time() >= deadline else Failure.BROKEN
+            if not idempotent:
+                raise OutcomeUnknownError(service.value, reason) from error
+            if reason is Failure.TIMED_OUT:
+                raise AuthorityUnavailableError(reason, service.value) from error
+            return AuthorityUnavailableError(reason, service.value)
+        status = streamed.status_code
+        if status == _TOO_MANY:
+            return AuthorityUnavailableError(Failure.THROTTLED, service.value)
+        if status >= _SERVER_ERROR and not idempotent:
+            raise OutcomeUnknownError(service.value, Failure.SERVER_ERROR)
+        if status >= _SERVER_ERROR:
+            return AuthorityUnavailableError(Failure.SERVER_ERROR, service.value)
+        if body is None and not idempotent:
+            raise OutcomeUnknownError(service.value, Failure.UNREADABLE)
         if body is None:
             raise AuthorityUnavailableError(Failure.UNREADABLE, service.value)
-        if streamed.status_code >= _SERVER_ERROR or streamed.status_code == _TOO_MANY:
-            return AuthorityUnavailableError(Failure.SERVER_ERROR, service.value)
-        return httpx.Response(streamed.status_code, content=body, request=request)
+        return httpx.Response(status, content=body, request=request)
 
-    async def _call(self, request: httpx.Request, service: Service, *, idempotent: bool) -> httpx.Response:
-        delays = iter(RETRY_DELAYS if idempotent else ())
+    async def _retrying[R](
+        self,
+        attempt: Callable[[], Awaitable[R | AuthorityUnavailableError]],
+        deadline: float,
+        *,
+        retried: bool,
+    ) -> R:
+        """``attempt``'s outcome, tried again after ``RETRY_DELAYS`` when ``retried`` and time is left."""
+        delays = iter(RETRY_DELAYS if retried else ())
         while True:
-            outcome = await self._attempt(request, service, idempotent=idempotent)
-            if isinstance(outcome, httpx.Response):
+            outcome = await attempt()
+            if not isinstance(outcome, AuthorityUnavailableError):
                 return outcome
             delay = next(delays, None)
-            if delay is None:
+            if delay is None or asyncio.get_running_loop().time() + delay >= deadline:
                 raise outcome
             await self._sleep(delay)
+
+    async def _call(
+        self, request: httpx.Request, service: Service, *, idempotent: bool, deadline: float
+    ) -> httpx.Response:
+        return await self._retrying(
+            lambda: self._attempt(request, service, idempotent=idempotent, deadline=deadline),
+            deadline,
+            retried=idempotent,
+        )
 
     def _request(
         self,
@@ -236,49 +325,64 @@ class DgiiClient(Authority):
         params: Mapping[str, str] | None = None,
         document: tuple[str, bytes] | None = None,
     ) -> httpx.Request:
-        headers = {"Accept": "application/json"} | (
+        headers = {"Accept": "application/json", "Accept-Encoding": ACCEPTED_ENCODING} | (
             {} if token is None else {"Authorization": f"Bearer {token}"}
         )
         files = None if document is None else {"xml": (document[0], document[1], "text/xml")}
         method = "GET" if document is None else "POST"
         return self._client(service).build_request(method, url, headers=headers, params=params, files=files)
 
-    async def _signed_seed(self, environment: Environment) -> bytes:
-        seed_url = self._hosts.url(Service.SEED, environment)
-        seed = await self._call(self._request(seed_url, Service.SEED, None), Service.SEED, idempotent=True)
-        if not seed.is_success:
-            raise AuthorityUnavailableError(Failure.UNDOCUMENTED, Service.SEED.value)
+    async def _signed(self, seed: bytes) -> bytes:
         try:
-            texts(seed.content)
-            return await self._signer.sign_seed(seed.content)
+            texts(seed)
+            return await self._signer.sign_seed(seed)
         except EcfInvalidError as error:
             raise AuthorityUnavailableError(Failure.UNREADABLE, Service.SEED.value) from error
 
-    async def _token(self, environment: Environment) -> str:
-        async with self._locks.setdefault(environment, asyncio.Lock()):
-            cached = self._tokens.get(environment)
-            if cached is not None and cached.good_until > self._clock():
-                return cached.value
-            signed = await self._signed_seed(environment)
-            validate_url = self._hosts.url(Service.VALIDATE_SEED, environment)
-            request = self._request(
-                validate_url, Service.VALIDATE_SEED, None, document=("semilla.xml", signed)
-            )
-            response = await self._call(request, Service.VALIDATE_SEED, idempotent=True)
-            if response.status_code == _BAD_REQUEST:
-                raise AuthorityUnavailableError(Failure.REFUSED, Service.VALIDATE_SEED.value)
-            if not response.is_success:
-                raise AuthorityUnavailableError(Failure.UNDOCUMENTED, Service.VALIDATE_SEED.value)
-            token = read_answer(_TOKEN, response, Service.VALIDATE_SEED)
-            try:
-                expires = datetime.fromisoformat(token.expires.strip())
-            except ValueError as error:
-                raise AuthorityUnavailableError(Failure.UNREADABLE, Service.VALIDATE_SEED.value) from error
-            if expires.tzinfo is None:
-                expires = expires.replace(tzinfo=UTC)
-            good_until = min(expires, self._clock() + TOKEN_CEILING) - TOKEN_MARGIN
-            self._tokens[environment] = _Token(token.token, good_until)
-            return token.token
+    async def _authenticate(
+        self, environment: Environment, deadline: float
+    ) -> _Token | AuthorityUnavailableError:
+        """A fresh seed, signed, exchanged for a token: one try of the two (a seed serves once)."""
+        seed_request = self._request(self._url(Service.SEED, environment), Service.SEED, None)
+        seed = await self._attempt(seed_request, Service.SEED, idempotent=True, deadline=deadline)
+        if isinstance(seed, AuthorityUnavailableError):
+            return seed
+        if not seed.is_success:
+            raise AuthorityUnavailableError(Failure.UNDOCUMENTED, Service.SEED.value)
+        signed = await self._signed(seed.content)
+        validate_url = self._url(Service.VALIDATE_SEED, environment)
+        request = self._request(validate_url, Service.VALIDATE_SEED, None, document=("semilla.xml", signed))
+        response = await self._attempt(request, Service.VALIDATE_SEED, idempotent=True, deadline=deadline)
+        if isinstance(response, AuthorityUnavailableError):
+            return response
+        if response.status_code == _BAD_REQUEST:
+            raise AuthorityUnavailableError(Failure.REFUSED, Service.VALIDATE_SEED.value)
+        if not response.is_success:
+            raise AuthorityUnavailableError(Failure.UNDOCUMENTED, Service.VALIDATE_SEED.value)
+        token = read_answer(_TOKEN, response, Service.VALIDATE_SEED)
+        try:
+            expires = datetime.fromisoformat(token.expires.strip())
+        except ValueError as error:
+            raise AuthorityUnavailableError(Failure.UNREADABLE, Service.VALIDATE_SEED.value) from error
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=UTC)
+        return _Token(token.token, min(expires, self._clock() + TOKEN_CEILING) - TOKEN_MARGIN)
+
+    async def _token(self, environment: Environment, service: Service, deadline: float) -> str:
+        """The environment's token, fetched if need be; waiting for it, too, ends with the deadline."""
+        lock = self._locks.setdefault(environment, asyncio.Lock())
+        try:
+            async with asyncio.timeout_at(deadline), lock:
+                cached = self._tokens.get(environment)
+                if cached is not None and cached.good_until > self._clock():
+                    return cached.value
+                fresh = await self._retrying(
+                    lambda: self._authenticate(environment, deadline), deadline, retried=True
+                )
+                self._tokens[environment] = fresh
+                return fresh.value
+        except TimeoutError as error:
+            raise AuthorityUnavailableError(Failure.TIMED_OUT, service.value) from error
 
     async def _authenticated(
         self,
@@ -288,22 +392,27 @@ class DgiiClient(Authority):
         *,
         idempotent: bool,
     ) -> httpx.Response:
-        response = await self._call(build(await self._token(environment)), service, idempotent=idempotent)
+        deadline = self._deadline()
+        token = await self._token(environment, service, deadline)
+        response = await self._call(build(token), service, idempotent=idempotent, deadline=deadline)
         if response.status_code != _UNAUTHORIZED:
             return response
-        self._tokens.pop(environment, None)
-        return await self._call(build(await self._token(environment)), service, idempotent=idempotent)
+        cached = self._tokens.get(environment)
+        if cached is not None and cached.value == token:
+            del self._tokens[environment]
+        renewed = await self._token(environment, service, deadline)
+        return await self._call(build(renewed), service, idempotent=idempotent, deadline=deadline)
 
     def _send(
         self, environment: Environment, service: Service, name: str, signed: bytes
     ) -> Callable[[str], httpx.Request]:
-        url = self._hosts.url(service, environment)
+        url = self._url(service, environment)
         return lambda token: self._request(url, service, token, document=(name, signed))
 
     async def _query(
         self, environment: Environment, service: Service, params: Mapping[str, str]
     ) -> httpx.Response:
-        url = self._hosts.url(service, environment)
+        url = self._url(service, environment)
         response = await self._authenticated(
             environment,
             service,
@@ -314,33 +423,39 @@ class DgiiClient(Authority):
             raise AuthorityUnavailableError(Failure.UNDOCUMENTED, service.value)
         return response
 
+    async def _submit(
+        self, environment: Environment, service: Service, issuer_rnc: str, encf: Encf, signed: bytes
+    ) -> httpx.Response | Refused:
+        """A document sent once: DGII's 2xx answer, or its refusal at the door (400)."""
+        build = self._send(environment, service, f"{issuer_rnc}{encf}.xml", signed)
+        response = await self._authenticated(environment, service, build, idempotent=False)
+        if response.status_code == _BAD_REQUEST:
+            refusal = read_answer(_RECEPTION, response, service)
+            return Refused((DgiiMessage(refusal.error or str(_BAD_REQUEST), refusal.message or ""),))
+        if not response.is_success:
+            raise AuthorityUnavailableError(Failure.UNDOCUMENTED, service.value)
+        return response
+
     @override
     async def submit_ecf(
         self, environment: Environment, issuer_rnc: str, encf: Encf, signed: bytes
     ) -> Reception:
-        build = self._send(environment, Service.RECEPTION, f"{issuer_rnc}{encf}.xml", signed)
-        response = await self._authenticated(environment, Service.RECEPTION, build, idempotent=False)
-        if not response.is_success and response.status_code != _BAD_REQUEST:
-            raise AuthorityUnavailableError(Failure.UNDOCUMENTED, Service.RECEPTION.value)
-        answer = read_answer(_RECEPTION, response, Service.RECEPTION)
-        if response.is_success and answer.track_id:
-            return Received(answer.track_id)
-        if response.is_success:
-            raise AuthorityUnavailableError(Failure.UNDOCUMENTED, Service.RECEPTION.value)
-        return Refused((DgiiMessage(answer.error or str(response.status_code), answer.message or ""),))
+        response = await self._submit(environment, Service.RECEPTION, issuer_rnc, encf, signed)
+        if isinstance(response, Refused):
+            return response
+        answer = _submitted(_RECEPTION, response, Service.RECEPTION)
+        if not answer.track_id:
+            raise OutcomeUnknownError(Service.RECEPTION.value, Failure.UNDOCUMENTED)
+        return Received(answer.track_id)
 
     @override
     async def submit_rfce(
         self, environment: Environment, issuer_rnc: str, encf: Encf, signed: bytes
     ) -> Answer | Refused:
-        build = self._send(environment, Service.RFCE, f"{issuer_rnc}{encf}.xml", signed)
-        response = await self._authenticated(environment, Service.RFCE, build, idempotent=False)
-        if response.status_code == _BAD_REQUEST:
-            refusal = read_answer(_RECEPTION, response, Service.RFCE)
-            return Refused((DgiiMessage(refusal.error or "400", refusal.message or ""),))
-        if not response.is_success:
-            raise AuthorityUnavailableError(Failure.UNDOCUMENTED, Service.RFCE.value)
-        answer = read_answer(_RESULT, response, Service.RFCE)
+        response = await self._submit(environment, Service.RFCE, issuer_rnc, encf, signed)
+        if isinstance(response, Refused):
+            return response
+        answer = _submitted(_RESULT, response, Service.RFCE)
         return Answer(answer.code, _messages(answer.messages), answer.sequence_used)
 
     @override
@@ -355,11 +470,16 @@ class DgiiClient(Authority):
     ) -> tuple[str, ...] | None:
         if not offered(Service.TRACK_IDS, environment):
             return None
-        response = await self._query(
-            environment, Service.TRACK_IDS, {"rncemisor": issuer_rnc, "encf": str(encf)}
-        )
+        params = {"rncemisor": issuer_rnc, "encf": str(encf)}
+        response = await self._query(environment, Service.TRACK_IDS, params)
         entries = read_answer(_TRACK_IDS, response, Service.TRACK_IDS)
-        return tuple(entry.track_id for entry in sorted(entries, key=lambda entry: entry.received_at))
+        received = [(_received_at(entry.received_at), entry.track_id) for entry in entries]
+        ordered: list[tuple[datetime, str]] = []
+        for moment, track_id in received:
+            if moment is None:
+                raise AuthorityUnavailableError(Failure.UNREADABLE, Service.TRACK_IDS.value)
+            ordered.append((moment, track_id))
+        return tuple(track_id for _, track_id in sorted(ordered, key=lambda each: each[0]))
 
     async def directory(self, environment: Environment, rnc: str) -> DirectoryEntry | None:
         """The receiver ``rnc`` in DGII's directory; ``None`` if it is no electronic receiver (F5, F6)."""

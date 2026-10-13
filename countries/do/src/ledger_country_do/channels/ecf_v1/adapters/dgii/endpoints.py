@@ -4,14 +4,16 @@ A URL is a host, the environment's segment, the service and its resource:
 ``https://ecf.dgii.gov.do/testecf/recepcion/api/facturaselectronicas``. The RFCE has a host of its own,
 ``fc.dgii.gov.do``. CerteCF publishes neither ``consultatrackids`` nor ``consultadirectorio``. The live
 environment is reached on DGII's own hosts only (``LiveHostRefusedError``), compared exactly: a fake can stand
-in for TesteCF and CerteCF, never for production. DGII's paths ignore case; DT-DGII's lower-case spelling is
-used.
+in for TesteCF and CerteCF, never for production. Every host, DGII's or a fake's, is an ``https`` origin and
+nothing more (``HostRefusedError``): TLS always, no path, user, query or fragment. DGII's paths ignore case;
+DT-DGII's lower-case spelling is used.
 """
 
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
 from typing import ClassVar, Final, final
+from urllib.parse import urlsplit
 lazy from collections.abc import Mapping
 
 from ledger_country_do.channels.ecf_v1.domain.environments import (
@@ -66,6 +68,31 @@ class LiveHostRefusedError(EcfError):
         super().__init__("the live environment is reached on DGII's own hosts only")
 
 
+class HostRefusedError(EcfError):
+    """A host that is not an ``https`` origin: a defect of configuration."""
+
+    code: ClassVar[str] = "do_ecf_dgii_host_refused"
+
+    def __init__(self) -> None:
+        super().__init__("DGII's hosts are each an https origin: no path, user, query or fragment")
+
+
+def _origin(host: str) -> bool:
+    """Whether ``host`` is ``https://`` and an authority without user information, and nothing more."""
+    try:
+        parts = urlsplit(host)
+        hostname = parts.hostname
+    except ValueError:
+        return False
+    return (
+        parts.scheme == "https"
+        and bool(hostname)
+        and "@" not in parts.netloc
+        and (parts.path, parts.query, parts.fragment) == ("", "", "")
+        and not host.endswith(("?", "#"))
+    )
+
+
 def offered(service: Service, environment: Environment) -> bool:
     """Whether DGII answers ``service`` in ``environment``."""
     return environment is not Environment.CERTECF or service not in NOT_IN_CERTECF
@@ -78,6 +105,10 @@ class DgiiHosts:
 
     ecf: str = OFFICIAL_ECF_HOST
     fc: str = OFFICIAL_FC_HOST
+
+    def __post_init__(self) -> None:
+        if not (_origin(self.ecf) and _origin(self.fc)):
+            raise HostRefusedError
 
     @property
     def official(self) -> bool:

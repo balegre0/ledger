@@ -2,7 +2,7 @@ import asyncio
 import gzip
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Final
+from typing import Final, final, override
 
 import httpx
 import pytest
@@ -23,6 +23,7 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
     OutcomeUnknownError,
     Received,
     Refused,
+    XmlSigner,
 )
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
@@ -48,7 +49,7 @@ async def signed_ecf(signer: KeyPairSigner, sequence: int = 1, *, small_consumer
 
 def client_over(
     transport: httpx.AsyncBaseTransport,
-    signer: KeyPairSigner,
+    signer: XmlSigner,
     clock: ManualClock,
     sleeps: list[float],
     timeouts: DgiiTimeouts | None = None,
@@ -196,10 +197,10 @@ async def test_a_submission_is_never_retried(
 ) -> None:
     await dgii.result(T, "warm the token")
     fake.script.outage = 1
-    with pytest.raises(AuthorityUnavailableError):
+    with pytest.raises(OutcomeUnknownError, match="server_error"):
         await dgii.submit_ecf(T, ISSUER, FIRST, await signed_ecf(signer))
     fake.script.outage = 1
-    with pytest.raises(AuthorityUnavailableError):
+    with pytest.raises(OutcomeUnknownError, match="server_error"):
         await dgii.submit_rfce(T, ISSUER, FIRST, await signed_ecf(signer))
     assert sleeps == []
     assert fake.received == []
@@ -241,8 +242,39 @@ async def test_the_live_environment_is_never_reached_through_a_fake(
     assert counting.paths == []
 
 
+async def test_the_live_environment_is_never_reached_through_an_injected_transport(
+    signer: KeyPairSigner,
+) -> None:
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.url.path)
+        return reply(200, b"{}")
+
+    async with DgiiClient(signer, transport=httpx.MockTransport(handler)).opened() as dgii:
+        with pytest.raises(LiveHostRefusedError):
+            await dgii.result(Environment.ECF, "a")
+        with pytest.raises(LiveHostRefusedError):
+            await dgii.submit_rfce(Environment.ECF, ISSUER, FIRST, b"<RFCE/>")
+    assert sent == []
+
+
 SEED: Final = b"<SemillaModel><valor>v</valor><fecha>f</fecha></SemillaModel>"
 GOOD_TOKEN: Final = b'{"token": "t", "expira": "2026-10-13T14:30:00Z"}'
+
+
+def reply(status: int, body: bytes = b"", headers: dict[str, str] | None = None) -> httpx.Response:
+    """An answer whose body streams as a server's does (``content=`` would hand it over already read)."""
+    return httpx.Response(status, headers=headers, stream=httpx.ByteStream(body))
+
+
+def seeded(path: str) -> httpx.Response | None:
+    """DGII's seed and a good token, for the paths of authentication; ``None`` for every other."""
+    if path.endswith("/semilla"):
+        return reply(200, SEED)
+    if path.endswith("validarsemilla"):
+        return reply(200, GOOD_TOKEN)
+    return None
 
 
 def scripted_dgii(token: bytes, status: int, answer: bytes, *, seed: bytes = SEED) -> httpx.MockTransport:
@@ -250,10 +282,10 @@ def scripted_dgii(token: bytes, status: int, answer: bytes, *, seed: bytes = SEE
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/semilla"):
-            return httpx.Response(200, content=seed)
+            return reply(200, seed)
         if request.url.path.endswith("validarsemilla"):
-            return httpx.Response(200, content=token)
-        return httpx.Response(status, content=answer)
+            return reply(200, token)
+        return reply(status, answer)
 
     return httpx.MockTransport(handler)
 
@@ -281,31 +313,45 @@ class Undocumented:
             "submit",
             "unreadable",
         ),
-        Undocumented(GOOD_TOKEN, 200, b"not json", "submit", "unreadable"),
-        Undocumented(GOOD_TOKEN, 200, b"[" + b" " * (1024 * 1024) + b"]", "submit", "unreadable"),
         Undocumented(GOOD_TOKEN, 404, b"", "submit", "undocumented"),
-        Undocumented(GOOD_TOKEN, 200, b'{"trackId": null}', "submit", "undocumented"),
+        Undocumented(GOOD_TOKEN, 302, b"", "submit", "undocumented"),
+        Undocumented(GOOD_TOKEN, 400, b"not json", "submit", "unreadable"),
         Undocumented(GOOD_TOKEN, 404, b"", "rfce", "undocumented"),
+        Undocumented(GOOD_TOKEN, 429, b"", "submit", "throttled"),
+        Undocumented(GOOD_TOKEN, 429, b"", "rfce", "throttled"),
         Undocumented(GOOD_TOKEN, 404, b"", "result", "undocumented"),
         Undocumented(GOOD_TOKEN, 302, b"", "result", "undocumented"),
+        Undocumented(GOOD_TOKEN, 200, b"not json", "result", "unreadable"),
+        Undocumented(GOOD_TOKEN, 200, b"[" + b" " * MAX_ANSWER + b"]", "result", "unreadable"),
         Undocumented(GOOD_TOKEN, 404, b"", "track_ids", "undocumented"),
         Undocumented(GOOD_TOKEN, 404, b"", "directory", "undocumented"),
-        Undocumented(GOOD_TOKEN, 200, b'[{"trackId": ""}]', "track_ids", "unreadable"),
+        Undocumented(
+            GOOD_TOKEN, 200, b'[{"trackId": "", "fechaRecepcion": "2026-10-13"}]', "track_ids", "unreadable"
+        ),
+        Undocumented(GOOD_TOKEN, 200, b'[{"trackId": "a"}]', "track_ids", "unreadable"),
+        Undocumented(
+            GOOD_TOKEN, 200, b'[{"trackId": "a", "fechaRecepcion": "ayer"}]', "track_ids", "unreadable"
+        ),
     ],
     ids=[
         "token-not-json",
         "token-expiry",
         "token-not-a-header-value",
-        "not-json",
-        "too-large",
-        "not-found",
-        "no-track-id",
+        "submit-404",
+        "submit-redirect-not-followed",
+        "refusal-unreadable",
         "rfce-404",
+        "submit-429",
+        "rfce-429",
         "result-404",
-        "redirect-not-followed",
+        "result-redirect-not-followed",
+        "result-not-json",
+        "result-too-large",
         "track-ids-404",
         "directory-404",
         "empty-track-id",
+        "no-reception-moment",
+        "reception-moment-unreadable",
     ],
 )
 async def test_answers_dgii_does_not_document_are_failures(
@@ -315,6 +361,7 @@ async def test_answers_dgii_does_not_document_are_failures(
     async with client_over(transport, signer, clock, sleeps).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match=case.failure):
             await call(dgii, case.call)
+    assert sleeps == []
 
 
 async def call(dgii: DgiiClient, service: str) -> object:
@@ -330,6 +377,141 @@ async def call(dgii: DgiiClient, service: str) -> object:
             return await dgii.directory(T, "131098193")
         case _:
             return await dgii.result(T, "a")
+
+
+@dataclass(frozen=True, slots=True)
+class MayHaveTaken:
+    """``status``/``answer`` to a submission (``service``) that DGII may have taken: ``reason``."""
+
+    status: int
+    answer: bytes
+    service: str
+    reason: str
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        MayHaveTaken(200, b"not json", "submit", "unreadable"),
+        MayHaveTaken(200, b"[" + b" " * MAX_ANSWER + b"]", "submit", "unreadable"),
+        MayHaveTaken(200, b'{"trackId": null}', "submit", "undocumented"),
+        MayHaveTaken(201, b'{"trackId": ""}', "submit", "undocumented"),
+        MayHaveTaken(500, b"", "submit", "server_error"),
+        MayHaveTaken(200, b"not json", "rfce", "unreadable"),
+        MayHaveTaken(502, b"", "rfce", "server_error"),
+    ],
+    ids=["not-json", "too-large", "no-track-id", "empty-track-id", "500", "rfce-not-json", "rfce-502"],
+)
+async def test_a_submission_dgii_may_have_taken_has_an_unknown_outcome(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float], case: MayHaveTaken
+) -> None:
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.url.path)
+        return seeded(request.url.path) or reply(case.status, case.answer)
+
+    async with client_over(httpx.MockTransport(handler), signer, clock, sleeps).opened() as dgii:
+        with pytest.raises(OutcomeUnknownError, match=f"{case.reason}.*outcome is unknown") as raised:
+            await call(dgii, case.service)
+    assert raised.value.reason == case.reason
+    assert len(sent) == len(("seed", "validation", "the submission, once"))
+    assert sleeps == []
+
+
+async def test_a_submission_dgii_refuses_twice_as_unauthorized_is_sent_exactly_twice(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
+) -> None:
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.url.path.rsplit("/", 1)[-1])
+        return seeded(request.url.path) or reply(401)
+
+    async with client_over(httpx.MockTransport(handler), signer, clock, sleeps).opened() as dgii:
+        with pytest.raises(AuthorityUnavailableError, match="reception: undocumented"):
+            await dgii.submit_ecf(T, ISSUER, FIRST, b"<ECF/>")
+    assert sent == ["semilla", "validarsemilla", "facturaselectronicas"] * 2
+
+
+async def test_only_the_token_dgii_refused_is_dropped(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
+) -> None:
+    issued: list[str] = []
+    refused: list[str] = []
+    both_sent = asyncio.Event()
+    renewed_used = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/semilla"):
+            return reply(200, SEED)
+        if request.url.path.endswith("validarsemilla"):
+            issued.append(f"t{len(issued) + 1}")
+            return reply(200, b'{"token": "' + issued[-1].encode() + b'", "expira": "2026-10-13T14:30:00Z"}')
+        if request.headers["authorization"] != "Bearer t1":
+            renewed_used.set()
+            return reply(200, b'{"codigo": 0}')
+        refused.append(request.url.path)
+        place = len(refused)
+        if place == len(("first", "second")):
+            both_sent.set()
+        await both_sent.wait()
+        if place > 1:
+            await renewed_used.wait()
+        return reply(401)
+
+    async with client_over(httpx.MockTransport(handler), signer, clock, sleeps).opened() as dgii:
+        answers = await asyncio.gather(dgii.result(T, "a"), dgii.result(T, "b"))
+        assert [answer.code for answer in answers] == [0, 0]
+        assert (await dgii.result(T, "c")).code == 0
+    assert issued == ["t1", "t2"]
+
+
+@pytest.mark.parametrize("failure", ["broken", "server_error"])
+async def test_a_failed_authentication_starts_again_from_a_fresh_seed(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float], failure: str
+) -> None:
+    sent: list[str] = []
+    validated: list[bytes] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.rsplit("/", 1)[-1]
+        sent.append(path)
+        if path == "semilla":
+            return reply(200, SEED.replace(b">v<", f">v{sent.count('semilla')}<".encode()))
+        if path == "validarsemilla":
+            validated.append(await request.aread())
+            if len(validated) == 1 and failure == "broken":
+                reason = "reset"
+                raise httpx.ReadError(reason, request=request)
+            if len(validated) == 1:
+                return reply(503)
+            return reply(200, GOOD_TOKEN)
+        return reply(200, b'{"codigo": 0}')
+
+    async with client_over(httpx.MockTransport(handler), signer, clock, sleeps).opened() as dgii:
+        assert (await dgii.result(T, "a")).code == 0
+    assert sent == ["semilla", "validarsemilla", "semilla", "validarsemilla", "estado"]
+    assert b"<valor>v1</valor>" in validated[0]
+    assert b"<valor>v2</valor>" in validated[1]
+    assert sleeps == [0.2]
+
+
+async def test_an_authentication_that_keeps_failing_is_tried_three_times(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
+) -> None:
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.rsplit("/", 1)[-1]
+        sent.append(path)
+        return reply(200, SEED) if path == "semilla" else reply(503)
+
+    async with client_over(httpx.MockTransport(handler), signer, clock, sleeps).opened() as dgii:
+        with pytest.raises(AuthorityUnavailableError, match="validate_seed: server_error"):
+            await dgii.result(T, "a")
+    assert sent == ["semilla", "validarsemilla"] * 3
+    assert sleeps == [0.2, 0.5]
 
 
 @pytest.mark.parametrize(
@@ -357,12 +539,15 @@ async def test_a_seed_or_its_validation_refused_is_a_failure(
 ) -> None:
     def no_seed(request: httpx.Request) -> httpx.Response:
         del request
-        return httpx.Response(404)
+        return reply(404)
 
     def refuses(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/semilla"):
-            return httpx.Response(200, content=SEED)
-        return httpx.Response(400, json={"trackId": None, "error": "400", "mensaje": "La firma no es válida"})
+            return reply(200, SEED)
+        return reply(400, b'{"trackId": null, "error": "400", "mensaje": "La firma no es valida"}')
+
+    def undocumented(request: httpx.Request) -> httpx.Response:
+        return reply(200, SEED) if request.url.path.endswith("/semilla") else reply(404)
 
     async with client_over(httpx.MockTransport(no_seed), signer, clock, sleeps).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="seed: undocumented"):
@@ -370,35 +555,25 @@ async def test_a_seed_or_its_validation_refused_is_a_failure(
     async with client_over(httpx.MockTransport(refuses), signer, clock, sleeps).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="validate_seed: refused"):
             await dgii.result(T, "a")
-
-
-async def test_a_seed_validation_dgii_does_not_document_is_a_failure(
-    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
-) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/semilla"):
-            return httpx.Response(200, content=SEED)
-        return httpx.Response(404)
-
-    async with client_over(httpx.MockTransport(handler), signer, clock, sleeps).opened() as dgii:
+    async with client_over(httpx.MockTransport(undocumented), signer, clock, sleeps).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="validate_seed: undocumented"):
             await dgii.result(T, "a")
+    assert sleeps == []
 
 
 async def test_a_client_with_every_default_reaches_dgii_s_own_hosts(signer: KeyPairSigner) -> None:
     hosts: list[str] = []
+    encodings: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         hosts.append(request.url.host)
-        if request.url.path.endswith("/semilla"):
-            return httpx.Response(200, content=SEED)
-        if request.url.path.endswith("validarsemilla"):
-            return httpx.Response(200, content=GOOD_TOKEN)
-        return httpx.Response(200, content=b'{"codigo": 0}')
+        encodings.append(request.headers["accept-encoding"])
+        return seeded(request.url.path) or reply(200, b'{"codigo": 0}')
 
     async with DgiiClient(signer, transport=httpx.MockTransport(handler)).opened() as dgii:
         assert (await dgii.result(T, "a")).code == 0
     assert set(hosts) == {"ecf.dgii.gov.do"}
+    assert set(encodings) == {"gzip"}
 
 
 async def test_no_error_quotes_a_token(
@@ -414,27 +589,63 @@ async def test_no_error_quotes_a_token(
     assert "unreadable" in told
 
 
-async def test_a_compressed_answer_is_bounded_once_expanded(
-    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
-) -> None:
-    bomb = gzip.compress(b"[" + b" " * (2 * MAX_ANSWER) + b"]")
+EMPTY_LIST: Final = gzip.compress(b"[]")
 
+
+@pytest.mark.parametrize(
+    ("encoding", "body"),
+    [
+        ("gzip, gzip", gzip.compress(EMPTY_LIST)),
+        ("br", b"[]"),
+        ("deflate", b"[]"),
+        ("gzip", gzip.compress(b"[" + b" " * (4 * MAX_ANSWER) + b"]")),
+        ("gzip", b"not gzip at all"),
+        ("gzip", EMPTY_LIST[:-4]),
+        ("gzip", EMPTY_LIST + EMPTY_LIST),
+    ],
+    ids=["gzip-twice", "brotli", "deflate", "bomb", "not-gzip", "truncated", "two-members"],
+)
+async def test_an_answer_is_decompressed_once_and_bounded_as_it_expands(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float], encoding: str, body: bytes
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/semilla"):
-            return httpx.Response(200, content=SEED)
-        if request.url.path.endswith("validarsemilla"):
-            return httpx.Response(200, content=GOOD_TOKEN)
-        return httpx.Response(200, headers={"Content-Encoding": "gzip"}, content=bomb)
+        return seeded(request.url.path) or reply(200, body, {"Content-Encoding": encoding})
 
     async with client_over(httpx.MockTransport(handler), signer, clock, sleeps).opened() as dgii:
-        with pytest.raises(AuthorityUnavailableError, match="unreadable"):
+        with pytest.raises(AuthorityUnavailableError, match="track_ids: unreadable"):
             await dgii.track_ids(T, ISSUER, FIRST)
+
+
+@pytest.mark.parametrize(
+    ("encoding", "body"), [("gzip", EMPTY_LIST), ("identity", b"[]"), (" GZIP ", EMPTY_LIST)]
+)
+async def test_an_answer_plain_or_gzipped_is_read(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float], encoding: str, body: bytes
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return seeded(request.url.path) or reply(200, body, {"Content-Encoding": encoding})
+
+    async with client_over(httpx.MockTransport(handler), signer, clock, sleeps).opened() as dgii:
+        assert await dgii.track_ids(T, ISSUER, FIRST) == ()
 
 
 def test_an_answer_read_whole_is_bounded_too() -> None:
     oversized = httpx.Response(200, content=b'{"token": "t", "expira": "' + b" " * MAX_ANSWER + b'"}')
     with pytest.raises(AuthorityUnavailableError, match="validate_seed: unreadable"):
         read_answer(TypeAdapter(TokenAnswer), oversized, Service.VALIDATE_SEED)
+
+
+async def test_track_ids_are_ordered_by_when_dgii_received_them(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
+) -> None:
+    answer = (
+        b'[{"trackId": "c", "fechaRecepcion": "2026-10-13T12:00:00-04:00"},'
+        b' {"trackId": "a", "fechaRecepcion": "13-10-2026 09:15:00"},'
+        b' {"trackId": "b", "fechaRecepcion": "2026-10-13T14:00:00Z"},'
+        b' {"trackId": "d", "fechaRecepcion": "2026-10-13T12:00:00"}]'
+    )
+    async with client_over(scripted_dgii(GOOD_TOKEN, 200, answer), signer, clock, sleeps).opened() as dgii:
+        assert await dgii.track_ids(T, ISSUER, FIRST) == ("a", "b", "c", "d")
 
 
 async def test_a_broken_answer_to_a_query_is_retried_then_a_failure(
@@ -447,25 +658,96 @@ async def test_a_broken_answer_to_a_query_is_retried_then_a_failure(
     assert sleeps == [0.2, 0.5]
 
 
-async def test_every_call_has_a_time_limit(
+async def stalls(request: httpx.Request) -> httpx.Response:
+    """Authenticates at once, then never answers in time."""
+    if (answer := seeded(request.url.path)) is not None:
+        return answer
+    await asyncio.sleep(60)
+    return reply(200, b"{}")
+
+
+async def test_every_attempt_has_a_time_limit(
     signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
 ) -> None:
-    async def stalls(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/semilla"):
-            return httpx.Response(200, content=SEED)
-        if request.url.path.endswith("validarsemilla"):
-            return httpx.Response(200, content=GOOD_TOKEN)
-        await asyncio.sleep(60)
-        return httpx.Response(200, content=b"{}")
-
     quick = DgiiTimeouts(connect=0.05, total=0.05)
     async with client_over(httpx.MockTransport(stalls), signer, clock, sleeps, quick).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="result: broken"):
             await dgii.result(T, "a")
         assert sleeps == [0.2, 0.5]
-        with pytest.raises(OutcomeUnknownError):
+        with pytest.raises(OutcomeUnknownError, match="broken"):
             await dgii.submit_ecf(T, ISSUER, FIRST, b"<ECF/>")
     assert sleeps == [0.2, 0.5]
+
+
+def test_a_call_s_overall_deadline_is_a_minute_by_default() -> None:
+    assert DgiiTimeouts().call == 60.0
+
+
+async def test_every_call_has_an_overall_deadline(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
+) -> None:
+    tight = DgiiTimeouts(connect=5, total=5, call=0.1)
+    async with client_over(httpx.MockTransport(stalls), signer, clock, sleeps, tight).opened() as dgii:
+        with pytest.raises(AuthorityUnavailableError, match="result: timed_out"):
+            await dgii.result(T, "a")
+        with pytest.raises(OutcomeUnknownError, match="timed_out"):
+            await dgii.submit_ecf(T, ISSUER, FIRST, b"<ECF/>")
+    assert sleeps == []
+
+
+async def test_no_retry_is_waited_for_past_the_deadline(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return seeded(request.url.path) or reply(503)
+
+    tight = DgiiTimeouts(connect=5, total=5, call=0.15)
+    async with client_over(httpx.MockTransport(handler), signer, clock, sleeps, tight).opened() as dgii:
+        with pytest.raises(AuthorityUnavailableError, match="result: server_error"):
+            await dgii.result(T, "a")
+    assert sleeps == []
+
+
+@final
+class SlowSigner(XmlSigner):
+    """Signs seeds slowly, as a signer process that takes its time."""
+
+    __slots__ = ("_inner",)
+
+    def __init__(self, inner: KeyPairSigner) -> None:
+        self._inner = inner
+
+    @override
+    async def sign_document(self, document: bytes) -> bytes:
+        return await self._inner.sign_document(document)
+
+    @override
+    async def sign_seed(self, seed: bytes) -> bytes:
+        await asyncio.sleep(60)
+        return await self._inner.sign_seed(seed)
+
+
+async def test_waiting_for_a_token_ends_with_the_deadline(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
+) -> None:
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.url.path.rsplit("/", 1)[-1])
+        return seeded(request.url.path) or reply(200, b"{}")
+
+    tight = DgiiTimeouts(connect=5, total=5, call=0.1)
+    slow = SlowSigner(signer)
+    async with client_over(httpx.MockTransport(handler), slow, clock, sleeps, tight).opened() as dgii:
+        first, second = await asyncio.gather(
+            dgii.result(T, "a"), dgii.submit_ecf(T, ISSUER, FIRST, b"<ECF/>"), return_exceptions=True
+        )
+        assert sleeps == []
+    assert isinstance(first, AuthorityUnavailableError)
+    assert first.failure == "timed_out"
+    assert isinstance(second, AuthorityUnavailableError)
+    assert str(second) == "DGII's reception: timed_out"
+    assert sent == ["semilla"]
 
 
 async def test_a_token_expiry_without_a_zone_is_read_as_utc(

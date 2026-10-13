@@ -58,7 +58,8 @@ class TrackIdAnswer(_Answer):
     """One entry of ``consultatrackids``."""
 
     track_id: str = Field(alias="trackId", min_length=1, max_length=128)
-    received_at: str = Field(default="", alias="fechaRecepcion", max_length=64)
+    received_at: str = Field(alias="fechaRecepcion", min_length=1, max_length=64)
+    """When DGII received it, as DGII writes it: the order of the track ids (``client``)."""
 
 
 class DirectoryAnswer(_Answer):
