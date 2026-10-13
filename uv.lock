@@ -711,10 +711,14 @@ version = "0.1.0"
 source = { editable = "countries/do/testing" }
 dependencies = [
     { name = "cryptography" },
+    { name = "ledger-country-do" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "cryptography", specifier = ">=50.0.2" }]
+requires-dist = [
+    { name = "cryptography", specifier = ">=50.0.2" },
+    { name = "ledger-country-do" },
+]
 
 [[package]]
 name = "ledger-identity"
