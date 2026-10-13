@@ -6,13 +6,13 @@ extend-exclude = [
 ]
 
 [default]
-# Ruff rule codes (the plan quotes `CPY001`) are identifiers, not words.
+# Ruff rule codes (`CPY001` in the root pyproject.toml) are identifiers, not words.
 extend-ignore-identifiers-re = ["^CPY[0-9]{3}$"]
 
 [default.extend-words]
 # Spanish: a DGII e-invoice status ("Aceptado Condicional"), not an English typo.
 condicional = "condicional"
-# Spanish: DGII's own words (element names, document titles, sample addresses) the plan and DGII's files quote.
+# Spanish: DGII's own words (element names, document titles, sample addresses) its files and the DO pack quote.
 calle = "calle"
 cliente = "cliente"
 comercial = "comercial"
@@ -24,7 +24,7 @@ informe = "informe"
 instructivo = "instructivo"
 
 [default.extend-identifiers]
-# ISO 3166-1 and ISO 4217 codes the plans list (Bosnia, the Faroe Islands, Pitcairn; the Jordanian dinar).
+# ISO 3166-1 and ISO 4217 codes the kernel lists (Bosnia, the Faroe Islands, Pitcairn; the Jordanian dinar).
 BA = "BA"
 FO = "FO"
 PN = "PN"

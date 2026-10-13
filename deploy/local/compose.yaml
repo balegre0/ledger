@@ -1,7 +1,7 @@
 # The local stack: PostgreSQL, the migrate job, the api and the worker, and Zitadel behind a profile.
 #
 # What an app running on the host is configured with (the LEDGER_* variables of Settings), beside ledger.env's:
-#   LEDGER_DATABASE_URL=postgresql+psycopg://ledger_app:ledger_app@127.0.0.1:5432/ledger
+#   LEDGER_DATABASE_URL=postgresql+psycopg://ledger_app:ledger_app@127.0.0.1:5432/ledger (or LEDGER_POSTGRES_PORT)
 #   LEDGER_HTTP_PORT=8100 (api) or 8101 (worker): never 8000, another project's on this machine
 # An app that runs inside this network uses the same URL with the host name `postgres` in place of 127.0.0.1.
 #
@@ -46,7 +46,7 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-    ports: ["127.0.0.1:5432:5432"]
+    ports: ["127.0.0.1:${LEDGER_POSTGRES_PORT:-5432}:5432"]
     volumes:
       - postgres:/var/lib/postgresql
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/10-ledger.sql:ro

@@ -13,7 +13,7 @@ TOKEN=$(sh deploy/local/zitadel/token.sh)
 curl -X POST "http://127.0.0.1:${LEDGER_API_PORT:-8100}/v1/companies" \
   -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: $(date +%s%N)" -H 'Ledger-Mode: test' \
   -H 'Content-Type: application/json' \
-  -d '{"tax_id": "101850043", "legal_name": "Mi Empresa, S.R.L."}'
+  -d '{"tax_id": {"scheme": "do.rnc", "value": "101-85004-3"}, "legal_name": "Mi Empresa, S.R.L."}'
 ```
 
 The local stack does not start Zitadel: run the first command (compose's profile `zitadel`) beside it.

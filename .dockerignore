@@ -16,3 +16,7 @@ htmlcov
 docs
 deploy
 **/tests
+# The dev-only tooling is never installed, but uv checks the lockfile against every workspace member: its
+# pyproject.toml stays in the context.
+tools/**
+!tools/*/pyproject.toml
