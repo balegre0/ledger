@@ -18,6 +18,7 @@ import psycopg
 import pytest
 from opentelemetry import trace
 from prometheus_client import CollectorRegistry
+from pydantic import AwareDatetime, TypeAdapter
 from structlog.testing import capture_logs
 lazy from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -25,7 +26,8 @@ from ledger_kernel.errors import ConflictError, InvalidInputError, UnavailableEr
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.data.bound import BoundDatabase
-from ledger_platform.data.database import Database
+from ledger_platform.data.database import Database, DatabaseLimits
+from ledger_platform.data.queue import Backoff
 from ledger_platform.data.unit_of_work import JobPolicy
 from ledger_platform.jobs import Done, Job, JobOutcome, JobRunner, Park, RunAgain
 from ledger_platform.runtime.manifest import JobDecl
@@ -39,10 +41,12 @@ A, A1 = OrganizationId(uuid.uuid7()), CompanyId(uuid.uuid7())
 TENANT: Final = Tenant(A, A1, Mode.TEST)
 EXPORT: Final = "probe.export"
 POLL: Final = "probe.poll"
+SLOW: Final = "probe.slow"
 LEASE: Final = timedelta(seconds=60)
 DECLS: Final = {
     EXPORT: JobDecl(kind=EXPORT, lease=LEASE, max_attempts=3, deadline=timedelta(hours=1)),
     POLL: JobDecl(kind=POLL, lease=LEASE, max_attempts=5, concurrency=2),
+    SLOW: JobDecl(kind=SLOW, lease=timedelta(seconds=1)),
 }
 STATE: Final = """
     SELECT status, attempts, last_error_code, parked_reason, lease_until, lease_token, run_at - updated_at
@@ -51,6 +55,8 @@ STATE: Final = """
 DUE: Final = "UPDATE probe.jobs SET run_at = now() - interval '1 second' WHERE status = 'ready'"
 EXPIRED: Final = "UPDATE probe.jobs SET lease_until = now() - interval '1 second' WHERE status = 'running'"
 UNLEASED: Final = (None, None)
+
+_LEASE: Final = TypeAdapter(tuple[AwareDatetime, uuid.UUID])
 
 type Answer = JobOutcome | Exception | Callable[[Job], JobOutcome]
 
@@ -278,21 +284,63 @@ async def test_invalid_and_conflict_errors_and_spent_attempts_are_dead(
     assert finished(registry, "dead") == 3
 
 
-async def test_a_job_past_its_deadline_is_dead(
-    runner: JobRunner, probe: BoundDatabase, handler: Scripted, admin: psycopg.AsyncConnection
+async def test_a_job_polled_past_its_deadline_is_dead(
+    runner: JobRunner,
+    probe: BoundDatabase,
+    handler: Scripted,
+    admin: psycopg.AsyncConnection,
+    registry: CollectorRegistry,
 ) -> None:
-    await enqueue(probe, "polling", "failing")
+    await enqueue(probe, "polling")
 
     def beyond(job: Job) -> JobOutcome:
         assert job.deadline_at is not None
         return RunAgain(job.deadline_at + timedelta(seconds=1))
 
     handler.will("polling", beyond)
-    handler.will("failing", UnavailableError())
-    await run(admin, "UPDATE probe.jobs SET deadline_at = now() - interval '1 second' WHERE key = 'failing'")
-    assert await runner.run_due() == 2
+    assert await runner.run_due() == 1
     assert (await state(admin, "polling"))[:3] == ("dead", 1, "deadline_passed")
-    assert (await state(admin, "failing"))[:3] == ("dead", 1, "unavailable")
+    assert finished(registry, "dead") == 1
+
+
+async def test_a_retry_that_would_land_past_the_deadline_is_dead(
+    probe: BoundDatabase, handler: Scripted, admin: psycopg.AsyncConnection, registry: CollectorRegistry
+) -> None:
+    """I1: the deadline is an hour away and the backoff two: retrying would only run past it."""
+    kinds = {EXPORT: (DECLS[EXPORT], handler)}
+    late = Backoff(steps=(timedelta(hours=2),), then=timedelta(hours=2))
+    runner = JobRunner(database=probe, kinds=kinds, registry=registry, backoff=late)
+    await enqueue(probe, "k1")
+    handler.will("k1", UnavailableError())
+    assert await runner.run_due() == 1
+    assert (await state(admin, "k1"))[:3] == ("dead", 1, "deadline_passed")
+    assert finished(registry, "dead") == 1
+
+
+async def test_no_handler_runs_past_its_deadline(
+    runner: JobRunner,
+    probe: BoundDatabase,
+    handler: Scripted,
+    admin: psycopg.AsyncConnection,
+    registry: CollectorRegistry,
+) -> None:
+    """I1: a due job, and one whose worker died, are made dead once their deadline has passed, unclaimed."""
+    await enqueue(probe, "due", "abandoned")
+    await run(admin, "UPDATE probe.jobs SET run_at = now() + interval '1 hour' WHERE key = 'due'")
+    (claimed,) = await runner.claim_now()
+    assert claimed.key == "abandoned"
+    await run(
+        admin,
+        "UPDATE probe.jobs SET run_at = now() - interval '1 s', deadline_at = now() - interval '1 s'",
+    )
+    await run(admin, EXPIRED)
+    with capture_logs() as logs:
+        assert await runner.claim_now() == []
+    assert (await state(admin, "due"))[:6] == ("dead", 0, "deadline_passed", None, *UNLEASED)
+    assert (await state(admin, "abandoned"))[:6] == ("dead", 1, "deadline_passed", None, *UNLEASED)
+    assert handler.seen == []
+    assert logs == [{"event": "job_deadline_passed", "kind": EXPORT, "jobs": 2, "log_level": "warning"}]
+    assert finished(registry, "dead") == 2
 
 
 async def test_a_worker_that_crashed_mid_run_leaves_the_job_to_be_claimed_again(
@@ -469,3 +517,182 @@ async def test_run_never_holds_more_jobs_of_a_kind_than_its_concurrency(
     await waiting.eventually(all_done)
     assert holding.most == 2
     assert not task.done()
+
+
+@final
+class Blocking:
+    """A handler that runs until released, and says whether it was cancelled."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancelled = False
+
+    async def __call__(self, job: Job) -> JobOutcome:
+        del job
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        return Done()
+
+
+async def lease_of(admin: psycopg.AsyncConnection) -> tuple[datetime, uuid.UUID]:
+    cursor = await admin.execute("SELECT lease_until, lease_token FROM probe.jobs")
+    (row,) = await cursor.fetchall()
+    return _LEASE.validate_python(tuple(row))
+
+
+async def test_a_handler_that_outlives_its_lease_keeps_it(
+    probe: BoundDatabase,
+    databases: tuple[Database, Database],
+    admin: psycopg.AsyncConnection,
+    registry: CollectorRegistry,
+) -> None:
+    """M1: the runner renews the lease while the handler runs; no one claims the job meanwhile."""
+    blocking = Blocking()
+    runner = JobRunner(database=probe, kinds={SLOW: (DECLS[SLOW], blocking)}, registry=registry)
+    await enqueue(probe, "k1", kind=SLOW)
+    (job,) = await runner.claim_now()
+    first, token = await lease_of(admin)
+    handling = asyncio.create_task(runner.handle(job))
+
+    async def renewed_past_the_first_lease() -> bool:
+        cursor = await admin.execute("SELECT now() > %s AND lease_until > now() FROM probe.jobs", (first,))
+        return await cursor.fetchall() == [(True,)]
+
+    await waiting.eventually(renewed_past_the_first_lease)
+    assert (await lease_of(admin))[1] == token
+    other = JobRunner(database=bind(databases[1]), kinds={SLOW: (DECLS[SLOW], Scripted())})
+    assert await other.claim_now() == []
+    blocking.release.set()
+    await handling
+    assert (await state(admin, "k1"))[:2] == ("done", 1)
+    assert not blocking.cancelled
+
+
+async def test_a_handler_whose_lease_was_taken_is_cancelled(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry
+) -> None:
+    """M1: the renewal finds another token: the handler is cancelled and nothing is recorded."""
+    blocking = Blocking()
+    runner = JobRunner(database=probe, kinds={SLOW: (DECLS[SLOW], blocking)}, registry=registry)
+    await enqueue(probe, "k1", kind=SLOW)
+    (job,) = await runner.claim_now()
+    with capture_logs() as logs:
+        handling = asyncio.create_task(runner.handle(job))
+        await blocking.started.wait()
+        await run(admin, "UPDATE probe.jobs SET lease_token = gen_random_uuid()")
+        await asyncio.wait_for(handling, timeout=5)
+    assert blocking.cancelled
+    _, stolen = await lease_of(admin)
+    assert stolen != job.lease_token
+    assert (await state(admin, "k1"))[:2] == ("running", 1)
+    assert logs == [{"event": "job_lease_lost", "kind": SLOW, "log_level": "warning"}]
+    assert registry.get_sample_value("ledger_job_lease_lost_total", {"kind": SLOW}) == 1
+
+
+async def test_a_lease_that_cannot_be_renewed_cancels_the_handler(
+    chassis: WorkerDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry
+) -> None:
+    """M1: a renewal that fails (here: a lock it may not wait for) cannot vouch for the lease: stop."""
+    limits = DatabaseLimits(lock_timeout=timedelta(milliseconds=100))
+    database = Database.create(app_url(chassis), pool_size=2, limits=limits)
+    try:
+        probe = bind(database)
+        blocking = Blocking()
+        runner = JobRunner(database=probe, kinds={SLOW: (DECLS[SLOW], blocking)}, registry=registry)
+        await enqueue(probe, "k1", kind=SLOW)
+        (job,) = await runner.claim_now()
+        async with await psycopg.AsyncConnection.connect(chassis.admin_url()) as locking:
+            await locking.execute("SELECT 1 FROM probe.jobs FOR UPDATE")
+            with capture_logs() as logs:
+                await asyncio.wait_for(runner.handle(job), timeout=5)
+            await locking.rollback()
+    finally:
+        await database.aclose()
+    assert blocking.cancelled
+    assert [log["event"] for log in logs] == ["job_lease_renewal_failed", "job_lease_lost"]
+    assert (await state(admin, "k1"))[:2] == ("running", 1)
+
+
+async def test_a_claim_that_fails_is_retried_and_spares_the_jobs_in_flight(
+    chassis: WorkerDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry
+) -> None:
+    """M6: a claim the database refuses (a lock it may not wait for) is logged and retried; run() goes on."""
+    limits = DatabaseLimits(lock_timeout=timedelta(milliseconds=100))
+    database = Database.create(app_url(chassis), pool_size=2, limits=limits)
+    blocking = Blocking()
+    probe = bind(database)
+    runner = JobRunner(
+        database=probe, kinds={EXPORT: (DECLS[EXPORT], blocking)}, registry=registry, poll=0.02
+    )
+    await enqueue(probe, "k1")
+    try:
+        with capture_logs() as logs:
+            task = asyncio.create_task(runner.run())
+            await blocking.started.wait()
+            async with await psycopg.AsyncConnection.connect(chassis.admin_url()) as locking:
+                await locking.execute("LOCK TABLE probe.jobs IN ACCESS EXCLUSIVE MODE")
+
+                async def failed_twice() -> bool:
+                    return [log["event"] for log in logs].count("job_claim_failed") >= 2
+
+                await waiting.eventually(failed_twice)
+                await locking.rollback()
+            assert not blocking.cancelled
+            blocking.release.set()
+
+            async def done() -> bool:
+                cursor = await admin.execute("SELECT status FROM probe.jobs")
+                return await cursor.fetchall() == [("done",)]
+
+            await waiting.eventually(done)
+            assert not task.done()
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+    finally:
+        await database.aclose()
+
+
+async def test_run_claims_again_at_once_while_a_kind_has_free_slots_and_due_jobs(
+    probe: BoundDatabase, handler: Scripted, admin: psycopg.AsyncConnection, registry: CollectorRegistry
+) -> None:
+    """M7: a claim that filled its batch is followed by another, not by a poll's wait (here a minute)."""
+    runner = JobRunner(
+        database=probe, kinds={EXPORT: (DECLS[EXPORT], handler)}, registry=registry, batch=2, poll=60
+    )
+    await enqueue(probe, *(f"k{index}" for index in range(6)))
+    task = asyncio.create_task(runner.run())
+
+    async def all_done() -> bool:
+        cursor = await admin.execute("SELECT count(*) FROM probe.jobs WHERE status = 'done'")
+        return await cursor.fetchall() == [(6,)]
+
+    try:
+        await waiting.eventually(all_done)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+async def test_a_runner_stopped_mid_job_stops_the_handler_and_records_nothing(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry
+) -> None:
+    """A cancellation from outside (the worker stops) is no lost lease: it propagates, the lease runs out."""
+    blocking = Blocking()
+    runner = JobRunner(database=probe, kinds={SLOW: (DECLS[SLOW], blocking)}, registry=registry)
+    await enqueue(probe, "k1", kind=SLOW)
+    (job,) = await runner.claim_now()
+    handling = asyncio.create_task(runner.handle(job))
+    await blocking.started.wait()
+    handling.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await handling
+    assert blocking.cancelled
+    assert (await state(admin, "k1"))[:2] == ("running", 1)
+    assert registry.get_sample_value("ledger_job_lease_lost_total", {"kind": SLOW}) is None

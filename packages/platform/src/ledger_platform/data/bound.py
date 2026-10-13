@@ -28,7 +28,7 @@ from ledger_platform.data.database import AbortedTransactionError, is_committabl
 from ledger_platform.data.notifier import OUTBOX
 from ledger_platform.data.roles import SchemaRoles, identifier
 from ledger_platform.data.tables import chassis_tables
-from ledger_platform.data.unit_of_work import Binding, Purge, UnitOfWork, open_unit
+from ledger_platform.data.unit_of_work import Binding, Purge, UnitOfWork, open_unit, unmark_open
 lazy from ledger_kernel.tenancy import Scope
 lazy from ledger_platform.data.database import Database
 lazy from ledger_platform.data.notifier import Signals
@@ -131,7 +131,7 @@ class BoundDatabase:
                 await unit.flush()
             finally:
                 callbacks = unit.close()
-                UnitOfWork.unmark(token)
+                unmark_open(token)
         if unit.published:
             self._signals.signal(OUTBOX)
         _run(callbacks)
@@ -153,7 +153,11 @@ class BoundDatabase:
                 yield connection
         finally:
             purge.close()
-            UnitOfWork.unmark(token)
+            unmark_open(token)
+
+    def policy_of(self, kind: str) -> JobPolicy:
+        """The limits of job kind ``kind``; ``UndeclaredJobKindError`` if the manifest does not declare it."""
+        return self._binding.policy_of(kind)
 
     def _refuse_nesting(self) -> None:
         if open_unit() is not None:

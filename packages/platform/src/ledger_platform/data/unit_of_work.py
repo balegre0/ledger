@@ -116,8 +116,13 @@ class Purge:
         self._open = False
 
     def mark_open(self) -> Token[OpenTransaction | None]:
-        """Make this the task's open transaction; the token ``UnitOfWork.unmark`` takes."""
+        """Make this the task's open transaction; the token ``unmark_open`` takes."""
         return _OPEN.set(self)
+
+
+def unmark_open(token: Token[OpenTransaction | None]) -> None:
+    """The task's open unit or purge has ended: undo its ``mark_open``."""
+    _OPEN.reset(token)
 
 
 type OpenTransaction = UnitOfWork | Purge
@@ -174,6 +179,15 @@ def _digest(value: object) -> bytes | None:
     return None if value is None else hashlib.sha256(canonical_json(encode(value))).digest()
 
 
+def _foreign(jobs: AnyTable, kind: str, key: str, scope: Mapping[str, object]) -> Executable:
+    """The job ``(kind, key)`` if another scope than ``scope`` owns it."""
+    return select(jobs.c.kind).where(
+        jobs.c.kind == kind,
+        jobs.c.key == key,
+        or_(*(jobs.c[column].is_distinct_from(value) for column, value in scope.items())),
+    )
+
+
 async def _execute(statement: Executable, connection: AsyncConnection) -> None:
     await connection.execute(statement)
 
@@ -211,11 +225,13 @@ class UnitJobs:
         *,
         run_at: datetime | None = None,
         payload: Mapping[str, object] | None = None,
+        restart: bool = True,
     ) -> None:
         """A job of ``kind`` keyed ``key`` at ``run_at`` (the unit's time by default), with its kind's limits.
 
         An existing job of that kind and key is left as it is while ready, running or parked, and restarted
-        (attempts 0, the new payload) when done or dead.
+        (attempts 0, the new payload) when done or dead, unless ``restart`` is false: then a key runs at most
+        once (a schedule's slot).
         """
         unit = self._unit
         unit.require_open()
@@ -236,8 +252,9 @@ class UnitJobs:
             created_at=now,
             updated_at=now,
         )
-        stored = fresh.on_conflict_do_update(
-            index_elements=(jobs.c.kind, jobs.c.key),
+        conflict = (jobs.c.kind, jobs.c.key)
+        restarting = fresh.on_conflict_do_update(
+            index_elements=conflict,
             set_={
                 "status": "ready",
                 "attempts": 0,
@@ -258,13 +275,9 @@ class UnitJobs:
                 jobs.c.company_id.is_not_distinct_from(fresh.excluded.company_id),
                 jobs.c.mode.is_not_distinct_from(fresh.excluded.mode),
             ),
-        ).returning(jobs.c.kind)
-        foreign = select(jobs.c.kind).where(
-            jobs.c.kind == kind,
-            jobs.c.key == key,
-            or_(*(jobs.c[column].is_distinct_from(value) for column, value in scope.items())),
         )
-        unit.defer(partial(_enqueue, stored, foreign, kind))
+        stored = restarting if restart else fresh.on_conflict_do_nothing(index_elements=conflict)
+        unit.defer(partial(_enqueue, stored.returning(jobs.c.kind), _foreign(jobs, kind, key, scope), kind))
 
     def wake(self, kind: str, key: str) -> None:
         """Make the parked job ``(kind, key)`` ready now; a job in any other state is left as it is."""
@@ -311,6 +324,13 @@ class Binding:
     source: str
     publishes: frozenset[str]
     policies: Mapping[str, JobPolicy]
+
+    def policy_of(self, kind: str) -> JobPolicy:
+        """``kind``'s policy; ``UndeclaredJobKindError`` if the manifest does not declare it."""
+        policy = self.policies.get(kind)
+        if policy is None:
+            raise UndeclaredJobKindError(kind, self.source)
+        return policy
 
 
 @final
@@ -378,10 +398,7 @@ class UnitOfWork:
 
     def policy_of(self, kind: str) -> JobPolicy:
         """``kind``'s policy; ``UndeclaredJobKindError`` if the manifest does not declare it."""
-        policy = self._binding.policies.get(kind)
-        if policy is None:
-            raise UndeclaredJobKindError(kind, self._binding.source)
-        return policy
+        return self._binding.policy_of(kind)
 
     def publish(self, event: Event) -> None:
         """Write ``event`` to the module's outbox when the unit commits (rule 3).
@@ -473,10 +490,5 @@ class UnitOfWork:
         return callbacks
 
     def mark_open(self) -> Token[OpenTransaction | None]:
-        """Make this the task's open unit; the token ``unmark`` takes."""
+        """Make this the task's open unit; the token ``unmark_open`` takes."""
         return _OPEN.set(self)
-
-    @staticmethod
-    def unmark(token: Token[OpenTransaction | None]) -> None:
-        """Undo ``mark_open``."""
-        _OPEN.reset(token)

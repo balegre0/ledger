@@ -5,20 +5,24 @@ Time is the database's: a test makes a slot due, or a lease run out, by moving t
 
 import asyncio
 import contextlib
+import os
+import socket
 from datetime import UTC, timedelta
 from functools import partial
 from typing import Final
-lazy from collections.abc import AsyncGenerator
+lazy from collections.abc import AsyncGenerator, Callable
 lazy from datetime import datetime
 
 import psycopg
 import pytest
 from pydantic import AwareDatetime, TypeAdapter
+from sqlalchemy import event
+from structlog.testing import capture_logs
 
 from ledger_kernel.errors import InvalidValueError
 from ledger_platform.data.bound import BoundDatabase
 from ledger_platform.data.database import Database
-from ledger_platform.data.unit_of_work import JobPolicy
+from ledger_platform.data.unit_of_work import JobPolicy, UndeclaredJobKindError
 from ledger_platform.jobs import Schedule, Scheduler
 from ledger_testing import waiting
 from ledger_testing.database import app_url
@@ -28,6 +32,14 @@ lazy from ledger_testing.postgres import WorkerDatabase
 NIGHTLY: Final = "probe.nightly"
 EXPORT: Final = "probe.export"
 DAY: Final = timedelta(hours=24)
+STEAL: Final = """
+    UPDATE platform.schedule_leases SET holder = 'b', leased_until = now() + interval '1 hour'
+    RETURNING leased_until
+"""
+MOVE: Final = """
+    UPDATE platform.schedule_leases SET next_run_at = next_run_at + interval '1 hour'
+    RETURNING holder, next_run_at, leased_until
+"""
 _LEASE: Final = TypeAdapter(tuple[AwareDatetime, str | None, AwareDatetime | None])
 _KEYS: Final = TypeAdapter(list[tuple[str, str, str]])
 
@@ -56,7 +68,8 @@ async def admin(chassis: WorkerDatabase) -> AsyncGenerator[psycopg.AsyncConnecti
         yield connection
 
 
-def scheduler(database: Database, holder: str) -> Scheduler:
+def bound(database: Database) -> tuple[BoundDatabase, BoundDatabase]:
+    """The platform's bound database, and ``probe``'s, which declares ``probe.export``."""
     platform = BoundDatabase(database, schema="platform", source="platform", signals=Silent())
     probe = BoundDatabase(
         database,
@@ -65,6 +78,11 @@ def scheduler(database: Database, holder: str) -> Scheduler:
         jobs={EXPORT: JobPolicy(max_attempts=3, deadline=None)},
         signals=Silent(),
     )
+    return platform, probe
+
+
+def scheduler(database: Database, holder: str) -> Scheduler:
+    platform, probe = bound(database)
     return Scheduler(platform=platform, schedules=[Schedule(NIGHTLY, DAY, EXPORT, probe)], holder=holder)
 
 
@@ -139,6 +157,27 @@ async def test_a_lease_held_by_a_crashed_scheduler_expires(
     assert (await lease(admin))[1:] == (None, None)
 
 
+async def test_a_scheduler_whose_lease_was_taken_over_moves_nothing(
+    databases: tuple[Database, Database], chassis: WorkerDatabase, admin: psycopg.AsyncConnection
+) -> None:
+    """I2: while ``a`` enqueues, ``b`` takes the lease; ``a``'s release leaves the row as ``b`` holds it."""
+    stolen: list[object] = []
+
+    def steal(*arguments: object) -> None:
+        """``before_cursor_execute``: steal the lease, as admin, just before the slot's job is written."""
+        if not stolen and "INSERT INTO probe.jobs" in str(arguments[2]):
+            with psycopg.connect(chassis.admin_url(), autocommit=True) as connection:
+                taken = connection.execute(STEAL).fetchone()
+            stolen.append(None if taken is None else taken[0])
+
+    event.listen(databases[0].engine.sync_engine, "before_cursor_execute", steal)
+    assert await scheduler(databases[0], "a").run_due() == 1
+    ((_, slot_key, _),) = await jobs(admin)
+    next_run_at, holder, leased_until = await lease(admin)
+    assert (holder, leased_until) == ("b", stolen[0])
+    assert slot_key == key(next_run_at)  # still the slot ``a`` fired: ``b`` will move it
+
+
 async def test_run_fires_the_due_slots_poll_after_poll(
     first: Scheduler, admin: psycopg.AsyncConnection
 ) -> None:
@@ -165,3 +204,90 @@ def test_a_schedule_runs_at_a_positive_interval(
     target = BoundDatabase(databases[0], schema="probe", source="probe", signals=Silent())
     with pytest.raises(InvalidValueError, match=r"schedule\.every"):
         Schedule(NIGHTLY, timedelta(0), EXPORT, target)
+
+
+def listening(database: Database, act: Callable[[str], None]) -> None:
+    """Run ``act`` with each statement's text before the pool sends it (``before_cursor_execute``)."""
+
+    def heard(*arguments: object) -> None:
+        act(str(arguments[2]))
+
+    event.listen(database.engine.sync_engine, "before_cursor_execute", heard)
+
+
+async def test_a_slot_fires_once_even_after_its_job_finished(
+    first: Scheduler, admin: psycopg.AsyncConnection
+) -> None:
+    """M2: a slot taken again (a crash before the release) never restarts its finished job."""
+    assert await first.run_due() == 1
+    await admin.execute("UPDATE probe.jobs SET status = 'done'")
+    await admin.execute("UPDATE platform.schedule_leases SET next_run_at = next_run_at - interval '24 hours'")
+    slot, _, _ = await lease(admin)
+    assert await first.run_due() == 1
+    assert await jobs(admin) == [(EXPORT, key(slot), "done")]
+
+
+async def test_a_scheduler_holds_leases_under_a_name_of_its_own_and_releases_only_its_slot(
+    databases: tuple[Database, Database], chassis: WorkerDatabase, admin: psycopg.AsyncConnection
+) -> None:
+    """M3: the default holder names the host, the process and the instance; the release names the slot."""
+    seen: list[tuple[object, ...]] = []
+
+    def move_the_slot(statement: str) -> None:
+        if not seen and "INSERT INTO probe.jobs" in statement:
+            with psycopg.connect(chassis.admin_url(), autocommit=True) as connection:
+                row = connection.execute(MOVE).fetchone()
+            seen.append(() if row is None else tuple(row))
+
+    listening(databases[0], move_the_slot)
+    platform, probe = bound(databases[0])
+    one = Scheduler(platform=platform, schedules=[Schedule(NIGHTLY, DAY, EXPORT, probe)])
+    two = Scheduler(platform=platform, schedules=[Schedule(NIGHTLY, DAY, EXPORT, probe)])
+    assert await one.run_due() == 1
+    ((holder, moved, leased_until),) = seen
+    assert isinstance(holder, str)
+    assert holder.startswith(f"{socket.gethostname()}:{os.getpid()}:")
+    assert await lease(admin) == (moved, holder, leased_until)  # not the slot it took: left alone
+    assert holder != two.holder
+
+
+async def test_a_schedule_names_a_job_kind_its_target_declares(databases: tuple[Database, Database]) -> None:
+    """M4: checked when the schedule is made, not when its first slot fails."""
+    _, probe = bound(databases[0])
+    with pytest.raises(UndeclaredJobKindError):
+        Schedule(NIGHTLY, DAY, "probe.unknown", probe)
+
+
+async def test_a_failing_schedule_never_keeps_the_others_from_firing(
+    databases: tuple[Database, Database], admin: psycopg.AsyncConnection
+) -> None:
+    """M4: a schedule whose target cannot take its job is logged; the next one still fires."""
+    platform, probe = bound(databases[0])
+    missing = BoundDatabase(
+        databases[0],
+        schema="missing",
+        source="missing",
+        jobs={EXPORT: JobPolicy(max_attempts=3, deadline=None)},
+        signals=Silent(),
+    )
+    schedules = [Schedule("missing.nightly", DAY, EXPORT, missing), Schedule(NIGHTLY, DAY, EXPORT, probe)]
+    with capture_logs() as logs:
+        fired = await Scheduler(platform=platform, schedules=schedules, holder="a").run_due()
+    assert fired == 1
+    assert [(log["event"], log["schedule"]) for log in logs] == [("schedule_failed", "missing.nightly")]
+    assert len(await jobs(admin)) == 1
+
+
+async def test_lease_rows_are_made_once_per_scheduler(databases: tuple[Database, Database]) -> None:
+    """M5: the first-sight upsert runs on the first pass only, not on every poll."""
+    inserts: list[str] = []
+    listening(
+        databases[0],
+        lambda statement: inserts.extend(
+            [statement] if "INSERT INTO platform.schedule_leases" in statement else []
+        ),
+    )
+    one = scheduler(databases[0], "a")
+    await one.run_due()
+    await one.run_due()
+    assert len(inserts) == 1
