@@ -416,7 +416,8 @@ The outbox gauges read the table, so every replica exports the same values: aggr
   `tax_id_taken`, whichever organization holds it; a deactivated company frees its tax id.
 - Roles per company: `owner`, `admin`, `accountant`, `issuer`, `viewer`. The owner role is granted and taken by
   owners only, a company always keeps one, and a change of roles is decided on the role its actor holds once it
-  has the company's lock. A revoked membership is kept, so its version never goes back.
+  has the company's lock. A revoked membership is kept, so its version never goes back; revoking it again
+  answers 204 and changes nothing (a subject that never held a role is a 404).
 - Every `POST` takes an `Idempotency-Key`; a company's updates take `If-Match` with its `ETag`; lists take `limit`
   and `cursor`. Errors are RFC 9457 problem documents with a stable `code`. The OpenAPI document is published in
   `services/identity/openapi.json`, and a test keeps it equal to the code.

@@ -183,9 +183,13 @@ async def grant_role(
 async def revoke_role(
     unit: IdentityUnit, company_id: CompanyId, *, subject: SubjectId, actor: SubjectId
 ) -> None:
-    """Take ``subject``'s role in the company away, as the membership of ``actor`` allows."""
+    """Take ``subject``'s role in the company away, as the membership of ``actor`` allows.
+
+    A role revoked already stays so: nothing is stored or announced again.
+    """
     roster = await _roster(unit, company_id, subject)
     acting = await _actor(unit, company_id, actor)
     revoked, event = revoke(roster, actor=acting, now=unit.now)
-    await unit.memberships.put(revoked)
-    await unit.events.publish(event)
+    if event is not None:
+        await unit.memberships.put(revoked)
+        await unit.events.publish(event)

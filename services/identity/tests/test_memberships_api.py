@@ -181,6 +181,16 @@ async def test_an_owner_demoted_while_its_grant_of_ownership_waits_for_the_compa
     assert (gone.status_code, document(gone)["code"]) == (404, "membership_not_found")
 
 
+async def test_revoking_a_role_twice_answers_204_twice(members: Members) -> None:
+    """A DELETE is idempotent: its retry answers as the first did and changes nothing more."""
+    await members.assign("3001", "viewer")
+    assert [(await members.revoke("3001")).status_code for _ in range(2)] == [204, 204]
+    regranted = await members.assign("3001", "viewer")
+    assert document(regranted)["version"] == 3  # granted, revoked once, granted: the retry changed nothing
+    unknown = await members.revoke("4004")
+    assert (unknown.status_code, document(unknown)["code"]) == (404, "membership_not_found")
+
+
 async def test_a_member_without_the_permission_cannot_give_or_take_a_role(members: Members) -> None:
     await members.assign("3001", "accountant")
     given = await members.assign("3002", "viewer", by="3001")

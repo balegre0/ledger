@@ -397,6 +397,7 @@ def test_a_role_can_be_revoked_even_in_a_deactivated_company() -> None:
     viewer = member(company, "3001", Role.VIEWER)
     inactive = company.deactivate(now=LATER)[0]
     _, revoked = revoke(Roster(inactive, viewer.subject, viewer, owners=1), actor=ADMIN, now=LATER)
+    assert revoked is not None
     assert revoked.role is Role.VIEWER
 
 
@@ -408,6 +409,7 @@ def test_only_an_owner_revokes_an_owner_and_never_the_last() -> None:
     with pytest.raises(LastOwnerError):
         revoke(Roster(company, owner.subject, owner, owners=1), actor=OWNER, now=LATER)
     _, revoked = revoke(Roster(company, owner.subject, owner, owners=2), actor=OWNER, now=LATER)
+    assert revoked is not None
     assert revoked.role is Role.OWNER
 
 
@@ -415,11 +417,32 @@ def test_revoking_a_role_nobody_holds_is_not_found() -> None:
     with pytest.raises(MembershipNotFoundError, match="'3001' holds no role in the company") as caught:
         revoke(Roster(registered(), SubjectId("3001"), None, owners=1), actor=OWNER, now=NOW)
     assert caught.value.code == "membership_not_found"
+
+
+def test_revoking_a_role_already_revoked_changes_and_announces_nothing() -> None:
+    """A retried revocation: the first one's outcome stands, and the answer is the same."""
     company = registered()
     viewer = member(company, "3001", Role.VIEWER)
     revoked, _ = revoke(Roster(company, viewer.subject, viewer, owners=1), actor=OWNER, now=NOW)
-    with pytest.raises(MembershipNotFoundError):
-        revoke(Roster(company, viewer.subject, revoked, owners=1), actor=OWNER, now=LATER)
+    assert revoke(Roster(company, viewer.subject, revoked, owners=1), actor=ADMIN, now=LATER) == (
+        revoked,
+        None,
+    )
+    with pytest.raises(ActorNotAllowedError):
+        revoke(Roster(company, viewer.subject, revoked, owners=1), actor=VIEWER, now=LATER)
+
+
+def test_a_revoked_owner_is_revoked_again_by_an_owner_only() -> None:
+    """The same answer the first revocation gave: an admin could never take the owner role."""
+    company = registered()
+    owner, _ = found(company, FOUNDER, now=NOW)
+    revoked, _ = revoke(Roster(company, owner.subject, owner, owners=2), actor=OWNER, now=NOW)
+    with pytest.raises(OwnersOnlyError):
+        revoke(Roster(company, owner.subject, revoked, owners=1), actor=ADMIN, now=LATER)
+    assert revoke(Roster(company, owner.subject, revoked, owners=1), actor=OWNER, now=LATER) == (
+        revoked,
+        None,
+    )
 
 
 def test_other_services_may_let_a_member_of_a_deactivated_company_read_only() -> None:

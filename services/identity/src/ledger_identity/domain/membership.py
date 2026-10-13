@@ -178,16 +178,22 @@ def grant(
     return membership, granted
 
 
-def revoke(roster: Roster, *, actor: Actor, now: datetime) -> tuple[Membership, MembershipRevoked]:
-    """Take the roster subject's role away: its membership, revoked, and the event that says so."""
+def revoke(roster: Roster, *, actor: Actor, now: datetime) -> tuple[Membership, MembershipRevoked | None]:
+    """Take the roster subject's role away: its membership, revoked, and the event that says so.
+
+    A membership revoked already is left as it is, without an event: a retried revocation answers as the first
+    did (the actor judged as it would have been then). A subject that never held a role has nothing to revoke.
+    """
     _require_managing(actor)
     current = roster.current
-    if current is None or not current.active:
+    if current is None:
         raise MembershipNotFoundError(roster.subject)
     if current.role is Role.OWNER:
         _require_ownership(actor)
-        if roster.owners <= 1:
-            raise LastOwnerError
+    if not current.active:
+        return current, None
+    if current.role is Role.OWNER and roster.owners <= 1:
+        raise LastOwnerError
     revoked = replace(
         current,
         status=MembershipStatus.REVOKED,

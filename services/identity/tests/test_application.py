@@ -28,6 +28,7 @@ from ledger_identity.domain.errors import (
     EmissionPointCodeTakenError,
     EmissionPointNotFoundError,
     LastOwnerError,
+    MembershipNotFoundError,
     OrganizationAdminRequiredError,
     OrganizationNotFoundError,
     OwnersOnlyError,
@@ -567,6 +568,17 @@ async def test_revoking_a_role_keeps_the_membership_revoked_and_announces_it(sta
     listed = await queries.memberships(state.unit(), company.id, PageRequest())
     assert [membership.subject for membership in listed.items] == [OWNER]
     assert (await queries.companies_of(state.unit(), VIEWER, PageRequest())).items == ()
+
+
+async def test_revoking_a_revoked_role_again_changes_and_announces_nothing(state: State) -> None:
+    company = await created(state)
+    await commands.grant_role(state.unit(), company.id, subject=VIEWER, role=Role.VIEWER, actor=OWNER)
+    await commands.revoke_role(state.unit(), company.id, subject=VIEWER, actor=OWNER)
+    revoked, announced = state.memberships[company.id, VIEWER], len(state.events)
+    await commands.revoke_role(state.unit(LATER), company.id, subject=VIEWER, actor=OWNER)
+    assert (state.memberships[company.id, VIEWER], len(state.events)) == (revoked, announced)
+    with pytest.raises(MembershipNotFoundError):
+        await commands.revoke_role(state.unit(), company.id, subject=SubjectId("4004"), actor=OWNER)
 
 
 async def test_a_role_granted_again_continues_the_membership_s_versions(state: State) -> None:

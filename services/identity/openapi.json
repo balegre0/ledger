@@ -4548,7 +4548,7 @@
     },
     "/v1/companies/{company_id}/memberships/{subject}": {
       "delete": {
-        "description": "Take ``subject``'s role in the company away (its membership is kept, revoked).",
+        "description": "Take ``subject``'s role in the company away (its membership is kept, revoked).\n\nIdempotent: revoking a role revoked already answers 204 again and changes nothing; a subject that\nnever held a role in the company is a 404.",
         "operationId": "revoke_role_v1_companies__company_id__memberships__subject__delete",
         "parameters": [
           {

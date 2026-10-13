@@ -88,7 +88,11 @@ def router(context: ApiContext) -> APIRouter:
         subject: str,
         current: Annotated[Runtime[IdentitySettings], Depends(runtime)],
     ) -> None:
-        """Take ``subject``'s role in the company away (its membership is kept, revoked)."""
+        """Take ``subject``'s role in the company away (its membership is kept, revoked).
+
+        Idempotent: revoking a role revoked already answers 204 again and changes nothing; a subject that
+        never held a role in the company is a 404.
+        """
         member = parse_subject(subject)
         async with current.database.transaction(access.tenant) as transaction:
             await commands.revoke_role(
