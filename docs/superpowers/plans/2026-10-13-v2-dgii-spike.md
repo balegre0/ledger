@@ -8339,6 +8339,20 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 13: Delivery to an electronic buyer: directory, the buyer's seed authentication, a verified ARECF
 
+> **Revised by Task 13's reviews (binding; the committed code is the reference, the code blocks below are the
+> first draft).** `BuyerClient(signer, directory, *, trust, timeouts, transport, resolve, clock, audit)`.
+> Directory URLs are attacker-controlled: `adapters/buyers/endpoints.py` checks them (https, public host name,
+> no userinfo or IP literal), resolves them, refuses any non-public address (IPv6 global unicast only, no
+> 6to4/NAT64), and sends to the checked addresses in turn with the name kept for TLS and `Host`. The ARECF is
+> schema-checked, verified (`INBOUND`), matched, refused when received with a reason, and its certificate must
+> pass `adapters/signing/trust.CounterpartyTrust` (configured roots, validity at `FechaHoraAcuseRecibo` and at
+> receipt, usage, EKU, identity: `serialNumber` bare/`IDCDO-`/`TINDO-`/`PNODO-`, `organizationIdentifier`
+> `VATDO-`/`NTRDO-`). A 200 answer whose receipt fails is invalid (not retried). Every buyer seed signed is
+> audited (`SeedSigned`). Rulings for later: the TesteCF simulator's identity (step 7 below); a duplicate
+> ARECF (reason 3) means "already received" only after an earlier unknown-outcome delivery of the same e-CF,
+> else a conflict (v2-M4); revocation blocks production delivery (v2-M4); buyer authentication is a
+> per-company switch, off unless a buyer requires it (v2-M4); production needs an egress firewall.
+
 **Files:**
 - Create: `countries/do/src/ledger_country_do/channels/ecf_v1/adapters/buyers/{__init__, client}.py`
 - Test: `countries/do/tests/integration/test_buyer_delivery.py`
@@ -9303,6 +9317,19 @@ Expected: `buyer: received, receipt signed by ...` (TesteCF's directory names DG
 simulator). A 404 at reception settles F5 the other way (the directory's URLs are full endpoints); a 401 at
 `consultadirectorio` would contradict F6's reading.
 
+Expect, too, that the receipt may be **refused** with `do_ecf_counterparty_certificate_refused` ("not the
+buyer's"): if DGII's simulator signs its ARECFs with DGII's own certificate rather than one naming the buyer,
+the identity check refuses it (and "does not chain to a trusted authority" if DGII's authority is not among
+the configured roots). Record which (F15) and the subject's identity attributes (`serialNumber`,
+`organizationIdentifier`: their prefixes, never the certificate). If it is DGII's own certificate, the fix is
+an explicit stand-in identity limited to TesteCF/CerteCF (refused in production, the chain still required),
+not a looser check.
+
+Ask DGII (F14): a buyer's seed has DGII's own `SemillaModel` format, so a hostile buyer endpoint could relay
+DGII's seed for our RNC, have us sign it, and obtain a DGII token as us. Does DGII bind its seeds to their
+audience, or recommend issuers refuse to sign a buyer seed that also validates at DGII? Every buyer seed the
+spike signs is audit-logged (`ledger_country_do.audit.buyer_seeds`: issuer, buyer, endpoint host, time).
+
 ## 8. TesteCF: a large consumer invoice, in full
 
 ```powershell
@@ -9343,6 +9370,20 @@ TesteCF run; never paste a token, a password, a certificate or a whole document.
 | F11 | Conditional-acceptance codes and messages | Kept verbatim | | |
 | F12 | `MontoTotal` (ITBIS included) is compared with RD$250,000 | Yes | | |
 | F13 | A refusal at the door (HTTP 400) burns the number | Burned (never reuse what DGII may have recorded) | | |
+| F14 | Can a buyer relay DGII's seed for the issuer to sign (a signing oracle)? Does DGII bind seeds to their audience? | Not bound: every buyer seed signed is audit-logged; buyer authentication off unless a buyer requires it (v2-M4) | | |
+| F15 | Whose certificate signs the TesteCF simulator's ARECFs, and which identity attributes it carries | The buyer's (`serialNumber`/`organizationIdentifier` naming its RNC); DGII's own would be refused | | |
+
+## Known gaps before production (not settled by TesteCF)
+
+- **Egress firewall.** The buyer client refuses non-public addresses after DNS and pins the checked address,
+  but a NAT64 gateway with an operator-chosen prefix makes an internal IPv4 address look like a public IPv6
+  one, undetectably. The process that delivers needs an egress firewall blocking internal ranges.
+- **Revocation.** A buyer's certificate is never checked against CRL or OCSP; production delivery is blocked
+  until it is (v2-M4).
+- **Buyer authentication** (signing a buyer's seed) is a per-company switch, off unless a buyer requires it
+  (v2-M4), because of F14.
+- **Duplicate receipts.** An ARECF "not received, duplicate" (reason 3) means "already received" only when the
+  same e-CF had an earlier delivery whose outcome is unknown; otherwise it is a conflict (v2-M4).
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**

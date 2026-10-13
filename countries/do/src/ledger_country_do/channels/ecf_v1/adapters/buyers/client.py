@@ -16,14 +16,33 @@ reception (multipart ``xml``, named RNC + e-NCF), and the answer must be a **sig
    receipt here, those two moments close, its usage allowing it, and its subject naming the buyer's RNC or
    cédula. Revocation is not checked (a recorded gap).
 
-``Estado`` 0 is received; 1 is not, with DGII's reason code. Requests follow no redirect, ignore the
-environment's proxies, verify TLS for the buyer's name, accept a plain or single-gzip answer of at most
-``MAX_ANSWER`` bytes read as it streams, and each has the per-attempt limit of ``DgiiTimeouts`` (``total``)
-within the delivery's overall deadline (``call``). Nothing is retried here, and no connection is reused. The
-receipt is the caller's to archive; the ``delivering`` state machine and its retries are v2-M4's.
+``Estado`` 0 is received (and then carries no reason: one that does contradicts itself); 1 is not, with
+DGII's reason code. Requests follow no redirect, ignore the environment's proxies, verify TLS for the buyer's
+name, accept a plain or single-gzip answer of at most ``MAX_ANSWER`` bytes read as it streams, and each has
+the per-attempt limit of ``DgiiTimeouts`` (``total``) within the delivery's overall deadline (``call``). A
+request goes to the next checked address only when the previous could not be connected to; nothing is
+otherwise retried here, and no connection is reused.
+
+**Failures, one classification.** A buyer that could not be reached, failed, timed out, answered other than
+200, or whose answer cannot be read as bytes (an encoding refused, over the size limit), or whose seed or
+token does not read, is *unavailable* (``BuyerUnavailableError``: v2-M4 retries later). A buyer that answered
+200 with a receipt that fails DGII's schema, the hardened reading, its signature, its contents (another
+document; received with a reason), its date or the trust policy is *invalid*: retrying would get the same
+receipt, so it is not retried. An endpoint in DGII's directory that may not be reached is invalid too.
+
+**A signing oracle (recorded, not closed).** A buyer's seed has DGII's own format (``SemillaModel``), and the
+issuer signs whatever seed a buyer's authentication endpoint serves. A hostile endpoint can relay a seed it
+fetched from DGII's ``autenticacion`` for this issuer's RNC, have the issuer sign it, and exchange the signed
+seed for a DGII token as this issuer. Nothing in the seed binds it to its audience. So every buyer seed signed
+is audit-logged (``SeedSigned``: issuer, buyer, the endpoint's host, the moment; never the seed, the
+signature or a token), the question goes to DGII (runbook step 7, spike findings), and v2-M4 makes buyer
+authentication a per-company switch, off unless a buyer requires it.
+
+The receipt is the caller's to archive; the ``delivering`` state machine and its retries are v2-M4's.
 """
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -108,7 +127,7 @@ type Delivery = Delivered | NotApplicable
 
 
 class BuyerUnavailableError(EcfUnavailableError):
-    """The buyer's receiver failed or answered something other than what DGII's format says: retried later."""
+    """The buyer's receiver failed, or answered nothing a receipt could be read from: retried later."""
 
     code: ClassVar[str] = "do_ecf_buyer_unavailable"
 
@@ -125,6 +144,40 @@ class ArecfMismatchError(EcfInvalidError):
         super().__init__("the buyer's receipt names another issuer, buyer or e-NCF")
 
 
+class ArecfContradictoryError(EcfInvalidError):
+    """A receipt that says received (``Estado`` 0) and gives a reason it was not."""
+
+    code: ClassVar[str] = "do_ecf_arecf_contradictory"
+
+    def __init__(self) -> None:
+        super().__init__("the buyer's receipt says received and gives a reason it was not")
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class SeedSigned:
+    """A buyer's seed the issuer signed (see the module): who for, where it came from, when. No secret."""
+
+    issuer_rnc: str
+    buyer_rnc: str
+    endpoint_host: str
+    signed_at: datetime
+
+
+AUDIT_LOGGER: Final = "ledger_country_do.audit.buyer_seeds"
+
+
+def log_seed_signed(event: SeedSigned) -> None:
+    """``event`` as a line of ``AUDIT_LOGGER`` at INFO: the default audit."""
+    logging.getLogger(AUDIT_LOGGER).info(
+        "signed a buyer's seed: issuer %s, buyer %s, endpoint %s, at %s",
+        event.issuer_rnc,
+        event.buyer_rnc,
+        event.endpoint_host,
+        event.signed_at.isoformat(),
+    )
+
+
 class ArecfMomentError(EcfInvalidError):
     """A receipt whose ``FechaHoraAcuseRecibo`` fits DGII's pattern yet is no moment (a 31 February)."""
 
@@ -135,10 +188,11 @@ class ArecfMomentError(EcfInvalidError):
 
 
 class BuyerOptions(TypedDict, total=False):
-    """``BuyerClient``'s keywords: the trust policy, then timeouts, transport, resolver and clock.
+    """``BuyerClient``'s keywords: the trust policy, then timeouts, transport, resolver, clock and audit.
 
     ``timeouts`` ``DEFAULT_TIMEOUTS``; ``transport`` ``None`` (httpx's own, TLS verified); ``resolve`` the
-    system's resolver (``endpoints.system_resolve``); ``clock`` UTC now (the moment a receipt is received).
+    system's resolver (``endpoints.system_resolve``); ``clock`` UTC now (the moment a receipt is received, a
+    seed signed); ``audit`` ``log_seed_signed``.
     """
 
     trust: Required[CounterpartyTrust]
@@ -146,6 +200,7 @@ class BuyerOptions(TypedDict, total=False):
     transport: httpx.AsyncBaseTransport | None
     resolve: Resolve
     clock: Callable[[], datetime]
+    audit: Callable[[SeedSigned], None]
 
 
 def _integer(text: str | None) -> str | None:
@@ -164,7 +219,17 @@ def _acknowledged(text: str | None) -> datetime:
 class BuyerClient:
     """Delivers to buyers' receivers (see the module); ``opened`` holds its connections."""
 
-    __slots__ = ("_clock", "_directory", "_http", "_resolve", "_signer", "_timeouts", "_transport", "_trust")
+    __slots__ = (
+        "_audit",
+        "_clock",
+        "_directory",
+        "_http",
+        "_resolve",
+        "_signer",
+        "_timeouts",
+        "_transport",
+        "_trust",
+    )
 
     def __init__(
         self, signer: XmlSigner, directory: DirectoryLookup, **options: Unpack[BuyerOptions]
@@ -176,6 +241,7 @@ class BuyerClient:
         self._transport = options.get("transport")
         self._resolve = options.get("resolve", system_resolve)
         self._clock = options.get("clock", _now)
+        self._audit = options.get("audit", log_seed_signed)
         self._http: httpx.AsyncClient | None = None
 
     @asynccontextmanager
@@ -201,6 +267,35 @@ class BuyerClient:
             raise BuyerUnavailableError(_NOT_OPEN)
         return self._http
 
+    async def _answer(
+        self, at: Endpoint, step: _Step, *, headers: Mapping[str, str], document: tuple[str, bytes] | None
+    ) -> tuple[int, bytes | None]:
+        """The status and bounded body of the first checked address that takes the request.
+
+        The next address is tried only when the previous could not be connected to: nothing was sent.
+        """
+        http = self._opened()
+        files = None if document is None else {"xml": (document[0], document[1], "text/xml")}
+        unreachable: httpx.TransportError | None = None
+        for address in await pinned(at, self._resolve):
+            request = http.build_request(
+                "GET" if document is None else "POST",
+                at.url(address, step.path),
+                headers={"Host": at.authority, "Accept-Encoding": ACCEPTED_ENCODING, **headers},
+                files=files,
+                extensions={"sni_hostname": at.host},
+            )
+            try:
+                streamed = await http.send(request, stream=True)
+            except (httpx.ConnectError, httpx.ConnectTimeout) as error:
+                unreachable = error
+                continue
+            try:
+                return streamed.status_code, await bounded(streamed)
+            finally:
+                await streamed.aclose()
+        raise BuyerUnavailableError(step.name) from unreachable
+
     async def _exchange(
         self,
         at: Endpoint,
@@ -210,38 +305,26 @@ class BuyerClient:
         headers: Mapping[str, str],
         document: tuple[str, bytes] | None = None,
     ) -> bytes:
-        """One request to ``at``'s checked address, its answer's body; ``BuyerUnavailableError`` otherwise."""
-        http = self._opened()
+        """One request to ``at``'s checked addresses: its answer's body, or ``BuyerUnavailableError``."""
+        self._opened()
         loop = asyncio.get_running_loop()
-        files = None if document is None else {"xml": (document[0], document[1], "text/xml")}
         try:
             async with asyncio.timeout_at(min(loop.time() + self._timeouts.total, deadline)):
-                address = await pinned(at, self._resolve)
-                request = http.build_request(
-                    "GET" if document is None else "POST",
-                    at.url(address, step.path),
-                    headers={"Host": at.authority, "Accept-Encoding": ACCEPTED_ENCODING, **headers},
-                    files=files,
-                    extensions={"sni_hostname": at.host},
-                )
-                streamed = await http.send(request, stream=True)
-                try:
-                    body = await bounded(streamed)
-                finally:
-                    await streamed.aclose()
+                status, body = await self._answer(at, step, headers=headers, document=document)
         except (httpx.TransportError, OSError) as error:
             raise BuyerUnavailableError(step.name) from error
-        if streamed.status_code != _OK or body is None:
+        if status != _OK or body is None:
             raise BuyerUnavailableError(step.name)
         return body
 
-    async def _token(self, at: Endpoint, deadline: float) -> str:
+    async def _token(self, at: Endpoint, deadline: float, draft: EcfDraft, buyer: str) -> str:
         seed = await self._exchange(at, _SEED, deadline, headers={"Accept": "application/xml"})
         try:
             texts(seed)
             signed = await self._signer.sign_seed(seed)
         except EcfInvalidError as error:
             raise BuyerUnavailableError(_SEED.name) from error
+        self._audit(SeedSigned(draft.issuer.rnc, buyer, at.host, self._clock()))
         answer = await self._exchange(
             at,
             _AUTHENTICATION,
@@ -266,7 +349,7 @@ class BuyerClient:
         reception = endpoint(entry.reception)
         authentication = None if entry.authentication is None else endpoint(entry.authentication)
         deadline = asyncio.get_running_loop().time() + self._timeouts.call
-        token = None if authentication is None else await self._token(authentication, deadline)
+        token = None if authentication is None else await self._token(authentication, deadline, draft, buyer)
         headers = {"Accept": "application/xml"} | (
             {} if token is None else {"Authorization": f"Bearer {token}"}
         )
@@ -294,12 +377,15 @@ class BuyerClient:
         )
         if (_integer(issuer), _integer(receiver), encf) != (draft.issuer.rnc, buyer, str(draft.encf)):
             raise ArecfMismatchError
+        received = _integer(state) == _RECEIVED
+        if received and reason is not None:
+            raise ArecfContradictoryError
         self._trust.check(
             verified, counterparty=buyer, signed_at=_acknowledged(moment), received_at=received_at
         )
         return Delivered(
             arecf=arecf,
-            received=_integer(state) == _RECEIVED,
+            received=received,
             reason=None if reason is None else int(reason),
             certificate=verified.certificate,
         )

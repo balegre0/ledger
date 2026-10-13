@@ -5,14 +5,22 @@ buyer's entry chooses where an issuer's requests go. Before anything is sent:
 
 - **The URL.** ``https``, a host name (letters, digits, hyphens; at least two labels; no IP literal in any
   spelling, no user information), an optional port, a path; no query or fragment (``endpoint``).
-- **The address.** The name is resolved and **every** address it resolves to must be public (``public``):
-  globally routable, not loopback, private, link-local, shared, reserved, documentation, multicast or
-  unspecified, nor an IPv6 form that carries or translates to such an IPv4 address (mapped, 6to4, Teredo,
-  NAT64). The request then goes to the address checked (``pinned``), never to the name again: a second
-  resolution, rebound to an internal address between the check and the connection, is never made. The
-  name still decides TLS (``sni_hostname``: the certificate is verified for the name) and ``Host``.
+- **The address.** The name is resolved and **every** address it resolves to must be public (``public``).
+  IPv4: globally routable (``is_global``: not loopback, private, link-local, shared, reserved,
+  documentation, benchmarking or unspecified) and not multicast. IPv6: an IPv4-mapped address is judged as
+  its IPv4 address; any other must be global unicast (``2000::/3``: so no IPv4-compatible ``::a.b.c.d``, no
+  SIIT ``::ffff:0:a.b.c.d``, no site-local, unique-local, link-local, multicast or unassigned space), not
+  6to4 (``2002::/16``) nor NAT64's well-known prefixes (``64:ff9b::/96``, ``64:ff9b:1::/48``), and
+  ``is_global`` (which leaves out the special-purpose parts of ``2001::/23``: Teredo, benchmarking, ORCHID,
+  documentation). The checked addresses are tried in turn (``pinned``), the next only when the previous
+  could not be connected to (nothing was sent), and never the name again: a second resolution, rebound to
+  an internal address between the check and the connection, is never made. The name still decides TLS
+  (``sni_hostname``: the certificate is verified for the name) and ``Host``.
 
 Each request resolves and checks afresh: a rebinding between two requests is caught by the second check.
+**This is not enough alone in production**: a NAT64 gateway with an operator-chosen prefix translates a
+public-looking IPv6 address to an internal IPv4 one, undetectably here, so production also needs an egress
+firewall that blocks internal ranges for the process that delivers (spike findings).
 Redirects are never followed, answers are bounded and time-limited (``client``). A refusal never quotes the
 URL.
 """
@@ -38,7 +46,9 @@ _NAME: Final = re.compile(
 """A host name of two labels or more, its last one not all digits (``2130706433`` and ``0x7f000001``-like
 spellings of an address never pass: their last label is a number, or they are a single label)."""
 _PATH: Final = re.compile(r"(?:/[A-Za-z0-9._~!$&'()*+,;=:@%-]*)*")
-_NAT64: Final = (IPv6Network("64:ff9b::/96"), IPv6Network("64:ff9b:1::/48"))
+_GLOBAL_UNICAST: Final = IPv6Network("2000::/3")
+_TRANSLATED: Final = (IPv6Network("2002::/16"), IPv6Network("64:ff9b::/96"), IPv6Network("64:ff9b:1::/48"))
+"""6to4 and NAT64's well-known prefixes: IPv6 addresses that reach an IPv4 one (NAT64's outside 2000::/3)."""
 _SCHEME: Final = "it is not https"
 _USER: Final = "it carries user information"
 _HOST: Final = "its host is not a public host name"
@@ -102,7 +112,7 @@ def public(address: Address) -> bool:
     if isinstance(address, IPv6Address):
         if address.ipv4_mapped is not None:
             return public(address.ipv4_mapped)
-        if any(address in network for network in _NAT64):
+        if address not in _GLOBAL_UNICAST or any(address in network for network in _TRANSLATED):
             return False
     return address.is_global and not address.is_multicast
 
@@ -113,9 +123,9 @@ async def system_resolve(host: str, port: int) -> Sequence[Address]:
     return tuple(dict.fromkeys(ip_address(str(entry[4][0]).partition("%")[0]) for entry in found))
 
 
-async def pinned(at: Endpoint, resolve: Resolve) -> Address:
-    """The address to send to: the first ``at``'s host resolves to, once every one is public."""
+async def pinned(at: Endpoint, resolve: Resolve) -> tuple[Address, ...]:
+    """The addresses to try, in the resolver's order: all ``at``'s host resolves to, once all are public."""
     addresses = tuple(await resolve(at.host, at.port))
     if not addresses or not all(public(address) for address in addresses):
         raise BuyerEndpointRefusedError(_ADDRESS)
-    return addresses[0]
+    return addresses

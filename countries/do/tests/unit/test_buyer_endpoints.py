@@ -128,6 +128,14 @@ def test_a_global_address_is_public(address: str) -> None:
         "2002:7f00:1::1",
         "2002:a00:1::1",
         "2001::1",
+        "2001:2::1",
+        "2001:10::1",
+        "::7f00:1",
+        "::a00:1",
+        "::ffff:0:7f00:1",
+        "fec0::1",
+        "5f00::1",
+        "4000::1",
     ],
 )
 def test_a_private_loopback_link_local_reserved_or_translated_address_is_not(address: str) -> None:
@@ -139,12 +147,15 @@ def test_the_unspecified_addresses_are_not_public() -> None:
     assert not public(IPv6Address(0))
 
 
-async def test_a_name_is_pinned_to_its_first_address_when_every_one_is_public() -> None:
+async def test_a_name_is_pinned_to_its_addresses_in_order_when_every_one_is_public() -> None:
     async def resolve(host: str, port: int) -> Sequence[IPv4Address | IPv6Address]:
         assert (host, port) == ("buyer.example.com", 8443)
         return (PUBLIC, IPv6Address("2606:4700::1111"))
 
-    assert await pinned(Endpoint("buyer.example.com", 8443, ""), resolve) == PUBLIC
+    assert await pinned(Endpoint("buyer.example.com", 8443, ""), resolve) == (
+        PUBLIC,
+        IPv6Address("2606:4700::1111"),
+    )
 
 
 @pytest.mark.parametrize(

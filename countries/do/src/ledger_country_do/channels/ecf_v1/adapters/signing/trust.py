@@ -14,8 +14,9 @@ certificate may speak for the counterparty (a buyer signing its ARECF):
 - **Usage.** It may sign (``certificates.signing_problem``: an end entity, ``digitalSignature`` or
   ``nonRepudiation``); an extended key usage, where present, names one of ``purposes`` (document signing,
   e-mail protection, client authentication as qualified certificates write them, or any).
-- **Identity.** Its subject names the counterparty: an RNC or cédula in ``serialNumber`` (``IDCDO-<cédula>``,
-  ``<rnc>``, ``402-1234567-8``) or ``organizationIdentifier`` (``VATDO-<rnc>``), as ``identities`` reads them.
+- **Identity.** Its subject names the counterparty: an RNC or cédula in ``serialNumber`` (bare, or
+  ``IDCDO-``/``TINDO-``/``PNODO-``) or ``organizationIdentifier`` (``VATDO-``/``NTRDO-``), as ``identities``
+  reads them; no other prefix counts.
 
 **Revocation is not checked** (no CRL, no OCSP): a known gap of the spike, recorded in its findings, for
 v2-M4's delivery. A refusal says why without quoting the certificate, the document or a tax id.
@@ -51,12 +52,17 @@ DOCUMENT_SIGNING_PURPOSES: Final = frozenset(
 )
 """Any purpose; client authentication and e-mail protection, which qualified certificates for persons and
 seals carry; document signing (RFC 9336, Microsoft's, Adobe's)."""
-_IDENTITY: Final = re.compile(
-    r"(?:[A-Z]{3}DO-)?([0-9]{9}|[0-9]{11}|[0-9]{3}-[0-9]{7}-[0-9]|[0-9]-[0-9]{2}-[0-9]{5}-[0-9])"
-)
-"""An RNC (``131098193``, ``1-31-09819-3``) or a cédula (``40212345678``, ``402-1234567-8``), after an
-ETSI EN 319 412-1 semantics prefix of the Dominican Republic (``IDCDO-``, ``VATDO-``) where one is written."""
-_PREFIXED: Final = re.compile(r"[A-Z]{3}DO-.*")
+_NUMBER: Final = r"([0-9]{9}|[0-9]{11}|[0-9]{3}-[0-9]{7}-[0-9]|[0-9]-[0-9]{2}-[0-9]{5}-[0-9])"
+"""An RNC (``131098193``, ``1-31-09819-3``) or a cédula (``40212345678``, ``402-1234567-8``)."""
+_SERIAL_NUMBER: Final = re.compile(rf"(?:(?:IDC|TIN|PNO)DO-)?{_NUMBER}")
+"""``serialNumber``: bare, or after ETSI EN 319 412-1's natural-person prefixes for the Dominican Republic
+(national identity card, tax identification number, national personal number)."""
+_ORGANIZATION_IDENTIFIER: Final = re.compile(rf"(?:VAT|NTR)DO-{_NUMBER}")
+"""``organizationIdentifier``: always prefixed, by legal persons' prefixes (VAT, national trade register)."""
+_READERS: Final = {
+    NameOID.SERIAL_NUMBER: _SERIAL_NUMBER,
+    NameOID.ORGANIZATION_IDENTIFIER: _ORGANIZATION_IDENTIFIER,
+}
 _UNTRUSTED: Final = "it does not chain to a trusted authority"
 _TOO_MANY: Final = "the document carries too many certificates"
 _FAR: Final = "the document is dated too far from its receipt"
@@ -85,19 +91,17 @@ class NoTrustedRootsError(EcfError):
 
 
 def identities(name: x509.Name) -> frozenset[str]:
-    """The RNCs and cédulas ``name`` names (digits only): its ``serialNumber`` and ``organizationIdentifier``.
+    """The RNCs and cédulas ``name`` names (digits only), in ``serialNumber`` and ``organizationIdentifier``.
 
-    An ``organizationIdentifier`` counts only with its semantics prefix (``VATDO-``): bare, it names nothing
-    the standard defines. A value of another country, or another shape, names nothing.
+    ``serialNumber`` bare or prefixed ``IDCDO-``, ``TINDO-`` or ``PNODO-``; ``organizationIdentifier``
+    prefixed ``VATDO-`` or ``NTRDO-``. Any other prefix (a passport's ``PASDO-``, another country's) or shape
+    names nothing.
     """
     found: set[str] = set()
     for attribute in name:
+        reader = _READERS.get(attribute.oid)
         value = attribute.value if isinstance(attribute.value, str) else ""
-        if attribute.oid == NameOID.ORGANIZATION_IDENTIFIER and not _PREFIXED.fullmatch(value):
-            continue
-        if attribute.oid not in {NameOID.SERIAL_NUMBER, NameOID.ORGANIZATION_IDENTIFIER}:
-            continue
-        if (matched := _IDENTITY.fullmatch(value)) is not None:
+        if reader is not None and (matched := reader.fullmatch(value)) is not None:
             found.add(matched[1].replace("-", ""))
     return frozenset(found)
 

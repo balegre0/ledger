@@ -33,7 +33,7 @@ SIGNING: Final = x509.KeyUsage(
     encipher_only=False,
     decipher_only=False,
 )
-_CERTIFYING: Final = x509.KeyUsage(
+CERTIFYING: Final = x509.KeyUsage(
     digital_signature=False,
     content_commitment=False,
     key_encipherment=False,
@@ -112,7 +112,7 @@ def _authority_builder(
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .add_extension(x509.BasicConstraints(ca=True, path_length=path_length), critical=True)
-        .add_extension(_CERTIFYING, critical=True)
+        .add_extension(CERTIFYING, critical=True)
         .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
         .add_extension(
             x509.AuthorityKeyIdentifier.from_issuer_public_key(issuer_key.public_key()), critical=False
