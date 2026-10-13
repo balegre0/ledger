@@ -29,7 +29,9 @@ and the spans still pending. A step that runs out of time is left behind and log
 (``app.stop_step_timed_out``), one that fails is logged (``app.stop_step_failed``): neither holds the rest.
 Limit: a step left behind is cancelled but cannot be forced to end. One that ignores its cancellation runs on
 (kept in ``_ABANDONED``) until the process exits, and may still hold a pool connection when the pools close
-(``app.pools_closing`` logs how many are out); the process exiting is what ends it.
+(``app.pools_closing`` logs how many are out); the process exiting is what ends it. Served by Granian, the
+stop starts once the server has let its requests in flight finish, and both share the server's 30 s before it
+kills the process: Granian bounds no request's time, so a route answers well within 5 s (long work is a job).
 """
 
 import asyncio

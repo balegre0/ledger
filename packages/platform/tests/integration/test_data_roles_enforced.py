@@ -460,6 +460,7 @@ def test_roles_that_exist_with_other_options_are_normalized(chassis: WorkerDatab
             )
             connection.execute("CREATE ROLE stale_rw INHERIT CONNECTION LIMIT 0")
             connection.execute("CREATE ROLE stale_intruder LOGIN")
+            connection.execute("CREATE ROLE stale_grantor")
             connection.execute("GRANT stale_rw TO ledger_app WITH INHERIT TRUE, ADMIN TRUE")
             # memberships nobody asked for: the app login in an owner role, an intruder in a rw role, a
             # module role in a predefined one, the migrator login in a predefined one
@@ -467,12 +468,15 @@ def test_roles_that_exist_with_other_options_are_normalized(chassis: WorkerDatab
             connection.execute("GRANT stale_rw TO stale_intruder")
             connection.execute("GRANT pg_read_all_stats TO stale_rw")
             connection.execute("GRANT pg_read_all_stats TO ledger_migrator")
+            # an expected pair granted a second time, by another grantor and with other options
+            connection.execute("GRANT stale_rw TO stale_grantor WITH ADMIN TRUE")
+            connection.execute("GRANT stale_rw TO ledger_app WITH INHERIT TRUE GRANTED BY stale_grantor")
             for statement in cluster_statements((roles,), TEST_LOGINS):
                 connection.execute(statement.encode())
             options = connection.execute(
                 """SELECT rolname::text, rolcanlogin, rolbypassrls, rolcreatedb, rolpassword IS NULL,
                           rolconnlimit, rolvaliduntil = 'infinity'
-                   FROM pg_authid WHERE rolname LIKE 'stale%%' AND rolname <> 'stale_intruder' ORDER BY 1"""
+                   FROM pg_authid WHERE rolname IN ('stale_owner', 'stale_purge', 'stale_rw') ORDER BY 1"""
             ).fetchall()
             member = connection.execute(
                 """SELECT inherit_option, admin_option, set_option FROM pg_auth_members
@@ -488,7 +492,9 @@ def test_roles_that_exist_with_other_options_are_normalized(chassis: WorkerDatab
                    ORDER BY 1, 2"""
             ).fetchall()
         finally:
-            connection.execute("DROP ROLE IF EXISTS stale_owner, stale_rw, stale_purge, stale_intruder")
+            connection.execute(
+                "DROP ROLE IF EXISTS stale_owner, stale_rw, stale_purge, stale_intruder, stale_grantor"
+            )
     assert options == [
         ("stale_owner", False, False, False, True, -1, True),
         ("stale_purge", False, False, False, True, -1, True),

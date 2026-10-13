@@ -19,7 +19,7 @@ import hashlib
 import hmac
 import re
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar, Final, final
 lazy from collections.abc import Callable, Sequence
 
@@ -151,7 +151,8 @@ _GROUP: Final = (
 _LOGIN: Final = f"LOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION {_UNLIMITED}"
 SCRAM_ITERATIONS: Final = 4096
 """PostgreSQL's own default (``scram_iterations``)."""
-_SALT_BYTES: Final = 16
+SALT_BYTES: Final = 16
+"""PostgreSQL's own salt length, and the shortest a verifier here is made with."""
 _MEMBER: Final = "WITH ADMIN FALSE, INHERIT FALSE, SET TRUE"
 """A login becomes the role with ``SET ROLE``; it never inherits it, and can grant it to no one."""
 _DATABASE: Final = "DO $$ BEGIN EXECUTE format('{} ON DATABASE %I {}', current_database()); END $$"
@@ -188,6 +189,15 @@ class UnsupportedPasswordError(LedgerError):
         super().__init__("a login password is 1 or more printable ASCII characters")
 
 
+class ShortSaltError(LedgerError):
+    """A SCRAM salt shorter than PostgreSQL's own (16 bytes): it would weaken every verifier made with it."""
+
+    code: ClassVar[str] = "scram_salt_too_short"
+
+    def __init__(self, length: int) -> None:
+        super().__init__(f"a SCRAM salt has at least {SALT_BYTES} bytes, not {length}")
+
+
 type Salting = Callable[[str], bytes]
 """The salt of a login's verifier, by the login's name."""
 
@@ -195,7 +205,7 @@ type Salting = Callable[[str], bytes]
 def random_salt(login: str) -> bytes:
     """A new random salt (the default): every run makes another verifier of the same password."""
     del login
-    return secrets.token_bytes(_SALT_BYTES)
+    return secrets.token_bytes(SALT_BYTES)
 
 
 def scram_verifier(password: str, *, salt: bytes) -> str:
@@ -206,6 +216,8 @@ def scram_verifier(password: str, *, salt: bytes) -> str:
     """
     if not password or not (password.isascii() and password.isprintable()):
         raise UnsupportedPasswordError
+    if len(salt) < SALT_BYTES:
+        raise ShortSaltError(len(salt))
     salted = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, SCRAM_ITERATIONS)
     stored = hashlib.sha256(hmac.digest(salted, b"Client Key", "sha256")).digest()
     server = hmac.digest(salted, b"Server Key", "sha256")
@@ -262,11 +274,14 @@ class SchemaRoles:
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Logins:
-    """The passwords of the login roles (local and test values only; production takes them from secrets)."""
+    """The passwords of the login roles (local and test values only; production takes them from secrets).
 
-    app: str
-    migrator: str
-    signer: str | None = None
+    They are kept out of the ``repr``, so that no log line or traceback shows one.
+    """
+
+    app: str = field(repr=False)
+    migrator: str = field(repr=False)
+    signer: str | None = field(default=None, repr=False)
 
 
 def _role(name: str, options: str) -> tuple[str, str]:
@@ -286,7 +301,13 @@ def _member(role: str, login: str) -> str:
 
 
 _KEPT_BY_LOGIN: Final = {APP: "_(rw|purge)$", MIGRATOR: "_owner$", SIGNER: "_(rw|purge)$"}
-"""The roles a login may stay a member of although this run names them not: another database's schemas."""
+"""The roles a login may stay a member of although this run names them not: another database's schemas.
+
+Accepted risk: the families go by name, so ``ledger_app`` and ``ledger_signer`` keep a membership in any role
+whose name ends ``_rw`` or ``_purge`` (``ledger_migrator`` in any ending ``_owner``), whoever made it. Making
+such a role and granting it takes ``CREATEROLE`` or a superuser, who could grant the logins anything anyway;
+the roles of the schemas a run names are checked exactly.
+"""
 
 
 _STRAYS: Final = sql.SQL("""DO $$ DECLARE stray record; BEGIN
@@ -296,7 +317,9 @@ FOR stray IN
     JOIN pg_roles AS granted ON granted.oid = membership.roleid
     JOIN pg_roles AS member ON member.oid = membership.member
     JOIN pg_roles AS grantor ON grantor.oid = membership.grantor
-    WHERE (granted.rolname, member.rolname) NOT IN ({expected}) AND member.rolname <> current_user
+    WHERE NOT ((granted.rolname, member.rolname) IN ({expected})
+               AND NOT membership.admin_option AND NOT membership.inherit_option AND membership.set_option)
+      AND member.rolname <> current_user
       AND (granted.rolname IN ({granted}) OR member.rolname IN ({groups}) OR {families})
 LOOP
     EXECUTE format('REVOKE %I FROM %I GRANTED BY %I CASCADE', stray.role, stray.member, stray.grantor);
@@ -314,9 +337,11 @@ def _revoke_strays(
     """Revoke, whoever granted it, every membership no statement here granted.
 
     That is any membership in this run's roles (nobody is a member of a login either), any of this run's group
-    roles in another role, and any of a login outside its family of roles (``_KEPT_BY_LOGIN``). The role
-    running the statements keeps its own (PostgreSQL makes a ``CREATEROLE`` creator a member of what it
-    creates). Every name is a constant or a checked schema's role, and goes in as a literal.
+    roles in another role, and any of a login outside its family of roles (``_KEPT_BY_LOGIN``). A membership
+    of an expected pair is kept only with this module's options: PostgreSQL 16 keeps one row per grantor, and
+    the ``GRANT`` here normalizes the current user's row only. The role running the statements keeps its own
+    (PostgreSQL makes a ``CREATEROLE`` creator a member of what it creates). Every name is a constant or a
+    checked schema's role, and goes in as a literal.
     """
     pair = sql.SQL("({}, {})")
     family = sql.SQL("(member.rolname = {} AND granted.rolname !~ {})")

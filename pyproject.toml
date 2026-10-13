@@ -304,15 +304,17 @@ source_modules = ["ledger_kernel"]
 forbidden_modules = ["pydantic", "pydantic_settings", "sqlalchemy", "fastapi", "starlette", "structlog", "google", "grpc", "opentelemetry", "prometheus_client", "psycopg"]
 
 # An app is a composition root (§3.3): it builds an App and serves it. Modules are found through their entry
-# points, so an app never imports one; nor does it reach below the platform's runtime.
+# points, so an app imports no module at all; nor the kernel, nor the platform below its runtime. (Indirect
+# imports are the runtime's own.)
 [[tool.importlinter.contracts]]
 name = "Apps only compose"
 type = "forbidden"
 source_modules = ["ledger_app_api", "ledger_app_worker", "ledger_app_migrate"]
 forbidden_modules = [
-    "ledger_identity.domain", "ledger_identity.application", "ledger_identity.adapters",
-    "ledger_platform.config", "ledger_platform.observability", "ledger_platform.data", "ledger_platform.auth",
-    "ledger_platform.events", "ledger_platform.jobs", "ledger_platform.http", "ledger_platform.grpc",
+    "ledger_identity", "ledger_country_do", "ledger_kernel",
+    "ledger_platform._manifest", "ledger_platform.config", "ledger_platform.observability", "ledger_platform.data",
+    "ledger_platform.auth", "ledger_platform.events", "ledger_platform.jobs", "ledger_platform.http",
+    "ledger_platform.grpc",
 ]
 allow_indirect_imports = true
 

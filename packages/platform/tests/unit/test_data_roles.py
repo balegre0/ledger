@@ -14,6 +14,7 @@ from ledger_platform.data.roles import (
     InvalidSchemaNameError,
     Logins,
     SchemaRoles,
+    ShortSaltError,
     UnsupportedPasswordError,
     cluster_statements,
     database_statements,
@@ -148,6 +149,27 @@ def test_memberships_nobody_granted_here_are_revoked_last() -> None:
     assert "('identity_owner', 'ledger_migrator')" in revoke
     assert "('ledger_relay', 'ledger_app')" in revoke
     assert "'a''pp'" not in revoke
+
+
+def test_an_expected_membership_with_other_options_is_a_stray_too() -> None:
+    """Another grantor's row of an expected pair (PostgreSQL 16 keeps one per grantor) needs the options."""
+    revoke = cluster_statements((SchemaRoles(schema="identity"),), LOGINS, salt=salted)[-1]
+    assert (
+        "AND NOT membership.admin_option AND NOT membership.inherit_option AND membership.set_option"
+        in revoke
+    )
+
+
+def test_a_salt_shorter_than_16_bytes_is_refused() -> None:
+    with pytest.raises(ShortSaltError) as raised:
+        scram_verifier("pencil", salt=SALT[:15])
+    assert raised.value.code == "scram_salt_too_short"
+    assert scram_verifier("pencil", salt=SALT + b"x").startswith("SCRAM-SHA-256$4096:")
+
+
+def test_the_logins_never_show_their_passwords() -> None:
+    shown = repr(Logins(app="app-secret", migrator="migrator-secret", signer="signer-secret"))
+    assert "secret" not in shown
 
 
 def test_a_signer_schema_belongs_to_the_signer_login_only() -> None:

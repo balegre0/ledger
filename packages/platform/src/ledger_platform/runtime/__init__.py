@@ -15,9 +15,11 @@ from ledger_platform.runtime.contexts import (
 )
 from ledger_platform.runtime.facade import UnitOpenError, facade
 from ledger_platform.runtime.keys import Key
+from ledger_platform.runtime.serving import SERVER_LOGGERS, serving_logs
 from ledger_platform.runtime.supervision import Supervisor
 
 __all__ = [
+    "SERVER_LOGGERS",
     "App",
     "AppRole",
     "Call",
@@ -34,4 +36,5 @@ __all__ = [
     "Telemetry",
     "UnitOpenError",
     "facade",
+    "serving_logs",
 ]
