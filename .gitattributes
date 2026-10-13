@@ -1,2 +1,3 @@
 * text=auto eol=lf
 *.png binary
+countries/do/src/ledger_country_do/channels/ecf_v1/adapters/xsd/*.xsd -text

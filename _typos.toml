@@ -1,5 +1,10 @@
 [files]
-extend-exclude = ["uv.lock", "libs/contracts/src/ledger/"]
+extend-exclude = [
+    "uv.lock",
+    "libs/contracts/src/ledger/",
+    "countries/do/src/ledger_country_do/channels/ecf_v1/adapters/xsd/",
+    "countries/do/tests/contract/golden/",
+]
 
 [default]
 # Ruff rule codes (the plan quotes `CPY001`) are identifiers, not words.
@@ -8,3 +13,13 @@ extend-ignore-identifiers-re = ["^CPY[0-9]{3}$"]
 [default.extend-words]
 # Spanish: a DGII e-invoice status ("Aceptado Condicional"), not an English typo.
 condicional = "condicional"
+# Spanish: DGII's own words (element names, document titles, sample addresses) the plan and DGII's files quote.
+calle = "calle"
+cliente = "cliente"
+comercial = "comercial"
+descripcion = "descripcion"
+direccion = "direccion"
+emision = "emision"
+excede = "excede"
+informe = "informe"
+instructivo = "instructivo"

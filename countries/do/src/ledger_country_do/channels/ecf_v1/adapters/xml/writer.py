@@ -1,0 +1,87 @@
+"""Writing DGII's XML: one element after another in the schema's order, never an empty one by accident.
+
+DT-EMI: no XML may hold an empty tag, and an unused tag is left out; so a field without a value is never
+written (the one exception, an anonymous buyer's ``Comprador``, is the builder's explicit choice: F4).
+Elements are named in lowercase and written as their schema declares them (``names.element``). The tree is the
+standard library's ``ElementTree``, used here to build and serialize only (never to parse): its ``Element`` is
+public and typed.
+"""
+
+from io import BytesIO
+from typing import ClassVar, final
+from xml.etree.ElementTree import Element, ElementTree, SubElement
+lazy from decimal import Decimal
+
+from ledger_country_do.channels.ecf_v1.adapters.xml.names import element
+from ledger_country_do.channels.ecf_v1.domain.drafts import writable
+from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
+from ledger_country_do.channels.ecf_v1.domain.notation import dgii_amount, dgii_number
+lazy from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
+
+
+class EmptyTextError(EcfError):
+    """A builder gave an element an empty text, which DGII forbids: a defect of the builder."""
+
+    code: ClassVar[str] = "do_ecf_xml_empty_text"
+
+    def __init__(self, tag: str) -> None:
+        super().__init__(f"{tag} would be written empty (DGII forbids empty elements)")
+
+
+class UnwritableTextError(EcfError):
+    """A text XML 1.0 cannot hold, or holding a control character: a defect of whatever checked it before."""
+
+    code: ClassVar[str] = "do_ecf_xml_unwritable_text"
+
+    def __init__(self, tag: str) -> None:
+        super().__init__(f"{tag} would hold a control character or one XML 1.0 cannot hold")
+
+
+@final
+class Node:
+    """An element being written: its children are added in the order the schema wants them."""
+
+    __slots__ = ("element", "format")
+
+    def __init__(self, format_: Format, written: Element) -> None:
+        self.format: Format = format_
+        self.element: Element = written
+
+    @classmethod
+    def root(cls, format_: Format, name: str) -> Node:
+        """A document's root element, of ``format_``'s schema."""
+        return cls(format_, Element(element(format_, name)))
+
+    def child(self, name: str) -> Node:
+        """A new child element, last."""
+        return Node(self.format, SubElement(self.element, element(self.format, name)))
+
+    def text(self, name: str, value: str | None) -> None:
+        """A child with ``value`` as its text; nothing when there is no value.
+
+        ``EmptyTextError`` for an empty text, ``UnwritableTextError`` for a character XML 1.0 cannot hold or a
+        control character: the writer is safe on its own, whatever checked the value before.
+        """
+        if value is None:
+            return
+        tag = element(self.format, name)
+        if not value:
+            raise EmptyTextError(tag)
+        if not writable(value):
+            raise UnwritableTextError(tag)
+        SubElement(self.element, tag).text = value
+
+    def amount(self, name: str, value: Decimal | None) -> None:
+        """A child with an amount (two decimals); nothing when there is none."""
+        self.text(name, None if value is None else dgii_amount(value))
+
+    def number(self, name: str, value: Decimal | int | None) -> None:
+        """A child with a number written as it is; nothing when there is none."""
+        if value is not None:
+            self.text(name, str(value) if isinstance(value, int) else dgii_number(value))
+
+    def document(self) -> bytes:
+        """The whole document, UTF-8, with its XML declaration."""
+        written = BytesIO()
+        ElementTree(self.element).write(written, encoding="utf-8", xml_declaration=True)
+        return written.getvalue()
