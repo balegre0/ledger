@@ -6,8 +6,10 @@ import grpc
 import pytest
 from nats.aio.client import Client
 from nats.aio.msg import Msg
+from nats.errors import ConnectionClosedError
 from prometheus_client import CollectorRegistry
 from structlog.testing import capture_logs
+lazy from nats.aio.subscription import Subscription
 
 from ledger.events.identity.v1.events_pb2 import (
     ROLE_ADMIN,
@@ -39,6 +41,7 @@ from ledger_platform.identity_client import (
     PERMISSION_SUBJECTS,
     PermissionChanges,
     RemotePermissions,
+    Subscriber,
     follow_permission_changes,
     following,
     known_permissions,
@@ -281,6 +284,44 @@ async def test_a_follower_hears_a_deactivation_on_the_wire(
 
         await eventually(heard)
     assert cache.companies == [(ORGANIZATION, COMPANY)]
+
+
+@final
+class SubscribesOnce(Subscriber):
+    """A connection whose second subscription fails, as when NATS goes away between the two."""
+
+    def __init__(self, connection: Subscriber) -> None:
+        self.connection = connection
+        self.subscribed = 0
+
+    @override
+    async def subscribe(self, subject: str, *, cb: Callable[[Msg], Awaitable[None]]) -> Subscription:
+        if self.subscribed:
+            raise ConnectionClosedError
+        self.subscribed += 1
+        return await self.connection.subscribe(subject, cb=cb)
+
+
+async def test_a_follow_that_fails_halfway_leaves_no_subscription_behind(
+    connect: Callable[[], Awaitable[Client]],
+    eventually: Callable[[Callable[[], Awaitable[bool]]], Awaitable[None]],
+) -> None:
+    """The first subject's subscription is ended: a retried follow would otherwise hear each event twice."""
+    cache, probe = Forgotten(), Forgotten()
+    follower, prober, publisher = await connect(), await connect(), await connect()
+    with pytest.raises(ConnectionClosedError):
+        await PermissionChanges(cache).follow(SubscribesOnce(follower))
+    await PermissionChanges(probe).follow(prober)
+    await prober.flush()
+    await publish(publisher, granted())
+
+    async def probe_heard() -> bool:
+        return len(probe.forgotten) == 1
+
+    await eventually(probe_heard)
+    await follower.flush()
+    await asyncio.sleep(0.01)
+    assert cache.forgotten == []
 
 
 async def test_following_forgets_everything_kept_while_nobody_followed(

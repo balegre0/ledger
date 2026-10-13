@@ -143,8 +143,20 @@ class PermissionChanges:
         self._cache = cache
 
     async def follow(self, nats: Subscriber) -> tuple[Subscription, ...]:
-        """Follow every such event on this replica; unsubscribe each, or drain the connection, to stop."""
-        return tuple([await nats.subscribe(subject, cb=self.handle) for subject in PERMISSION_SUBJECTS])
+        """Follow every such event on this replica; unsubscribe each, or drain the connection, to stop.
+
+        All of the subjects or none: when one subscription fails, those already made are ended before the
+        error goes on, so that a follow tried again does not hear an event twice.
+        """
+        made: list[Subscription] = []
+        try:
+            for subject in PERMISSION_SUBJECTS:
+                subscription = await nats.subscribe(subject, cb=self.handle)
+                made.append(subscription)
+        except BaseException:
+            await _unsubscribe(made)
+            raise
+        return tuple(made)
 
     async def handle(self, message: Msg) -> None:
         """Forget what an event changed; one that cannot be read is logged and skipped, any other ignored."""
@@ -167,6 +179,13 @@ class PermissionChanges:
             self._cache.forget_company(*_company(deactivated.organization_id, deactivated.company_id))
 
 
+async def _unsubscribe(subscriptions: Iterable[Subscription]) -> None:
+    """End each of ``subscriptions``; a closed or draining connection ended them itself."""
+    for subscription in subscriptions:
+        with suppress(ConnectionClosedError, ConnectionDrainingError):
+            await subscription.unsubscribe()
+
+
 @asynccontextmanager
 async def following(
     nats: Subscriber, cache: PermissionCache, interruptions: Interruptions
@@ -183,10 +202,7 @@ async def following(
         try:
             yield
         finally:
-            for subscription in subscriptions:
-                # A closed or draining connection ended its subscriptions itself.
-                with suppress(ConnectionClosedError, ConnectionDrainingError):
-                    await subscription.unsubscribe()
+            await _unsubscribe(subscriptions)
     finally:
         stop_listening()
 
