@@ -6,7 +6,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from ledger_country_do.channels.ecf_v1.domain.drafts import BillingIndicator, Line
+from ledger_country_do.channels.ecf_v1.domain.drafts import BillingIndicator, DraftInvalidError, Line
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do.regime import REGIME
 from ledger_country_do.regime.definitions import RegimeDataError
@@ -96,3 +96,32 @@ def test_the_total_is_the_sum_of_its_parts_whatever_the_order(
     shuffled = list(lines)
     order.shuffle(shuffled)
     assert compute_totals(replace(draft, lines=tuple(shuffled))).total == totals.total
+
+
+_MOST = D("9999999999999999.99")
+
+
+def test_a_total_reaches_sixteen_integer_digits() -> None:
+    line = Line(name="ITEM", quantity=D(1), unit_price=_MOST, billing=BillingIndicator.EXEMPT)
+    assert compute_totals(replace(consumer_invoice(), lines=(line,))).total == _MOST
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        (Line(name="ITEM", quantity=D(1), unit_price=_MOST, billing=BillingIndicator.EXEMPT),) * 2,
+        (
+            Line(
+                name="ITEM",
+                quantity=D(1),
+                unit_price=D("9000000000000000.00"),
+                billing=BillingIndicator.ITBIS_1,
+            ),
+        ),
+    ],
+    ids=["exempt-sum", "itbis"],
+)
+def test_a_total_of_seventeen_integer_digits_is_refused(lines: tuple[Line, ...]) -> None:
+    with pytest.raises(DraftInvalidError, match=r"^total ") as caught:
+        compute_totals(replace(consumer_invoice(), lines=lines))
+    assert caught.value.field == "total"

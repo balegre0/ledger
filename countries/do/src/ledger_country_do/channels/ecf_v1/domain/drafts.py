@@ -6,15 +6,16 @@ here is one of DGII's e-CF schemas (lengths, decimals, line counts) or of DGII's
 """
 
 from dataclasses import dataclass, field
+from decimal import Decimal
 from enum import IntEnum, StrEnum
 from types import MappingProxyType
 from typing import ClassVar, Final, final
 lazy from collections.abc import Mapping
 lazy from datetime import date
-lazy from decimal import Decimal
 
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError
+from ledger_country_do.regime.rounding import round_amount
 from ledger_country_do.regime.tax_ids import normalize, scheme_of
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
 
@@ -25,6 +26,10 @@ _ADDRESS: Final = 100
 _ITEM_NAME: Final = 80
 _QUANTITY_PLACES: Final = 2
 _UNIT_PRICE_PLACES: Final = 4
+INTEGER_DIGITS: Final = 16
+"""DGII's schemas give quantities, unit prices and amounts at most 16 integer digits (``[0-9]{1,16}``)."""
+AMOUNT_LIMIT: Final = Decimal(10) ** INTEGER_DIGITS
+"""The least value of 17 integer digits: every quantity, unit price and amount is below it."""
 
 
 class BillingIndicator(IntEnum):
@@ -119,6 +124,20 @@ class _SequenceExpiryError(DraftInvalidError):
         )
 
 
+class _SequenceExpiredError(DraftInvalidError):
+    def __init__(self) -> None:
+        super().__init__(
+            "sequence_expires_on", "is on or after the issue date (a range is used up to that day)"
+        )
+
+
+class _LineAmountError(DraftInvalidError):
+    def __init__(self) -> None:
+        super().__init__(
+            "line.amount", f"(quantity x unit price) has at most {INTEGER_DIGITS} integer digits"
+        )
+
+
 class _UnnamedCreditBuyerError(DraftInvalidError):
     def __init__(self) -> None:
         super().__init__("buyer", "names its RNC or cédula and its legal name on a type 31")
@@ -140,9 +159,18 @@ def _places(value: Decimal) -> int:
 
 
 def _decimal(field_name: str, value: Decimal, *, places: int, positive: bool) -> None:
-    if not value.is_finite() or value < 0 or (positive and value == 0) or _places(value) > places:
+    if (
+        not value.is_finite()
+        or value < 0
+        or (positive and value == 0)
+        or value >= AMOUNT_LIMIT
+        or _places(value) > places
+    ):
         sign = "greater than zero" if positive else "zero or more"
-        raise DraftInvalidError(field_name, f"is a number {sign} with at most {places} decimals")
+        raise DraftInvalidError(
+            field_name,
+            f"is a number {sign} with at most {INTEGER_DIGITS} integer digits and {places} decimals",
+        )
 
 
 @final
@@ -195,6 +223,9 @@ class Line:
         _text("line.name", self.name, _ITEM_NAME)
         _decimal("line.quantity", self.quantity, places=_QUANTITY_PLACES, positive=True)
         _decimal("line.unit_price", self.unit_price, places=_UNIT_PRICE_PLACES, positive=False)
+        product = self.quantity * self.unit_price
+        if product >= AMOUNT_LIMIT or round_amount(product) >= AMOUNT_LIMIT:
+            raise _LineAmountError
         if self.billing is BillingIndicator.NOT_BILLABLE:
             raise _NotBillableLineError
 
@@ -220,6 +251,8 @@ class EcfDraft:
             raise _LineCountError
         if (self.ecf_type not in UNDATED_TYPES) != (self.sequence_expires_on is not None):
             raise _SequenceExpiryError
+        if self.sequence_expires_on is not None and self.issued_on > self.sequence_expires_on:
+            raise _SequenceExpiredError
         if self.ecf_type is EcfType.CREDIT_INVOICE and (self.buyer.rnc is None or self.buyer.name is None):
             raise _UnnamedCreditBuyerError
 

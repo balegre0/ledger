@@ -6,15 +6,31 @@ lacks without ``tzdata``.
 """
 
 from datetime import timedelta, timezone
-from typing import Final
+from typing import ClassVar, Final
 lazy from datetime import date, datetime
 lazy from decimal import Decimal
 
+from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 from ledger_country_do.regime.rounding import round_amount
 
 SANTO_DOMINGO: Final = timezone(timedelta(hours=-4), "AST")
 _DATE: Final = "%d-%m-%Y"
 _MOMENT: Final = "%d-%m-%Y %H:%M:%S"
+
+
+class NaiveMomentError(EcfError):
+    """A moment without a UTC offset: a defect of the caller, never read in the machine's time zone."""
+
+    code: ClassVar[str] = "do_ecf_naive_moment"
+
+    def __init__(self) -> None:
+        super().__init__("a moment carries its UTC offset (a timezone-aware datetime)")
+
+
+def _in_santo_domingo(value: datetime) -> datetime:
+    if value.utcoffset() is None:
+        raise NaiveMomentError
+    return value.astimezone(SANTO_DOMINGO)
 
 
 def dgii_date(value: date) -> str:
@@ -23,13 +39,13 @@ def dgii_date(value: date) -> str:
 
 
 def dgii_moment(value: datetime) -> str:
-    """``dd-MM-yyyy HH:mm:ss`` in the Dominican Republic's time (``value`` is timezone-aware)."""
-    return value.astimezone(SANTO_DOMINGO).strftime(_MOMENT)
+    """``dd-MM-yyyy HH:mm:ss`` in the Dominican Republic's time; ``NaiveMomentError`` without a UTC offset."""
+    return _in_santo_domingo(value).strftime(_MOMENT)
 
 
 def local_date(value: datetime) -> date:
-    """The Dominican Republic's date at ``value``."""
-    return value.astimezone(SANTO_DOMINGO).date()
+    """The Dominican Republic's date at ``value``; ``NaiveMomentError`` without a UTC offset."""
+    return _in_santo_domingo(value).date()
 
 
 def dgii_amount(value: Decimal) -> str:

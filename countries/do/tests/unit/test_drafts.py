@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import timedelta
 from decimal import Decimal
 lazy from collections.abc import Callable
 lazy from contextlib import AbstractContextManager
@@ -79,6 +80,20 @@ def test_a_credit_invoice_names_its_buyer() -> None:
         ("line.unit_price", lambda: replace(LINE, unit_price=Decimal(-1))),
         ("line.unit_price", lambda: replace(LINE, unit_price=Decimal("1.00001"))),
         ("line.billing", lambda: replace(LINE, billing=BillingIndicator.NOT_BILLABLE)),
+        (
+            "line.quantity",
+            lambda: replace(LINE, quantity=Decimal(10000000000000000), unit_price=Decimal(0)),
+        ),
+        ("line.unit_price", lambda: replace(LINE, quantity=Decimal("0.01"), unit_price=Decimal("1E16"))),
+        ("line.amount", lambda: replace(LINE, quantity=Decimal(2), unit_price=Decimal(5000000000000000))),
+        (
+            "line.amount",
+            lambda: replace(LINE, quantity=Decimal(1), unit_price=Decimal("9999999999999999.995")),
+        ),
+        (
+            "line.amount",
+            lambda: replace(LINE, quantity=Decimal("9999999999999999.99"), unit_price=Decimal("1E15")),
+        ),
     ],
 )
 def test_each_field_is_checked_and_named_without_its_value(field: str, build: Callable[[], object]) -> None:
@@ -90,3 +105,24 @@ def test_each_field_is_checked_and_named_without_its_value(field: str, build: Ca
 
 def test_a_cedula_is_taken_wherever_an_rnc_is() -> None:
     assert Issuer(rnc="00113918205", legal_name="JUAN PEREZ", address="CALLE 1").rnc == "00113918205"
+
+
+def test_quantities_prices_and_amounts_reach_sixteen_integer_digits() -> None:
+    most = Decimal("9999999999999999.99")
+    assert replace(LINE, quantity=most, unit_price=Decimal(1)).quantity == most
+    assert replace(LINE, quantity=Decimal(1), unit_price=Decimal("9999999999999999.9949")).quantity == 1
+    assert replace(
+        LINE, quantity=Decimal("0.01"), unit_price=Decimal("9999999999999999.9999")
+    ).quantity == Decimal("0.01")
+
+
+@pytest.mark.parametrize("days", [-1, 0])
+def test_a_range_is_used_up_to_its_expiry_date(days: int) -> None:
+    draft = replace(credit_invoice(), issued_on=SEQUENCE_EXPIRES_ON + timedelta(days=days))
+    assert draft.sequence_expires_on == SEQUENCE_EXPIRES_ON
+
+
+def test_a_range_is_not_used_after_its_expiry_date() -> None:
+    with refused("sequence_expires_on") as caught:
+        replace(credit_invoice(), issued_on=SEQUENCE_EXPIRES_ON + timedelta(days=1))
+    assert caught.value.field == "sequence_expires_on"

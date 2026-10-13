@@ -1,10 +1,12 @@
 from datetime import UTC, date, datetime
 from decimal import Decimal
+lazy from collections.abc import Callable
 
 import pytest
 
 from ledger_country_do.channels.ecf_v1.domain.notation import (
     SANTO_DOMINGO,
+    NaiveMomentError,
     dgii_amount,
     dgii_date,
     dgii_moment,
@@ -53,3 +55,12 @@ def test_a_quantity_or_price_is_written_as_it_is_never_in_exponent_form() -> Non
 )
 def test_a_rate_is_an_integer(value: Decimal, written: str) -> None:
     assert dgii_percent(value) == written
+
+
+@pytest.mark.parametrize("read", [dgii_moment, local_date])
+def test_a_naive_moment_is_refused_never_read_in_the_machine_s_time(
+    read: Callable[[datetime], object],
+) -> None:
+    with pytest.raises(NaiveMomentError) as caught:
+        read(datetime(2026, 10, 13, 9, 30, tzinfo=UTC).replace(tzinfo=None))
+    assert caught.value.code == "do_ecf_naive_moment"

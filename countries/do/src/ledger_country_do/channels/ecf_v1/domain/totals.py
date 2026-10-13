@@ -11,7 +11,14 @@ from decimal import Decimal
 from typing import final
 lazy from datetime import date
 
-from ledger_country_do.channels.ecf_v1.domain.drafts import CATEGORY_OF, TAXED, BillingIndicator
+from ledger_country_do.channels.ecf_v1.domain.drafts import (
+    AMOUNT_LIMIT,
+    CATEGORY_OF,
+    INTEGER_DIGITS,
+    TAXED,
+    BillingIndicator,
+    DraftInvalidError,
+)
 from ledger_country_do.regime import REGIME
 from ledger_country_do.regime.definitions import RegimeDataError
 from ledger_country_do.regime.rounding import round_amount
@@ -59,6 +66,11 @@ class Totals:
         return sum((group.itbis for group in self.groups), _ZERO) if self.groups else None
 
 
+class _TotalTooLargeError(DraftInvalidError):
+    def __init__(self) -> None:
+        super().__init__("total", f"(MontoTotal) has at most {INTEGER_DIGITS} integer digits")
+
+
 class _RatelessCategoryError(RegimeDataError):
     def __init__(self, key: str) -> None:
         super().__init__(f"{key} has no rate, yet lines are taxed at it")
@@ -73,7 +85,10 @@ def _percent(regime: RegimeDef, indicator: BillingIndicator, day: date) -> Decim
 
 
 def compute_totals(draft: EcfDraft, regime: RegimeDef = REGIME) -> Totals:
-    """``draft``'s totals under ``regime``'s rates in force on its issue date."""
+    """``draft``'s totals under ``regime``'s rates in force on its issue date.
+
+    ``DraftInvalidError`` (field ``total``) when the total has more integer digits than DGII's schemas allow.
+    """
     amounts = tuple(round_amount(line.quantity * line.unit_price) for line in draft.lines)
     groups: list[RateGroup] = []
     for indicator in TAXED:
@@ -91,4 +106,6 @@ def compute_totals(draft: EcfDraft, regime: RegimeDef = REGIME) -> Totals:
     ]
     exempt = sum(exempt_lines, _ZERO) if exempt_lines else None
     total = sum((group.base + group.itbis for group in groups), _ZERO) + (exempt or _ZERO)
+    if total >= AMOUNT_LIMIT:
+        raise _TotalTooLargeError
     return Totals(amounts, tuple(groups), exempt, total)

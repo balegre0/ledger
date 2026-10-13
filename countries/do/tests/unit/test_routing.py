@@ -9,6 +9,12 @@ from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.samples import BUYER, consumer_invoice, credit_invoice
 
 
+def taxed_consumer_invoice(price: str, billing: BillingIndicator, buyer: Buyer) -> Route:
+    line = Line(name="VARILLA", quantity=Decimal(1), unit_price=Decimal(price), billing=billing)
+    draft = replace(consumer_invoice(), lines=(line,), buyer=buyer)
+    return route(draft, compute_totals(draft))
+
+
 def exempt_consumer_invoice(amount: str, buyer: Buyer) -> Route:
     line = Line(
         name="LIBROS", quantity=Decimal(1), unit_price=Decimal(amount), billing=BillingIndicator.EXEMPT
@@ -37,3 +43,12 @@ def test_a_consumer_invoice_from_the_threshold_names_its_buyer() -> None:
 def test_every_other_type_goes_in_full() -> None:
     draft = credit_invoice()
     assert route(draft, compute_totals(draft)) is Route.RECEPTION
+
+
+def test_the_threshold_is_compared_with_the_total_itbis_included() -> None:
+    assert taxed_consumer_invoice("220000.00", BillingIndicator.ITBIS_1, BUYER) is Route.RECEPTION
+    assert taxed_consumer_invoice("211864.40", BillingIndicator.ITBIS_1, Buyer()) is Route.RFCE
+
+
+def test_a_zero_rate_line_of_exactly_the_threshold_goes_in_full() -> None:
+    assert taxed_consumer_invoice("250000.00", BillingIndicator.ITBIS_3, BUYER) is Route.RECEPTION
