@@ -33,13 +33,14 @@ from ledger_identity.domain.membership import MembershipStatus
 from ledger_identity.domain.roles import Role
 from ledger_identity.domain.text import MAX_CODE, MAX_LEGAL_NAME, MAX_NAME
 from ledger_kernel.access import MAX_PROVIDER_ORGANIZATION_LENGTH, MAX_SUBJECT_LENGTH
+from ledger_kernel.tax_ids import MAX_TAX_ID_LENGTH
 
 SCHEMA: Final = "identity"
 """identity's schema: its tables and the chassis's (``chassis_schema_v1``), under its roles."""
-TAX_ID_LENGTH: Final = 11
-"""A cédula's eleven digits; an RNC has nine."""
+TAX_SCHEME_LENGTH: Final = 34
+"""The longest scheme key ``ledger_kernel.tax_ids`` reads: a country code, a dot and 31 characters."""
 ACTIVE_TAX_ID: Final = "ux_companies_active_tax_id"
-"""One active company per tax id, in every organization: an RNC or cédula is one taxpayer."""
+"""One active company per tax id (its scheme and value), in every organization: a tax id is one taxpayer."""
 WORD_LENGTH: Final = 16
 """For a status or a role: a short word of a closed list, which a check constraint names."""
 
@@ -87,7 +88,8 @@ class CompanyRecord(IdentityTable):
         UniqueConstraint("organization_id", "id", name="uq_companies_organization"),
         Index(
             ACTIVE_TAX_ID,
-            "tax_id",
+            "tax_scheme",
+            "tax_value",
             unique=True,
             postgresql_where=text(f"status = '{CompanyStatus.ACTIVE.value}'"),
         ),
@@ -97,7 +99,8 @@ class CompanyRecord(IdentityTable):
 
     id: Mapped[UUID] = mapped_column(primary_key=True)
     organization_id: Mapped[UUID] = mapped_column(ForeignKey(f"{SCHEMA}.organizations.id"))
-    tax_id: Mapped[str] = mapped_column(String(TAX_ID_LENGTH))
+    tax_scheme: Mapped[str] = mapped_column(String(TAX_SCHEME_LENGTH))
+    tax_value: Mapped[str] = mapped_column(String(MAX_TAX_ID_LENGTH))
     legal_name: Mapped[str] = mapped_column(String(MAX_LEGAL_NAME))
     status: Mapped[str] = mapped_column(String(WORD_LENGTH))
     version: Mapped[int] = mapped_column(BigInteger)

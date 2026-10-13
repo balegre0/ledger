@@ -9,22 +9,22 @@ from ledger_identity.domain.branches import Branch, EmissionPoint
 from ledger_identity.domain.company import Company
 from ledger_identity.domain.errors import (
     BranchCodeTakenError,
-    CompanyNotFoundError,
     EmissionPointCodeTakenError,
     StaleVersionError,
     TaxIdTakenError,
 )
 from ledger_identity.domain.membership import Actor, Roster, found, grant, revoke
 from ledger_identity.domain.organization import Organization, require_organization_admin
-from ledger_kernel.access import Permission
+from ledger_identity.domain.roles import COMPANIES_MANAGE
+from ledger_kernel.access import CompanyNotFoundError
 lazy from ledger_identity.application.ports import IdentityUnit
 lazy from ledger_identity.domain.ids import BranchId
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_identity.domain.roles import Role
 lazy from ledger_identity.domain.text import Code, LegalName, Name
 lazy from ledger_kernel.access import Principal, SubjectId
-lazy from ledger_kernel.countries.do import TaxId
 lazy from ledger_kernel.ids import CompanyId
+lazy from ledger_kernel.tax_ids import TaxId
 
 type Admits = Callable[[int], bool]
 """Whether a change may apply to a company at a version: the client's ``If-Match``."""
@@ -135,7 +135,7 @@ async def open_emission_point(
 async def _managed(unit: IdentityUnit, company_id: CompanyId, actor: SubjectId) -> Company:
     """The company, locked, if ``actor``'s membership allows managing it as it stands once locked."""
     locked = await _locked(unit, company_id)
-    (await _actor(unit, company_id, actor)).require(Permission.COMPANY_MANAGE)
+    (await _actor(unit, company_id, actor)).require(COMPANIES_MANAGE)
     return locked
 
 

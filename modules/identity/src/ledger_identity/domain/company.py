@@ -9,13 +9,14 @@ from enum import StrEnum
 from typing import final
 lazy from datetime import datetime
 
-from ledger_identity.domain.errors import CompanyInactiveError, InvalidStateError
+from ledger_identity.domain.errors import CompanyInactiveError
 from ledger_identity.events import CompanyDeactivated, CompanyRegistered, CompanyUpdated
+from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.ids import CompanyId, new_id
 from ledger_kernel.tenancy import Tenant
 lazy from ledger_identity.domain.text import LegalName
-lazy from ledger_kernel.countries.do import TaxId
 lazy from ledger_kernel.ids import OrganizationId
+lazy from ledger_kernel.tax_ids import TaxId
 
 
 class CompanyStatus(StrEnum):
@@ -41,7 +42,7 @@ class Company:
 
     def __post_init__(self) -> None:
         if self.version < 1:
-            raise InvalidStateError(field="company.version", requirement="at least 1")
+            raise InvalidValueError(field="company.version", requirement="at least 1")
 
     @property
     def tenant(self) -> Tenant:

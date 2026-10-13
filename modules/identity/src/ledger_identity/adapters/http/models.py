@@ -12,35 +12,54 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ledger_identity.domain.company import CompanyStatus
 from ledger_identity.domain.roles import Role
-from ledger_kernel.countries.do import TaxIdKind
+from ledger_identity.domain.text import MAX_LEGAL_NAME
+from ledger_kernel.tax_ids import MAX_TAX_ID_LENGTH
 lazy from ledger_identity.domain.branches import Branch, EmissionPoint
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_identity.domain.organization import Organization
+lazy from ledger_kernel.tax_ids import TaxId
 
 
 class _Shape(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True)
 
 
+class TaxIdBody(_Shape):
+    """A tax id qualified by its scheme, which says how the value is read and checked."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    scheme: str = Field(
+        description="A scheme a regime declares, <country>.<name>: do.rnc (RNC) or do.cedula (cédula).",
+        examples=["do.rnc"],
+    )
+    value: str = Field(
+        min_length=1,
+        max_length=MAX_TAX_ID_LENGTH,
+        description="As the scheme writes it; separators are ignored (101-85004-3 is read as 101850043).",
+        examples=["101-85004-3"],
+    )
+
+    @classmethod
+    def of(cls, tax_id: TaxId) -> Self:
+        """The body of ``tax_id``, as its scheme normalized it."""
+        return cls(scheme=tax_id.scheme, value=tax_id.value)
+
+
 class NewCompany(_Shape):
     """A company to register."""
 
-    tax_id: str = Field(
-        min_length=1,
-        max_length=20,
-        description="RNC (9 digits) or cedula (11 digits); hyphens and spaces are ignored.",
-        examples=["101-85004-3"],
-    )
+    tax_id: TaxIdBody
     legal_name: str = Field(
-        min_length=1, max_length=300, description="As registered with DGII; up to 150 characters."
+        min_length=1, max_length=MAX_LEGAL_NAME, description="As registered with the tax authority."
     )
 
 
 class CompanyChanges(_Shape):
     """What can change in a company."""
 
-    legal_name: str = Field(min_length=1, max_length=300)
+    legal_name: str = Field(min_length=1, max_length=MAX_LEGAL_NAME)
 
 
 class CompanyView(_Shape):
@@ -48,8 +67,7 @@ class CompanyView(_Shape):
 
     id: UUID
     organization_id: UUID
-    tax_id: str
-    tax_id_kind: TaxIdKind
+    tax_id: TaxIdBody
     legal_name: str
     status: CompanyStatus
     version: int
@@ -62,8 +80,7 @@ class CompanyView(_Shape):
         return cls(
             id=company.id,
             organization_id=company.organization,
-            tax_id=str(company.tax_id),
-            tax_id_kind=company.tax_id.kind,
+            tax_id=TaxIdBody.of(company.tax_id),
             legal_name=company.legal_name,
             status=company.status,
             version=company.version,

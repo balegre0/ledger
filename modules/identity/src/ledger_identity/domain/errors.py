@@ -1,33 +1,16 @@
 """The identity service's errors: each with its kind and a stable code clients match on (§4.2, §10).
 
 Messages name ids, fields and limits, never text a client typed: a legal name or tax id is the client's data.
+The refusals every module shares are the kernel's, one class per code: ``CompanyNotFoundError`` and
+``PermissionDeniedError`` (``ledger_kernel.access``), and ``InvalidValueError`` for a value our own code built
+wrong (``ledger_kernel.errors``).
 """
 
 from typing import ClassVar
 lazy from uuid import UUID
 
-from ledger_kernel.errors import (
-    ConflictError,
-    ForbiddenError,
-    InvalidInputError,
-    LedgerError,
-    NotFoundError,
-    excerpt,
-)
-lazy from ledger_kernel.access import Permission, SubjectId
-
-
-class InvalidStateError(LedgerError):
-    """A domain value built from parts that do not belong together. A bug in the code that builds it.
-
-    Annotations are not enforced at runtime and the rules that guard roles rest on these values: each is
-    checked once, where it is made. The message names the field, never a value.
-    """
-
-    code: ClassVar[str] = "invalid_state"
-
-    def __init__(self, *, field: str, requirement: str) -> None:
-        super().__init__(f"{field} must be {requirement}")
+from ledger_kernel.errors import ConflictError, ForbiddenError, InvalidInputError, NotFoundError, excerpt
+lazy from ledger_kernel.access import SubjectId
 
 
 class InvalidNameError(InvalidInputError):
@@ -55,15 +38,6 @@ class OrganizationNotFoundError(NotFoundError):
 
     def __init__(self, organization: UUID) -> None:
         super().__init__(f"organization {organization} has no company yet")
-
-
-class CompanyNotFoundError(NotFoundError):
-    """No company by this id in the organization."""
-
-    code: ClassVar[str] = "company_not_found"
-
-    def __init__(self, company: UUID) -> None:
-        super().__init__(f"company {company} was not found")
 
 
 class BranchNotFoundError(NotFoundError):
@@ -167,17 +141,3 @@ class OwnersOnlyError(ForbiddenError):
 
     def __init__(self) -> None:
         super().__init__("only an owner grants or takes the owner role")
-
-
-class ActorNotAllowedError(ForbiddenError):
-    """The actor's membership, read as it is now, lacks the permission the change needs.
-
-    The same code as the platform's ``PermissionDeniedError``: for a client both mean "your role does not
-    allow this"; this one is raised under the company's lock, when the role changed after the request was
-    checked.
-    """
-
-    code: ClassVar[str] = "permission_denied"
-
-    def __init__(self, permission: Permission) -> None:
-        super().__init__(f"this needs the permission {permission.value}")

@@ -77,7 +77,7 @@ lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environme
 lazy from ledger_country_do.channels.ecf_v1.domain.printed import QrHosts
 lazy from ledger_country_do.channels.ecf_v1.domain.status_map import Outcome
 lazy from ledger_country_do.channels.ecf_v1.domain.totals import Totals
-lazy from ledger_country_do.regime.definitions import RegimeDef
+lazy from ledger_kernel.regimes import RegimeDef
 
 POLL_SCHEDULE: Final = (1.0, 2.0, 5.0, 10.0, 30.0, 60.0)
 MAX_SIGNING_SKEW: Final = timedelta(minutes=5)

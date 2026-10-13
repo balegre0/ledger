@@ -12,6 +12,7 @@ dependencies = [
     "granian>=2.8.4",
     "httpx>=0.28.1",
     "ledger-country-do",
+    "ledger-kernel",
     "lxml>=6.1.3",
     "pydantic>=2.14.1",
     "python-multipart>=0.0.32",

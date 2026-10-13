@@ -2,8 +2,7 @@
 
 A client matches on ``code`` (§9.6); two classes declaring one code would make one code mean two failures. A
 subclass that declares no code of its own shares its base's on purpose and is not counted. Every exception
-class of a first-party module counts, ``LedgerError`` or not (the DO pack's errors stand on a base of their
-own until they join the kernel's).
+class of a first-party module counts, ``LedgerError`` or not.
 """
 
 import importlib
@@ -64,35 +63,13 @@ def first_party() -> tuple[str, ...]:
 _SOURCE_PKGS: Final = TypeAdapter(list[str])
 
 
-SHARED_UNTIL_THE_VOCABULARY_CUTOVER: Final = {
-    "company_not_found": [
-        "ledger_identity.domain.errors.CompanyNotFoundError",
-        "ledger_platform.auth.access.NoCompanyAccessError",
-    ],
-    "invalid_tax_id": [
-        "ledger_kernel.countries.do.InvalidTaxIdError",
-        "ledger_kernel.tax_ids.InvalidTaxIdError",
-    ],
-    "permission_denied": [
-        "ledger_identity.domain.errors.ActorNotAllowedError",
-        "ledger_platform.auth.access.PermissionDeniedError",
-    ],
-}
-"""The codes two classes still declare, each on purpose, until one class per code replaces them.
-
-The kernel's ``PermissionDeniedError`` and ``CompanyNotFoundError`` take the place of identity's and the
-platform's, and the kernel's Dominican tax ids move to ``countries/do`` (the plan's vocabulary cutover).
-Exact: a pair that goes away must leave this list, and no new pair may join it.
-"""
-
-
 def test_no_two_error_classes_of_the_workspace_declare_one_code() -> None:
     packages = first_party()
     for package in packages:
         imported(package)
     codes = declared_codes(subclasses(BaseException), packages)
     twice = {code: sorted(owners) for code, owners in codes.items() if len(owners) > 1}
-    assert twice == SHARED_UNTIL_THE_VOCABULARY_CUTOVER
+    assert twice == {}
 
 
 def test_a_code_two_classes_declare_is_named() -> None:

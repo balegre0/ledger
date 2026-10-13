@@ -2,17 +2,17 @@
 
 A ``Principal`` is a caller whose token was verified: the identity provider's id of the user or machine
 (``subject``), the organization it acts in, and the roles the provider granted it there. What it may do in a
-company is a set of ``Permission``s, which the identity service derives from the principal's role there.
-Permissions cross service boundaries as their values, which therefore never change.
+company is a set of ``Permission``s, codes a module declares in its manifest, which identity derives from
+the principal's role there. Refusals are one class per code: ``PermissionDeniedError`` and
+``CompanyNotFoundError`` are raised by the platform's access checks and by the modules alike.
 """
 
 import re
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import ClassVar, Final, NewType, final
 
-from ledger_kernel.errors import InvalidInputError, InvalidValueError, excerpt
-lazy from ledger_kernel.ids import OrganizationId
+from ledger_kernel.errors import ForbiddenError, InvalidInputError, InvalidValueError, NotFoundError, excerpt
+lazy from ledger_kernel.ids import CompanyId, OrganizationId
 
 SubjectId = NewType("SubjectId", str)
 """Who a principal is: the identity provider's id of a user or a machine (Zitadel's are digits)."""
@@ -38,25 +38,63 @@ def parse_subject(text: str) -> SubjectId:
     return SubjectId(text)
 
 
-class Permission(StrEnum):
-    """What a principal may do in a company. Stable codes: they cross service boundaries."""
+Permission = NewType("Permission", str)
+"""What a principal may do in a company: ``<module>.<resource>.<action>``, declared in a manifest (§7.7).
 
-    COMPANY_READ = "company.read"
-    """Read the company, its branches and its emission points."""
-    COMPANY_MANAGE = "company.manage"
-    """Change the company, deactivate it, open branches and emission points."""
-    MEMBERSHIP_READ = "membership.read"
-    """See who holds which role in the company."""
-    MEMBERSHIP_MANAGE = "membership.manage"
-    """Grant and revoke every role but the owner's."""
-    OWNERSHIP_MANAGE = "ownership.manage"
-    """Grant and revoke the owner role."""
-    CERTIFICATE_MANAGE = "certificate.manage"
-    """Upload and replace the company's signing certificate (milestone 3)."""
-    INVOICE_READ = "invoice.read"
-    """Read the company's documents (milestone 5)."""
-    INVOICE_ISSUE = "invoice.issue"
-    """Issue documents in the company's name (milestone 5)."""
+Codes cross module boundaries as their text, which therefore never changes once declared.
+"""
+
+_PERMISSION: Final = re.compile(
+    r"[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*\.(?:read|create|issue|void|manage|own)", re.ASCII
+)
+
+
+class InvalidPermissionError(InvalidInputError):
+    """Text that is not a permission code."""
+
+    code: ClassVar[str] = "invalid_permission"
+
+    def __init__(self, text: str) -> None:
+        super().__init__(f"not a permission (<module>.<resource>.<action>): {excerpt(text)}")
+
+
+def parse_permission(text: str) -> Permission:
+    """Read a permission code: ``<module>.<resource>.<action>``.
+
+    Each part is lower-case ASCII letters, digits and underscores, led by a letter; the action is one of
+    ``read``, ``create``, ``issue``, ``void``, ``manage`` or ``own``.
+    """
+    if _PERMISSION.fullmatch(text) is None:
+        raise InvalidPermissionError(text)
+    return Permission(text)
+
+
+class PermissionDeniedError(ForbiddenError):
+    """The caller holds a role in the company, but not one that allows this.
+
+    Raised wherever a permission is checked: on a request (``CompanyAccess.require``), and by a module under
+    the company's lock, when the role changed after the request was checked. One class, one code.
+    """
+
+    code: ClassVar[str] = "permission_denied"
+
+    permission: Permission
+
+    def __init__(self, permission: Permission) -> None:
+        super().__init__(f"this needs the permission {permission}")
+        self.permission = permission
+
+
+class CompanyNotFoundError(NotFoundError):
+    """No such company for the caller: it does not exist, or the caller holds no role in it.
+
+    A caller learns nothing of companies it has no part in, its own organization's or another's.
+    """
+
+    code: ClassVar[str] = "company_not_found"
+
+    def __init__(self, company: CompanyId) -> None:
+        super().__init__(f"company {company} was not found")
 
 
 @final

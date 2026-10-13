@@ -2,11 +2,11 @@
 
 from ledger_identity.domain.errors import (
     BranchNotFoundError,
-    CompanyNotFoundError,
     EmissionPointNotFoundError,
     OrganizationNotFoundError,
 )
 from ledger_identity.domain.membership import permissions_in
+from ledger_kernel.access import CompanyNotFoundError
 lazy from ledger_identity.application.ports import IdentityUnit
 lazy from ledger_identity.domain.branches import Branch, EmissionPoint
 lazy from ledger_identity.domain.company import Company

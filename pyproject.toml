@@ -40,7 +40,7 @@ package = false
 constraint-dependencies = ["cryptography>=50.0.2"]  # joserfc's: the first release with CPython 3.15 wheels of its own
 
 [tool.uv.workspace]
-members = ["packages/*", "modules/*", "tools/*", "countries/do", "countries/do/testing", "apps/*"]
+members = ["packages/*", "modules/*", "tools/*", "countries/*", "countries/*/testing", "apps/*"]
 
 [tool.uv.sources]
 ledger-kernel = { workspace = true }
@@ -348,16 +348,19 @@ forbidden_modules = [
     "httpx", "joserfc", "cryptography", "alembic", "granian",
 ]
 
-# ── The Dominican pack (the v2-M1b spike) ───────────────────────────────────────
-# It stands alone so the restructure can move libs/ and services/ at any time; the integration milestone takes
-# the kernel off the first contract's list.
+# ── Countries (§4.6 contracts 3-5; written by hand until `ledger-devtools sync` generates them, Task 19) ──
+# The DO pack stands on the kernel; its channel takes the platform when it gets an assembly (v2-M3).
 [[tool.importlinter.contracts]]
-name = "The DO pack imports nothing of the workspace"
+name = "The DO pack imports the kernel and nothing else of the workspace"
 type = "forbidden"
 source_modules = ["ledger_country_do", "ledger_country_do_testing"]
-forbidden_modules = [
-    "ledger_kernel", "ledger_platform", "ledger_identity", "ledger_testing", "ledger_devtools",
-]
+forbidden_modules = ["ledger_platform", "ledger_identity", "ledger_testing", "ledger_devtools"]
+
+[[tool.importlinter.contracts]]
+name = "Modules never import countries"
+type = "forbidden"
+source_modules = ["ledger_identity"]
+forbidden_modules = ["ledger_country_do", "ledger_country_do_testing"]
 
 # Starlette is production code for the platform and identity, and test tooling (the fake DGII's) for the DO
 # pack: hence a contract of the pack's own rather than an entry in "Production code never imports test tooling".
@@ -367,11 +370,19 @@ type = "forbidden"
 source_modules = ["ledger_country_do"]
 forbidden_modules = ["starlette"]
 
+# A regime is data in the kernel's types: the kernel and the standard library only (ADR 0005).
 [[tool.importlinter.contracts]]
-name = "The DO regime is pure data: the standard library only"
+name = "Regimes are pure"
 type = "forbidden"
 source_modules = ["ledger_country_do.regime"]
-forbidden_modules = ["ledger_country_do.channels", "lxml", "httpx", "pydantic", "cryptography"]
+forbidden_modules = [
+    "ledger_country_do.channels", "ledger_country_do_testing", "ledger_platform", "ledger_identity",
+    "ledger_testing", "ledger_devtools",
+    # every third-party distribution of the workspace a regime could reach for
+    "lxml", "httpx", "pydantic", "pydantic_settings", "cryptography", "starlette", "fastapi", "sqlalchemy",
+    "psycopg", "structlog", "opentelemetry", "prometheus_client", "joserfc", "alembic", "granian", "grpc",
+    "google", "xmlschema", "signxml", "testcontainers",
+]
 
 [[tool.importlinter.contracts]]
 name = "Channel do-ecf-v1 is layered: adapters -> application -> domain"

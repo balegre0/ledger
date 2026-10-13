@@ -13,8 +13,8 @@ from ledger_identity.adapters.http.models import BranchView
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import commands, queries
 from ledger_identity.domain.ids import BranchId
+from ledger_identity.domain.roles import COMPANIES_MANAGE, COMPANIES_READ
 from ledger_identity.domain.text import parse_code, parse_name
-from ledger_kernel.access import Permission
 from ledger_kernel.ids import parse_uuid
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.http import (
@@ -56,8 +56,8 @@ def router(context: ApiContext) -> APIRouter:
     branches = APIRouter(prefix="/v1/companies/{company_id}/branches", tags=["branches"])
     database = context.database
     reader, manager = (
-        allowed(context.in_company, Permission.COMPANY_READ),
-        allowed(context.in_company, Permission.COMPANY_MANAGE),
+        allowed(context.in_company, COMPANIES_READ),
+        allowed(context.in_company, COMPANIES_MANAGE),
     )
 
     @branches.post("", status_code=HTTPStatus.CREATED, response_model=BranchView, responses=OPEN)

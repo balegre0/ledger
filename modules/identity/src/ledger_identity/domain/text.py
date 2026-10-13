@@ -12,14 +12,14 @@ from typing import Final, NewType
 from ledger_identity.domain.errors import InvalidCodeError, InvalidNameError
 
 LegalName = NewType("LegalName", str)
-"""A company's registered name, as DGII knows it."""
+"""A company's registered name, as its tax authority knows it."""
 Name = NewType("Name", str)
 """The name of a branch or an emission point."""
 Code = NewType("Code", str)
 """A short code of a branch or an emission point, unique where it lives."""
 
-MAX_LEGAL_NAME: Final = 150
-"""As long as an e-CF's ``RazonSocialEmisor`` may be."""
+MAX_LEGAL_NAME: Final = 300
+"""Generic (§7.1): a channel enforces its own, shorter limit (an e-CF's ``RazonSocialEmisor`` is 150)."""
 MAX_NAME: Final = 100
 MAX_CODE: Final = 10
 """The message of ``InvalidCodeError`` spells this limit as a literal: its test pins the two together."""

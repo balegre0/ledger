@@ -10,7 +10,7 @@ from typing import ClassVar, final
 
 from ledger_kernel.events import Event
 lazy from ledger_kernel.access import SubjectId
-lazy from ledger_kernel.countries.do import TaxId
+lazy from ledger_kernel.tax_ids import TaxId
 
 
 @final

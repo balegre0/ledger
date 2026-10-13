@@ -31,7 +31,7 @@ lazy from ledger_testing.issuer import LocalIssuer
 lazy from ledger_testing.postgres import PostgresServer, Template, WorkerDatabase
 
 SCHEMAS: Final = ("platform", "identity")
-COMPANY: Final = {"tax_id": "101850043", "legal_name": "Duarte"}
+COMPANY: Final = {"tax_id": {"scheme": "do.rnc", "value": "101850043"}, "legal_name": "Duarte"}
 """What the ``company`` fixture registers."""
 PUBLISHES: Final = frozenset(event.type for event in MANIFEST.events.publishes)
 

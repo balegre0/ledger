@@ -4,6 +4,7 @@ from hypothesis import strategies as st
 
 from ledger_country_do.channels.ecf_v1.domain.encf import MAX_SEQUENCE, EcfType, Encf, InvalidEncfError
 from ledger_country_do.regime import REGIME
+from ledger_country_do.regime.entries import document_type
 
 
 def test_an_encf_is_e_the_type_and_ten_digits() -> None:
@@ -47,4 +48,4 @@ def test_an_encf_reads_back_as_written(ecf_type: EcfType, sequence: int) -> None
 def test_the_e_cf_types_are_the_regime_s_document_types_exactly() -> None:
     assert {ecf_type.value for ecf_type in EcfType} == {each.code for each in REGIME.document_types}
     for ecf_type in EcfType:
-        assert REGIME.document_type(ecf_type.value).code == ecf_type.value
+        assert document_type(REGIME, ecf_type.value).code == ecf_type.value

@@ -19,11 +19,12 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     BillingIndicator,
     DraftInvalidError,
 )
-from ledger_country_do.channels.ecf_v1.domain.errors import RegimeDefectError, from_regime
+from ledger_country_do.channels.ecf_v1.domain.errors import from_regime
 from ledger_country_do.regime import REGIME
+from ledger_country_do.regime.entries import rate
 from ledger_country_do.regime.rounding import round_with
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
-lazy from ledger_country_do.regime.definitions import RegimeDef
+lazy from ledger_kernel.regimes import RegimeDef
 
 _HUNDRED = Decimal(100)
 _ZERO = Decimal(0)
@@ -71,17 +72,8 @@ class _TotalTooLargeError(DraftInvalidError):
         super().__init__("total", f"(MontoTotal) has at most {INTEGER_DIGITS} integer digits")
 
 
-class _RatelessCategoryError(RegimeDefectError):
-    def __init__(self, key: str) -> None:
-        super().__init__(f"{key} has no rate, yet lines are taxed at it")
-
-
 def _percent(regime: RegimeDef, indicator: BillingIndicator, day: date) -> Decimal:
-    key = CATEGORY_OF[indicator]
-    rate = from_regime(lambda: regime.category(key).rate_at(day))
-    if rate is None:
-        raise _RatelessCategoryError(key)
-    return rate
+    return from_regime(lambda: rate(regime, CATEGORY_OF[indicator], day))
 
 
 def compute_totals(draft: EcfDraft, regime: RegimeDef = REGIME) -> Totals:
