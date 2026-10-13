@@ -13,6 +13,7 @@ from ledger_country_do.channels.ecf_v1.domain.notation import (
     dgii_number,
     dgii_percent,
     local_date,
+    parse_dgii_moment,
 )
 
 D = Decimal
@@ -64,3 +65,17 @@ def test_a_naive_moment_is_refused_never_read_in_the_machine_s_time(
     with pytest.raises(NaiveMomentError) as caught:
         read(datetime(2026, 10, 13, 9, 30, tzinfo=UTC).replace(tzinfo=None))
     assert caught.value.code == "do_ecf_naive_moment"
+
+
+def test_a_dgii_moment_reads_back_in_the_dominican_republic_s_time() -> None:
+    moment = datetime(2026, 10, 13, 13, 30, 5, tzinfo=UTC)
+    assert parse_dgii_moment(dgii_moment(moment)) == moment
+    assert parse_dgii_moment(" 13-10-2026 09:30:05 ") == moment
+    found = parse_dgii_moment("13-10-2026 09:30:05")
+    assert found is not None
+    assert found.tzinfo is SANTO_DOMINGO
+
+
+@pytest.mark.parametrize("text", ["31-02-2026 10:00:00", "2026-10-13T09:30:05", "13-10-2026", "", "ayer"])
+def test_what_is_no_dgii_moment_reads_as_none(text: str) -> None:
+    assert parse_dgii_moment(text) is None

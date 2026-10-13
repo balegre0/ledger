@@ -26,7 +26,7 @@ from starlette.responses import JSONResponse, Response
 lazy from starlette.requests import Request
 
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
-from ledger_country_do.channels.ecf_v1.domain.notation import SANTO_DOMINGO
+from ledger_country_do.channels.ecf_v1.domain.notation import dgii_moment
 from ledger_country_do_testing.fake_dgii.emitter import (
     ECF_FORMATS,
     NOT_A_FILE,
@@ -51,7 +51,6 @@ SPECIFICATION_ERROR: Final = 1
 SIGNATURE_ERROR: Final = 2
 DUPLICATE: Final = 3
 NOT_THIS_BUYER: Final = 4
-_MOMENT: Final = "%d-%m-%Y %H:%M:%S"
 _ARECF_RNC: Final = re.compile(r"[0-9]{9}|[0-9]{11}")
 _ARECF_ENCF: Final = re.compile(r"[a-zA-Z0-9]{13}|[a-zA-Z0-9]{11}|[a-zA-Z0-9]{9}")
 """The ARECF's ``RNCType`` and ``eNCFType`` (*Formato Acuse de Recibo v1.0*): what an ARECF can name."""
@@ -68,7 +67,7 @@ def arecf(issuer_rnc: str, buyer_rnc: str, encf: str, *, reason: int | None, at:
         '<?xml version="1.0" encoding="utf-8"?><ARECF><DetalleAcusedeRecibo><Version>1.0</Version>'
         f"<RNCEmisor>{escape(issuer_rnc)}</RNCEmisor><RNCComprador>{escape(buyer_rnc)}</RNCComprador>"
         f"<eNCF>{escape(encf)}</eNCF><Estado>{state}</Estado>{why}"
-        f"<FechaHoraAcuseRecibo>{at.astimezone(SANTO_DOMINGO).strftime(_MOMENT)}</FechaHoraAcuseRecibo>"
+        f"<FechaHoraAcuseRecibo>{dgii_moment(at)}</FechaHoraAcuseRecibo>"
         "</DetalleAcusedeRecibo></ARECF>"
     ).encode()
 

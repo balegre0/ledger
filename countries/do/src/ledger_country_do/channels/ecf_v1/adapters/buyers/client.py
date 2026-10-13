@@ -65,7 +65,7 @@ from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import texts
 from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import checked
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError, EcfUnavailableError
-from ledger_country_do.channels.ecf_v1.domain.notation import SANTO_DOMINGO
+from ledger_country_do.channels.ecf_v1.domain.notation import parse_dgii_moment
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import Endpoint, Resolve
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiTimeouts, DirectoryEntry
 lazy from ledger_country_do.channels.ecf_v1.adapters.signing.trust import CounterpartyTrust
@@ -78,7 +78,6 @@ SEED_PATH: Final = "/fe/autenticacion/api/semilla"
 VALIDATION_PATH: Final = "/fe/autenticacion/api/validacioncertificado"
 _OK: Final = 200
 _RECEIVED: Final = "0"
-_MOMENT: Final = "%d-%m-%Y %H:%M:%S"
 _TOKEN: Final = TypeAdapter(TokenAnswer)
 _DETAIL: Final = "DetalleAcusedeRecibo/"
 _NOT_OPEN: Final = "a client not opened"
@@ -209,10 +208,10 @@ def _integer(text: str | None) -> str | None:
 
 
 def _acknowledged(text: str | None) -> datetime:
-    try:
-        return datetime.strptime((text or "").strip(), _MOMENT).replace(tzinfo=SANTO_DOMINGO)
-    except ValueError as error:
-        raise ArecfMomentError from error
+    moment = parse_dgii_moment(text or "")
+    if moment is None:
+        raise ArecfMomentError
+    return moment
 
 
 @final

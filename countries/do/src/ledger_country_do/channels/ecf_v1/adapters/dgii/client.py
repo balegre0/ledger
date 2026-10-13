@@ -70,7 +70,7 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
     TrackId,
 )
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError
-from ledger_country_do.channels.ecf_v1.domain.notation import SANTO_DOMINGO
+from ledger_country_do.channels.ecf_v1.domain.notation import SANTO_DOMINGO, parse_dgii_moment
 from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import MessageAnswer
@@ -86,8 +86,6 @@ ACCEPTED_ENCODING: Final = "gzip"
 _PLAIN: Final = "identity"
 _GZIP_WINDOW: Final = 31
 """``zlib``'s ``wbits`` for exactly one gzip member (16 + a 32 KiB window)."""
-_DGII_OFFSET: Final = "-0400"
-"""Santo Domingo's offset, all year (no daylight saving: ``notation.SANTO_DOMINGO``)."""
 _SERVER_ERROR: Final = 500
 _TOO_MANY: Final = 429
 _UNAUTHORIZED: Final = 401
@@ -167,10 +165,7 @@ def _received_at(text: str) -> datetime | None:
     try:
         moment = datetime.fromisoformat(text.strip())
     except ValueError:
-        try:
-            return datetime.strptime(f"{text.strip()} {_DGII_OFFSET}", "%d-%m-%Y %H:%M:%S %z")
-        except ValueError:
-            return None
+        return parse_dgii_moment(text)
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=SANTO_DOMINGO)
 
 
