@@ -577,6 +577,7 @@ async def test_revoking_a_revoked_role_again_changes_and_announces_nothing(state
     revoked, announced = state.memberships[company.id, VIEWER], len(state.events)
     await commands.revoke_role(state.unit(LATER), company.id, subject=VIEWER, actor=OWNER)
     assert (state.memberships[company.id, VIEWER], len(state.events)) == (revoked, announced)
+    assert [type(event) for event in state.events].count(MembershipRevoked) == 1
     with pytest.raises(MembershipNotFoundError):
         await commands.revoke_role(state.unit(), company.id, subject=SubjectId("4004"), actor=OWNER)
 

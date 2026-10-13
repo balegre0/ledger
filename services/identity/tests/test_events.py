@@ -180,3 +180,17 @@ async def test_every_replica_following_identity_hears_a_company_deactivated(
     assert (await client.post(f"/v1/companies/{company}/deactivate", headers=headers)).status_code == 200
     expected = (ORGANIZATION, CompanyId(UUID(company)))
     await within(10, cache.arrived, lambda: expected in cache.companies)
+
+
+async def test_a_membership_revoked_twice_is_announced_once(
+    client: httpx.AsyncClient, owner: Caller, company: str, heard: Heard, database: Database
+) -> None:
+    path = f"/v1/companies/{company}/memberships/3001"
+    assert (await client.put(path, json={"role": "viewer"}, headers=owner.bearer())).status_code == 201
+    assert [(await client.delete(path, headers=owner.bearer())).status_code for _ in range(2)] == [204, 204]
+    # Both revocations committed before they answered: whatever they stored is in the outbox, and the relay
+    # deletes a row only once JetStream has the event. An empty outbox leaves nothing more to come.
+    await eventually(lambda: nothing_waits_in_the_outbox(database))
+    revoked = wire.MembershipRevoked.DESCRIPTOR.full_name
+    await within(10, heard.arrived, lambda: any(event.type == revoked for event in heard.about(company)))
+    assert [event.type for event in heard.about(company)].count(revoked) == 1
