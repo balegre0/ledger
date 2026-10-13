@@ -3,7 +3,7 @@ name = "ledger-workspace"
 version = "0.0.0"
 description = "Workspace root: the shared tooling of every ledger package and service."
 requires-python = ">=3.15"
-dependencies = ["ledger-kernel", "ledger-contracts", "ledger-platform"]
+dependencies = ["ledger-kernel", "ledger-contracts", "ledger-platform", "ledger-identity"]
 
 [dependency-groups]
 dev = [
@@ -34,13 +34,14 @@ package = false
 constraint-dependencies = ["cryptography>=50.0.2"]  # joserfc's: the first release with CPython 3.15 wheels of its own
 
 [tool.uv.workspace]
-members = ["libs/*"]
+members = ["libs/*", "services/*"]
 
 [tool.uv.sources]
 ledger-kernel = { workspace = true }
 ledger-contracts = { workspace = true }
 ledger-platform = { workspace = true }
 ledger-testing = { workspace = true }
+ledger-identity = { workspace = true }
 
 # ── Tasks: `uv run poe <task>` ──────────────────────────────────────────────────
 [tool.poe.tasks]
@@ -52,15 +53,17 @@ mypy-kernel = { cmd = "mypy libs/kernel" }
 mypy-contracts = { cmd = "mypy libs/contracts" }
 mypy-platform = { cmd = "mypy libs/platform" }
 mypy-testing = { cmd = "mypy libs/testing" }
+mypy-identity = { cmd = "mypy services/identity" }
 mypy-workspace = { cmd = "mypy tests" }
-mypy = { sequence = ["mypy-kernel", "mypy-contracts", "mypy-platform", "mypy-testing", "mypy-workspace"], help = "Type check #2, one package at a time (each has its own tests), then the workspace's own tests" }
+mypy = { sequence = ["mypy-kernel", "mypy-contracts", "mypy-platform", "mypy-testing", "mypy-identity", "mypy-workspace"], help = "Type check #2, one package at a time (each has its own tests), then the workspace's own tests" }
 types = { sequence = ["pyright", "mypy"], help = "Both type checkers" }
 arch = { cmd = "lint-imports", help = "Architecture contracts (import-linter)" }
 deps-kernel = { cmd = "deptry libs/kernel/src --config libs/kernel/pyproject.toml" }
 deps-contracts = { cmd = "deptry libs/contracts/src --config libs/contracts/pyproject.toml" }
 deps-platform = { cmd = "deptry libs/platform/src --config libs/platform/pyproject.toml" }
 deps-testing = { cmd = "deptry libs/testing/src --config libs/testing/pyproject.toml" }
-deps = { sequence = ["deps-kernel", "deps-contracts", "deps-platform", "deps-testing"], help = "Unused / missing / transitive dependencies, per package" }
+deps-identity = { cmd = "deptry services/identity/src --config services/identity/pyproject.toml" }
+deps = { sequence = ["deps-kernel", "deps-contracts", "deps-platform", "deps-testing", "deps-identity"], help = "Unused / missing / transitive dependencies, per package" }
 spell = { cmd = "typos", help = "Spell check" }
 # Poe expands the `**` glob to absolute paths, and protoc only accepts a file that lies under a --proto_path
 # spelled the same way: hence the absolute --proto_path. The *_out directories take no such comparison and
@@ -118,7 +121,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"{libs/*/tests,tests}/**" = [
+"{libs/*/tests,services/*/tests,tests}/**" = [
     "S101",    # assert is the point of a test
     "D",       # test names are the documentation
     "PLR2004", # magic values are fine in assertions
@@ -142,7 +145,7 @@ runtime-evaluated-base-classes = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing", "ledger"]
+known-first-party = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing", "ledger_identity", "ledger"]
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -151,7 +154,7 @@ exclude = ["*.md"]  # ruff 0.17 formats Python blocks inside Markdown; the docs 
 # ── Type checker #1: basedpyright ───────────────────────────────────────────────
 [tool.basedpyright]
 pythonVersion = "3.15"
-include = ["libs", "tests", "conftest.py"]
+include = ["libs", "services", "tests", "conftest.py"]
 exclude = ["libs/contracts/src/ledger", "**/.venv", "**/__pycache__"]
 typeCheckingMode = "all"
 failOnWarnings = true
@@ -199,7 +202,7 @@ warn_required_dynamic_aliases = true
 # ── Tests ───────────────────────────────────────────────────────────────────────
 [tool.pytest]
 minversion = "9.0"
-testpaths = ["libs", "tests"]
+testpaths = ["libs", "services", "tests"]
 addopts = [
     "--strict-markers",
     "--strict-config",
@@ -214,7 +217,7 @@ asyncio_default_fixture_loop_scope = "function"
 
 [tool.coverage.run]
 branch = true
-source_pkgs = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing"]
+source_pkgs = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing", "ledger_identity"]
 core = "ctrace"
 
 [tool.coverage.report]
@@ -224,13 +227,13 @@ partial_branches = []  # no "pragma: no branch": every branch counts
 
 # ── Architecture contracts (import-linter) ──────────────────────────────────────
 [tool.importlinter]
-root_packages = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing"]
+root_packages = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing", "ledger_identity"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Production code never imports test tooling"
 type = "forbidden"
-source_modules = ["ledger_kernel", "ledger_contracts", "ledger_platform"]
+source_modules = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_identity"]
 forbidden_modules = ["pytest", "hypothesis", "testcontainers", "ledger_testing"]
 
 [[tool.importlinter.contracts]]
@@ -270,3 +273,18 @@ name = "Contracts know the wire, not the infrastructure"
 type = "forbidden"
 source_modules = ["ledger_contracts"]
 forbidden_modules = ["pydantic", "sqlalchemy", "nats", "fastapi", "starlette", "structlog", "opentelemetry", "prometheus_client", "psycopg"]
+
+[[tool.importlinter.contracts]]
+name = "Libraries never import services"
+type = "forbidden"
+source_modules = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing"]
+forbidden_modules = ["ledger_identity"]
+
+[[tool.importlinter.contracts]]
+name = "Identity's domain is the standard library and the kernel"
+type = "forbidden"
+source_modules = ["ledger_identity.domain"]
+forbidden_modules = [
+    "ledger_contracts", "ledger_platform", "pydantic", "sqlalchemy", "fastapi", "starlette", "grpc", "nats",
+    "structlog", "google", "psycopg",
+]

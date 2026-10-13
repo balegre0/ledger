@@ -1,0 +1,13 @@
+[project]
+name = "ledger-identity"
+version = "0.1.0"
+description = "The identity service: organizations, companies, branches, emission points, memberships and roles."
+requires-python = ">=3.15"
+dependencies = ["ledger-kernel"]
+
+[tool.uv.sources]
+ledger-kernel = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"

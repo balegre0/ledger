@@ -5,6 +5,7 @@ requires-python = ">=3.15"
 [manifest]
 members = [
     "ledger-contracts",
+    "ledger-identity",
     "ledger-kernel",
     "ledger-platform",
     "ledger-testing",
@@ -611,6 +612,17 @@ requires-dist = [
 ]
 
 [[package]]
+name = "ledger-identity"
+version = "0.1.0"
+source = { editable = "services/identity" }
+dependencies = [
+    { name = "ledger-kernel" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "ledger-kernel", editable = "libs/kernel" }]
+
+[[package]]
 name = "ledger-kernel"
 version = "0.1.0"
 source = { editable = "libs/kernel" }
@@ -689,6 +701,7 @@ version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "ledger-contracts" },
+    { name = "ledger-identity" },
     { name = "ledger-kernel" },
     { name = "ledger-platform" },
 ]
@@ -719,6 +732,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "ledger-contracts", editable = "libs/contracts" },
+    { name = "ledger-identity", editable = "services/identity" },
     { name = "ledger-kernel", editable = "libs/kernel" },
     { name = "ledger-platform", editable = "libs/platform" },
 ]

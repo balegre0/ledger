@@ -12,7 +12,7 @@ from pydantic import TypeAdapter
 
 ROOT: Final = Path(__file__).resolve().parent.parent
 PACKAGE_DIRECTORIES: Final = ("libs", "services")
-BILLING_DEPTRY: Final = "deptry services/billing/src --config services/billing/pyproject.toml"
+BILLING_DEPTRY: Final = "deptry apps/billing/src --config apps/billing/pyproject.toml"
 
 
 class Task(TypedDict):
@@ -104,11 +104,11 @@ def test_every_package_of_the_workspace_is_in_every_list_the_gate_runs_from() ->
 
 def test_a_package_left_out_of_the_lists_is_named() -> None:
     """The check itself: a service the configuration does not know of is reported in every list."""
-    found = packages(ROOT) | {"services/billing": ("ledger_billing",)}
+    found = packages(ROOT) | {"apps/billing": ("ledger_billing",)}
     assert unguarded(found, workspace()) == [
-        "services/billing: ledger_billing not in [tool.coverage.run] source_pkgs",
-        "services/billing: ledger_billing not in [tool.importlinter] root_packages",
-        "services/billing: no task of the mypy sequence runs 'mypy services/billing'",
-        f"services/billing: no task of the deps sequence runs '{BILLING_DEPTRY}'",
-        "services/billing: under no [tool.pytest] testpaths",
+        "apps/billing: ledger_billing not in [tool.coverage.run] source_pkgs",
+        "apps/billing: ledger_billing not in [tool.importlinter] root_packages",
+        "apps/billing: no task of the mypy sequence runs 'mypy apps/billing'",
+        f"apps/billing: no task of the deps sequence runs '{BILLING_DEPTRY}'",
+        "apps/billing: under no [tool.pytest] testpaths",
     ]
