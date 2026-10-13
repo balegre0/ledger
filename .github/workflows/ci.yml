@@ -28,17 +28,17 @@ jobs:
       - name: Generated code is up to date
         run: |
           uv run poe proto
-          git add --intent-to-add libs/contracts/src/ledger
-          git diff --exit-code -- libs/contracts/src/ledger
+          git add --intent-to-add contracts/src/ledger
+          git diff --exit-code -- contracts/src/ledger
       - name: Protobuf breaking changes against main
         if: github.event_name == 'pull_request'
         # Runs as the owner of the checkout, not as root: nothing root-owned lands in the workspace and git never
         # has to trust a repository owned by someone else. HOME must be writable for buf's cache directory.
         run: |
-          if git cat-file -e origin/main:libs/contracts/buf.yaml 2>/dev/null; then
+          if git cat-file -e origin/main:contracts/buf.yaml 2>/dev/null; then
             docker run --rm --user "$(id -u):$(id -g)" --env HOME=/tmp \
-              --volume "$PWD:/repo" --workdir /repo/libs/contracts bufbuild/buf:1.73.0@sha256:75d8f756f0919dcded71e67968a91adfe55fe4dd62c4900c57bbfcd7fe625608 \
-              breaking --against '/repo/.git#branch=origin/main,subdir=libs/contracts'
+              --volume "$PWD:/repo" --workdir /repo/contracts bufbuild/buf:1.73.0@sha256:75d8f756f0919dcded71e67968a91adfe55fe4dd62c4900c57bbfcd7fe625608 \
+              breaking --against '/repo/.git#branch=origin/main,subdir=contracts'
           fi
       - name: Format, lint, types x2, architecture, deps, spelling, tests
         run: uv run poe check
@@ -53,7 +53,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: services/identity/Dockerfile
+          file: modules/identity/Dockerfile
           tags: ledger-identity:local
           load: true
           cache-from: type=gha,scope=identity

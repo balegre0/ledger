@@ -6,8 +6,8 @@ docker_compose("deploy/local/compose.yaml")
 docker_build(
     "ledger-identity:local",
     ".",
-    dockerfile="services/identity/Dockerfile",
-    only=["pyproject.toml", "uv.lock", ".python-version", "libs", "services"],
+    dockerfile="modules/identity/Dockerfile",
+    only=["pyproject.toml", "uv.lock", ".python-version", "packages", "modules", "contracts"],
     ignore=["**/tests", "**/__pycache__", "**/.venv"],
 )
 

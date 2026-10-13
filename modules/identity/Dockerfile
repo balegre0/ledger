@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # The identity service. Built from the workspace's lockfile with uv; run by Granian on uvloop, as an unprivileged
 # user, from a file system it never writes to. Build from the repository root:
-#   docker build -f services/identity/Dockerfile -t ledger-identity:local .
+#   docker build -f modules/identity/Dockerfile -t ledger-identity:local .
 #
 # Deploying it:
 # - Probes: /livez for liveness (the process answers), /readyz for readiness (PostgreSQL, NATS, the workers, the
@@ -40,11 +40,11 @@ WORKDIR /src
 # Dependencies first, in their own layer: it is rebuilt when the lockfile or a package's manifest changes, not
 # when code does. Every member of the workspace is listed (uv checks the lockfile against all of them).
 COPY pyproject.toml uv.lock .python-version ./
-COPY libs/kernel/pyproject.toml libs/kernel/
-COPY libs/contracts/pyproject.toml libs/contracts/
-COPY libs/platform/pyproject.toml libs/platform/
-COPY libs/testing/pyproject.toml libs/testing/
-COPY services/identity/pyproject.toml services/identity/
+COPY packages/kernel/pyproject.toml packages/kernel/
+COPY contracts/pyproject.toml contracts/
+COPY packages/platform/pyproject.toml packages/platform/
+COPY packages/testing/pyproject.toml packages/testing/
+COPY modules/identity/pyproject.toml modules/identity/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-install-workspace --package ledger-identity
 # Then the workspace's own packages.

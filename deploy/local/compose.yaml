@@ -16,7 +16,7 @@
 # re-pushed (a rebuild on a newer base image keeps it): Zitadel's is pinned by digest too, and pinning the others'
 # digests is a later hardening step.
 #
-# Services: identity runs from its production image (services/identity/Dockerfile), read-only, as nonroot, with
+# Services: identity runs from its production image (modules/identity/Dockerfile), read-only, as nonroot, with
 # its migrations applied first by the one-shot identity-migrate. Its database and role come from
 # postgres/init.sql; a data volume made before that file listed them needs `docker compose down -v`. The profile
 # `zitadel` adds a local identity provider (zitadel/README.md).
@@ -61,7 +61,7 @@ services:
     image: ledger-identity:local
     build:
       context: ../..
-      dockerfile: services/identity/Dockerfile
+      dockerfile: modules/identity/Dockerfile
     entrypoint: ["/app/.venv/bin/ledger-identity-migrate"]
     env_file: [identity.env]
     read_only: true

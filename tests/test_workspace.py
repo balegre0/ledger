@@ -1,6 +1,6 @@
 """The gate covers every package of the workspace.
 
-A package added under ``libs/`` or ``services/`` and left out of one of the lists the gate runs from is a
+A workspace member (``[tool.uv.workspace] members``) left out of one of the lists the gate runs from is a
 failure here, not a package silently left unchecked.
 """
 
@@ -11,7 +11,7 @@ from typing import Final, NotRequired, TypedDict
 from pydantic import TypeAdapter
 
 ROOT: Final = Path(__file__).resolve().parent.parent
-PACKAGE_DIRECTORIES: Final = ("libs", "services")
+MODULES_DIRECTORY: Final = "modules"
 SERVICES_CONTRACT: Final = "Libraries never import services"
 BILLING_DEPTRY: Final = "deptry apps/billing/src --config apps/billing/pyproject.toml"
 
@@ -48,7 +48,16 @@ class Pytest(TypedDict):
     testpaths: list[str]
 
 
+class UvWorkspace(TypedDict):
+    members: list[str]
+
+
+class Uv(TypedDict):
+    workspace: UvWorkspace
+
+
 class Tools(TypedDict):
+    uv: Uv
     poe: Poe
     coverage: Coverage
     importlinter: ImportLinter
@@ -62,11 +71,11 @@ class Workspace(TypedDict):
 WORKSPACE: Final = TypeAdapter(Workspace)
 
 
-def packages(root: Path) -> dict[str, tuple[str, ...]]:
-    """Every package of the workspace by directory (``libs/kernel``), with the modules its ``src`` holds."""
+def packages(root: Path, config: Workspace) -> dict[str, tuple[str, ...]]:
+    """Every workspace member by directory (``packages/kernel``), with the modules its ``src`` holds."""
     found: dict[str, tuple[str, ...]] = {}
-    for parent in PACKAGE_DIRECTORIES:
-        for project in sorted((root / parent).glob("*/pyproject.toml")):
+    for member in config["tool"]["uv"]["workspace"]["members"]:
+        for project in sorted(root.glob(f"{member}/pyproject.toml")):
             directory = project.parent
             modules = tuple(sorted(init.parent.name for init in (directory / "src").glob("*/__init__.py")))
             found[directory.relative_to(root).as_posix()] = modules
@@ -89,7 +98,7 @@ def unguarded(packages: dict[str, tuple[str, ...]], config: Workspace) -> list[s
                 missing.append(f"{directory}: {module} not in [tool.coverage.run] source_pkgs")
             if module not in tools["importlinter"]["root_packages"]:
                 missing.append(f"{directory}: {module} not in [tool.importlinter] root_packages")
-        if directory.startswith("services/"):
+        if directory.startswith(f"{MODULES_DIRECTORY}/"):
             shielded = {
                 module
                 for contract in tools["importlinter"]["contracts"]
@@ -124,7 +133,7 @@ def unmeasured_migrations(root: Path, config: Workspace) -> list[str]:
         f"{directory}: not in [tool.coverage.run] source"
         for directory in sorted(
             found.relative_to(root).as_posix()
-            for found in (root / "services").glob("*/src/**/migrations")
+            for found in (root / MODULES_DIRECTORY).glob("*/src/**/migrations")
             if found.is_dir()
         )
         if directory not in measured
@@ -136,15 +145,17 @@ def workspace() -> Workspace:
 
 
 def test_every_package_of_the_workspace_is_in_every_list_the_gate_runs_from() -> None:
-    found = packages(ROOT)
-    assert {"libs/kernel", "libs/contracts", "libs/platform"} <= found.keys()
-    assert unguarded(found, workspace()) == []
+    config = workspace()
+    found = packages(ROOT, config)
+    assert {"packages/kernel", "contracts", "packages/platform", "modules/identity"} <= found.keys()
+    assert unguarded(found, config) == []
 
 
 def test_a_package_left_out_of_the_lists_is_named() -> None:
     """The check itself: a service the configuration does not know of is reported in every list."""
-    found = packages(ROOT) | {"apps/billing": ("ledger_billing",)}
-    assert unguarded(found, workspace()) == [
+    config = workspace()
+    found = packages(ROOT, config) | {"apps/billing": ("ledger_billing",)}
+    assert unguarded(found, config) == [
         "apps/billing: ledger_billing not in [tool.coverage.run] source_pkgs",
         "apps/billing: ledger_billing not in [tool.importlinter] root_packages",
         "apps/billing: no task of the mypy sequence runs 'mypy apps/billing'",
@@ -154,9 +165,10 @@ def test_a_package_left_out_of_the_lists_is_named() -> None:
 
 
 def test_a_service_the_libraries_may_import_is_named() -> None:
-    found = packages(ROOT) | {"services/billing": ("ledger_billing",)}
-    assert [line for line in unguarded(found, workspace()) if "Libraries never" in line] == [
-        "services/billing: ledger_billing not in the forbidden modules of 'Libraries never import services'"
+    config = workspace()
+    found = packages(ROOT, config) | {"modules/billing": ("ledger_billing",)}
+    assert [line for line in unguarded(found, config) if "Libraries never" in line] == [
+        "modules/billing: ledger_billing not in the forbidden modules of 'Libraries never import services'"
     ]
 
 
@@ -165,8 +177,8 @@ def test_every_services_migrations_are_measured_by_coverage() -> None:
 
 
 def test_migrations_coverage_is_not_told_of_are_named(tmp_path: Path) -> None:
-    (tmp_path / "services/billing/src/ledger_billing/adapters/migrations").mkdir(parents=True)
-    (tmp_path / "services/billing/src/ledger_billing/migrations.py").touch()  # a module, not a directory
+    (tmp_path / "modules/billing/src/ledger_billing/adapters/migrations").mkdir(parents=True)
+    (tmp_path / "modules/billing/src/ledger_billing/migrations.py").touch()  # a module, not a directory
     assert unmeasured_migrations(tmp_path, workspace()) == [
-        "services/billing/src/ledger_billing/adapters/migrations: not in [tool.coverage.run] source"
+        "modules/billing/src/ledger_billing/adapters/migrations: not in [tool.coverage.run] source"
     ]

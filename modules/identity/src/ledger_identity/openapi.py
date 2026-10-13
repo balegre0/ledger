@@ -1,4 +1,4 @@
-"""identity's OpenAPI document (3.1), as published in ``services/identity/openapi.json`` (§10).
+"""identity's OpenAPI document (3.1), as published in ``modules/identity/openapi.json`` (§10).
 
 The document is made from the code: the service is built with placeholder settings (nothing connects) and its
 app asked for its schema. A test keeps the published file equal to it.

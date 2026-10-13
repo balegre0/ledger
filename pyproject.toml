@@ -34,7 +34,7 @@ package = false
 constraint-dependencies = ["cryptography>=50.0.2"]  # joserfc's: the first release with CPython 3.15 wheels of its own
 
 [tool.uv.workspace]
-members = ["libs/*", "services/*"]
+members = ["packages/*", "modules/*", "contracts"]
 
 [tool.uv.sources]
 ledger-kernel = { workspace = true }
@@ -49,29 +49,29 @@ fmt = { shell = "ruff format . && ruff check --fix .", help = "Format and autofi
 format-check = { cmd = "ruff format --check .", help = "Verify formatting" }
 lint = { cmd = "ruff check .", help = "Lint (every ruff rule enabled)" }
 pyright = { cmd = "basedpyright", help = "Type check #1: basedpyright, mode 'all'" }
-mypy-kernel = { cmd = "mypy libs/kernel" }
-mypy-contracts = { cmd = "mypy libs/contracts" }
-mypy-platform = { cmd = "mypy libs/platform" }
-mypy-testing = { cmd = "mypy libs/testing" }
-mypy-identity = { cmd = "mypy services/identity" }
+mypy-kernel = { cmd = "mypy packages/kernel" }
+mypy-contracts = { cmd = "mypy contracts" }
+mypy-platform = { cmd = "mypy packages/platform" }
+mypy-testing = { cmd = "mypy packages/testing" }
+mypy-identity = { cmd = "mypy modules/identity" }
 mypy-workspace = { cmd = "mypy tests" }
 mypy = { sequence = ["mypy-kernel", "mypy-contracts", "mypy-platform", "mypy-testing", "mypy-identity", "mypy-workspace"], help = "Type check #2, one package at a time (each has its own tests), then the workspace's own tests" }
 types = { sequence = ["pyright", "mypy"], help = "Both type checkers" }
 arch = { cmd = "lint-imports", help = "Architecture contracts (import-linter)" }
-deps-kernel = { cmd = "deptry libs/kernel/src --config libs/kernel/pyproject.toml" }
-deps-contracts = { cmd = "deptry libs/contracts/src --config libs/contracts/pyproject.toml" }
-deps-platform = { cmd = "deptry libs/platform/src --config libs/platform/pyproject.toml" }
-deps-testing = { cmd = "deptry libs/testing/src --config libs/testing/pyproject.toml" }
-deps-identity = { cmd = "deptry services/identity/src --config services/identity/pyproject.toml" }
+deps-kernel = { cmd = "deptry packages/kernel/src --config packages/kernel/pyproject.toml" }
+deps-contracts = { cmd = "deptry contracts/src --config contracts/pyproject.toml" }
+deps-platform = { cmd = "deptry packages/platform/src --config packages/platform/pyproject.toml" }
+deps-testing = { cmd = "deptry packages/testing/src --config packages/testing/pyproject.toml" }
+deps-identity = { cmd = "deptry modules/identity/src --config modules/identity/pyproject.toml" }
 deps = { sequence = ["deps-kernel", "deps-contracts", "deps-platform", "deps-testing", "deps-identity"], help = "Unused / missing / transitive dependencies, per package" }
 spell = { cmd = "typos", help = "Spell check" }
 # Poe expands the `**` glob to absolute paths, and protoc only accepts a file that lies under a --proto_path
 # spelled the same way: hence the absolute --proto_path. The *_out directories take no such comparison and
 # stay relative to the project root, where poe runs every task. CI regenerates and diffs the committed code.
-proto = { cmd = "python -m grpc_tools.protoc --proto_path=${POE_ROOT}/libs/contracts/proto --python_out=libs/contracts/src --mypy_out=libs/contracts/src --grpc_python_out=libs/contracts/src --mypy_grpc_out=libs/contracts/src libs/contracts/proto/ledger/**/*.proto", help = "Regenerate the code of every .proto" }
-proto-lint = { cmd = "docker run --rm --volume ${POE_ROOT}/libs/contracts:/workspace --workdir /workspace bufbuild/buf:1.73.0@sha256:75d8f756f0919dcded71e67968a91adfe55fe4dd62c4900c57bbfcd7fe625608 lint", help = "buf lint" }
+proto = { cmd = "python -m grpc_tools.protoc --proto_path=${POE_ROOT}/contracts/proto --python_out=contracts/src --mypy_out=contracts/src --grpc_python_out=contracts/src --mypy_grpc_out=contracts/src contracts/proto/ledger/**/*.proto", help = "Regenerate the code of every .proto" }
+proto-lint = { cmd = "docker run --rm --volume ${POE_ROOT}/contracts:/workspace --workdir /workspace bufbuild/buf:1.73.0@sha256:75d8f756f0919dcded71e67968a91adfe55fe4dd62c4900c57bbfcd7fe625608 lint", help = "buf lint" }
 test = { cmd = "pytest", help = "Tests with coverage" }
-openapi = { cmd = "ledger-identity-openapi services/identity/openapi.json", help = "Regenerate the published OpenAPI documents" }
+openapi = { cmd = "ledger-identity-openapi modules/identity/openapi.json", help = "Regenerate the published OpenAPI documents" }
 check = { sequence = ["format-check", "lint", "suppressions", "types", "arch", "deps", "spell", "proto-lint", "test"], help = "Everything CI runs" }
 
 # Zero suppressions: no Python file outside the generated protobuf code may switch a check off.
@@ -100,7 +100,7 @@ subprocess.run([
     "-e", "#[[:space:]]*(based)?pyright:",
     "-e", "#[[:space:]]*(flake8|isort|mypy|ruff):",
     "-e", "#[[:space:]]*pragma:?[[:space:]]*no[[:space:]]*(cover|branch)",
-    "--", "*.py", "*.pyi", ":(exclude)libs/contracts/src/ledger",
+    "--", "*.py", "*.pyi", ":(exclude)contracts/src/ledger",
 ]).returncode == 1
 '''
 
@@ -108,7 +108,7 @@ subprocess.run([
 [tool.ruff]
 target-version = "py315"
 line-length = 110
-extend-exclude = ["libs/contracts/src/ledger", "Tiltfile"]  # generated code; Starlark, not Python
+extend-exclude = ["contracts/src/ledger", "Tiltfile"]  # generated code; Starlark, not Python
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -122,7 +122,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"{libs/*/tests,services/*/tests,tests}/**" = [
+"{packages/*/tests,modules/*/tests,contracts/tests,tests}/**" = [
     "S101",    # assert is the point of a test
     "D",       # test names are the documentation
     "PLR2004", # magic values are fine in assertions
@@ -156,8 +156,8 @@ exclude = ["*.md"]  # ruff 0.17 formats Python blocks inside Markdown; the docs 
 # ── Type checker #1: basedpyright ───────────────────────────────────────────────
 [tool.basedpyright]
 pythonVersion = "3.15"
-include = ["libs", "services", "tests", "conftest.py"]
-exclude = ["libs/contracts/src/ledger", "**/.venv", "**/__pycache__"]
+include = ["packages", "modules", "contracts", "tests", "conftest.py"]
+exclude = ["contracts/src/ledger", "**/.venv", "**/__pycache__"]
 typeCheckingMode = "all"
 failOnWarnings = true
 reportImplicitOverride = "error"
@@ -176,7 +176,7 @@ disallow_any_unimported = true
 extra_checks = true
 local_partial_types = true
 strict_bytes = true
-exclude = ["libs/contracts/src/ledger/"]
+exclude = ["contracts/src/ledger/"]
 enable_error_code = [
     "deprecated",
     "exhaustive-match",
@@ -204,7 +204,7 @@ warn_required_dynamic_aliases = true
 # ── Tests ───────────────────────────────────────────────────────────────────────
 [tool.pytest]
 minversion = "9.0"
-testpaths = ["libs", "services", "tests"]
+testpaths = ["packages", "modules", "contracts", "tests"]
 addopts = [
     "--strict-markers",
     "--strict-config",
@@ -223,7 +223,7 @@ source_pkgs = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_t
 # Alembic runs a service's migration environment and scripts from their files, as modules named after the file
 # (`env_py`), outside the service's package: coverage, which picks `source_pkgs` by module name, would never
 # trace them. Their directory is named here, which coverage matches by path.
-source = ["services/identity/src/ledger_identity/adapters/postgres/migrations"]
+source = ["modules/identity/src/ledger_identity/adapters/postgres/migrations"]
 # sys.monitoring, not the C tracer: lines of a route that run after SQLAlchemy's asynchronous driver switched
 # greenlets are reported unexecuted by the C tracer although they ran; sys.monitoring sees them.
 core = "sysmon"
