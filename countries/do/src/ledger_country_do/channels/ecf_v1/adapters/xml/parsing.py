@@ -3,10 +3,11 @@
 A document is checked before it is parsed: at most ``MAX_DOCUMENT`` bytes, UTF-8 (DGII's documents are; any
 other encoding, by byte order mark, by declaration or by its bytes, is refused, so no ``<!DOCTYPE`` can hide
 in UTF-16), and no ``<!DOCTYPE`` anywhere in it (a DTD, internal or external, is never read: no entity
-expansion, no external fetch). The parser then resolves no entity, loads no DTD, reaches no network and keeps
-libxml2's own limits on depth and entity amplification (``huge_tree`` off). Once parsed, ``require_plain``
-checks again what the parser saw: no DTD, and UTF-8. lxml parsers keep per-object state, so each thread makes
-its own.
+expansion, no external fetch). The parser then resolves no entity, loads no DTD, reaches no network, keeps
+libxml2's own limits on depth and entity amplification (``huge_tree`` off) and drops comments: a comment
+inside a value (``1<!---->0``) changes no signature (C14N without comments), so what is read must not see it
+either. Once parsed, ``require_plain`` checks again what the parser saw: no DTD, and UTF-8. lxml parsers keep
+per-object state, so each thread makes its own.
 
 Nothing here returns an lxml element (their class is private to the type checkers): callers parse with
 ``parser()`` after ``require_readable`` and check the tree's ``docinfo`` with ``require_plain``, or ask
@@ -79,7 +80,7 @@ class _PerThread(threading.local):
 
     def __init__(self) -> None:
         self.parser: etree.XMLParser = etree.XMLParser(
-            resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False
+            resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False, remove_comments=True
         )
 
 

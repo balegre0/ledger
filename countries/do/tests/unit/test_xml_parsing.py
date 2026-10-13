@@ -104,6 +104,14 @@ def test_texts_reads_what_it_is_asked_and_nothing_else() -> None:
     assert texts(b"<a><b>x</b><c/></a>", "b", "c", "d") == ("x", "", None)
 
 
+def test_a_comment_cannot_split_what_texts_reads() -> None:
+    # A comment inside a value (``1<!---->0``) leaves C14N without comments, and so a signature, unchanged: the
+    # parser drops comments, so what is read is what was signed.
+    document = b"<ECF><Estado>1<!---->0</Estado><RNC>1018<!-- x -->50043</RNC><!-- tail --></ECF>"
+    assert texts(document, "Estado", "RNC") == ("10", "101850043")
+    assert etree.fromstring(document, parser()).xpath("count(//comment())") == 0
+
+
 def test_each_thread_compiles_its_own_schema() -> None:
     here = schema(Format.SEED)
     assert schema(Format.SEED) is here
