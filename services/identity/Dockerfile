@@ -25,9 +25,10 @@ ENV UV_COMPILE_BYTECODE=1 \
 # The interpreter is uv's own build of CPython: self-contained, so it runs on a distroless base. What a server
 # never runs is removed: the GUI (Tcl/Tk, tkinter, IDLE, turtle), pip and ensurepip, the headers, the build
 # configuration and the man pages, and the shared libpython (the interpreter is linked statically and never
-# loads it; extension modules on Linux do not link it either).
+# loads it; extension modules on Linux do not link it either). The interpreter's directory is the one it names
+# itself (its prefix), whatever the platform in its name: the build runs on amd64 and arm64 alike.
 RUN uv python install 3.15.0 \
- && cd /python/cpython-3.15.0-linux-x86_64-gnu \
+ && cd "$("$(uv python find 3.15.0)" -c 'import sys; print(sys.base_prefix)')" \
  && rm -rf include share \
            bin/idle3* bin/pip* bin/pydoc3* bin/python3*-config \
            lib/libpython3* lib/libtcl* lib/libtk* lib/itcl* lib/tcl9* lib/tk9* lib/thread3* lib/pkgconfig \
