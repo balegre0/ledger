@@ -106,7 +106,11 @@ if [ -z "$grant" ]; then
     fail "granting the machine user $ROLE failed: $answer"
   require "the grant's id" "$(printf '%s' "$answer" | field userGrantId)"
 elif ! printf '%s' "$answer" | grep -q "\"$ROLE\""; then # Zitadel refuses a change that changes nothing
-  answer=$(call PUT "/management/v1/users/$user/grants/$grant" --data "{\"roleKeys\":[\"$ROLE\"]}") ||
+  # An update replaces the grant's roles: keep the ones it holds (a quoted, comma-separated list) beside ROLE.
+  held=$(printf '%s' "$answer" | grep -o '"roleKeys"[[:space:]]*:[[:space:]]*\[[^]]*\]' | head -n 1 |
+    sed 's/^[^[]*\[\(.*\)\]$/\1/')
+  answer=$(call PUT "/management/v1/users/$user/grants/$grant" \
+    --data "{\"roleKeys\":[${held:+$held,}\"$ROLE\"]}") ||
     fail "granting the machine user $ROLE failed: $answer"
 fi
 
