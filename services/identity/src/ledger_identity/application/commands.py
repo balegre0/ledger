@@ -15,7 +15,7 @@ from ledger_identity.domain.errors import (
     TaxIdTakenError,
 )
 from ledger_identity.domain.membership import Actor, Roster, found, grant, revoke
-from ledger_identity.domain.organization import Organization
+from ledger_identity.domain.organization import Organization, require_organization_admin
 from ledger_kernel.access import Permission
 lazy from ledger_identity.application.ports import IdentityUnit
 lazy from ledger_identity.domain.ids import BranchId
@@ -51,7 +51,11 @@ class Granted:
 async def create_company(
     unit: IdentityUnit, founder: Principal, *, tax_id: TaxId, legal_name: LegalName
 ) -> Company:
-    """Register a company of the founder's organization, with the founder as its first owner."""
+    """Register a company of the founder's organization, with the founder as its first owner.
+
+    The founder must be an administrator of the organization (``require_organization_admin``).
+    """
+    require_organization_admin(founder)
     await unit.organizations.add(Organization.of(founder, now=unit.now))
     registered, created = Company.register(
         organization=founder.organization, tax_id=tax_id, legal_name=legal_name, now=unit.now

@@ -1,6 +1,7 @@
 #!/bin/sh
 # Makes the local Zitadel hold what a developer needs to call ledger with a real token: a project (its id is the
-# audience of the tokens), an API application for the platform, and a machine user with a client secret.
+# audience of the tokens) with the role ledger.organization.admin, an API application for the platform, and a
+# machine user granted that role (it registers companies), with a client secret.
 # Run after `docker compose -f deploy/local/compose.yaml --profile zitadel up -d --wait`. It can run again: what
 # exists is found by name and kept, and the machine user gets a new client secret (the previous one stops
 # working). Needs curl, grep and sed. Every step that fails, or answers without what it should, stops the script
@@ -64,6 +65,15 @@ if [ -z "$project" ]; then
   require "the project's id" "$project"
 fi
 
+ROLE=ledger.organization.admin
+answer=$(call POST "/management/v1/projects/$project/roles/_search" --data "$(equals "$ROLE" key)") ||
+  fail "looking for the project role failed: $answer"
+if [ -z "$(printf '%s' "$answer" | field key)" ]; then
+  answer=$(call POST "/management/v1/projects/$project/roles" \
+    --data "{\"roleKey\":\"$ROLE\",\"displayName\":\"Organization administrator\"}") ||
+    fail "creating the project role failed: $answer"
+fi
+
 answer=$(call POST "/management/v1/projects/$project/apps/_search" --data "$(equals ledger-api name)") ||
   fail "looking for the API application failed: $answer"
 if [ -z "$(printf '%s' "$answer" | field id)" ]; then
@@ -82,6 +92,22 @@ if [ -z "$user" ]; then
     fail "creating the machine user failed: $answer"
   user=$(printf '%s' "$answer" | field userId)
   require "the machine user's id" "$user"
+fi
+
+# The machine user's grant on the project: found by user and project, set to the role, made if missing.
+grants=$(printf '{"queries":[{"userIdQuery":{"userId":"%s"}},{"projectIdQuery":{"projectId":"%s"}}]}' \
+  "$user" "$project")
+answer=$(call POST /management/v1/users/grants/_search --data "$grants") ||
+  fail "looking for the machine user's grant failed: $answer"
+grant=$(printf '%s' "$answer" | field id)
+if [ -z "$grant" ]; then
+  answer=$(call POST "/management/v1/users/$user/grants" \
+    --data "{\"projectId\":\"$project\",\"roleKeys\":[\"$ROLE\"]}") ||
+    fail "granting the machine user $ROLE failed: $answer"
+  require "the grant's id" "$(printf '%s' "$answer" | field userGrantId)"
+else
+  answer=$(call PUT "/management/v1/users/$user/grants/$grant" --data "{\"roleKeys\":[\"$ROLE\"]}") ||
+    fail "granting the machine user $ROLE failed: $answer"
 fi
 
 answer=$(call PUT "/management/v1/users/$user/secret" --data '{}') ||

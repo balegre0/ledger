@@ -147,6 +147,16 @@ class LastOwnerError(ConflictError):
         super().__init__("a company keeps at least one owner")
 
 
+class OrganizationAdminRequiredError(ForbiddenError):
+    """The caller acts in the organization, but the identity provider did not make it an administrator of it.
+
+    Its code is the plain ``forbidden``: registering is the one act decided at the organization's level.
+    """
+
+    def __init__(self, role: str) -> None:
+        super().__init__(f"registering a company needs the organization role {role}")
+
+
 class OwnersOnlyError(ForbiddenError):
     """Only an owner grants the owner role, or takes it away."""
 

@@ -50,15 +50,17 @@ def page(response: httpx.Response) -> Page:
 @final
 @dataclass(frozen=True, slots=True)
 class Caller:
-    """A principal of ``issuer`` (``subject`` of ``organization``), as the headers of its requests."""
+    """A principal of ``issuer``, ``subject`` of ``organization`` holding ``roles``: its requests' headers."""
 
     issuer: LocalIssuer
     subject: str = SUBJECT
     organization: str = PROVIDER_ORGANIZATION
+    roles: tuple[str, ...] = ()
+    """Project roles the provider granted the caller in its organization (none by default)."""
 
     def bearer(self) -> dict[str, str]:
         """``Authorization: Bearer`` with a fresh token of the caller."""
-        token = self.issuer.token(subject=self.subject, organization=self.organization)
+        token = self.issuer.token(subject=self.subject, organization=self.organization, roles=self.roles)
         return {"Authorization": f"Bearer {token}"}
 
     def posting(self, key: str) -> dict[str, str]:

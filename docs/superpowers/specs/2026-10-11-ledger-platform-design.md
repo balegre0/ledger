@@ -389,6 +389,10 @@ company can certify while another runs in production.
   or client credentials for API clients.
 - Organization in Zitadel = organization in `ledger`. Companies are ours (`identity` service), and
   roles are granted per company: `owner`, `admin`, `accountant`, `issuer`, `viewer`.
+  Registering a company is the one act decided at the organization's level, before the company has members:
+  it needs the Zitadel project role `ledger.organization.admin` in the token (403 `forbidden` otherwise), and
+  its caller becomes the company's first owner. Every other act on a company is decided by the actor's role in
+  that company.
 - **Envoy Gateway** validates the access token (JWKS from Zitadel) and applies rate limits per client.
   Every service validates the token again (defense in depth): issuer, audience (the Zitadel project),
   signature with a published key (asymmetric algorithms only), times within a small leeway, and that it is

@@ -28,6 +28,7 @@ from ledger_identity.domain.errors import (
     EmissionPointCodeTakenError,
     EmissionPointNotFoundError,
     LastOwnerError,
+    OrganizationAdminRequiredError,
     OrganizationNotFoundError,
     OwnersOnlyError,
     StaleVersionError,
@@ -41,11 +42,12 @@ from ledger_identity.domain.events import (
     MembershipRevoked,
 )
 from ledger_identity.domain.ids import BranchId, EmissionPointId
-from ledger_identity.domain.organization import Organization
+from ledger_identity.domain.organization import ORGANIZATION_ADMIN, Organization
 from ledger_identity.domain.roles import READ_ONLY, Role
 from ledger_identity.domain.text import parse_code, parse_legal_name, parse_name
 from ledger_kernel.access import Permission, Principal, SubjectId
 from ledger_kernel.countries.do import TaxId
+from ledger_kernel.errors import ErrorKind
 from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
 from ledger_kernel.pagination import PageRequest, page_of
 lazy from ledger_identity.domain.branches import Branch, EmissionPoint
@@ -57,9 +59,17 @@ lazy from ledger_kernel.pagination import Page
 NOW: Final = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
 LATER: Final = NOW + timedelta(minutes=5)
 ORGANIZATION: Final = OrganizationId(new_id())
-FOUNDER: Final = Principal(subject=SubjectId("2001"), organization=ORGANIZATION, provider_organization="1001")
+FOUNDER: Final = Principal(
+    subject=SubjectId("2001"),
+    organization=ORGANIZATION,
+    provider_organization="1001",
+    roles=frozenset({ORGANIZATION_ADMIN}),
+)
 STRANGER: Final = Principal(
-    subject=SubjectId("9001"), organization=OrganizationId(new_id()), provider_organization="9"
+    subject=SubjectId("9001"),
+    organization=OrganizationId(new_id()),
+    provider_organization="9",
+    roles=frozenset({ORGANIZATION_ADMIN}),
 )
 OWNER: Final = FOUNDER.subject
 ADMIN: Final = SubjectId("2002")
@@ -312,6 +322,21 @@ async def test_a_new_company_has_its_founder_as_owner_and_both_are_announced(sta
     owner = state.memberships[company.id, OWNER]
     assert owner.role is Role.OWNER
     assert [type(event) for event in state.events] == [CompanyCreated, MembershipGranted]
+
+
+@pytest.mark.parametrize(
+    "roles", [frozenset[str](), frozenset({"ledger.viewer", "LEDGER.ORGANIZATION.ADMIN"})]
+)
+async def test_registering_a_company_needs_the_organization_s_admin_role(
+    state: State, roles: frozenset[str]
+) -> None:
+    """A member of the organization without it (a viewer, a machine user) registers nothing."""
+    member = replace(FOUNDER, roles=roles)
+    with pytest.raises(OrganizationAdminRequiredError) as caught:
+        await created(state, founder=member)
+    assert (caught.value.kind, caught.value.code) == (ErrorKind.FORBIDDEN, "forbidden")
+    assert str(caught.value) == "registering a company needs the organization role ledger.organization.admin"
+    assert (state.organizations, state.companies, state.events) == ({}, {}, [])
 
 
 async def test_a_second_company_of_the_organization_keeps_the_organization_as_it_was(state: State) -> None:

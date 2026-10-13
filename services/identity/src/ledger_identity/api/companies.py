@@ -17,6 +17,7 @@ lazy from fastapi import Request, Response
 from ledger_identity.api.context import precondition_checked, problems, success
 from ledger_identity.api.models import CompanyPage, CompanyView
 from ledger_identity.application import commands, queries
+from ledger_identity.domain.organization import require_organization_admin
 from ledger_identity.domain.text import parse_legal_name
 from ledger_kernel.access import Permission
 from ledger_kernel.countries.do import TaxId
@@ -57,20 +58,29 @@ def router(context: ApiContext) -> APIRouter:
     caller, runtime = context.caller, context.runtime
     reader, manager = context.allowed(Permission.COMPANY_READ), context.allowed(Permission.COMPANY_MANAGE)
 
+    async def registrar(principal: Annotated[Principal, Depends(caller)]) -> Principal:
+        """The caller, if it may register companies: checked before the request's key and body (403)."""
+        require_organization_admin(principal)
+        return principal
+
     @companies.post(
         "",
         status_code=HTTPStatus.CREATED,
         response_model=CompanyView,
-        responses=problems(401, 409, 422) | success(HTTPStatus.CREATED, "Location", "ETag", REPLAYED_HEADER),
+        responses=problems(401, 403, 409, 422)
+        | success(HTTPStatus.CREATED, "Location", "ETag", REPLAYED_HEADER),
     )
     async def create_company(
+        principal: Annotated[Principal, Depends(registrar)],
         body: NewCompany,
         request: Request,
-        principal: Annotated[Principal, Depends(caller)],
         key: Annotated[str, Depends(idempotency_key)],
         current: Annotated[Runtime[IdentitySettings], Depends(runtime)],
     ) -> Response:
-        """Register a company of the caller's organization; the caller becomes its owner."""
+        """Register a company of the caller's organization; the caller becomes its owner.
+
+        The caller must hold the identity provider's project role ``ledger.organization.admin``.
+        """
         tax_id, legal_name = TaxId.parse(body.tax_id), parse_legal_name(body.legal_name)
         attempt = attempt_of(request, principal, key, body)
         async with current.database.transaction(principal.organization) as transaction:

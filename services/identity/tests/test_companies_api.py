@@ -11,6 +11,7 @@ lazy import httpx
 
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import commands
+from ledger_identity.domain.organization import ORGANIZATION_ADMIN
 from ledger_identity.domain.roles import Role
 from ledger_kernel.access import SubjectId
 from ledger_kernel.ids import CompanyId, Tenant, new_id
@@ -122,6 +123,26 @@ async def test_a_retry_with_its_fields_in_another_order_is_the_same_request(
     assert (again.content, again.headers["idempotent-replayed"]) == (first.content, "true")
 
 
+@pytest.mark.parametrize(
+    "roles", [(), ("ledger.viewer",)], ids=["a-machine-user-without-roles", "a-viewer-of-the-organization"]
+)
+async def test_registering_a_company_without_the_organization_s_admin_role_is_forbidden(
+    client: httpx.AsyncClient, issuer: LocalIssuer, roles: tuple[str, ...]
+) -> None:
+    member = Caller(issuer, subject="2002", roles=roles)
+    response = await client.post("/v1/companies", json=DUARTE, headers=member.posting("k-1"))
+    assert (response.status_code, document(response)["code"]) == (403, "forbidden")
+    assert page(await client.get("/v1/companies", headers=member.bearer()))["items"] == []
+
+
+async def test_the_role_is_checked_before_what_the_request_must_carry(
+    client: httpx.AsyncClient, issuer: LocalIssuer
+) -> None:
+    """As every route checks the caller's permission before its Idempotency-Key and its body."""
+    response = await client.post("/v1/companies", json={}, headers=Caller(issuer).bearer())
+    assert (response.status_code, document(response)["code"]) == (403, "forbidden")
+
+
 async def test_a_key_reused_for_another_body_is_refused(client: httpx.AsyncClient, owner: Caller) -> None:
     await created(client, "/v1/companies", DUARTE, owner.posting("k-1"))
     other = {"tax_id": "130000012", "legal_name": "Otra"}
@@ -134,7 +155,9 @@ async def test_a_key_belongs_to_its_caller(
 ) -> None:
     mine = await created(client, "/v1/companies", DUARTE, owner.posting("k-1"))
     theirs = await client.post(
-        "/v1/companies", json=DUARTE, headers=Caller(issuer, organization="1002").posting("k-1")
+        "/v1/companies",
+        json=DUARTE,
+        headers=Caller(issuer, organization="1002", roles=(ORGANIZATION_ADMIN,)).posting("k-1"),
     )
     assert theirs.status_code == 201
     assert "idempotent-replayed" not in theirs.headers
@@ -186,7 +209,7 @@ async def test_a_tax_id_the_organization_has_is_a_conflict(
 async def test_another_organization_registers_the_same_taxpayer_as_its_own(
     client: httpx.AsyncClient, issuer: LocalIssuer, company: str
 ) -> None:
-    other = Caller(issuer, organization="1002")
+    other = Caller(issuer, organization="1002", roles=(ORGANIZATION_ADMIN,))
     theirs = await created(client, "/v1/companies", DUARTE, other.posting("k-1"))
     assert theirs != company
 

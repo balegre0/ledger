@@ -11,6 +11,7 @@ from pydantic import SecretStr
 from sqlalchemy import text
 
 from ledger_identity.adapters.postgres.migrate import MIGRATIONS
+from ledger_identity.domain.organization import ORGANIZATION_ADMIN
 from ledger_identity.main import build
 from ledger_identity.settings import IdentitySettings
 from ledger_kernel.ids import new_id
@@ -131,8 +132,9 @@ async def client(service: Service[IdentitySettings]) -> AsyncGenerator[httpx.Asy
 
 @pytest.fixture
 def owner(issuer: LocalIssuer) -> Caller:
-    """Subject ``2001`` of the provider's organization ``1001``: it owns every company it registers."""
-    return Caller(issuer)
+    """Subject ``2001`` of the provider's organization ``1001``, its administrator (``ORGANIZATION_ADMIN``):
+    it owns every company it registers."""
+    return Caller(issuer, roles=(ORGANIZATION_ADMIN,))
 
 
 @pytest.fixture

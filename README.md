@@ -408,6 +408,9 @@ The outbox gauges read the table, so every replica exports the same values: aggr
 
 - Every `/v1` route needs a bearer token of the organization's identity provider; the organization comes from
   the token, the company from the path. A company the caller holds no role in is a 404.
+- Registering a company needs the identity provider's project role `ledger.organization.admin` (an administrator
+  of the organization; 403 `forbidden` without it), and makes the caller its owner. The local Zitadel's bootstrap
+  grants it to `ledger-dev`.
 - Roles per company: `owner`, `admin`, `accountant`, `issuer`, `viewer`. The owner role is granted and taken by
   owners only, a company always keeps one, and a change of roles is decided on the role its actor holds once it
   has the company's lock. A revoked membership is kept, so its version never goes back.
@@ -452,7 +455,7 @@ Not in the gate yet (spec section 13): `pip-audit`, image scanning and secret sc
 Next:
 
 - Mirroring Zitadel users and machine clients into identity (Zitadel Actions v2 webhooks), organization-level
-  roles, and a company's fiscal regime (with `fiscal-do`).
+  roles beyond registering companies, and a company's fiscal regime (with `fiscal-do`).
 - Tracing of SQL statements and gRPC calls, a call's deadline derived from its caller's remaining deadline, and
   retries of idempotent methods: with the first service-to-service caller (milestone 3).
 - The append-only audit log of security-relevant actions, with vault's signing audit (milestone 3); until then a

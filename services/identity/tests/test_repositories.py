@@ -42,7 +42,7 @@ from ledger_identity.domain.events import (
     MembershipRevoked,
 )
 from ledger_identity.domain.membership import found
-from ledger_identity.domain.organization import Organization
+from ledger_identity.domain.organization import ORGANIZATION_ADMIN, Organization
 from ledger_identity.domain.roles import READ_ONLY, Role
 from ledger_identity.domain.text import LegalName, parse_code, parse_legal_name, parse_name
 from ledger_kernel.access import Permission, Principal, SubjectId
@@ -61,13 +61,19 @@ lazy from ledger_platform.outbox import Outbox
 
 NOW: Final = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
 FOUNDER: Final = Principal(
-    subject=SubjectId("2001"), organization=organization_of("1001"), provider_organization="1001"
+    subject=SubjectId("2001"),
+    organization=organization_of("1001"),
+    provider_organization="1001",
+    roles=frozenset({ORGANIZATION_ADMIN}),
 )
 PARTNER: Final = Principal(
     subject=SubjectId("2002"), organization=FOUNDER.organization, provider_organization="1001"
 )
 STRANGER: Final = Principal(
-    subject=SubjectId("2001"), organization=organization_of("1002"), provider_organization="1002"
+    subject=SubjectId("2001"),
+    organization=organization_of("1002"),
+    provider_organization="1002",
+    roles=frozenset({ORGANIZATION_ADMIN}),
 )
 OWNER: Final = FOUNDER.subject
 MEMBER: Final = Principal(

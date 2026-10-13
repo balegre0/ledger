@@ -708,7 +708,7 @@
         ]
       },
       "post": {
-        "description": "Register a company of the caller's organization; the caller becomes its owner.",
+        "description": "Register a company of the caller's organization; the caller becomes its owner.\n\nThe caller must hold the identity provider's project role ``ledger.organization.admin``.",
         "operationId": "create_company_v1_companies_post",
         "parameters": [
           {
@@ -818,6 +818,55 @@
               }
             },
             "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "description": "An RFC 9457 problem document: what every failure answers.",
+                  "properties": {
+                    "code": {
+                      "description": "The stable code to match on.",
+                      "title": "Code",
+                      "type": "string"
+                    },
+                    "detail": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Detail"
+                    },
+                    "status": {
+                      "title": "Status",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "title": "Title",
+                      "type": "string"
+                    },
+                    "type": {
+                      "description": "urn:ledger:error:<code>",
+                      "title": "Type",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "title": "Problem",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "409": {
             "content": {

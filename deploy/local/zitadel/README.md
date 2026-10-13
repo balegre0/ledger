@@ -17,9 +17,11 @@ curl -X POST "http://127.0.0.1:${LEDGER_IDENTITY_PORT:-8100}/v1/companies" \
 
 `tilt up` does not start Zitadel: run the first command (compose's profile `zitadel`) beside it.
 
-`bootstrap.sh` makes sure the project `ledger` (its id is the tokens' audience), the API application `ledger-api`
-and the machine user `ledger-dev`, whose access tokens are JWTs, exist: it finds them by name, creates what is
-missing, and issues the machine user a new client secret each run (the previous one stops working). It writes,
+`bootstrap.sh` makes sure the project `ledger` (its id is the tokens' audience) with its role
+`ledger.organization.admin`, the API application `ledger-api` and the machine user `ledger-dev`, whose access
+tokens are JWTs, exist, and that `ledger-dev` is granted the role (identity registers companies for an
+organization's administrators only): it finds them by name, creates what is missing, sets the grant to the role,
+and issues the machine user a new client secret each run (the previous one stops working). It writes,
 under `deploy/local/zitadel/.local/` (ignored by git): `admin.pat` (Zitadel's bootstrap service account),
 `client.env` (the developer client's id and secret) and `identity.env` (`LEDGER_TOKEN_AUDIENCE`, which compose
 gives identity after `deploy/local/identity.env`). Both scripts stop with a message when Zitadel refuses a call or
@@ -39,7 +41,8 @@ Checked against Zitadel v4.19.2: header `typ` `JWT`, `alg` `RS256`; claims `iss`
 `aud` the project id, `sub` the machine user's id, `client_id`, `jti`, `exp`/`iat`/`nbf`, and
 `urn:zitadel:iam:user:resourceowner:id` (the organization; identity derives the ledger organization id from it),
 with its `...:name` and `...:primary_domain`. Project roles, once granted, come as
-`urn:zitadel:iam:org:project:<project id>:roles`.
+`urn:zitadel:iam:org:project:<project id>:roles` (`{"ledger.organization.admin": {"<organization id>": "<domain>"}}`
+for `ledger-dev`).
 
 An ID token of the same project (a login's, or one from a token exchange) is signed with the same keys, is typed
 `JWT` too and holds the project id among its audiences and the same organization claim; it differs in what makes

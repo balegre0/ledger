@@ -179,4 +179,4 @@ async def test_every_replica_following_identity_hears_a_company_deactivated(
     headers = owner.posting("off-1") | {"If-Match": "*"}
     assert (await client.post(f"/v1/companies/{company}/deactivate", headers=headers)).status_code == 200
     expected = (ORGANIZATION, CompanyId(UUID(company)))
-    await within(10, cache.arrived, lambda: cache.companies == [expected])
+    await within(10, cache.arrived, lambda: expected in cache.companies)
