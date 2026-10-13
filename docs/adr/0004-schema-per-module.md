@@ -41,4 +41,8 @@ extractable and tenants shardable later.
 
 - Positive: database-enforced ownership; extraction by logical replication of one schema; bounded connections;
   pooler-compatible.
-- Negative: a chassis bug could set the wrong role; mitigated because only the runtime-bound unit of work sets it.
+- Negative: a chassis bug could set the wrong role; mitigated because only the runtime-bound unit of work sets it,
+  and the pool resets every connection it takes back (`RESET ROLE`, `RESET ALL`).
+- Negative: the isolation holds against mistakes, not against hostile SQL. `ledger_app` is a member of every
+  module's `_rw` role, so code that issues its own `SET ROLE` can switch schemas; isolation against hostile
+  code needs a login per module (or per app), a later step.

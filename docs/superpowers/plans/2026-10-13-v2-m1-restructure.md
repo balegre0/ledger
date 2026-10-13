@@ -4994,6 +4994,26 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 Spec §5.3, §3.4 (rule 13 guard), §3.5 (publish, NOTIFY), §3.6 (enqueue, wake, wake_all), §6.4 (audit), §6.7; Decisions 6, 10. After Task 8. New modules; v1's `Database.transaction` and `UnitOfWork` stay in `data/database.py` for identity until Task 16.
 
+**Amended by the Task 9 review (binding; the code in the steps below predates it, the implementation follows this):**
+- **One clock, the database's.** A unit's `now` is its transaction's `now()` (read with the scope settings);
+  `BoundDatabase` takes no `clock`. Every time a unit writes (`occurred_at`, `run_at`, `deadline_at`,
+  `created_at`) and every due or lease comparison in SQL (`run_at <= now()`, `lease_until < now()`) is on that
+  clock. `claim` takes no `now`: leases run from `now()` (`lease_until = now() + lease`), and callers' `due`
+  predicates use `func.now()`. Injectable clocks stay only where the database is not involved.
+- `publish` refuses an event outside the unit's scope (`EventScopeMismatchError`, `event_scope_mismatch`): same
+  organization; the company and the mode too where the unit names them; an unscoped unit publishes for anyone.
+- Job keys are unique per kind across tenants, so a key embeds a globally unique id. Enqueue restarts a done or
+  dead job only when the existing row's scope columns are the enqueuer's (`IS NOT DISTINCT FROM`); `wake` and
+  `wake_all` touch only jobs inside the unit's scope (organization, and company and mode where named).
+- A unit or a purge opened while the task holds a unit raises `NestedUnitError` (`unit_nested`).
+- `audit` needs an organization scope (`MissingAuditScopeError`, `audit_scope_missing`); `purging()` makes no
+  tenant setting and the purge deletes without `RETURNING`.
+- The codec refuses floats (amounts are `Decimal`) and text or keys with NUL; aware datetimes are written in UTC
+  (equal instants, equal bytes); a mapping key appears in an error path only when it looks like a name.
+- `Notifier`: one sender per channel with a dirty mark (no pile-up when the pool is busy); `aclose` gathers with
+  `return_exceptions=True`. A dedicated small connection for it is Task 14's.
+- The pool resets every returned connection (`RESET ROLE`, `RESET ALL`: `Database`'s `reset` hook).
+
 **Files:**
 - Create: `packages/platform/src/ledger_platform/data/{codec,audit,notifier,unit_of_work,bound,queue,scopes}.py`
 - Modify: `packages/platform/src/ledger_platform/data/database.py` (`Database.create`, `Database.aclose`, `open` built on them; `_is_committable` → public `is_committable`), `packages/platform/src/ledger_platform/observability/tracing.py` (module function `current_traceparent() -> str | None`)
@@ -5006,8 +5026,8 @@ Spec §5.3, §3.4 (rule 13 guard), §3.5 (publish, NOTIFY), §3.6 (enqueue, wake
   - `data.audit`: `Actor(name: str, call_id: str)`; `acting_as(actor) -> ContextManager[None]`; `current_actor() -> Actor` (`MissingActorError`, internal, `missing_actor`).
   - `data.notifier`: `type Channel = Literal["ledger_outbox", "ledger_inbox"]`; `OUTBOX`, `INBOX`; `Signals` (Protocol: `signal(channel: Channel) -> None`); `Notifier(database, *, window: float = 0.01)` implementing it, with `async aclose()`.
   - `data.unit_of_work`: `JobPolicy(*, max_attempts: int, deadline: timedelta | None)`; `UnitOfWork` with `connection: AsyncConnection`, `scope: Scope | None`, `now: datetime`, `is_open: bool`, `publish(event) -> None`, `jobs: UnitJobs` (`enqueue(kind, key, *, run_at=None, payload=None) -> None`, `wake(kind, key) -> None`, `wake_all(kind, company: CompanyId, reason: str) -> None`), `audit(*, action, subject, before=None, after=None, detail=None) -> None`, `after_commit(callback) -> None`; `open_unit() -> UnitOfWork | None`; errors `EventTooLargeError` (`event_too_large`), `UndeclaredEventTypeError` (`event_type_undeclared`), `UndeclaredJobKindError` (`job_kind_undeclared`), all internal.
-  - `data.bound`: `BoundDatabase(database, *, schema: str, source: str, publishes: frozenset[str] = frozenset(), jobs: Mapping[str, JobPolicy] = {}, signals: Signals, clock: Clock = utc_now)` with `schema`, `database`, `tables -> ChassisTables`, `unit(scope: Scope | None) -> AsyncContextManager[UnitOfWork]`, `purging() -> AsyncContextManager[AsyncConnection]`.
-  - `data.queue`: `Backoff(steps: tuple[timedelta, ...], then: timedelta)` with `after(attempts: int) -> timedelta`; `DEFAULT_BACKOFF` (1 s, 10 s, 1 min, 5 min, then 10 min); `async claim(connection, table, *, keys, due, order_by, limit, now, lease, extra=None) -> Sequence[RowMapping]`.
+  - `data.bound`: `BoundDatabase(database, *, schema: str, source: str, publishes: frozenset[str] = frozenset(), jobs: Mapping[str, JobPolicy] = {}, signals: Signals)` (a unit's `now` is the database's) with `schema`, `database`, `tables -> ChassisTables`, `unit(scope: Scope | None) -> AsyncContextManager[UnitOfWork]`, `purging() -> AsyncContextManager[AsyncConnection]`.
+  - `data.queue`: `Backoff(steps: tuple[timedelta, ...], then: timedelta)` with `after(attempts: int) -> timedelta`; `DEFAULT_BACKOFF` (1 s, 10 s, 1 min, 5 min, then 10 min); `async claim(connection, table, *, keys, due, order_by, limit, lease, extra=None) -> Sequence[RowMapping]` (leases from the database's `now()`).
   - `Database.create(url, *, pool_size=10, application_name="ledger", limits=DEFAULT_LIMITS) -> Database` (no I/O), `async Database.aclose()`.
   - `data.scopes.scope_of(organization: UUID | None, company: UUID | None, mode: str | None) -> Scope | None` (the scope a queue row's envelope columns name; Tasks 10 and 11 use it).
 
@@ -5924,6 +5944,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 Spec §3.5 (all of it), §2 rules 2-4, ADR 0002; Decisions 7, 16, 17, 18. After Task 9. Files only under `packages/platform/src/ledger_platform/events/` and its tests (the root `pyproject.toml` contract line is the one shared edit: add `events` to the layer `"outbox | idempotency | auth | grpc"`, which Task 11 extends with `jobs`).
 
+**Amended by the Task 9 review:** the database's clock. Claims call `claim(..., order_by=..., limit=...,
+lease=...)` without `now`; due predicates compare with `func.now()` (`next_attempt_at <= now()`,
+`lease_until < now()`), and retries set `next_attempt_at = now() + backoff`. A runner's `now=` parameters below
+are dropped; tests make rows due by moving their columns (as admin), not a clock. A bound unit's `now` is its
+transaction's `now()`.
+
 **Files:**
 - Create: `packages/platform/src/ledger_platform/events/{__init__,consumers,subscriptions,routing,dispatcher,inbox,wakeups,bus}.py`
 - Test: `packages/platform/tests/integration/{test_events_subscriptions,test_events_dispatcher,test_events_inbox,test_events_wakeups}.py`, `packages/platform/tests/unit/test_events_consumers.py`
@@ -6557,6 +6583,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 11: Jobs — the runner with leases and fencing, schedules on lease rows, the platform's purges (∥ Tasks 10, 13)
 
 Spec §3.6 (all of it), §6.4 (purges), §2 rule 4, ADR 0003; Decisions 8, 9, 15. After Task 9. Files only under `packages/platform/src/ledger_platform/jobs/` and its tests (the shared root edit: add `jobs` to the layer that Task 10 gave `events`).
+
+**Amended by the Task 9 review:** the database's clock. `claim` takes no `now`; job due predicates are
+`run_at <= now()` and `lease_until < now()`, outcomes write `now()`-based times (`RunAgain`, backoff,
+`deadline_at < now()`), and schedule leases compare `next_run_at` and `leased_until` with `now()`. The
+`now=` parameters of `run_due`, `claim_now` and `handle` below, and the scheduler's and `maintenance_jobs`'
+`clock`, are dropped; tests make rows due by moving their columns (as admin), not a `ManualClock`.
 
 **Files:**
 - Create: `packages/platform/src/ledger_platform/jobs/{__init__,outcomes,runner,schedules,maintenance}.py`
@@ -7720,7 +7752,7 @@ Write `App` in full following the docstring. The construction steps, in code ord
 2. `configure_logging(settings, service=f"ledger-{role}")`; `registry = CollectorRegistry()` (+ process, platform, GC collectors); `tracing = Tracing.create(service_name=f"ledger-{role}", exporter=<OTLP when settings.otlp_endpoint>)`.
 3. `database = Database.create(settings.database_url, application_name=f"ledger-{role}")`; `signals = Notifier(database)`.
 4. `regimes = Regimes.load(discover)`; `channel_packs = Channels.load(regimes, discover)`; `modules = load_modules(discover)` ordered with `graphlib.TopologicalSorter` over `dependencies.modules`.
-5. `self._bound = {"platform": BoundDatabase(database, schema="platform", source="platform", signals=signals, publishes=..., jobs=..., clock=clock)}` and one per module schema (`source` = module name; `publishes` = its event types; `jobs` = `{decl.kind: JobPolicy(max_attempts=decl.max_attempts, deadline=decl.deadline)}`).
+5. `self._bound = {"platform": BoundDatabase(database, schema="platform", source="platform", signals=signals, publishes=..., jobs=...)}` and one per module schema (`source` = module name; `publishes` = its event types; `jobs` = `{decl.kind: JobPolicy(max_attempts=decl.max_attempts, deadline=decl.deadline)}`).
 6. `apis, extensions, ports = Directory("api"), Directory("extension"), Directory("port")`; `assembled = AssembledChannels()`; for each module: `ModuleContext(manifest, role, settings, database=self._bound[schema], clock, regimes, channels=assembled, apis=apis.view(frozenset(manifest.dependencies.modules)), extensions=extensions.view(frozenset(manifest.extension_points.declares)), telemetry=Telemetry.of(name, tracing, registry), auth=authentication)`; `parts = module.assemble(context)`; an `api` binding must be named after the module (`BindingTypeError` otherwise); add `parts.api`, `parts.implements`, `parts.provides`.
 7. For each channel pack: a `BoundDatabase` for `pack.entry.schema_name` (source = channel key); `ChannelContext(definition=pack.entry, regime=regimes.get(pack.regime), role, settings, database, clock, ports=ports.view(<every provided name>), telemetry)`; `assembled.add(pack.key, pack.assemble(context).channel)`; then `assembled.seal()`.
 8. Merge: for each module, `Consumer.of(spec, decl)` for every spec (declared names from `manifest.events.consumes`; a spec without a declaration or a declaration without a spec raises), `{decl.kind: (decl, spec.handler)}` likewise for jobs; schedules: `Schedule(name, every, enqueues, target=self._bound[<owner schema>])` from every manifest (platform's included); the platform's own job handlers are `maintenance_jobs(tuple(self._bound.values()), clock=clock)`.

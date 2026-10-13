@@ -342,6 +342,11 @@ state machines** (ADR 0003).
 - **Enqueue** `uow.jobs.enqueue(kind, key, *, run_at, payload)` inside the transaction that decides the work.
   On an existing `(kind, key)`: ignored when the job is `ready`, `running` or `parked`; reset to `ready`
   (attempts 0, new payload) when `done` or `dead`.
+- **Time** is the database's: a unit's `now` is its transaction's `now()`, and every due, lease and
+  deadline comparison is made in SQL against `now()`, so workers on hosts with drifting clocks agree.
+- **Keys** are unique per kind across tenants: a key embeds a globally unique id (a document's, an
+  event's). A job belongs to the scope that enqueued it; another scope's enqueue never restarts it, and a
+  unit wakes only jobs inside its own scope.
 - **Claim**: `status = 'ready' AND run_at <= now()`, `FOR UPDATE SKIP LOCKED`, sets `status = 'running'`,
   `lease_until = now() + lease` (per kind, default 60 s), a fresh `lease_token` (fencing token), and
   `attempts += 1` (counted on claim, so a crash mid-run still counts).
@@ -853,7 +858,10 @@ async with context.database.unit(call.scope) as uow:     # role and schema bound
   `BoundDatabase` is created by the runtime from the manifest's schema; each unit begins with
   `SET LOCAL ROLE <schema>_rw` and `set_config('ledger.organization_id' | 'ledger.company_id' | 'ledger.mode',
   …, true)`. Tables are **schema-qualified** in their SQLAlchemy definitions; there is no `search_path`
-  setting. A module's transaction therefore cannot read or write another schema even through a bug (ADR 0004).
+  setting. A module's transaction therefore cannot read or write another schema even through a bug (ADR
+  0004) — a mistake, not hostile SQL: the login is a member of every `_rw` role, so code that runs its own
+  `SET ROLE` can switch; isolation against hostile code would need a login per module. The pool also
+  resets every connection it takes back (`RESET ROLE`, `RESET ALL`).
 - The unit marks itself open on the task (`ContextVar`) for the facade guard (§3.4).
 - Commit only if every statement succeeded; after-commit callbacks (coalesced NOTIFY) never run after a rollback
   (v1 §7 kept). Connection limits as v1 (connect 5 s, statement 30 s, lock 5 s, idle-in-transaction 60 s, pool
