@@ -109,6 +109,20 @@ class InvalidTextLimitError(LedgerError):
         super().__init__(f"a text limit must be at least {_MIN_LIMIT}, not {limit}")
 
 
+class InvalidValueError(LedgerError):
+    """A value our own code built from parts that do not fit: a defect of that code, never the client's input.
+
+    It stays ``INTERNAL`` on purpose: it crosses a boundary as a server error. The message names the field and
+    what it must be, never the value (``Principal``, ``TaxId``, ``Jurisdiction`` and the regime types raise
+    it).
+    """
+
+    code: ClassVar[str] = "invalid_value"
+
+    def __init__(self, *, field: str, requirement: str) -> None:
+        super().__init__(f"{field} must be {requirement}")
+
+
 def truncate(text: str, limit: int) -> str:
     """``text`` cut at ``limit`` characters, with ``...`` after the cut when anything was dropped.
 

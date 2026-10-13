@@ -8,41 +8,47 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from ledger_kernel.errors import ErrorKind
+from ledger_kernel.errors import ErrorKind, InvalidValueError
 from ledger_kernel.money import (
+    CURRENCIES,
     Currency,
     CurrencyMismatchError,
     InvalidAmountError,
     InvalidCurrencyError,
     Money,
+    RoundingMode,
 )
+
+DOP: Final = Currency.of("DOP")
+USD: Final = Currency.of("USD")
+EUR: Final = Currency.of("EUR")
 
 # The widest amount there is: 18 integer digits and 24 places, 42 significant digits.
 WIDEST: Final = "123456789012345678.123456789012345678901234"
 # Bounds that reach 18 integer digits and 24 places while three of them still sum below 10^18.
 amounts = st.decimals(min_value=Decimal("-3e17"), max_value=Decimal("3e17"), places=24)
-pesos = st.builds(Money, amounts, st.just(Currency.DOP))
+pesos = st.builds(Money, amounts, st.just(DOP))
 
 OPERATIONS: Final = [operator.add, operator.sub, operator.lt, operator.le, operator.gt, operator.ge]
 OPERATION_IDS: Final = ["add", "sub", "lt", "le", "gt", "ge"]
 
 
 def dop(amount: str) -> Money:
-    return Money.of(amount, Currency.DOP)
+    return Money.of(amount, DOP)
 
 
 def test_amounts_are_read_exactly() -> None:
     assert dop("1250.50").amount == Decimal("1250.50")
-    assert Money.of(7, Currency.USD) == Money(Decimal(7), Currency.USD)
-    assert Money.of(Decimal("2.5"), Currency.EUR).amount == Decimal("2.5")
+    assert Money.of(7, USD) == Money(Decimal(7), USD)
+    assert Money.of(Decimal("2.5"), EUR).amount == Decimal("2.5")
     assert dop("-0.01").amount == Decimal("-0.01")
-    assert Money.zero(Currency.DOP) == dop("0")
+    assert Money.zero(DOP) == dop("0")
 
 
 def test_minus_zero_reads_as_zero() -> None:
-    assert dop("-0") == Money.zero(Currency.DOP)
+    assert dop("-0") == Money.zero(DOP)
     assert dop("-0.00") == dop("0")
-    assert hash(dop("-0")) == hash(Money.zero(Currency.DOP))
+    assert hash(dop("-0")) == hash(Money.zero(DOP))
     assert not dop("-0").amount.is_signed()
     assert str(dop("-0").amount) == "0"
 
@@ -50,14 +56,14 @@ def test_minus_zero_reads_as_zero() -> None:
 @pytest.mark.parametrize(
     ("zero", "text"),
     [
-        (-Money.zero(Currency.DOP), "0"),
-        (Money.zero(Currency.DOP) * -1, "0"),
+        (-Money.zero(DOP), "0"),
+        (Money.zero(DOP) * -1, "0"),
         (dop("0") * Decimal("-0.50"), "0.00"),
         (dop("-0"), "0"),
         (dop("-0.00"), "0.00"),
         (dop("-0.004").rounded(), "0.00"),
         (-dop("0.00"), "0.00"),
-        (Money(Decimal("-0.00"), Currency.DOP), "0.00"),
+        (Money(Decimal("-0.00"), DOP), "0.00"),
     ],
     ids=[
         "negated-zero",
@@ -74,7 +80,7 @@ def test_zero_is_never_signed_and_keeps_its_scale(zero: Money, text: str) -> Non
     assert str(zero.amount) == text
     assert zero.amount.as_tuple() == Decimal(text).as_tuple()
     assert not zero.amount.is_signed()
-    assert zero == Money.zero(Currency.DOP)
+    assert zero == Money.zero(DOP)
 
 
 def test_equality_and_hashing_are_by_value_across_scales() -> None:
@@ -82,7 +88,7 @@ def test_equality_and_hashing_are_by_value_across_scales() -> None:
     assert hash(dop("1.0")) == hash(dop("1.00"))
     assert {dop("1.0"): "found"}[dop("1.00")] == "found"
     assert len({dop("1.0"), dop("1.00"), dop("1")}) == 1
-    assert dop("1") != Money.of("1", Currency.USD)
+    assert dop("1") != Money.of("1", USD)
 
 
 @pytest.mark.parametrize(
@@ -130,12 +136,12 @@ def test_a_huge_text_is_not_echoed_back() -> None:
 )
 def test_values_out_of_range_are_refused(value: Decimal | int) -> None:
     with pytest.raises(InvalidAmountError):
-        Money.of(value, Currency.DOP)
+        Money.of(value, DOP)
 
 
 def test_a_boolean_is_not_an_amount() -> None:
     with pytest.raises(InvalidAmountError, match="unsupported type"):
-        Money.of(amount=True, currency=Currency.DOP)
+        Money.of(amount=True, currency=DOP)
 
 
 @pytest.mark.parametrize(
@@ -145,7 +151,7 @@ def test_a_boolean_is_not_an_amount() -> None:
 )
 def test_only_text_integers_and_decimals_are_amounts(payload: str) -> None:
     # `methodcaller` takes untyped arguments, like a real boundary: `json.loads` hands over whatever was sent.
-    read = operator.methodcaller("of", json.loads(payload), Currency.DOP)
+    read = operator.methodcaller("of", json.loads(payload), DOP)
     with pytest.raises(InvalidAmountError, match="unsupported type"):
         read(Money)
 
@@ -162,7 +168,7 @@ def test_only_integers_and_decimals_scale_an_amount(payload: str) -> None:
 
 
 def test_a_wrong_type_is_named_and_not_blamed_on_the_text() -> None:
-    read = operator.methodcaller("of", json.loads("12.5"), Currency.DOP)
+    read = operator.methodcaller("of", json.loads("12.5"), DOP)
     with pytest.raises(InvalidAmountError) as caught:
         read(Money)
     assert str(caught.value) == "the amount 'float: 12.5' has an unsupported type"
@@ -175,7 +181,7 @@ def test_a_wrong_type_is_named_and_not_blamed_on_the_text() -> None:
     ids=["float", "text", "integer", "true", "null", "list"],
 )
 def test_construction_takes_only_a_decimal_amount(payload: str) -> None:
-    build = operator.methodcaller("__call__", json.loads(payload), Currency.DOP)
+    build = operator.methodcaller("__call__", json.loads(payload), DOP)
     with pytest.raises(InvalidAmountError, match="unsupported type"):
         build(Money)
 
@@ -201,7 +207,7 @@ def zero_in(payload: str) -> None:
 def test_a_currency_must_be_a_currency_on_every_way_in(
     entry_point: Callable[[str], None], payload: str
 ) -> None:
-    with pytest.raises(InvalidCurrencyError, match="not one of DOP, USD, EUR"):
+    with pytest.raises(InvalidCurrencyError, match="is not an ISO 4217 currency"):
         entry_point(payload)
 
 
@@ -227,7 +233,7 @@ def test_arithmetic_is_exact() -> None:
     ids=["default", "tiny-and-strict"],
 )
 def test_the_widest_amount_survives_every_operation_whatever_the_ambient_context(ambient: Context) -> None:
-    zero = Money.zero(Currency.DOP)
+    zero = Money.zero(DOP)
     with localcontext(ambient):
         widest = dop(WIDEST)
         negated = -widest
@@ -260,7 +266,7 @@ def test_rounding_that_carries_past_the_range_is_refused() -> None:
 @pytest.mark.parametrize("operation", OPERATIONS, ids=OPERATION_IDS)
 def test_currencies_never_mix(operation: Callable[[Money, Money], object]) -> None:
     with pytest.raises(CurrencyMismatchError, match="DOP with USD"):
-        operation(dop("1"), Money.of("1", Currency.USD))
+        operation(dop("1"), Money.of("1", USD))
 
 
 @pytest.mark.parametrize("operation", OPERATIONS, ids=OPERATION_IDS)
@@ -294,9 +300,10 @@ def test_rounding_is_half_away_from_zero_to_the_minor_unit(amount: str, expected
     assert dop(amount).rounded().amount.as_tuple() == Decimal(expected).as_tuple()
 
 
-@pytest.mark.parametrize("currency", list(Currency))
-def test_every_currency_has_a_minor_unit(currency: Currency) -> None:
-    assert Money.of("1.005", currency).rounded().amount.as_tuple() == Decimal("1.01").as_tuple()
+@pytest.mark.parametrize("currency", list(CURRENCIES.values()), ids=list(CURRENCIES))
+def test_every_currency_rounds_to_its_minor_unit(currency: Currency) -> None:
+    one = Decimal(1).quantize(Decimal(1).scaleb(-currency.minor_units))  # 1, 1.00, 1.000, 1.0000
+    assert Money.of("1.000004", currency).rounded().amount.as_tuple() == one.as_tuple()
 
 
 @given(pesos, pesos, pesos)
@@ -305,7 +312,7 @@ def test_addition_is_commutative_and_associative(a: Money, b: Money, c: Money) -
     assert (a + b) + c == a + (b + c)
     assert a - b == a + (-b)
     negated = -a
-    assert a + negated == Money.zero(Currency.DOP)
+    assert a + negated == Money.zero(DOP)
     assert -negated == a
 
 
@@ -330,21 +337,21 @@ def test_rounding_is_idempotent_and_within_half_a_cent(a: Money) -> None:
 )
 def test_a_positive_exponent_is_written_out(amount: Decimal, text: str) -> None:
     """``str`` of a Decimal with a positive exponent prints ``1E+5``: no invoice may show that."""
-    money = Money(amount, Currency.DOP)
+    money = Money(amount, DOP)
     assert str(money.amount) == text
     assert money.amount.as_tuple() == Decimal(text).as_tuple()
-    assert money == Money.of(text, Currency.DOP)
+    assert money == Money.of(text, DOP)
 
 
 def test_arithmetic_never_leaves_a_positive_exponent() -> None:
     assert str((dop("100") * Decimal("1E+3")).amount) == "100000"
-    assert str((Money(Decimal("5E+2"), Currency.DOP) + dop("0")).amount) == "500"
-    assert str((-Money(Decimal("5E+2"), Currency.DOP)).amount) == "-500"
+    assert str((Money(Decimal("5E+2"), DOP) + dop("0")).amount) == "500"
+    assert str((-Money(Decimal("5E+2"), DOP)).amount) == "-500"
 
 
 @pytest.mark.parametrize("text", ["1.50", "0.001", "-12.340", "7"])
 def test_the_scale_of_an_amount_without_a_positive_exponent_is_kept(text: str) -> None:
-    assert Money.of(text, Currency.DOP).amount.as_tuple() == Decimal(text).as_tuple()
+    assert Money.of(text, DOP).amount.as_tuple() == Decimal(text).as_tuple()
 
 
 @given(
@@ -355,10 +362,71 @@ def test_an_amount_keeps_its_value_and_is_written_without_a_positive_exponent(
     coefficient: int, exponent: int
 ) -> None:
     amount = Decimal(coefficient).scaleb(exponent)
-    money = Money(amount, Currency.DOP)
+    money = Money(amount, DOP)
     assert money.amount == amount
     stored = money.amount.as_tuple().exponent
     assert isinstance(stored, int)
     assert stored == min(exponent, 0)
     if money.amount.adjusted() >= -6:  # Decimal writes anything smaller in exponent form whatever its scale
         assert "E" not in str(money.amount)
+
+
+@pytest.mark.parametrize(
+    ("code", "numeric", "minor_units"),
+    [
+        ("DOP", 214, 2),
+        ("USD", 840, 2),
+        ("EUR", 978, 2),
+        ("JPY", 392, 0),
+        ("BHD", 48, 3),
+        ("CLF", 990, 4),
+        ("XCG", 532, 2),
+    ],
+)
+def test_the_iso_4217_table_has_each_currency_minor_units(code: str, numeric: int, minor_units: int) -> None:
+    assert Currency.of(code) == Currency(code, numeric, minor_units)
+
+
+def test_codes_and_numbers_are_unique_and_withdrawn_codes_absent() -> None:
+    assert len({currency.numeric for currency in CURRENCIES.values()}) == len(CURRENCIES)
+    assert all(code == currency.code for code, currency in CURRENCIES.items())
+    assert {"ANG", "HRK", "SLL", "ZWL", "CUC", "BGN"}.isdisjoint(CURRENCIES)
+
+
+@pytest.mark.parametrize("code", ["dop", "XXX", "XAU", "", 214])
+def test_anything_else_is_not_a_currency(code: object) -> None:
+    with pytest.raises(InvalidCurrencyError):
+        Currency.of(code)
+
+
+def test_a_currency_writes_as_its_code() -> None:
+    assert str(DOP) == "DOP"
+
+
+def test_a_currency_not_from_the_table_cannot_make_money() -> None:
+    with pytest.raises(InvalidCurrencyError):
+        Money.of("1", Currency("DOP", 214, 3))
+
+
+def test_rounding_follows_the_currency_minor_unit() -> None:
+    assert Money.of("1.5", Currency.of("JPY")).rounded() == Money.of("2", Currency.of("JPY"))
+    assert Money.of("1.0005", Currency.of("BHD")).rounded() == Money.of("1.001", Currency.of("BHD"))
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        (RoundingMode.HALF_UP, "2.13"),
+        (RoundingMode.HALF_EVEN, "2.12"),
+        (RoundingMode.DOWN, "2.12"),
+        (RoundingMode.UP, "2.13"),
+    ],
+)
+def test_quantized_rounds_with_the_mode_asked(mode: RoundingMode, expected: str) -> None:
+    assert Money.of("2.125", DOP).quantized(2, mode) == Money.of(expected, DOP)
+
+
+@pytest.mark.parametrize("places", [-1, 25, True])
+def test_quantized_refuses_impossible_places(places: int) -> None:
+    with pytest.raises(InvalidValueError):
+        Money.of("1", DOP).quantized(places, RoundingMode.HALF_UP)

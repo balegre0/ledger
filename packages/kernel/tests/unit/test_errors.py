@@ -10,6 +10,7 @@ from ledger_kernel.errors import (
     ForbiddenError,
     InvalidInputError,
     InvalidTextLimitError,
+    InvalidValueError,
     LedgerError,
     NotFoundError,
     UnauthenticatedError,
@@ -31,6 +32,7 @@ from ledger_kernel.errors import (
         (UnauthenticatedError, ErrorKind.UNAUTHENTICATED, "unauthenticated"),
         (ForbiddenError, ErrorKind.FORBIDDEN, "forbidden"),
         (UnavailableError, ErrorKind.UNAVAILABLE, "unavailable"),
+        (InvalidValueError, ErrorKind.INTERNAL, "invalid_value"),
     ],
 )
 def test_every_base_error_has_a_kind_and_a_stable_code(
@@ -44,6 +46,11 @@ class DuplicateInvoiceError(ConflictError):
 
     def __init__(self, number: int) -> None:
         super().__init__(f"invoice {number} exists")
+
+
+def test_a_value_our_code_built_wrong_names_the_field_and_the_requirement_never_the_value() -> None:
+    error = InvalidValueError(field="x", requirement="y")
+    assert (error.kind, error.code, str(error)) == (ErrorKind.INTERNAL, "invalid_value", "x must be y")
 
 
 def test_a_subclass_refines_the_code_and_keeps_the_kind() -> None:

@@ -8,13 +8,13 @@ from hypothesis import strategies as st
 from ledger_kernel.access import (
     MAX_PROVIDER_ORGANIZATION_LENGTH,
     MAX_SUBJECT_LENGTH,
-    InvalidPrincipalError,
     InvalidSubjectError,
     Permission,
     Principal,
     SubjectId,
     parse_subject,
 )
+from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.ids import OrganizationId, new_id
 
 SUBJECTS = st.from_regex(rf"[A-Za-z0-9._@:-]{{1,{MAX_SUBJECT_LENGTH}}}", fullmatch=True)
@@ -89,9 +89,9 @@ def test_roles_are_kept_as_given_when_they_are_a_frozenset_of_text() -> None:
     ids=["set", "list", "tuple", "text", "none", "numbers", "bytes"],
 )
 def test_roles_that_are_not_a_frozenset_of_text_are_refused(roles: object) -> None:
-    with pytest.raises(InvalidPrincipalError, match="roles") as caught:
+    with pytest.raises(InvalidValueError, match=r"^principal\.roles must be a frozenset of text$") as caught:
         build(roles=roles)
-    assert caught.value.code == "invalid_principal"
+    assert caught.value.code == "invalid_value"
 
 
 @pytest.mark.parametrize(
@@ -102,7 +102,9 @@ def test_roles_that_are_not_a_frozenset_of_text_are_refused(roles: object) -> No
 def test_a_provider_organization_that_is_empty_too_long_or_not_text_is_refused(
     provider_organization: object,
 ) -> None:
-    with pytest.raises(InvalidPrincipalError, match="provider_organization") as caught:
+    with pytest.raises(
+        InvalidValueError, match=r"^principal\.provider_organization must be text of 1 to "
+    ) as caught:
         build(provider_organization=provider_organization)
     assert len(str(caught.value)) < 80
 
