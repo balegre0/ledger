@@ -25,7 +25,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ledger-probe = "ledger_platform.probe:main"
+ledger-probe = "ledger_platform.observability.probe:main"
 
 [tool.uv.sources]
 ledger-kernel = { workspace = true }

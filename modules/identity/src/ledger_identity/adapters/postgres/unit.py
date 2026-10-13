@@ -16,7 +16,7 @@ from ledger_kernel.errors import LedgerError
 from ledger_kernel.ids import OrganizationId, Tenant
 lazy from ledger_kernel.clock import Clock
 lazy from ledger_kernel.ids import CompanyId
-lazy from ledger_platform.database import Scope, UnitOfWork
+lazy from ledger_platform.data.database import Scope, UnitOfWork
 lazy from ledger_platform.outbox import Outbox
 
 

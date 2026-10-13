@@ -7,13 +7,14 @@ lets those in flight finish, the workers are cancelled and awaited (all together
 the connection to NATS drains, the pool closes, and the spans still pending are exported. A start that fails
 halfway releases what had started, in the same order.
 
-Workers are supervised (``ledger_platform.supervision``): one that fails is started again after a growing
-delay, and one that fails on a configuration mistake (``ConsumerRefusedError``, any ``InvalidOptionError``)
-is not, since it would fail the same way every time. ``/readyz`` checks that PostgreSQL answers, that NATS is
-connected and that no worker is dead. A worker waiting to start again is not dead, so the failure of a worker
-alone (JetStream unable to serve its consumer for a moment) never makes the service unready; NATS itself
-being unreachable does, through its own check. A dead worker also fails ``/livez``: nothing in the process
-brings it back, so the orchestrator restarts the process, and a misconfiguration shows as a crash loop.
+Workers are supervised (``ledger_platform.runtime.supervision``): one that fails is started again after a
+growing delay, and one that fails on a configuration mistake (``ConsumerRefusedError``, any
+``InvalidOptionError``) is not, since it would fail the same way every time. ``/readyz`` checks that
+PostgreSQL answers, that NATS is connected and that no worker is dead. A worker waiting to start again is not
+dead, so the failure of a worker alone (JetStream unable to serve its consumer for a moment) never makes the
+service unready; NATS itself being unreachable does, through its own check. A dead worker also fails
+``/livez``: nothing in the process brings it back, so the orchestrator restarts the process, and a
+misconfiguration shows as a crash loop.
 
 The first connection to NATS is retried for ``ServiceLimits.nats_connect_timeout`` seconds, then the
 start fails (and the process exits). Once connected, NATS is reconnected for as long as it takes: the outbox
@@ -41,25 +42,25 @@ lazy from fastapi import APIRouter, FastAPI
 lazy from opentelemetry.sdk.trace.export import SpanExporter
 
 from ledger_kernel.errors import LedgerError, UnavailableError, error_type, truncate
+from ledger_platform.config.options import InvalidOptionError, require_at_least, require_seconds
 from ledger_platform.consumer import Consumer, ConsumerMetrics, ConsumerRefusedError
-from ledger_platform.database import DEFAULT_LIMITS, DEFAULT_POOL_SIZE, Database
-from ledger_platform.grpc_server import serve_grpc
-from ledger_platform.health import Health
+from ledger_platform.data.database import DEFAULT_LIMITS, DEFAULT_POOL_SIZE, Database
+from ledger_platform.grpc.server import serve_grpc
+from ledger_platform.http.app import ApiInfo, Observability, create_app
 from ledger_platform.interruptions import Interruptions
 from ledger_platform.lifecycle import Lifecycle
-from ledger_platform.logs import Throttled, configure_logging
-from ledger_platform.options import InvalidOptionError, require_at_least, require_seconds
+from ledger_platform.observability.health import Health
+from ledger_platform.observability.logs import Throttled, configure_logging
+from ledger_platform.observability.tracing import DEFAULT_SHUTDOWN_TIMEOUT, Tracing
 from ledger_platform.outbox import DEFAULT_PUBLISH_TIMEOUT, Outbox
+from ledger_platform.runtime.supervision import Supervisor
 from ledger_platform.schema import CHASSIS_METADATA
 from ledger_platform.streams import DEAD_LETTERS, ensure_stream
-from ledger_platform.supervision import Supervisor
-from ledger_platform.tracing import DEFAULT_SHUTDOWN_TIMEOUT, Tracing
-from ledger_platform.web import ApiInfo, Observability, create_app
+lazy from ledger_platform.config.settings import ServiceSettings
 lazy from ledger_platform.consumer import ConsumerSpec
-lazy from ledger_platform.database import DatabaseLimits
-lazy from ledger_platform.settings import ServiceSettings
+lazy from ledger_platform.data.database import DatabaseLimits
+lazy from ledger_platform.runtime.supervision import Work
 lazy from ledger_platform.streams import StreamSpec
-lazy from ledger_platform.supervision import Work
 
 _RECONNECT_WAIT: Final = 2
 """Seconds between two attempts to reach NATS: nats-py's own default, short enough for a blip."""

@@ -49,14 +49,14 @@ from ledger_kernel.access import Permission, Principal, SubjectId
 from ledger_kernel.countries.do import TaxId
 from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
 from ledger_kernel.pagination import PageRequest, decode_cursor
-from ledger_platform.authentication import organization_of
+from ledger_platform.auth.tokens import organization_of
 from ledger_platform.outbox import OutboxRecord
 from ledger_testing.waiting import eventually, waits_for_a_lock
 lazy from ledger_identity.application.ports import IdentityUnit
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_identity.domain.events import IdentityEvent
 lazy from ledger_kernel.pagination import Page
-lazy from ledger_platform.database import Database, Scope
+lazy from ledger_platform.data.database import Database, Scope
 lazy from ledger_platform.outbox import Outbox
 
 NOW: Final = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)

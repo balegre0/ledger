@@ -15,12 +15,12 @@ from ledger_identity.api.context import problems
 from ledger_identity.api.models import MembershipPage, MembershipView
 from ledger_identity.application import commands, queries
 from ledger_kernel.access import Permission, parse_subject
-from ledger_platform.routes import allowed, page_request
+from ledger_platform.http.deps import allowed, page_request
 lazy from ledger_identity.api.context import ApiContext
 lazy from ledger_identity.api.models import RoleAssignment
 lazy from ledger_identity.settings import IdentitySettings
 lazy from ledger_kernel.pagination import PageRequest
-lazy from ledger_platform.authorization import CompanyAccess
+lazy from ledger_platform.auth.access import CompanyAccess
 lazy from ledger_platform.service import Runtime
 
 

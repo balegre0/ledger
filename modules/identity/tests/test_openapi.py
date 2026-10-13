@@ -9,7 +9,7 @@ lazy from fastapi.dependencies.models import Dependant
 from ledger_identity import openapi
 from ledger_identity.main import VERSION, create_app
 from ledger_identity.openapi import app, document
-from ledger_platform.routes import if_match, unguarded_routes
+from ledger_platform.http.deps import if_match, unguarded_routes
 
 PUBLISHED: Final = Path(__file__).parents[1] / "openapi.json"
 Parameter = TypedDict("Parameter", {"name": str, "in": str, "required": bool})

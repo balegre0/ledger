@@ -56,15 +56,15 @@ lazy from prometheus_client import CollectorRegistry
 lazy from sqlalchemy import Update
 
 from ledger_kernel.errors import ErrorKind, LedgerError, error_type, excerpt
-from ledger_platform.database import PlatformTable
-from ledger_platform.options import InvalidOptionError, require_at_least, require_seconds
+from ledger_platform.config.options import InvalidOptionError, require_at_least, require_seconds
+from ledger_platform.data.database import PlatformTable
+from ledger_platform.runtime.supervision import being_cancelled
 from ledger_platform.streams import StreamRefusedError, ensure_stream
-from ledger_platform.supervision import being_cancelled
 lazy from ledger_contracts.envelope import Envelope
 lazy from ledger_kernel.clock import Sleep
-lazy from ledger_platform.database import Database, UnitOfWork
+lazy from ledger_platform.data.database import Database, UnitOfWork
+lazy from ledger_platform.observability.tracing import Tracing
 lazy from ledger_platform.streams import StreamSpec
-lazy from ledger_platform.tracing import Tracing
 
 MAX_BATCH: Final = 10_000
 """The most events one pass takes: each is a bind parameter of its ``DELETE`` (PostgreSQL allows 65,535) and a

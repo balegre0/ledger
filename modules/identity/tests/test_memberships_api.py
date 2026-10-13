@@ -12,7 +12,7 @@ from ledger_identity.application import commands
 from ledger_identity.domain.roles import Role
 from ledger_kernel.access import SubjectId
 from ledger_kernel.ids import CompanyId, Tenant
-from ledger_platform.authentication import organization_of
+from ledger_platform.auth.tokens import organization_of
 from ledger_testing.api import Caller, document, page
 from ledger_testing.waiting import eventually, waits_for_a_lock
 lazy from ledger_identity.settings import IdentitySettings
