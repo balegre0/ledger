@@ -8,7 +8,8 @@ at a time (a transaction-level advisory lock; a dispatcher that finds it held sk
 a schema's events reach the inboxes in the order of their ids.
 
 A pass whose batch fails is done again one row at a time, each in a savepoint of the pass (which keeps the
-schema's lock): the good rows go. A row that still fails is blamed (its ``attempts`` counted,
+schema's lock), paging on past the rows that fail until a batch's worth went: the good rows go, even behind a
+batch's worth of rows a broken target refuses. A row that still fails is blamed (its ``attempts`` counted,
 ``outbox.fan_out_failed``, ``ledger_outbox_failed_total``) only when the error is its own: it could not be
 read, broke a constraint, or a trigger refused it. Any other error (a revoked grant on one target inbox, a
 lost connection) is no row's fault: such a row is skipped uncounted, whatever the rows beside it did, and when
@@ -29,10 +30,11 @@ Times are the database's: ``unrouted_since`` is the relay transaction's ``now()`
 from its insert (the column's default).
 """
 
+from contextlib import aclosing
 from dataclasses import dataclass
-from typing import Final, Never, final
+from typing import ClassVar, Final, Never, final
 from uuid import UUID
-lazy from collections.abc import Iterator, Sequence
+lazy from collections.abc import AsyncGenerator, Iterator, Sequence
 lazy from datetime import datetime
 
 import structlog
@@ -45,7 +47,7 @@ lazy from prometheus_client import CollectorRegistry
 lazy from sqlalchemy import ColumnElement
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ledger_kernel.errors import error_type
+from ledger_kernel.errors import LedgerError, error_type
 from ledger_platform.data.notifier import INBOX, OUTBOX
 from ledger_platform.data.tables import chassis_tables
 from ledger_platform.events.metrics import counter
@@ -85,6 +87,15 @@ _BOOL: Final = TypeAdapter(bool)
 _IDS: Final = TypeAdapter(list[UUID])
 _SET_ASIDE: Final = TypeAdapter(tuple[int, str])
 _logger = structlog.stdlib.get_logger(__name__)
+
+
+class NoSchemasError(LedgerError):
+    """A dispatcher given no schema to fan out: a defect of the app's assembly."""
+
+    code: ClassVar[str] = "dispatcher_schemas_missing"
+
+    def __init__(self) -> None:
+        super().__init__("a dispatcher was given no schema to fan out")
 
 
 def chunked[T](items: Sequence[T], size: int) -> Iterator[Sequence[T]]:
@@ -204,6 +215,8 @@ class Dispatcher:
         batch: int = 100,
         registry: CollectorRegistry | None = None,
     ) -> None:
+        if not schemas:
+            raise NoSchemasError
         self._database = database
         self._schemas = tuple(schemas)
         self._signals = signals
@@ -328,22 +341,44 @@ class Dispatcher:
         self._committed(schema, moved, failures)
         return moved.taken
 
+    async def _due_ids(self, connection: AsyncConnection, outbox: AnyTable) -> AsyncGenerator[UUID]:
+        """The due rows' ids, oldest first, a batch's worth per query, until there are none left."""
+        after: ColumnElement[bool] = outbox.c.id.is_not(None)
+        while True:
+            page = select(outbox.c.id).where(*_due(outbox), after).order_by(outbox.c.id).limit(self._batch)
+            ids = _IDS.validate_python((await connection.execute(page)).scalars().all())
+            for event_id in ids:
+                yield event_id
+            if len(ids) < self._batch:
+                return
+            after = outbox.c.id > ids[-1]
+
     async def _one_by_one(
         self, connection: AsyncConnection, outbox: AnyTable, routing: Routing, failures: list[_Failure]
     ) -> _Moved:
-        chosen = select(outbox.c.id).where(*_due(outbox)).order_by(outbox.c.id).limit(self._batch)
-        ids = _IDS.validate_python((await connection.execute(chosen)).scalars().all())
+        """Each due row in a savepoint of its own, past the rows that fail, until a batch's worth went.
+
+        Paging on past the skipped rows keeps a batch of rows for a broken target (an inbox that refuses the
+        relay) from holding back the rows of healthy targets behind it.
+        """
         taken = routed = unrouted = 0
         failed: list[tuple[UUID, Exception]] = []
-        for event_id in ids:
-            try:
-                async with connection.begin_nested():
-                    moved = await self._deliver(connection, outbox, routing, outbox.c.id == event_id, 1)
-            except _FAILURES as error:
-                reraise_when_stopping(error)
-                failed.append((event_id, error))
-                continue
-            taken, routed, unrouted = taken + moved.taken, routed + moved.routed, unrouted + moved.unrouted
+        async with aclosing(self._due_ids(connection, outbox)) as due:
+            async for event_id in due:
+                try:
+                    async with connection.begin_nested():
+                        moved = await self._deliver(connection, outbox, routing, outbox.c.id == event_id, 1)
+                except _FAILURES as error:
+                    reraise_when_stopping(error)
+                    failed.append((event_id, error))
+                    continue
+                taken, routed, unrouted = (
+                    taken + moved.taken,
+                    routed + moved.routed,
+                    unrouted + moved.unrouted,
+                )
+                if taken >= self._batch:
+                    break
         systemic = [cause for _, cause in failed if not _row_specific(cause)]
         if systemic and len(systemic) == len(failed) and not taken:  # nothing went, through no row's fault
             raise systemic[0]

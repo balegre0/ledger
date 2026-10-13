@@ -24,7 +24,7 @@ from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.data.database import Database
 from ledger_platform.events import Dispatcher, PostgresEventBus
-from ledger_platform.events.dispatcher import ROWS_PER_INSERT, chunked
+from ledger_platform.events.dispatcher import ROWS_PER_INSERT, NoSchemasError, chunked
 from ledger_testing.database import app_url
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.notifier import Channel
@@ -92,6 +92,13 @@ class Renamed(Event):
     TYPE: ClassVar[str] = "probe.thing.renamed"
     VERSION: ClassVar[int] = 1
     name: str
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Created(Event):
+    TYPE: ClassVar[str] = "probe.thing.created"
+    VERSION: ClassVar[int] = 1
 
 
 @final
@@ -420,3 +427,36 @@ async def test_a_schema_whose_pass_fails_is_logged_and_the_others_still_go(
     finally:
         await bench.superuser.execute("GRANT INSERT ON other.inbox TO ledger_relay")
     assert await bench.dispatcher.run_until_idle() == 1
+
+
+async def test_rows_for_a_broken_inbox_never_hold_back_the_rows_behind_them(bench: Bench) -> None:
+    """A batch's worth of rows for an inbox the relay may not write comes first: the pass pages past them.
+
+    Row by row, the pass goes on past the rows it skipped until a batch's worth went through, and no further.
+    """
+    bench.subscribe("other", RENAMES)
+    bench.subscribe("probe", {"probe.echo": frozenset({"probe.thing.created"})})
+    await bench.publish(2)
+    async with bench.probe.unit(TENANT) as uow:
+        for _ in range(3):
+            uow.publish(Created(scope=TENANT, subject=SUBJECT, aggregate_version=1))
+    await bench.superuser.execute("REVOKE INSERT ON other.inbox FROM ledger_relay")
+    paged = Dispatcher(bench.probe.database, schemas=SCHEMAS, signals=bench.signals, batch=2)
+    try:
+        assert await paged.run_once() == 2  # past the two skipped rows, then a batch's worth: it stops there
+        assert await paged.run_once() == 1
+        with capture_logs() as logs:
+            assert await paged.run_once() == 0  # only the broken inbox's rows are left: probe's pass fails
+        assert [(entry["event"], entry["schema"]) for entry in logs] == [("outbox.pass_failed", "probe")]
+        renamed_rows = "SELECT type, attempts FROM probe.outbox ORDER BY id"
+        assert await bench.rows(renamed_rows) == [("probe.thing.renamed", 0)] * 2
+        assert await bench.rows("SELECT consumer FROM probe.inbox") == [("probe.echo",)] * 3
+    finally:
+        await bench.superuser.execute("GRANT INSERT ON other.inbox TO ledger_relay")
+    assert await paged.run_until_idle() == 2
+    assert await bench.count("other", "inbox") == 2
+
+
+def test_a_dispatcher_over_no_schema_is_refused(pool: Database) -> None:
+    with pytest.raises(NoSchemasError, match="no schema"):
+        Dispatcher(pool, schemas=(), signals=RecordedSignals())
