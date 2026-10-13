@@ -90,24 +90,39 @@ class PageRequest:
 @final
 @dataclass(frozen=True, slots=True)
 class Page[T]:
-    """Items in id order, and the cursor of the next page in the direction read (``None`` on the last)."""
+    """Items in id order, and the cursors of the pages on either side of it (``None`` where there is none).
+
+    ``next_cursor`` starts the page after the last item (``starting_after``), ``previous_cursor`` ends the
+    page before the first (``ending_before``); ``has_more`` says whether more follow in the direction read.
+    """
 
     items: tuple[T, ...]
     next_cursor: str | None
+    previous_cursor: str | None = None
+    backwards: bool = False
+    """Whether the page was read backwards (``ending_before``)."""
 
     @property
     def has_more(self) -> bool:
         """Whether more items follow in the direction the page was read."""
-        return self.next_cursor is not None
+        return (self.previous_cursor if self.backwards else self.next_cursor) is not None
 
 
 def page_of[T](rows: Sequence[T], request: PageRequest, *, key: Callable[[T], UUID]) -> Page[T]:
     """The page ``request`` asked for, from ``rows`` read in its direction: ``request.size`` + 1 at most.
 
     Rows are in id order, or newest first for a page read backwards (``request.before``). The extra row, when
-    it is there, only says that more follow: the cursor is the id of the last item kept, in the order read.
+    it is there, only says that more follow in that direction. Against it, something lies past the cursor the
+    page was read from: read forwards, a page has a ``previous_cursor`` only after a cursor; backwards, it
+    always has a ``next_cursor``.
     """
     kept = rows[: request.size]
     more = len(rows) > request.size
-    cursor = encode_cursor(key(kept[-1])) if more else None
-    return Page(tuple(reversed(kept)) if request.before is not None else tuple(kept), cursor)
+    backwards = request.before is not None
+    items = tuple(reversed(kept)) if backwards else tuple(kept)
+    if not items:
+        return Page(items, None, None, backwards=backwards)
+    first, last = encode_cursor(key(items[0])), encode_cursor(key(items[-1]))
+    if backwards:
+        return Page(items, last, first if more else None, backwards=True)
+    return Page(items, last if more else None, first if request.after is not None else None)

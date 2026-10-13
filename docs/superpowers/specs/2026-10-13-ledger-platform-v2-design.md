@@ -1558,8 +1558,10 @@ README/spec copies of the table are deleted ([05] D36).
 - Company-scoped resources take the company in the header `Ledger-Company: cmp_…` (the ISV seam, §7.1);
   `/v1/companies/{id}` takes it in the path. Mode comes from the credential (API clients) or, for human tokens,
   the **required** header `Ledger-Mode: test|live` (400 `mode_required` without it on moded routes; owner ruling).
-- Cursor pagination (`limit` 1-100, opaque `starting_after`/`ending_before` cursors), `has_more`; one generic
-  `Page[T]` model ([05] D23).
+- Cursor pagination (`limit` 1-100, opaque `starting_after`/`ending_before` cursors, one at a time), `has_more`
+  (in the direction read); one generic `Page[T]` model ([05] D23): `items` in id order, `has_more`,
+  `next_cursor` (for `starting_after`, `null` when nothing follows) and `previous_cursor` (for `ending_before`,
+  `null` on the first page and whenever nothing comes before).
 - `ETag` = resource version; `If-Match` required on updates (428 without, 412 stale), except idempotent set-value
   `PUT`s (v1 kept).
 - Amounts as strings; dates ISO 8601; country codes ISO 3166-1 alpha-2 upper case; currencies ISO 4217.

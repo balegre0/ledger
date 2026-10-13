@@ -2,9 +2,10 @@
 
 A list is read with ``limit`` (1 to 100) and at most one opaque cursor: ``starting_after`` (the page after it)
 or ``ending_before`` (the page before it). A page answers its items in id order, whether more follow in the
-direction it was read (``has_more``), and the cursor the next page in that direction is read with
-(``next_cursor``, ``null`` when none follows). A cursor is only ever one the service handed out: anything else
-is 422 ``invalid_cursor``, and both cursors at once 422 ``page_cursors_conflict``.
+direction it was read (``has_more``), and the cursors of the pages on either side: ``next_cursor`` (for
+``starting_after``) and ``previous_cursor`` (for ``ending_before``), each ``null`` when there is none. A
+cursor is only ever one the service handed out: anything else is 422 ``invalid_cursor``, and both cursors at
+once 422 ``page_cursors_conflict``.
 """
 
 from typing import Annotated, ClassVar, Final
@@ -28,12 +29,18 @@ class Page[T](BaseModel):
     items: list[T]
     has_more: bool
     next_cursor: str | None
+    """Read the page after this one with it (``starting_after``); ``null`` when nothing follows."""
+    previous_cursor: str | None
+    """Read the page before this one with it (``ending_before``); ``null`` when nothing comes before."""
 
 
 def page_of_items[I, T](page: KernelPage[I], render: Callable[[I], T]) -> Page[T]:
     """The kernel's ``page`` as an answer, each item rendered by ``render``."""
     return Page[T](
-        items=[render(item) for item in page.items], has_more=page.has_more, next_cursor=page.next_cursor
+        items=[render(item) for item in page.items],
+        has_more=page.has_more,
+        next_cursor=page.next_cursor,
+        previous_cursor=page.previous_cursor,
     )
 
 
