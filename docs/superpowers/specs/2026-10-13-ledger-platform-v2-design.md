@@ -908,6 +908,8 @@ USING (organization_id = (SELECT NULLIF(current_setting('ledger.organization_id'
   `(organization_id, company_id, mode)` or `(company_id, mode)`.
 - Foreign keys carry the tenant (`(organization_id, company_id, mode, x_id)`), so a row cannot point at another
   tenant's (v1 kept).
+- Every ordinary policy is `TO <schema>_rw, <schema>_owner`; the purge policies are `TO <schema>_purge` only,
+  so no other role sees a protected row whatever settings it sets.
 - **Chassis tables under RLS**: `idempotency_keys` (`moded_organization`; expired rows also visible to the
   `<schema>_purge` role, for the purge) and `audit_events` (`organization`, append-only: `SELECT` and `INSERT`
   policies only, `UPDATE`/`DELETE`/`TRUNCATE` revoked).

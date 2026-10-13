@@ -37,13 +37,14 @@ def test_the_organization_column_is_a_plain_name(column: str) -> None:
 def test_a_policy_per_command_forced_on_the_owner() -> None:
     rule = predicate(RlsScope.COMPANY)
     on = '"identity"."branches"'
+    to = 'TO "identity_rw", "identity_owner"'
     assert policy("identity.branches", RlsScope.COMPANY) == (
         f"ALTER TABLE {on} ENABLE ROW LEVEL SECURITY",
         f"ALTER TABLE {on} FORCE ROW LEVEL SECURITY",
-        f'CREATE POLICY "branches_select" ON {on} FOR SELECT USING ({rule})',
-        f'CREATE POLICY "branches_insert" ON {on} FOR INSERT WITH CHECK ({rule})',
-        f'CREATE POLICY "branches_update" ON {on} FOR UPDATE USING ({rule}) WITH CHECK ({rule})',
-        f'CREATE POLICY "branches_delete" ON {on} FOR DELETE USING ({rule})',
+        f'CREATE POLICY "branches_select" ON {on} FOR SELECT {to} USING ({rule})',
+        f'CREATE POLICY "branches_insert" ON {on} FOR INSERT {to} WITH CHECK ({rule})',
+        f'CREATE POLICY "branches_update" ON {on} FOR UPDATE {to} USING ({rule}) WITH CHECK ({rule})',
+        f'CREATE POLICY "branches_delete" ON {on} FOR DELETE {to} USING ({rule})',
     )
 
 
@@ -60,8 +61,9 @@ def test_a_purgeable_table_lets_the_purge_role_alone_read_and_delete_expired_row
     rule = predicate(RlsScope.MODED_ORGANIZATION)
     on = '"probe"."idempotency_keys"'
     statements = policy("probe.idempotency_keys", RlsScope.MODED_ORGANIZATION, purge_expired=True)
-    assert statements[2] == f'CREATE POLICY "idempotency_keys_select" ON {on} FOR SELECT USING ({rule})'
-    assert statements[5] == f'CREATE POLICY "idempotency_keys_delete" ON {on} FOR DELETE USING ({rule})'
+    to = 'TO "probe_rw", "probe_owner"'
+    assert statements[2] == f'CREATE POLICY "idempotency_keys_select" ON {on} FOR SELECT {to} USING ({rule})'
+    assert statements[5] == f'CREATE POLICY "idempotency_keys_delete" ON {on} FOR DELETE {to} USING ({rule})'
     purge = f'TO "probe_purge" USING ({EXPIRED})'
     assert statements[6:] == (
         f'CREATE POLICY "idempotency_keys_purge_select" ON {on} FOR SELECT {purge}',

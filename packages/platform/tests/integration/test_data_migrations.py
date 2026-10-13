@@ -248,6 +248,9 @@ def test_the_lock_key_is_derived_from_the_schema_alone() -> None:
 
 
 def test_a_database_is_closed_to_public(fresh: Fresh, probe_scripts: SchemaMigrations) -> None:
+    """On a fresh database: ``CREATE DATABASE ... TEMPLATE`` does not copy database-level ACLs, so the
+    per-worker clones keep PostgreSQL's defaults for ``PUBLIC`` (``CONNECT``, ``TEMPORARY``); only a database
+    ``database_statements`` ran in (the template, a fresh one, production's) is closed."""
     probe_scripts.upgrade(fresh.url())
     outsider = f"outsider_{fresh.name}"
     with fresh.admin() as admin:

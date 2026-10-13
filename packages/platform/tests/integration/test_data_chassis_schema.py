@@ -261,6 +261,15 @@ def test_the_purge_role_sees_and_deletes_expired_keys_and_nothing_else(
         assert keys(connection) == [(B, "b-live")]
 
 
+def test_the_purge_role_never_sees_live_keys_whatever_it_sets(connection: psycopg.Connection) -> None:
+    expiring(connection)
+    with connection.transaction():
+        unit(connection, B, "test", role="probe_purge")
+        connection.execute("SELECT set_config('ledger.company_id', %s, true)", (str(B),))
+        assert keys(connection) == [(A, "a-expired"), (B, "b-expired")]
+        assert connection.execute("DELETE FROM probe.idempotency_keys WHERE key = 'b-live'").rowcount == 0
+
+
 def test_the_purge_role_of_one_schema_reaches_no_other(connection: psycopg.Connection) -> None:
     with connection.transaction():
         unit(connection, role="other_purge")

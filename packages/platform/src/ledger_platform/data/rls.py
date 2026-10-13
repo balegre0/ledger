@@ -8,8 +8,8 @@ scope sees no protected row and can write none, and a unit without a mode sees n
 The text is versioned like ``chassis_schema_v1``: migrations call ``policy`` and their meaning must not move,
 so the tests pin every statement, and a different policy is a new function. Every policy is permissive
 (PostgreSQL's default) and the only one per command on its table: permissive policies are OR-ed, so a second
-one would widen the first. The purge policies are the exception, and apply to the schema's ``purge`` role
-only (Decision 6).
+one would widen the first. The ordinary policies apply to the schema's ``rw`` and ``owner`` roles only, the
+purge policies to its ``purge`` role only (Decision 6): no other role, whatever it sets, sees a row.
 """
 
 import re
@@ -97,16 +97,18 @@ def policy(
     name = found[2]
     on = f"{identifier(roles.schema)}.{identifier(name)}"
     rule = predicate(scope, organization_column=organization_column)
+    to = f"TO {identifier(roles.rw)}, {identifier(roles.owner)}"
+    both = f"USING ({rule}) WITH CHECK ({rule})"
     statements = [
         f"ALTER TABLE {on} ENABLE ROW LEVEL SECURITY",
         f"ALTER TABLE {on} FORCE ROW LEVEL SECURITY",
-        f"CREATE POLICY {_named(name, 'select')} ON {on} FOR SELECT USING ({rule})",
-        f"CREATE POLICY {_named(name, 'insert')} ON {on} FOR INSERT WITH CHECK ({rule})",
+        f"CREATE POLICY {_named(name, 'select')} ON {on} FOR SELECT {to} USING ({rule})",
+        f"CREATE POLICY {_named(name, 'insert')} ON {on} FOR INSERT {to} WITH CHECK ({rule})",
     ]
     if not append_only:
         statements += [
-            f"CREATE POLICY {_named(name, 'update')} ON {on} FOR UPDATE USING ({rule}) WITH CHECK ({rule})",
-            f"CREATE POLICY {_named(name, 'delete')} ON {on} FOR DELETE USING ({rule})",
+            f"CREATE POLICY {_named(name, 'update')} ON {on} FOR UPDATE {to} {both}",
+            f"CREATE POLICY {_named(name, 'delete')} ON {on} FOR DELETE {to} USING ({rule})",
         ]
     if purge_expired:
         purge = identifier(roles.purge)
