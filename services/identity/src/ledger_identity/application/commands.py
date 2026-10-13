@@ -91,7 +91,7 @@ async def deactivate_company(unit: IdentityUnit, company_id: CompanyId, *, admit
 
 async def open_branch(unit: IdentityUnit, company_id: CompanyId, *, code: Code, name: Name) -> Branch:
     """Open a branch of the company under a code it does not use yet."""
-    opened = Branch.open(await company(unit, company_id), code=code, name=name, now=unit.now)
+    opened = Branch.open(await _locked(unit, company_id), code=code, name=name, now=unit.now)
     if not await unit.branches.add(opened):
         raise BranchCodeTakenError
     return opened
@@ -101,7 +101,7 @@ async def open_emission_point(
     unit: IdentityUnit, company_id: CompanyId, branch_id: BranchId, *, code: Code, name: Name
 ) -> EmissionPoint:
     """Open an emission point of one of the company's branches, under a code the branch does not use yet."""
-    owner = await company(unit, company_id)
+    owner = await _locked(unit, company_id)
     opened = EmissionPoint.open(
         owner, await branch(unit, company_id, branch_id), code=code, name=name, now=unit.now
     )
@@ -110,11 +110,17 @@ async def open_emission_point(
     return opened
 
 
-async def _roster(unit: IdentityUnit, company_id: CompanyId, subject: SubjectId) -> Roster:
-    """The company locked, ``subject``'s membership and the owners: one membership change at a time."""
+async def _locked(unit: IdentityUnit, company_id: CompanyId) -> Company:
+    """The company, locked until the unit ends: what it is checked active against cannot change meanwhile."""
     locked = await unit.companies.locked(company_id)
     if locked is None:
         raise CompanyNotFoundError(company_id)
+    return locked
+
+
+async def _roster(unit: IdentityUnit, company_id: CompanyId, subject: SubjectId) -> Roster:
+    """The company locked, ``subject``'s membership and the owners: one membership change at a time."""
+    locked = await _locked(unit, company_id)
     current = await unit.memberships.get(company_id, subject)
     return Roster(locked, subject, current, await unit.memberships.owners(company_id))
 

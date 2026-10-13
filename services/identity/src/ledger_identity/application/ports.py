@@ -47,7 +47,11 @@ class Companies(Protocol, metaclass=ABCMeta):
 
     @abstractmethod
     async def locked(self, company: CompanyId) -> Company | None:
-        """The company, locked until the unit ends: changes of its memberships wait for one another."""
+        """The company, locked until the unit ends.
+
+        Whatever is decided on it (its memberships, its being active, a new branch or emission point) waits
+        for the other units that lock it.
+        """
 
     @abstractmethod
     async def update(self, company: Company, *, version: int) -> bool:

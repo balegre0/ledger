@@ -46,7 +46,7 @@ from ledger_identity.domain.roles import READ_ONLY, Role
 from ledger_identity.domain.text import parse_code, parse_legal_name, parse_name
 from ledger_kernel.access import Permission, Principal, SubjectId
 from ledger_kernel.countries.do import TaxId
-from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
 from ledger_kernel.pagination import PageRequest, page_of
 lazy from ledger_identity.domain.branches import Branch, EmissionPoint
 lazy from ledger_identity.domain.company import Company
@@ -108,9 +108,9 @@ class State:
         return IdentityUnit(
             organizations=MemoryOrganizations(self),
             companies=MemoryCompanies(self, organization),
-            branches=MemoryBranches(self),
-            emission_points=MemoryEmissionPoints(self),
-            memberships=MemoryMemberships(self),
+            branches=MemoryBranches(self, organization),
+            emission_points=MemoryEmissionPoints(self, organization),
+            memberships=MemoryMemberships(self, organization),
             events=MemoryEvents(self),
             now=now,
         )
@@ -148,16 +148,16 @@ class MemoryCompanies(Companies):
 
     @override
     async def get(self, company: CompanyId) -> Company | None:
-        return self._state.companies.get(company)
+        return self._mine(company)
 
     @override
     async def locked(self, company: CompanyId) -> Company | None:
         self._state.while_waiting()
-        return self._state.companies.get(company)
+        return self._mine(company)
 
     @override
     async def update(self, company: Company, *, version: int) -> bool:
-        current = self._state.companies.get(company.id)
+        current = self._mine(company.id)
         if self._state.races_lost or current is None or current.version != version:
             return False
         self._state.companies[company.id] = company
@@ -177,11 +177,16 @@ class MemoryCompanies(Companies):
         ]
         return paged(mine, request, key=lambda company: company.id)
 
+    def _mine(self, company: CompanyId) -> Company | None:
+        found = self._state.companies.get(company)
+        return found if found is not None and found.organization == self._organization else None
+
 
 @final
 class MemoryBranches(Branches):
-    def __init__(self, state: State) -> None:
+    def __init__(self, state: State, organization: OrganizationId) -> None:
         self._state = state
+        self._organization = organization
 
     @override
     async def add(self, branch: Branch) -> bool:
@@ -196,18 +201,23 @@ class MemoryBranches(Branches):
     @override
     async def get(self, company: CompanyId, branch: BranchId) -> Branch | None:
         found = self._state.branches.get(branch)
-        return found if found is not None and found.tenant.company == company else None
+        return found if found is not None and found.tenant == Tenant(self._organization, company) else None
 
     @override
     async def page(self, company: CompanyId, request: PageRequest) -> Page[Branch]:
-        mine = [branch for branch in self._state.branches.values() if branch.tenant.company == company]
+        mine = [
+            branch
+            for branch in self._state.branches.values()
+            if branch.tenant == Tenant(self._organization, company)
+        ]
         return paged(mine, request, key=lambda branch: branch.id)
 
 
 @final
 class MemoryEmissionPoints(EmissionPoints):
-    def __init__(self, state: State) -> None:
+    def __init__(self, state: State, organization: OrganizationId) -> None:
         self._state = state
+        self._organization = organization
 
     @override
     async def add(self, point: EmissionPoint) -> bool:
@@ -221,22 +231,25 @@ class MemoryEmissionPoints(EmissionPoints):
     @override
     async def get(self, company: CompanyId, point: EmissionPointId) -> EmissionPoint | None:
         found = self._state.points.get(point)
-        return found if found is not None and found.tenant.company == company else None
+        return found if found is not None and found.tenant == Tenant(self._organization, company) else None
 
     @override
     async def page(self, company: CompanyId, branch: BranchId, request: PageRequest) -> Page[EmissionPoint]:
-        mine = [p for p in self._state.points.values() if p.tenant.company == company and p.branch == branch]
+        tenant = Tenant(self._organization, company)
+        mine = [p for p in self._state.points.values() if p.tenant == tenant and p.branch == branch]
         return paged(mine, request, key=lambda point: point.id)
 
 
 @final
 class MemoryMemberships(Memberships):
-    def __init__(self, state: State) -> None:
+    def __init__(self, state: State, organization: OrganizationId) -> None:
         self._state = state
+        self._organization = organization
 
     @override
     async def get(self, company: CompanyId, subject: SubjectId) -> Membership | None:
-        return self._state.memberships.get((company, subject))
+        found = self._state.memberships.get((company, subject))
+        return found if found is not None and found.tenant.organization == self._organization else None
 
     @override
     async def put(self, membership: Membership) -> None:
@@ -251,7 +264,11 @@ class MemoryMemberships(Memberships):
         return paged(self._active(company), request, key=lambda membership: membership.id)
 
     def _active(self, company: CompanyId) -> list[Membership]:
-        return [m for (held, _), m in self._state.memberships.items() if held == company and m.active]
+        return [
+            m
+            for (held, _), m in self._state.memberships.items()
+            if held == company and m.active and m.tenant.organization == self._organization
+        ]
 
 
 @final
@@ -407,6 +424,21 @@ async def test_branches_and_emission_points_are_opened_once_per_code(state: Stat
     )
 
 
+async def test_a_company_deactivated_while_a_branch_waits_for_its_lock_opens_nothing(state: State) -> None:
+    company = await created(state)
+    branch = await commands.open_branch(
+        state.unit(), company.id, code=parse_code("SUC1"), name=parse_name("A")
+    )
+    state.while_waiting = deactivate(state, company)
+    with pytest.raises(CompanyInactiveError):
+        await commands.open_branch(state.unit(), company.id, code=parse_code("SUC2"), name=parse_name("B"))
+    with pytest.raises(CompanyInactiveError):
+        await commands.open_emission_point(
+            state.unit(), company.id, branch.id, code=parse_code("001"), name=parse_name("Caja")
+        )
+    assert (len(state.branches), len(state.points)) == (1, 0)
+
+
 async def test_an_emission_point_opens_in_a_branch_that_exists_only(state: State) -> None:
     company = await created(state)
     with pytest.raises(BranchNotFoundError):
@@ -520,6 +552,17 @@ async def test_the_actor_acts_with_the_role_it_holds_when_the_change_is_made(sta
         )
 
 
+def deactivate(state: State, company: Company) -> Callable[[], None]:
+    """The deactivation of ``company`` that commits while another unit waits for its lock."""
+
+    def commit() -> None:
+        current = state.companies[company.id]
+        if current.status is CompanyStatus.ACTIVE:
+            state.companies[company.id], _ = current.deactivate(now=LATER)
+
+    return commit
+
+
 def demote(state: State, company: Company, subject: SubjectId, role: Role) -> Callable[[], None]:
     """A change of ``subject``'s role that commits while another unit waits for the company's lock."""
 
@@ -547,6 +590,37 @@ async def test_an_owner_demoted_while_its_grant_of_ownership_waits_is_refused(st
     with pytest.raises(OwnersOnlyError):
         await commands.grant_role(state.unit(), company.id, subject=ADMIN, role=Role.OWNER, actor=OWNER)
     assert (company.id, ADMIN) not in state.memberships
+
+
+async def test_a_deactivated_company_grants_no_role_but_still_revokes(state: State) -> None:
+    company = await created(state)
+    await commands.grant_role(state.unit(), company.id, subject=VIEWER, role=Role.VIEWER, actor=OWNER)
+    await commands.deactivate_company(state.unit(LATER), company.id, admits=anything)
+    with pytest.raises(CompanyInactiveError):
+        await commands.grant_role(state.unit(LATER), company.id, subject=ADMIN, role=Role.ADMIN, actor=OWNER)
+    await commands.revoke_role(state.unit(LATER), company.id, subject=VIEWER, actor=OWNER)
+    assert not state.memberships[company.id, VIEWER].active
+
+
+async def test_another_organizations_unit_sees_nothing_of_the_company(state: State) -> None:
+    company = await created(state)
+    branch = await commands.open_branch(
+        state.unit(), company.id, code=parse_code("SUC1"), name=parse_name("A")
+    )
+    outsider = state.unit(organization=STRANGER.organization)
+    with pytest.raises(CompanyNotFoundError):
+        await queries.company(outsider, company.id)
+    with pytest.raises(CompanyNotFoundError):
+        await commands.open_branch(outsider, company.id, code=parse_code("SUC2"), name=parse_name("B"))
+    with pytest.raises(CompanyNotFoundError):
+        await commands.grant_role(outsider, company.id, subject=VIEWER, role=Role.VIEWER, actor=OWNER)
+    with pytest.raises(CompanyNotFoundError):
+        await commands.rename_company(outsider, company.id, legal_name=parse_legal_name("X"), admits=anything)
+    with pytest.raises(BranchNotFoundError):
+        await queries.branch(outsider, company.id, branch.id)
+    assert await queries.permissions_of(outsider, company.id, OWNER) == frozenset()
+    assert (await queries.memberships(outsider, company.id, PageRequest())).items == ()
+    assert (await queries.branches(outsider, company.id, PageRequest())).items == ()
 
 
 async def test_memberships_of_a_company_that_does_not_exist_are_not_found(state: State) -> None:
