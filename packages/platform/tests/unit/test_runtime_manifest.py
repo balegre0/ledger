@@ -1,0 +1,198 @@
+from datetime import date, timedelta
+
+import pytest
+
+from ledger_platform.runtime.manifest import (
+    InvalidManifestError,
+    PackageKind,
+    load_manifest,
+    parse_duration,
+)
+
+MODULE = """
+[package]
+name = "invoicing"
+kind = "module"
+summary = "Commercial documents."
+owners = ["@balegre0"]
+
+[dependencies]
+packages = ["kernel", "platform"]
+modules = ["identity"]
+python = ["fastapi>=0.143", "sqlalchemy[asyncio]>=2.1.4"]
+
+[data]
+schema = "invoicing"
+
+[[ids]]
+prefix = "inv"
+resource = "invoice"
+
+[[permissions]]
+code = "invoicing.invoices.read"
+summary = "Read commercial documents."
+roles = ["owner", "admin", "viewer"]
+
+[[events.publishes]]
+type = "invoicing.invoice.issued"
+version = 1
+public = "invoice.issued"
+
+[[events.consumes]]
+consumer = "invoicing.companies"
+types = ["identity.company.registered"]
+ordered = true
+
+[[jobs]]
+kind = "invoicing.export"
+deadline = "72h"
+
+[[schedules]]
+name = "invoicing.purge_drafts"
+every = "24h"
+enqueues = "invoicing.export"
+
+[http]
+mounted_in = ["api"]
+prefixes = ["/v1/invoices"]
+"""
+
+COUNTRY = """
+[package]
+name = "do"
+kind = "country"
+summary = "Dominican Republic."
+owners = ["@balegre0"]
+
+[dependencies]
+packages = ["kernel", "platform"]
+
+[country]
+iso = "DO"
+name = "Dominican Republic"
+currencies = ["DOP"]
+time_zone = "America/Santo_Domingo"
+authority = { name = "Dirección General de Impuestos Internos", short = "DGII", url = "https://dgii.gov.do" }
+
+[[regimes]]
+key = "do"
+entry_point = "ledger_country_do.regime:REGIME"
+
+[[channels]]
+key = "do-ecf-v1"
+entry_point = "ledger_country_do.channels.ecf_v1:CHANNEL"
+assembly = "ledger_country_do.channels.ecf_v1.assembly"
+schema = "do_ecf"
+valid_from = 2019-01-01
+environments = ["testecf", "certecf", "ecf"]
+live_environments = ["ecf"]
+document_kinds = ["invoice", "credit_note", "debit_note"]
+directions = ["sales", "purchase"]
+http_prefixes = ["/v1/do"]
+tier = "bronze"
+
+[[channels.jobs]]
+kind = "do_ecf.advance"
+max_attempts = 50
+deadline = "15d"
+concurrency = 16
+"""
+
+
+APP_HEAD = """
+[package]
+name = "api"
+kind = "app"
+summary = "The API."
+owners = ["@o"]
+"""
+
+APP_SECTION = """
+[app]
+script = "ledger-api"
+role = "api"
+"""
+
+A_REGIME = """
+[[regimes]]
+key = "do"
+entry_point = "ledger_invoicing.regime:REGIME"
+"""
+
+
+def test_the_spec_example_of_a_module_reads() -> None:
+    manifest = load_manifest(MODULE)
+    assert manifest.package.kind is PackageKind.MODULE
+    assert manifest.schema_name == "invoicing"
+    assert manifest.distribution == "ledger-invoicing"
+    assert manifest.import_name == "ledger_invoicing"
+    assert manifest.events.consumes[0].ordered is True
+    assert manifest.events.consumes[0].max_attempts == 10
+    assert manifest.jobs[0].lease == timedelta(seconds=60)
+    assert manifest.jobs[0].deadline == timedelta(hours=72)
+    assert manifest.schedules[0].every == timedelta(hours=24)
+
+
+def test_the_spec_example_of_a_country_reads() -> None:
+    manifest = load_manifest(COUNTRY)
+    assert manifest.distribution == "ledger-country-do"
+    assert manifest.channels[0].valid_from == date(2019, 1, 1)
+    assert manifest.channels[0].schema_name == "do_ecf"
+    assert manifest.channels[0].jobs[0].concurrency == 16
+
+
+def test_an_app_names_its_script_and_role() -> None:
+    manifest = load_manifest(APP_HEAD + APP_SECTION)
+    assert (manifest.distribution, manifest.app is not None and manifest.app.role) == (
+        "ledger-app-api",
+        "api",
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "location"),
+    [
+        (MODULE + "\n[surprise]\nx = 1\n", "surprise"),
+        (MODULE.replace('code = "invoicing.invoices.read"', 'code = "invoicing.read"'), "permissions.0.code"),
+        (MODULE.replace('roles = ["owner", "admin", "viewer"]', 'roles = ["root"]'), "permissions.0.roles.0"),
+        (MODULE.replace('every = "24h"', 'every = "24h"\ncron = "0 3 * * *"'), "schedules.0"),
+        (MODULE.replace('every = "24h"', ""), "schedules.0"),
+        (MODULE.replace('deadline = "72h"', 'deadline = "3 days"'), "jobs.0.deadline"),
+        (MODULE.replace('prefixes = ["/v1/invoices"]', 'prefixes = ["/invoices"]'), "http.prefixes.0"),
+        (MODULE.replace('prefix = "inv"', 'prefix = "invoice"'), "ids.0.prefix"),
+        (MODULE.replace('kind = "module"', 'kind = "app"'), "app"),
+        (COUNTRY + "\n[dependencies.extra]\n", "dependencies.extra"),
+        (
+            COUNTRY.replace(
+                'packages = ["kernel", "platform"]', 'packages = ["kernel"]\nmodules = ["identity"]'
+            ),
+            "dependencies.modules",
+        ),
+        (COUNTRY.replace('kind = "country"', 'kind = "module"'), "country"),
+        (APP_HEAD.replace('kind = "app"', 'kind = "country"'), "country"),
+        (MODULE + A_REGIME, "regimes"),
+        (APP_HEAD + APP_SECTION + '[data]\nschema = "api"\n', "data"),
+        ("not = [toml", "line 1"),
+    ],
+)
+def test_a_bad_manifest_lists_where_it_is_wrong_never_the_value(text: str, location: str) -> None:
+    with pytest.raises(InvalidManifestError) as caught:
+        load_manifest(text)
+    assert location in str(caught.value)
+    assert "3 days" not in str(caught.value)
+    assert "/invoices" not in str(caught.value).replace("/v1/invoices", "")
+
+
+@pytest.mark.parametrize(("text", "seconds"), [("60s", 60), ("10m", 600), ("1h", 3600), ("15d", 1_296_000)])
+def test_durations_read_in_four_units(text: str, seconds: int) -> None:
+    assert parse_duration(text) == timedelta(seconds=seconds)
+
+
+def test_a_duration_already_read_passes_through() -> None:
+    assert parse_duration(timedelta(minutes=5)) == timedelta(minutes=5)
+
+
+@pytest.mark.parametrize("text", ["0s", "1w", "1.5h", "h", "", 60, "60 s"])
+def test_anything_else_is_not_a_duration(text: object) -> None:
+    with pytest.raises(ValueError, match="duration"):
+        parse_duration(text)
