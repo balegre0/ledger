@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import final
 lazy from collections.abc import Callable
 
-from ledger_identity.application.queries import branch, company
+from ledger_identity.application.queries import branch
 from ledger_identity.domain.branches import Branch, EmissionPoint
 from ledger_identity.domain.company import Company
 from ledger_identity.domain.errors import (
@@ -16,6 +16,7 @@ from ledger_identity.domain.errors import (
 )
 from ledger_identity.domain.membership import Actor, Roster, found, grant, revoke
 from ledger_identity.domain.organization import Organization
+from ledger_kernel.access import Permission
 lazy from ledger_identity.application.ports import IdentityUnit
 lazy from ledger_identity.domain.ids import BranchId
 lazy from ledger_identity.domain.membership import Membership
@@ -55,8 +56,13 @@ async def create_company(
     return registered
 
 
-async def _admitted(unit: IdentityUnit, company_id: CompanyId, admits: Admits) -> Company:
-    current = await company(unit, company_id)
+async def _admitted(unit: IdentityUnit, company_id: CompanyId, admits: Admits, actor: SubjectId) -> Company:
+    """The company, locked, if ``actor``'s membership allows managing it now and ``admits`` its version.
+
+    The actor is judged as it stands once the company is locked: a role it lost meanwhile does not count.
+    """
+    current = await _locked(unit, company_id)
+    (await _actor(unit, company_id, actor)).require(Permission.COMPANY_MANAGE)
     if not admits(current.version):
         raise StaleVersionError(current.id)
     return current
@@ -69,10 +75,10 @@ async def _replace(unit: IdentityUnit, current: Company, changed: Company) -> No
 
 
 async def rename_company(
-    unit: IdentityUnit, company_id: CompanyId, *, legal_name: LegalName, admits: Admits
+    unit: IdentityUnit, company_id: CompanyId, *, legal_name: LegalName, admits: Admits, actor: SubjectId
 ) -> Company:
-    """Give the company ``legal_name``, if its current version is one ``admits``."""
-    current = await _admitted(unit, company_id, admits)
+    """Give the company ``legal_name``, if its current version is one ``admits``, as ``actor`` may."""
+    current = await _admitted(unit, company_id, admits, actor)
     renamed, updated = current.rename(legal_name, now=unit.now)
     if updated is not None:
         await _replace(unit, current, renamed)
@@ -80,9 +86,11 @@ async def rename_company(
     return renamed
 
 
-async def deactivate_company(unit: IdentityUnit, company_id: CompanyId, *, admits: Admits) -> Company:
-    """Deactivate the company, if its current version is one ``admits``."""
-    current = await _admitted(unit, company_id, admits)
+async def deactivate_company(
+    unit: IdentityUnit, company_id: CompanyId, *, admits: Admits, actor: SubjectId
+) -> Company:
+    """Deactivate the company, if its current version is one ``admits``, as ``actor`` may."""
+    current = await _admitted(unit, company_id, admits, actor)
     inactive, deactivated = current.deactivate(now=unit.now)
     await _replace(unit, current, inactive)
     await unit.events.publish(deactivated)

@@ -79,10 +79,10 @@ class Actor:
     subject: SubjectId
     permissions: frozenset[Permission]
 
-    @property
-    def manages_memberships(self) -> bool:
-        """Whether it may grant and revoke roles."""
-        return Permission.MEMBERSHIP_MANAGE in self.permissions
+    def require(self, permission: Permission) -> None:
+        """Refuse with ``ActorNotAllowedError`` unless its membership allows ``permission`` now."""
+        if permission not in self.permissions:
+            raise ActorNotAllowedError(permission)
 
     @property
     def manages_ownership(self) -> bool:
@@ -136,8 +136,7 @@ def found(company: Company, founder: Principal, *, now: datetime) -> tuple[Membe
 
 
 def _require_managing(actor: Actor) -> None:
-    if not actor.manages_memberships:
-        raise ActorNotAllowedError(Permission.MEMBERSHIP_MANAGE)
+    actor.require(Permission.MEMBERSHIP_MANAGE)
 
 
 def _require_ownership(actor: Actor) -> None:

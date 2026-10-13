@@ -34,6 +34,7 @@ from ledger_platform.routes import (
     etag,
     idempotency_key,
     if_match,
+    if_match_required,
     json_response,
     page_request,
     parse_if_match,
@@ -60,8 +61,13 @@ class Components(TypedDict):
     securitySchemes: dict[str, dict[str, str]]
 
 
+class Operation(TypedDict, total=False):
+    parameters: list[dict[str, object]]
+
+
 class Document(TypedDict):
     components: Components
+    paths: dict[str, dict[str, Operation]]
 
 
 DOCUMENT: Final = TypeAdapter(Document)
@@ -165,7 +171,7 @@ def router(verifier: TokenVerifier, grants: Grants) -> APIRouter:
     async def versions(version: int, condition: Annotated[IfMatch, Depends(if_match)]) -> dict[str, bool]:
         return {"admitted": condition.admits(version)}
 
-    @routes.put("/guarded/{version}")
+    @routes.put("/guarded/{version}", openapi_extra=if_match_required())
     async def guarded(version: int, condition: Annotated[IfMatch, Depends(if_match)]) -> dict[str, int]:
         return applied(version, condition)
 
@@ -480,6 +486,23 @@ async def test_an_if_match_too_long_in_all_is_refused(client: httpx.AsyncClient)
     assert len(line) < 1024
     response = await client.patch("/versions/3", headers=[("If-Match", line), ("If-Match", line)])
     assert (response.status_code, problem_code(response)) == (422, "invalid_header")
+
+
+async def test_if_match_is_documented_as_required_where_its_route_says_so(client: httpx.AsyncClient) -> None:
+    paths = DOCUMENT.validate_json((await client.get("/openapi.json")).content)["paths"]
+
+    def if_match_of(path: str, method: str) -> list[dict[str, object]]:
+        parameters = paths[path][method].get("parameters", [])
+        return [parameter for parameter in parameters if parameter["name"] == "If-Match"]
+
+    (documented,) = if_match_of("/guarded/{version}", "put")
+    assert (documented["in"], documented["required"], documented["schema"]) == (
+        "header",
+        True,
+        {"type": "string", "maxLength": 1024},
+    )
+    assert if_match_of("/versions/{version}", "patch") == []  # never documented as optional
+    assert if_match_required() is not if_match_required()
 
 
 @pytest.mark.parametrize(

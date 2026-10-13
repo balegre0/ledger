@@ -229,14 +229,14 @@ async def test_renames_and_deactivations_are_announced(database: Database, outbo
         outbox,
         company.tenant,
         lambda unit: commands.rename_company(
-            unit, company.id, legal_name=parse_legal_name("Duarte S.A."), admits=anything
+            unit, company.id, legal_name=parse_legal_name("Duarte S.A."), admits=anything, actor=OWNER
         ),
     )
     await in_unit(
         database,
         outbox,
         company.tenant,
-        lambda unit: commands.deactivate_company(unit, company.id, admits=anything),
+        lambda unit: commands.deactivate_company(unit, company.id, admits=anything, actor=OWNER),
     )
     types = [envelope.type.rsplit(".", 1)[1] for envelope in await published(database)]
     assert types == ["CompanyCreated", "MembershipGranted", "CompanyUpdated", "CompanyDeactivated"]
@@ -720,7 +720,10 @@ async def test_a_deactivated_company_lets_other_services_read_only_and_identity_
 
     await grant(Role.ISSUER)
     await in_unit(
-        database, outbox, tenant, lambda unit: commands.deactivate_company(unit, company.id, admits=anything)
+        database,
+        outbox,
+        tenant,
+        lambda unit: commands.deactivate_company(unit, company.id, admits=anything, actor=OWNER),
     )
     for_other_services = await in_unit(
         database, outbox, FOUNDER.organization, lambda unit: queries.permissions_of(unit, company.id, OWNER)

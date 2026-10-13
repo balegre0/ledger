@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+from functools import partial
 from http import HTTPStatus
 from typing import Final
 from uuid import UUID
@@ -16,6 +17,7 @@ from ledger_kernel.ids import CompanyId, Tenant, new_id
 from ledger_platform.authentication import organization_of
 from ledger_testing.api import Caller, created, document, page
 from ledger_testing.issuer import LocalIssuer
+from ledger_testing.waiting import eventually, waits_for_a_lock
 lazy from ledger_identity.settings import IdentitySettings
 lazy from ledger_platform.service import Service
 
@@ -354,6 +356,46 @@ async def test_a_viewer_reads_but_does_not_change(
     assert (deactivation.status_code, document(deactivation)["code"]) == (403, "permission_denied")
 
 
+async def test_a_caller_without_the_permission_is_refused_before_its_preconditions_are_read(
+    client: httpx.AsyncClient, issuer: LocalIssuer, service: Service[IdentitySettings], company: str
+) -> None:
+    await grant(service, company, "3001", Role.VIEWER)
+    viewer = Caller(issuer, subject="3001")
+    unconditional = await client.patch(
+        f"/v1/companies/{company}", json={"legal_name": "X"}, headers=viewer.bearer()
+    )
+    keyless = await client.post(f"/v1/companies/{company}/deactivate", headers=viewer.bearer())
+    for response in (unconditional, keyless):
+        assert (response.status_code, document(response)["code"]) == (403, "permission_denied")
+
+
+async def test_an_admin_demoted_while_its_deactivation_waits_for_the_company_cannot_deactivate(
+    client: httpx.AsyncClient,
+    issuer: LocalIssuer,
+    service: Service[IdentitySettings],
+    database_url: str,
+    company: str,
+) -> None:
+    await grant(service, company, "2002", Role.ADMIN)
+    runtime = service.runtime()
+    tenant = Tenant(organization_of("1001"), CompanyId(UUID(company)))
+    headers = Caller(issuer, subject="2002").posting("k-off") | {"If-Match": '"1"'}
+    async with runtime.database.transaction(tenant) as transaction:  # holds the company's lock
+        await commands.grant_role(
+            bind(transaction, runtime.outbox),
+            tenant.company,
+            subject=SubjectId("2002"),
+            role=Role.VIEWER,
+            actor=SubjectId("2001"),
+        )
+        waiting = asyncio.create_task(client.post(f"/v1/companies/{company}/deactivate", headers=headers))
+        await eventually(partial(waits_for_a_lock, database_url))
+    refused = await waiting
+    assert (refused.status_code, document(refused)["code"]) == (403, "permission_denied")
+    read = await client.get(f"/v1/companies/{company}", headers=Caller(issuer).bearer())
+    assert (document(read)["status"], read.headers["etag"]) == ("active", '"1"')
+
+
 async def test_a_company_id_that_is_not_an_id_is_refused(client: httpx.AsyncClient, owner: Caller) -> None:
     response = await client.get("/v1/companies/not-an-id", headers=owner.bearer())
     assert (response.status_code, document(response)["code"]) == (422, "invalid_id")
@@ -429,6 +471,7 @@ async def test_a_deactivated_company_changes_no_more_and_the_deactivation_replay
         "inactive",
         '"2"',
     )
+    assert "location" not in deactivated.headers  # a 201's header only
     again = await client.post(path, headers=headers)
     assert (again.content, again.headers["idempotent-replayed"]) == (deactivated.content, "true")
     change = await client.patch(

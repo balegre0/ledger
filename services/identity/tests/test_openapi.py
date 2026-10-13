@@ -14,6 +14,7 @@ Parameter = TypedDict("Parameter", {"name": str, "in": str, "required": bool})
 
 class Answer(TypedDict, total=False):
     content: dict[str, dict[str, object]]
+    headers: dict[str, dict[str, object]]
 
 
 class Operation(TypedDict, total=False):
@@ -43,6 +44,12 @@ def test_the_document_is_openapi_3_1_and_every_post_takes_an_idempotency_key() -
         assert {"name": "Idempotency-Key", "in": "header", "required": True} in post.get("parameters", [])
 
 
+def operations() -> list[Operation]:
+    """Every operation of the published document."""
+    parsed = DOCUMENT.validate_json(document())
+    return [operation for operations in parsed["paths"].values() for operation in operations.values()]
+
+
 def test_every_change_of_a_company_requires_if_match() -> None:
     parsed = DOCUMENT.validate_json(document())
     changes = [
@@ -50,8 +57,53 @@ def test_every_change_of_a_company_requires_if_match() -> None:
         parsed["paths"]["/v1/companies/{company_id}/deactivate"]["post"],
     ]
     for change in changes:
-        assert {"name": "If-Match", "in": "header", "required": False} in change.get("parameters", [])
+        assert {"name": "If-Match", "in": "header", "required": True} in change.get("parameters", [])
         assert {"412", "428"} <= set(change.get("responses", {}))
+
+
+def test_if_match_is_documented_once_and_required_wherever_it_is_read() -> None:
+    for operation in operations():
+        tags = [parameter for parameter in operation.get("parameters", []) if parameter["name"] == "If-Match"]
+        answers = set(operation.get("responses", {}))
+        assert (len(tags), [tag["required"] for tag in tags]) == (
+            (1, [True]) if "428" in answers else (0, [])
+        )
+
+
+def test_a_creation_says_where_its_resource_lives_and_no_other_answer_does() -> None:
+    parsed = DOCUMENT.validate_json(document())
+    located = [
+        (method, status)
+        for operations in parsed["paths"].values()
+        for method, operation in operations.items()
+        for status, answer in operation.get("responses", {}).items()
+        if "Location" in answer.get("headers", {})
+    ]
+    creations = [
+        "post"
+        for operations in parsed["paths"].values()
+        for method, operation in operations.items()
+        if method == "post" and "201" in operation.get("responses", {})
+    ]
+    assert creations
+    assert located == [("post", "201")] * len(creations)  # a PUT's resource is its URI (RFC 9110 15.3.2)
+
+
+def test_every_answer_of_a_company_tells_its_version() -> None:
+    paths = DOCUMENT.validate_json(document())["paths"]
+    answers = [
+        ("/v1/companies", "post", "201"),
+        ("/v1/companies/{company_id}", "get", "200"),
+        ("/v1/companies/{company_id}", "patch", "200"),
+        ("/v1/companies/{company_id}/deactivate", "post", "200"),
+    ]
+    for path, method, status in answers:
+        assert "ETag" in paths[path][method].get("responses", {})[status].get("headers", {})
+
+
+def test_every_operation_may_find_the_service_unavailable() -> None:
+    for operation in operations():
+        assert "503" in operation.get("responses", {})
 
 
 def test_every_operation_is_for_bearers_of_a_token() -> None:

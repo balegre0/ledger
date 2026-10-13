@@ -12,7 +12,8 @@
 * ``if_match``: the versions an update may apply to; 428 without ``If-Match``. A header sent in several lines
   is read as one list (RFC 9110 section 5.3), at most 1024 characters in all. The route compares the
   version it reads, and sets the next one only where it is still that version (compare and set), else
-  ``precondition_failed`` (412). ``etag`` is what it answers in ``ETag``.
+  ``precondition_failed`` (412). ``etag`` is what it answers in ``ETag``. Its route documents the header
+  with ``openapi_extra=if_match_required()``.
 * ``idempotency_key``: the ``Idempotency-Key`` every POST requires.
 * ``attempt_of``, ``json_response`` and ``answer``: run a POST's work once per key (``Idempotency.once``,
   called before the work's own statements), and answer it.
@@ -229,12 +230,15 @@ def parse_if_match(value: str) -> IfMatch:
 
 async def if_match(
     request: Request,
-    value: Annotated[str | None, Header(alias=IF_MATCH, max_length=_MAX_IF_MATCH_LENGTH)] = None,
+    value: Annotated[
+        str | None, Header(alias=IF_MATCH, max_length=_MAX_IF_MATCH_LENGTH, include_in_schema=False)
+    ] = None,
 ) -> IfMatch:
     """The ``If-Match`` an update requires: 428 when the request has none.
 
     Every line of the header counts, read as one list (RFC 9110 section 5.3); ``value``, the line FastAPI
-    reads, says whether there is any.
+    reads, says whether there is any. It is read as optional, so that its absence is a 428 rather than a 422,
+    and is kept out of the document, which would call it optional: ``if_match_required`` documents it.
     """
     if value is None:
         raise HTTPException(HTTPStatus.PRECONDITION_REQUIRED)
@@ -242,6 +246,24 @@ async def if_match(
     if len(joined) > _MAX_IF_MATCH_LENGTH:
         raise InvalidHeaderError(IF_MATCH, f"at most {_MAX_IF_MATCH_LENGTH} characters in all")
     return parse_if_match(joined)
+
+
+def if_match_required() -> dict[str, object]:
+    """The ``openapi_extra`` of a route that depends on ``if_match``: ``If-Match``, a required header.
+
+    A new mapping each time: FastAPI merges it into the route's operation.
+    """
+    parameter: dict[str, object] = {
+        "name": IF_MATCH,
+        "in": "header",
+        "required": True,
+        "description": (
+            "The versions the change may apply to: strong entity tags as ETag gives them, or *. "
+            "Without it the answer is 428; when no version it names is current, 412."
+        ),
+        "schema": {"type": "string", "maxLength": _MAX_IF_MATCH_LENGTH},
+    }
+    return {"parameters": [parameter]}
 
 
 def precondition_failed() -> HTTPException:

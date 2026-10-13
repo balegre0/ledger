@@ -339,7 +339,11 @@ async def test_another_organization_may_register_the_same_tax_id(state: State) -
 async def test_a_rename_is_a_new_version_announced(state: State) -> None:
     company = await created(state)
     renamed = await commands.rename_company(
-        state.unit(LATER), company.id, legal_name=parse_legal_name("Duarte Hermanos"), admits=anything
+        state.unit(LATER),
+        company.id,
+        legal_name=parse_legal_name("Duarte Hermanos"),
+        admits=anything,
+        actor=OWNER,
     )
     assert (renamed.version, state.companies[company.id]) == (2, renamed)
     assert isinstance(state.events[-1], CompanyUpdated)
@@ -348,7 +352,7 @@ async def test_a_rename_is_a_new_version_announced(state: State) -> None:
 async def test_a_rename_to_the_same_name_changes_and_announces_nothing(state: State) -> None:
     company = await created(state)
     same = await commands.rename_company(
-        state.unit(LATER), company.id, legal_name=company.legal_name, admits=anything
+        state.unit(LATER), company.id, legal_name=company.legal_name, admits=anything, actor=OWNER
     )
     assert (same, len(state.events)) == (company, 2)
 
@@ -357,10 +361,10 @@ async def test_a_change_the_precondition_does_not_admit_is_stale(state: State) -
     company = await created(state)
     with pytest.raises(StaleVersionError):
         await commands.rename_company(
-            state.unit(LATER), company.id, legal_name=parse_legal_name("X"), admits=nothing
+            state.unit(LATER), company.id, legal_name=parse_legal_name("X"), admits=nothing, actor=OWNER
         )
     with pytest.raises(StaleVersionError):
-        await commands.deactivate_company(state.unit(LATER), company.id, admits=nothing)
+        await commands.deactivate_company(state.unit(LATER), company.id, admits=nothing, actor=OWNER)
     assert state.companies[company.id] == company
 
 
@@ -369,14 +373,14 @@ async def test_a_company_changed_by_someone_else_meanwhile_is_stale(state: State
     state.races_lost = True
     with pytest.raises(StaleVersionError):
         await commands.rename_company(
-            state.unit(LATER), company.id, legal_name=parse_legal_name("X"), admits=anything
+            state.unit(LATER), company.id, legal_name=parse_legal_name("X"), admits=anything, actor=OWNER
         )
     assert len(state.events) == 2
 
 
 async def test_a_deactivated_company_is_announced_and_opens_nothing_more(state: State) -> None:
     company = await created(state)
-    inactive = await commands.deactivate_company(state.unit(LATER), company.id, admits=anything)
+    inactive = await commands.deactivate_company(state.unit(LATER), company.id, admits=anything, actor=OWNER)
     assert (inactive.status, isinstance(state.events[-1], CompanyDeactivated)) == (
         CompanyStatus.INACTIVE,
         True,
@@ -391,7 +395,7 @@ async def test_a_company_that_does_not_exist_is_not_found(state: State) -> None:
     missing = CompanyId(new_id())
     with pytest.raises(CompanyNotFoundError):
         await commands.rename_company(
-            state.unit(), missing, legal_name=parse_legal_name("X"), admits=anything
+            state.unit(), missing, legal_name=parse_legal_name("X"), admits=anything, actor=OWNER
         )
     with pytest.raises(CompanyNotFoundError):
         await queries.company(state.unit(), missing)
@@ -592,10 +596,43 @@ async def test_an_owner_demoted_while_its_grant_of_ownership_waits_is_refused(st
     assert (company.id, ADMIN) not in state.memberships
 
 
+async def test_an_admin_demoted_while_its_change_of_the_company_waits_is_refused(state: State) -> None:
+    company = await created(state)
+    await with_an_admin(state, company)
+    state.while_waiting = demote(state, company, ADMIN, Role.VIEWER)
+    with pytest.raises(ActorNotAllowedError):
+        await commands.deactivate_company(state.unit(LATER), company.id, admits=anything, actor=ADMIN)
+    with pytest.raises(ActorNotAllowedError):
+        await commands.rename_company(
+            state.unit(LATER), company.id, legal_name=parse_legal_name("X"), admits=anything, actor=ADMIN
+        )
+    assert (state.companies[company.id], len(state.events)) == (company, 3)
+
+
+async def test_a_company_is_changed_by_an_actor_with_an_active_role_there_only(state: State) -> None:
+    company = await created(state)
+    await with_an_admin(state, company)
+    await commands.revoke_role(state.unit(), company.id, subject=ADMIN, actor=OWNER)
+    with pytest.raises(CompanyNotFoundError):
+        await commands.deactivate_company(state.unit(LATER), company.id, admits=anything, actor=ADMIN)
+    with pytest.raises(CompanyNotFoundError):
+        await commands.rename_company(
+            state.unit(LATER), company.id, legal_name=parse_legal_name("X"), admits=anything, actor=VIEWER
+        )
+    assert state.companies[company.id] == company
+
+
+async def test_a_refused_actor_is_refused_whatever_version_it_names(state: State) -> None:
+    company = await created(state)
+    await commands.grant_role(state.unit(), company.id, subject=VIEWER, role=Role.VIEWER, actor=OWNER)
+    with pytest.raises(ActorNotAllowedError):
+        await commands.deactivate_company(state.unit(LATER), company.id, admits=nothing, actor=VIEWER)
+
+
 async def test_a_deactivated_company_grants_no_role_but_still_revokes(state: State) -> None:
     company = await created(state)
     await commands.grant_role(state.unit(), company.id, subject=VIEWER, role=Role.VIEWER, actor=OWNER)
-    await commands.deactivate_company(state.unit(LATER), company.id, admits=anything)
+    await commands.deactivate_company(state.unit(LATER), company.id, admits=anything, actor=OWNER)
     with pytest.raises(CompanyInactiveError):
         await commands.grant_role(state.unit(LATER), company.id, subject=ADMIN, role=Role.ADMIN, actor=OWNER)
     await commands.revoke_role(state.unit(LATER), company.id, subject=VIEWER, actor=OWNER)
@@ -615,7 +652,9 @@ async def test_another_organizations_unit_sees_nothing_of_the_company(state: Sta
     with pytest.raises(CompanyNotFoundError):
         await commands.grant_role(outsider, company.id, subject=VIEWER, role=Role.VIEWER, actor=OWNER)
     with pytest.raises(CompanyNotFoundError):
-        await commands.rename_company(outsider, company.id, legal_name=parse_legal_name("X"), admits=anything)
+        await commands.rename_company(
+            outsider, company.id, legal_name=parse_legal_name("X"), admits=anything, actor=OWNER
+        )
     with pytest.raises(BranchNotFoundError):
         await queries.branch(outsider, company.id, branch.id)
     assert await queries.permissions_of(outsider, company.id, OWNER) == frozenset()
@@ -660,7 +699,7 @@ async def test_permissions_are_the_role_s_or_none(state: State) -> None:
 
 async def test_other_services_get_the_reading_permissions_only_of_a_deactivated_company(state: State) -> None:
     company = await created(state)
-    await commands.deactivate_company(state.unit(LATER), company.id, admits=anything)
+    await commands.deactivate_company(state.unit(LATER), company.id, admits=anything, actor=OWNER)
     assert await queries.permissions_of(state.unit(), company.id, OWNER) == READ_ONLY
     assert await queries.permissions_of(state.unit(), CompanyId(new_id()), OWNER) == frozenset()
 
