@@ -102,7 +102,7 @@ type RouteOf = Callable[[Mapping[str, object]], str]
 
 
 class Problem(BaseModel):
-    """An RFC 9457 problem document: what every failure answers (§9.6). A code may add members of its own."""
+    """An RFC 9457 problem document: what every failure answers. A code may add members of its own."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="allow", frozen=True)
 

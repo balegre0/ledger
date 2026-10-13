@@ -21,6 +21,8 @@ from ledger_kernel.errors import LedgerError
 UNMATCHED: Final = "unmatched"
 ROUTE_KEY: Final = "ledger.route"
 """Where in the scope of a request ``Measure`` leaves the template of its route."""
+LABELS_KEY: Final = "ledger.route_labels"
+"""Where in the scope of a request ``Measure`` leaves the app's ``RouteLabels``, for ``full_template``."""
 _UNREGISTERED: Final = "unregistered"
 _OTHER_METHOD: Final = "other"
 _METHODS: Final = frozenset(method.value for method in HTTPMethod)
@@ -133,6 +135,7 @@ class Measure:
         if scope["type"] != "http":
             await self._app(scope, receive, send)
             return
+        scope[LABELS_KEY] = self._labels
         started = perf_counter()
         status = _FAILED  # what an application that returns without answering amounts to
 
@@ -158,3 +161,17 @@ class Measure:
         self._duration.labels(_method_label(scope["method"]), route, str(status)).observe(
             perf_counter() - started
         )
+
+
+def full_template(scope: Mapping[str, object]) -> str | None:
+    """The full template of the route that took the request, as the app mounted it; ``None`` if it has none.
+
+    From the app's ``RouteLabels`` when ``Measure`` runs (a chassis app), else the template the route declares
+    (an app of its own). ``None`` for a request no route took, or a route added after the app was built.
+    """
+    labels = scope.get(LABELS_KEY)
+    if isinstance(labels, RouteLabels):
+        template = labels.of_scope(scope)
+        return None if template in {UNMATCHED, _UNREGISTERED} else template
+    route = scope.get("route")
+    return route.path_format if isinstance(route, APIRoute) else None

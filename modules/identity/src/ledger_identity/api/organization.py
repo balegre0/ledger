@@ -4,11 +4,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from ledger_identity.api.context import problems
 from ledger_identity.api.models import OrganizationView
 from ledger_identity.application import queries
 from ledger_kernel.tenancy import OrganizationScope
 from ledger_platform.http.deps import in_organization
+from ledger_platform.http.openapi import problems
 lazy from ledger_identity.api.context import ApiContext
 lazy from ledger_identity.settings import IdentitySettings
 lazy from ledger_kernel.access import Principal
