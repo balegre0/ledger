@@ -8,15 +8,10 @@ import httpx
 import pytest
 from pydantic import TypeAdapter
 
-from ledger_country_do.channels.ecf_v1.adapters.dgii.client import (
-    DEFAULT_TIMEOUTS,
-    MAX_ANSWER,
-    DgiiClient,
-    DgiiTimeouts,
-    read_answer,
-)
+from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient, read_answer
 from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts, LiveHostRefusedError, Service
 from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import TokenAnswer
+from ledger_country_do.channels.ecf_v1.adapters.http import DEFAULT_TIMEOUTS, MAX_ANSWER, DgiiTimeouts
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf, rfce
 from ledger_country_do.channels.ecf_v1.application.ports import (
     Answer,

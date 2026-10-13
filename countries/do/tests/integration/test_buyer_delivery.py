@@ -27,7 +27,8 @@ from ledger_country_do.channels.ecf_v1.adapters.buyers.client import (
     log_seed_signed,
 )
 from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import BuyerEndpointRefusedError
-from ledger_country_do.channels.ecf_v1.adapters.dgii.client import MAX_ANSWER, DgiiTimeouts, DirectoryEntry
+from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DirectoryEntry
+from ledger_country_do.channels.ecf_v1.adapters.http import MAX_ANSWER, DgiiTimeouts
 from ledger_country_do.channels.ecf_v1.adapters.signing.trust import (
     CounterpartyCertificateError,
     CounterpartyTrust,

@@ -54,12 +54,8 @@ from pydantic import TypeAdapter, ValidationError
 lazy from cryptography import x509
 
 from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import endpoint, pinned, system_resolve
-from ledger_country_do.channels.ecf_v1.adapters.dgii.client import (
-    ACCEPTED_ENCODING,
-    DEFAULT_TIMEOUTS,
-    bounded,
-)
 from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import TokenAnswer
+from ledger_country_do.channels.ecf_v1.adapters.http import ACCEPTED_ENCODING, DEFAULT_TIMEOUTS, bounded
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import INBOUND, verify_enveloped
 from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import texts
 from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import checked
@@ -67,7 +63,8 @@ from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError, EcfUnavailableError
 from ledger_country_do.channels.ecf_v1.domain.notation import parse_dgii_moment
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import Endpoint, Resolve
-lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiTimeouts, DirectoryEntry
+lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DirectoryEntry
+lazy from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
 lazy from ledger_country_do.channels.ecf_v1.adapters.signing.trust import CounterpartyTrust
 lazy from ledger_country_do.channels.ecf_v1.application.ports import XmlSigner
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft

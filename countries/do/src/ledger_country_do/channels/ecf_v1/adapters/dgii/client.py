@@ -35,7 +35,6 @@ Queries are ``GET``; what carries a document (the signed seed, an e-CF, an RFCE)
 """
 
 import asyncio
-import zlib
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -58,6 +57,12 @@ from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import (
     TokenAnswer,
     TrackIdAnswer,
 )
+from ledger_country_do.channels.ecf_v1.adapters.http import (
+    ACCEPTED_ENCODING,
+    DEFAULT_TIMEOUTS,
+    MAX_ANSWER,
+    bounded,
+)
 from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import texts
 from ledger_country_do.channels.ecf_v1.application.ports import (
     Answer,
@@ -74,18 +79,14 @@ from ledger_country_do.channels.ecf_v1.domain.notation import SANTO_DOMINGO, par
 from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import MessageAnswer
+lazy from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
 lazy from ledger_country_do.channels.ecf_v1.application.ports import Reception, XmlSigner
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 
-MAX_ANSWER: Final = 1024 * 1024
 TOKEN_MARGIN: Final = timedelta(minutes=5)
 TOKEN_CEILING: Final = timedelta(hours=1)
 RETRY_DELAYS: Final = (0.2, 0.5)
-ACCEPTED_ENCODING: Final = "gzip"
-_PLAIN: Final = "identity"
-_GZIP_WINDOW: Final = 31
-"""``zlib``'s ``wbits`` for exactly one gzip member (16 + a 32 KiB window)."""
 _SERVER_ERROR: Final = 500
 _TOO_MANY: Final = 429
 _UNAUTHORIZED: Final = 401
@@ -97,20 +98,6 @@ _TRACK_IDS: Final = TypeAdapter(list[TrackIdAnswer])
 _DIRECTORY: Final = TypeAdapter(list[DirectoryAnswer])
 
 type Sleep = Callable[[float], Awaitable[None]]
-
-
-@final
-@dataclass(frozen=True, slots=True)
-class DgiiTimeouts:
-    """How long DGII is waited for, in seconds: to connect and in all, per attempt; and per call, overall."""
-
-    connect: float = 5.0
-    total: float = 20.0
-    call: float = 60.0
-    """A call's deadline: its token, every attempt, the waits between them."""
-
-
-DEFAULT_TIMEOUTS: Final = DgiiTimeouts()
 
 
 @final
@@ -185,27 +172,6 @@ def _submitted[T](model: TypeAdapter[T], response: httpx.Response, service: Serv
         return read_answer(model, response, service)
     except AuthorityUnavailableError as error:
         raise OutcomeUnknownError(service.value, Failure.UNREADABLE) from error
-
-
-async def bounded(response: httpx.Response) -> bytes | None:
-    """The body, plain or one gzip layer decompressed as it streams; ``None`` if unreadable or too large."""
-    encodings = [
-        each.strip().lower() for each in response.headers.get_list("content-encoding", split_commas=True)
-    ]
-    if encodings not in ([], [_PLAIN], [ACCEPTED_ENCODING]):
-        return None
-    inflater = zlib.decompressobj(wbits=_GZIP_WINDOW) if encodings == [ACCEPTED_ENCODING] else None
-    body = bytearray()
-    try:
-        async for chunk in response.aiter_raw():
-            body += chunk if inflater is None else inflater.decompress(chunk, MAX_ANSWER + 1 - len(body))
-            if len(body) > MAX_ANSWER:
-                return None
-    except zlib.error:
-        return None
-    if inflater is not None and (not inflater.eof or inflater.unused_data):
-        return None
-    return bytes(body)
 
 
 @final

@@ -3,7 +3,8 @@ from typing import Final, final, override
 import httpx
 import pytest
 
-from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient, DgiiTimeouts
+from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
+from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import verify_enveloped
 from ledger_country_do.channels.ecf_v1.adapters.xml.documents import DgiiXml
 from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import texts
