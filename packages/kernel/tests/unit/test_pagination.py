@@ -8,6 +8,7 @@ from ledger_kernel.ids import new_id
 from ledger_kernel.pagination import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
+    ConflictingCursorsError,
     InvalidCursorError,
     InvalidPageSizeError,
     Page,
@@ -92,3 +93,28 @@ def test_the_last_page_says_nothing_follows() -> None:
 def test_an_empty_page() -> None:
     nothing: list[UUID] = []
     assert page_of(nothing, PageRequest(), key=same) == Page(items=(), next_cursor=None)
+
+
+def test_a_page_says_whether_more_follow() -> None:
+    ids = sorted(new_id() for _ in range(3))
+    assert page_of(ids, PageRequest(size=2), key=same).has_more
+    assert not page_of(ids, PageRequest(size=3), key=same).has_more
+
+
+def test_a_page_read_backwards_holds_the_items_before_the_cursor_in_id_order() -> None:
+    """``ending_before``: rows come newest first; the page holds them oldest first and continues before."""
+    ids = sorted(new_id() for _ in range(4))
+    request = PageRequest(size=2, before=ids[3])
+    page = page_of([ids[2], ids[1], ids[0]], request, key=same)
+    assert page.items == (ids[1], ids[2])
+    assert page.next_cursor is not None
+    assert decode_cursor(page.next_cursor) == ids[1]
+    assert page_of([ids[1], ids[0]], PageRequest(size=2, before=ids[2]), key=same) == Page(
+        items=(ids[0], ids[1]), next_cursor=None
+    )
+
+
+def test_a_page_cannot_start_after_one_id_and_end_before_another() -> None:
+    with pytest.raises(ConflictingCursorsError) as caught:
+        PageRequest(after=new_id(), before=new_id())
+    assert caught.value.code == "page_cursors_conflict"
