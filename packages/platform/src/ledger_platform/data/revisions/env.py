@@ -1,0 +1,5 @@
+"""Alembic's entry point for the platform schema."""
+
+from ledger_platform.data.migrations import run_schema_migrations
+
+run_schema_migrations()

@@ -8,7 +8,7 @@ the database at ``url`` (an SQLAlchemy ``postgresql+psycopg://`` URL) and closes
 
 from contextlib import contextmanager
 from typing import Final
-lazy from collections.abc import Generator
+lazy from collections.abc import Generator, Mapping
 
 from alembic.autogenerate import produce_migrations, render_python_code
 from alembic.migration import MigrationContext
@@ -64,12 +64,28 @@ def tables_of(url: str) -> set[str]:
         return set(inspect(connection).get_table_names())
 
 
-def pending_changes(url: str, models: MetaData) -> str | None:
-    """The migration ``models`` would still need, as Alembic would write it; ``None`` when there is none."""
+def pending_changes(url: str, models: MetaData, *, schema: str | None = None) -> str | None:
+    """The migration ``models`` would still need, as Alembic would write it; ``None`` when there is none.
+
+    Without ``schema`` Alembic compares the default schema (``public``); with it, that schema alone, whose
+    tables ``models`` name with their schema (a v2 schema per module), Alembic's version table aside.
+    """
+
+    def in_schema(name: str | None, kind: str, parents: Mapping[str, str | None]) -> bool:
+        del parents
+        match kind:
+            case "schema":
+                return name == schema
+            case "table":
+                return name != "alembic_version"  # Alembic's own, in the schema it migrates
+            case _:
+                return True
+
+    options: dict[str, object] = {"compare_type": True, "compare_server_default": True}
+    if schema is not None:
+        options |= {"include_schemas": True, "include_name": in_schema}
     with _connected(url) as connection:
-        context = MigrationContext.configure(
-            connection, opts={"compare_type": True, "compare_server_default": True}
-        )
+        context = MigrationContext.configure(connection, opts=options)
         operations = produce_migrations(context, models).upgrade_ops
         return None if operations is None or operations.is_empty() else render_python_code(operations)
 

@@ -13,14 +13,14 @@ def test_the_server_round_trips_through_json(postgres: PostgresServer) -> None:
 def test_a_database_belongs_to_a_login_role_that_cannot_bypass_row_level_security(
     postgres: PostgresServer,
 ) -> None:
-    url = postgres.database("probe", role="probe_owner", password="it's-a-password")
-    assert url.startswith("postgresql+psycopg://probe_owner:")
+    url = postgres.database("owned", role="owned_login", password="it's-a-password")
+    assert url.startswith("postgresql+psycopg://owned_login:")
     with psycopg.connect(libpq_url(url)) as connection:
         row = connection.execute(
             """SELECT current_user, rolsuper, rolbypassrls, pg_get_userbyid(datdba)
             FROM pg_roles, pg_database WHERE rolname = current_user AND datname = current_database()"""
         ).fetchone()
-    assert row == ("probe_owner", False, False, "probe_owner")
+    assert row == ("owned_login", False, False, "owned_login")
 
 
 def test_every_database_gets_a_role_of_its_own(postgres: PostgresServer) -> None:
@@ -97,13 +97,13 @@ def test_truncate_empties_the_named_schemas_but_keeps_what_it_must(worker_databa
             CREATE TABLE IF NOT EXISTS scratch.u (n int);
             CREATE TABLE IF NOT EXISTS scratch.alembic_version (version_num text);
             CREATE SCHEMA IF NOT EXISTS platform;
-            CREATE TABLE IF NOT EXISTS platform.routing (version int);
+            CREATE TABLE IF NOT EXISTS platform.routing (version bigint);
             CREATE SCHEMA IF NOT EXISTS untouched;
             CREATE TABLE IF NOT EXISTS untouched.t (n int);
             INSERT INTO scratch.t VALUES (1);
             INSERT INTO scratch.u VALUES (2);
             INSERT INTO scratch.alembic_version VALUES ('r0001');
-            INSERT INTO platform.routing VALUES (3);
+            INSERT INTO platform.routing SELECT 3 WHERE NOT EXISTS (SELECT FROM platform.routing);
             INSERT INTO untouched.t VALUES (4);
             """
         )

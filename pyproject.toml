@@ -227,7 +227,10 @@ source_pkgs = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_t
 # Alembic runs a service's migration environment and scripts from their files, as modules named after the file
 # (`env_py`), outside the service's package: coverage, which picks `source_pkgs` by module name, would never
 # trace them. Their directory is named here, which coverage matches by path.
-source = ["modules/identity/src/ledger_identity/adapters/postgres/migrations"]
+source = [
+    "modules/identity/src/ledger_identity/adapters/postgres/migrations",
+    "packages/platform/src/ledger_platform/data/revisions",
+]
 # sys.monitoring, not the C tracer: lines of a route that run after SQLAlchemy's asynchronous driver switched
 # greenlets are reported unexecuted by the C tracer although they ran; sys.monitoring sees them.
 core = "sysmon"

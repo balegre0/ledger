@@ -12,18 +12,37 @@ from prometheus_client import CollectorRegistry
 
 from ledger_kernel.ids import new_id
 from ledger_platform.data.database import Database
+from ledger_platform.data.migrations import PLATFORM_MIGRATIONS
 from ledger_platform.observability.tracing import Tracing
 from ledger_platform.schema import CHASSIS_METADATA
 from ledger_testing import waiting
 from ledger_testing.containers import nats_address, nats_server
-lazy from ledger_testing.postgres import PostgresServer, Template
+from ledger_testing.database import bootstrap, create_chassis, migrate
+lazy from ledger_testing.postgres import PostgresServer, Template, WorkerDatabase
 
 SMALL_PAYLOAD_CONFIG = "/small-payload.conf"
 
 
+SCHEMAS = ("platform", "probe", "other")
+"""The platform's schema, and two test schemas with the chassis's tables: one unit's and another module's."""
+
+
 def pytest_ledger_template(template: Template) -> None:
-    """The platform's tests of the v1 chassis make databases of their own: nothing in the template."""
-    del template
+    """The roles, the platform's schema migrated, and the chassis's tables in ``probe`` and ``other``.
+
+    The tests of the v1 chassis make databases of their own.
+    """
+    bootstrap(template, SCHEMAS)
+    migrate(template, PLATFORM_MIGRATIONS)
+    create_chassis(template, "probe")
+    create_chassis(template, "other")
+
+
+@pytest.fixture
+def chassis(worker_database: WorkerDatabase) -> Iterator[WorkerDatabase]:
+    """This worker's database with the chassis's schemas; every row a test wrote is removed after it."""
+    yield worker_database
+    worker_database.truncate(SCHEMAS)
 
 
 @pytest.fixture(scope="session")
