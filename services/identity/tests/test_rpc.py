@@ -1,3 +1,4 @@
+import asyncio
 from typing import Final
 from uuid import UUID
 lazy from collections.abc import AsyncGenerator
@@ -10,9 +11,12 @@ from ledger.identity.v1.identity_query_pb2 import (
     COMPANY_STATUS_ACTIVE,
     COMPANY_STATUS_INACTIVE,
     GetCompanyRequest,
+    GetCompanyResponse,
     GetPermissionsRequest,
 )
-from ledger.identity.v1.identity_query_pb2_grpc import IdentityQueryServiceStub
+from ledger.identity.v1.identity_query_pb2_grpc import (
+    IdentityQueryServiceStub,
+)
 from ledger_kernel.access import Permission, Principal, SubjectId
 from ledger_kernel.ids import CompanyId
 from ledger_platform.authentication import organization_of
@@ -31,6 +35,7 @@ lazy from ledger_testing.api import Caller
 GET_COMPANY: Final = "/ledger.identity.v1.IdentityQueryService/GetCompany"
 GET_PERMISSIONS: Final = "/ledger.identity.v1.IdentityQueryService/GetPermissions"
 ORGANIZATION: Final = str(organization_of("1001"))
+UNKNOWN_COMPANY: Final = "0192f7a4-6b1e-7c3d-8e4f-5a6b7c8d9e0f"
 STRANGERS: Final = str(organization_of("1002"))
 
 
@@ -122,15 +127,42 @@ async def test_a_company_asked_by_a_malformed_id_is_an_invalid_argument(
     assert (caught.value.status, caught.value.remote_code) == (grpc.StatusCode.INVALID_ARGUMENT, code)
 
 
-async def test_a_deadline_that_passes_is_an_unavailable_identity(
-    company: str, channel: grpc.aio.Channel
-) -> None:
-    request = GetCompanyRequest(organization_id=ORGANIZATION, company_id=company)
-    with pytest.raises(RemoteUnavailableError) as caught:
-        # No answer fits in a microsecond: the deadline passes whatever identity is doing.
-        await call_unary(
-            IdentityQueryServiceStub(channel).GetCompany, request, rpc=GET_COMPANY, deadline=0.000_001
+async def unanswered(
+    request: GetCompanyRequest, context: grpc.aio.ServicerContext[GetCompanyRequest, GetCompanyResponse]
+) -> GetCompanyResponse:
+    """GetCompany of a server that never answers: it waits on a future nothing completes."""
+    del request, context
+    never: asyncio.Future[GetCompanyResponse] = asyncio.get_running_loop().create_future()
+    return await never
+
+
+async def test_a_deadline_that_passes_is_an_unavailable_identity() -> None:
+    server = grpc.aio.server()
+    server.add_generic_rpc_handlers(
+        (
+            grpc.method_handlers_generic_handler(
+                "ledger.identity.v1.IdentityQueryService",
+                {
+                    "GetCompany": grpc.unary_unary_rpc_method_handler(
+                        unanswered,
+                        request_deserializer=GetCompanyRequest.FromString,
+                        response_serializer=GetCompanyResponse.SerializeToString,
+                    )
+                },
+            ),
         )
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as silent:
+            request = GetCompanyRequest(organization_id=ORGANIZATION, company_id=UNKNOWN_COMPANY)
+            with pytest.raises(RemoteUnavailableError) as caught:
+                await call_unary(
+                    IdentityQueryServiceStub(silent).GetCompany, request, rpc=GET_COMPANY, deadline=0.05
+                )
+    finally:
+        await server.stop(None)
     assert (caught.value.status, caught.value.remote_code) == (grpc.StatusCode.DEADLINE_EXCEEDED, "unknown")
 
 
