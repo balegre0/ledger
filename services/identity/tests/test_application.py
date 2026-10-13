@@ -387,7 +387,7 @@ async def test_a_deactivated_company_is_announced_and_opens_nothing_more(state: 
     )
     with pytest.raises(CompanyInactiveError):
         await commands.open_branch(
-            state.unit(LATER), company.id, code=parse_code("SUC1"), name=parse_name("S")
+            state.unit(LATER), company.id, commands.Opening(parse_code("SUC1"), parse_name("S")), actor=OWNER
         )
 
 
@@ -407,18 +407,26 @@ async def test_a_company_that_does_not_exist_is_not_found(state: State) -> None:
 async def test_branches_and_emission_points_are_opened_once_per_code(state: State) -> None:
     company = await created(state)
     branch = await commands.open_branch(
-        state.unit(), company.id, code=parse_code("SUC1"), name=parse_name("Santiago")
+        state.unit(), company.id, commands.Opening(parse_code("SUC1"), parse_name("Santiago")), actor=OWNER
     )
     with pytest.raises(BranchCodeTakenError):
         await commands.open_branch(
-            state.unit(), company.id, code=parse_code("SUC1"), name=parse_name("Other")
+            state.unit(), company.id, commands.Opening(parse_code("SUC1"), parse_name("Other")), actor=OWNER
         )
     point = await commands.open_emission_point(
-        state.unit(), company.id, branch.id, code=parse_code("001"), name=parse_name("Caja")
+        state.unit(),
+        company.id,
+        branch.id,
+        commands.Opening(parse_code("001"), parse_name("Caja")),
+        actor=OWNER,
     )
     with pytest.raises(EmissionPointCodeTakenError):
         await commands.open_emission_point(
-            state.unit(), company.id, branch.id, code=parse_code("001"), name=parse_name("Caja")
+            state.unit(),
+            company.id,
+            branch.id,
+            commands.Opening(parse_code("001"), parse_name("Caja")),
+            actor=OWNER,
         )
     assert await queries.branch(state.unit(), company.id, branch.id) == branch
     assert await queries.emission_point(state.unit(), company.id, branch.id, point.id) == point
@@ -431,14 +439,20 @@ async def test_branches_and_emission_points_are_opened_once_per_code(state: Stat
 async def test_a_company_deactivated_while_a_branch_waits_for_its_lock_opens_nothing(state: State) -> None:
     company = await created(state)
     branch = await commands.open_branch(
-        state.unit(), company.id, code=parse_code("SUC1"), name=parse_name("A")
+        state.unit(), company.id, commands.Opening(parse_code("SUC1"), parse_name("A")), actor=OWNER
     )
     state.while_waiting = deactivate(state, company)
     with pytest.raises(CompanyInactiveError):
-        await commands.open_branch(state.unit(), company.id, code=parse_code("SUC2"), name=parse_name("B"))
+        await commands.open_branch(
+            state.unit(), company.id, commands.Opening(parse_code("SUC2"), parse_name("B")), actor=OWNER
+        )
     with pytest.raises(CompanyInactiveError):
         await commands.open_emission_point(
-            state.unit(), company.id, branch.id, code=parse_code("001"), name=parse_name("Caja")
+            state.unit(),
+            company.id,
+            branch.id,
+            commands.Opening(parse_code("001"), parse_name("Caja")),
+            actor=OWNER,
         )
     assert (len(state.branches), len(state.points)) == (1, 0)
 
@@ -447,7 +461,11 @@ async def test_an_emission_point_opens_in_a_branch_that_exists_only(state: State
     company = await created(state)
     with pytest.raises(BranchNotFoundError):
         await commands.open_emission_point(
-            state.unit(), company.id, BranchId(new_id()), code=parse_code("001"), name=parse_name("Caja")
+            state.unit(),
+            company.id,
+            BranchId(new_id()),
+            commands.Opening(parse_code("001"), parse_name("Caja")),
+            actor=OWNER,
         )
     with pytest.raises(BranchNotFoundError):
         await queries.emission_points(state.unit(), company.id, BranchId(new_id()), PageRequest())
@@ -458,13 +476,17 @@ async def test_an_emission_point_opens_in_a_branch_that_exists_only(state: State
 async def test_an_emission_point_is_found_under_its_own_branch_only(state: State) -> None:
     company = await created(state)
     first = await commands.open_branch(
-        state.unit(), company.id, code=parse_code("SUC1"), name=parse_name("A")
+        state.unit(), company.id, commands.Opening(parse_code("SUC1"), parse_name("A")), actor=OWNER
     )
     second = await commands.open_branch(
-        state.unit(), company.id, code=parse_code("SUC2"), name=parse_name("B")
+        state.unit(), company.id, commands.Opening(parse_code("SUC2"), parse_name("B")), actor=OWNER
     )
     point = await commands.open_emission_point(
-        state.unit(), company.id, first.id, code=parse_code("001"), name=parse_name("Caja")
+        state.unit(),
+        company.id,
+        first.id,
+        commands.Opening(parse_code("001"), parse_name("Caja")),
+        actor=OWNER,
     )
     with pytest.raises(EmissionPointNotFoundError):
         await queries.emission_point(state.unit(), company.id, second.id, point.id)
@@ -629,6 +651,48 @@ async def test_a_refused_actor_is_refused_whatever_version_it_names(state: State
         await commands.deactivate_company(state.unit(LATER), company.id, admits=nothing, actor=VIEWER)
 
 
+async def test_an_admin_demoted_while_its_opening_waits_for_the_company_opens_nothing(state: State) -> None:
+    company = await created(state)
+    branch = await commands.open_branch(
+        state.unit(), company.id, commands.Opening(parse_code("SUC1"), parse_name("A")), actor=OWNER
+    )
+    await with_an_admin(state, company)
+    state.while_waiting = demote(state, company, ADMIN, Role.VIEWER)
+    with pytest.raises(ActorNotAllowedError):
+        await commands.open_branch(
+            state.unit(), company.id, commands.Opening(parse_code("SUC2"), parse_name("B")), actor=ADMIN
+        )
+    with pytest.raises(ActorNotAllowedError):
+        await commands.open_emission_point(
+            state.unit(),
+            company.id,
+            branch.id,
+            commands.Opening(parse_code("001"), parse_name("Caja")),
+            actor=ADMIN,
+        )
+    assert (len(state.branches), len(state.points)) == (1, 0)
+
+
+async def test_establishments_open_for_an_actor_with_an_active_role_only(state: State) -> None:
+    company = await created(state)
+    branch = await commands.open_branch(
+        state.unit(), company.id, commands.Opening(parse_code("SUC1"), parse_name("A")), actor=OWNER
+    )
+    with pytest.raises(CompanyNotFoundError):
+        await commands.open_branch(
+            state.unit(), company.id, commands.Opening(parse_code("SUC2"), parse_name("B")), actor=VIEWER
+        )
+    with pytest.raises(CompanyNotFoundError):
+        await commands.open_emission_point(
+            state.unit(),
+            company.id,
+            branch.id,
+            commands.Opening(parse_code("001"), parse_name("Caja")),
+            actor=VIEWER,
+        )
+    assert (len(state.branches), len(state.points)) == (1, 0)
+
+
 async def test_a_deactivated_company_grants_no_role_but_still_revokes(state: State) -> None:
     company = await created(state)
     await commands.grant_role(state.unit(), company.id, subject=VIEWER, role=Role.VIEWER, actor=OWNER)
@@ -642,13 +706,15 @@ async def test_a_deactivated_company_grants_no_role_but_still_revokes(state: Sta
 async def test_another_organizations_unit_sees_nothing_of_the_company(state: State) -> None:
     company = await created(state)
     branch = await commands.open_branch(
-        state.unit(), company.id, code=parse_code("SUC1"), name=parse_name("A")
+        state.unit(), company.id, commands.Opening(parse_code("SUC1"), parse_name("A")), actor=OWNER
     )
     outsider = state.unit(organization=STRANGER.organization)
     with pytest.raises(CompanyNotFoundError):
         await queries.company(outsider, company.id)
     with pytest.raises(CompanyNotFoundError):
-        await commands.open_branch(outsider, company.id, code=parse_code("SUC2"), name=parse_name("B"))
+        await commands.open_branch(
+            outsider, company.id, commands.Opening(parse_code("SUC2"), parse_name("B")), actor=OWNER
+        )
     with pytest.raises(CompanyNotFoundError):
         await commands.grant_role(outsider, company.id, subject=VIEWER, role=Role.VIEWER, actor=OWNER)
     with pytest.raises(CompanyNotFoundError):

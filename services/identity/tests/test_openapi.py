@@ -1,12 +1,15 @@
 from pathlib import Path
 from typing import Final, TypedDict
 
+from fastapi.routing import APIRoute, iter_route_contexts
 from pydantic import TypeAdapter
 lazy import pytest
+lazy from fastapi.dependencies.models import Dependant
 
 from ledger_identity import openapi
 from ledger_identity.main import VERSION, create_app
-from ledger_identity.openapi import document
+from ledger_identity.openapi import app, document
+from ledger_platform.routes import if_match
 
 PUBLISHED: Final = Path(__file__).parents[1] / "openapi.json"
 Parameter = TypedDict("Parameter", {"name": str, "in": str, "required": bool})
@@ -68,6 +71,31 @@ def test_if_match_is_documented_once_and_required_wherever_it_is_read() -> None:
         assert (len(tags), [tag["required"] for tag in tags]) == (
             (1, [True]) if "428" in answers else (0, [])
         )
+
+
+def reads_if_match(dependant: Dependant) -> bool:
+    """Whether ``if_match`` is anywhere in the dependency tree of ``dependant``."""
+    return any(
+        dependency.call is if_match or reads_if_match(dependency) for dependency in dependant.dependencies
+    )
+
+
+def test_every_operation_that_reads_if_match_documents_it_as_required() -> None:
+    paths = DOCUMENT.validate_json(document())["paths"]
+    routes = [(context, context.original_route) for context in iter_route_contexts(app().routes)]
+    conditional = [
+        (context.path_format or route.path_format, method.lower())
+        for context, route in routes
+        if isinstance(route, APIRoute) and reads_if_match(route.dependant)
+        for method in route.methods or ()
+    ]
+    assert sorted(conditional) == [
+        ("/v1/companies/{company_id}", "patch"),
+        ("/v1/companies/{company_id}/deactivate", "post"),
+    ]
+    for path, method in conditional:
+        parameters = paths[path][method].get("parameters", [])
+        assert {"name": "If-Match", "in": "header", "required": True} in parameters
 
 
 def test_a_creation_says_where_its_resource_lives_and_no_other_answer_does() -> None:

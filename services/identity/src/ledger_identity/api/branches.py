@@ -50,13 +50,15 @@ def router(context: ApiContext) -> APIRouter:
         current: Annotated[Runtime[IdentitySettings], Depends(runtime)],
     ) -> Response:
         """Open a branch of the company under a code it does not use yet."""
-        code, name = parse_code(body.code), parse_name(body.name)
+        opening = commands.Opening(parse_code(body.code), parse_name(body.name))
         attempt = attempt_of(request, access.principal, key, body)
         async with current.database.transaction(access.tenant) as transaction:
 
             async def open_it() -> StoredResponse:
                 unit = context.bind(transaction, current.outbox)
-                opened = await commands.open_branch(unit, access.tenant.company, code=code, name=name)
+                opened = await commands.open_branch(
+                    unit, access.tenant.company, opening, actor=access.principal.subject
+                )
                 location = f"/v1/companies/{opened.tenant.company}/branches/{opened.id}"
                 return json_response(HTTPStatus.CREATED, BranchView.of(opened), {"Location": location})
 

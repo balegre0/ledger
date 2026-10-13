@@ -285,14 +285,16 @@ async def test_branches_and_emission_points_are_kept_per_company(database: Datab
         outbox,
         company.tenant,
         lambda unit: commands.open_branch(
-            unit, company.id, code=parse_code("SUC1"), name=parse_name("Santiago")
+            unit, company.id, commands.Opening(parse_code("SUC1"), parse_name("Santiago")), actor=OWNER
         ),
     )
     await in_unit(
         database,
         outbox,
         other.tenant,
-        lambda unit: commands.open_branch(unit, other.id, code=parse_code("SUC1"), name=parse_name("Bonao")),
+        lambda unit: commands.open_branch(
+            unit, other.id, commands.Opening(parse_code("SUC1"), parse_name("Bonao")), actor=OWNER
+        ),
     )
     with pytest.raises(BranchCodeTakenError):
         await in_unit(
@@ -300,7 +302,7 @@ async def test_branches_and_emission_points_are_kept_per_company(database: Datab
             outbox,
             company.tenant,
             lambda unit: commands.open_branch(
-                unit, company.id, code=parse_code("SUC1"), name=parse_name("X")
+                unit, company.id, commands.Opening(parse_code("SUC1"), parse_name("X")), actor=OWNER
             ),
         )
     point = await in_unit(
@@ -308,7 +310,7 @@ async def test_branches_and_emission_points_are_kept_per_company(database: Datab
         outbox,
         company.tenant,
         lambda unit: commands.open_emission_point(
-            unit, company.id, branch.id, code=parse_code("001"), name=parse_name("Caja")
+            unit, company.id, branch.id, commands.Opening(parse_code("001"), parse_name("Caja")), actor=OWNER
         ),
     )
     with pytest.raises(EmissionPointCodeTakenError):
@@ -317,7 +319,7 @@ async def test_branches_and_emission_points_are_kept_per_company(database: Datab
             outbox,
             company.tenant,
             lambda unit: commands.open_emission_point(
-                unit, company.id, branch.id, code=parse_code("001"), name=parse_name("Y")
+                unit, company.id, branch.id, commands.Opening(parse_code("001"), parse_name("Y")), actor=OWNER
             ),
         )
     assert (
@@ -355,7 +357,7 @@ async def test_a_company_scope_sees_no_branch_of_another_company(database: Datab
         outbox,
         company.tenant,
         lambda unit: commands.open_branch(
-            unit, company.id, code=parse_code("SUC1"), name=parse_name("Santiago")
+            unit, company.id, commands.Opening(parse_code("SUC1"), parse_name("Santiago")), actor=OWNER
         ),
     )
     seen_by_other = await in_unit(
@@ -380,7 +382,9 @@ async def test_a_row_cannot_point_at_a_company_or_a_branch_of_another_tenant(
         database,
         outbox,
         sister.tenant,
-        lambda unit: commands.open_branch(unit, sister.id, code=parse_code("SUC1"), name=parse_name("Bonao")),
+        lambda unit: commands.open_branch(
+            unit, sister.id, commands.Opening(parse_code("SUC1"), parse_name("Bonao")), actor=OWNER
+        ),
     )
     member_of_theirs = insert(MembershipRecord).values(
         id=new_id(),
@@ -450,14 +454,16 @@ async def a_company_with_a_branch_and_a_point(
         database,
         outbox,
         company.tenant,
-        lambda unit: commands.open_branch(unit, company.id, code=parse_code("SUC1"), name=parse_name("S")),
+        lambda unit: commands.open_branch(
+            unit, company.id, commands.Opening(parse_code("SUC1"), parse_name("S")), actor=OWNER
+        ),
     )
     point = await in_unit(
         database,
         outbox,
         company.tenant,
         lambda unit: commands.open_emission_point(
-            unit, company.id, branch.id, code=parse_code("001"), name=parse_name("Caja")
+            unit, company.id, branch.id, commands.Opening(parse_code("001"), parse_name("Caja")), actor=OWNER
         ),
     )
     return company, branch, point
@@ -758,7 +764,9 @@ async def test_branches_and_emission_points_are_paged_in_id_order_by_cursor(
             database,
             outbox,
             tenant,
-            lambda unit: commands.open_branch(unit, company.id, code=parse_code(code), name=parse_name(code)),
+            lambda unit: commands.open_branch(
+                unit, company.id, commands.Opening(parse_code(code), parse_name(code)), actor=OWNER
+            ),
         )
 
     async def open_point(code: str) -> EmissionPoint:
@@ -767,7 +775,11 @@ async def test_branches_and_emission_points_are_paged_in_id_order_by_cursor(
             outbox,
             tenant,
             lambda unit: commands.open_emission_point(
-                unit, company.id, first_branch.id, code=parse_code(code), name=parse_name(code)
+                unit,
+                company.id,
+                first_branch.id,
+                commands.Opening(parse_code(code), parse_name(code)),
+                actor=OWNER,
             ),
         )
 

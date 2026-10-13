@@ -228,3 +228,25 @@ async def test_a_branch_is_opened_once_per_key_and_a_key_reused_for_another_bran
     reused = await client.post(path, json={"code": "SUC2", "name": "B"}, headers=owner.posting("b-key"))
     assert (reused.status_code, document(reused)["code"]) == (422, "idempotency_key_reused")
     assert len(page(await client.get(path, headers=owner.bearer()))["items"]) == 1
+
+
+async def test_a_branch_of_another_company_has_no_emission_points_here(
+    client: httpx.AsyncClient, owner: Caller, company: str
+) -> None:
+    second = await another_company(client, owner)
+    theirs = await branch(client, owner, second)
+    point = await created(
+        client,
+        f"/v1/companies/{second}/branches/{theirs}/emission-points",
+        {"code": "001", "name": "Caja"},
+        owner.posting("p-theirs"),
+    )
+    base = f"/v1/companies/{company}/branches/{theirs}/emission-points"
+    opened = await client.post(base, json={"code": "002", "name": "Caja"}, headers=owner.posting("p-here"))
+    listed = await client.get(base, headers=owner.bearer())
+    read = await client.get(f"{base}/{point}", headers=owner.bearer())
+    assert [(response.status_code, document(response)["code"]) for response in (opened, listed, read)] == [
+        (404, "branch_not_found"),
+        (404, "branch_not_found"),
+        (404, "emission_point_not_found"),
+    ]

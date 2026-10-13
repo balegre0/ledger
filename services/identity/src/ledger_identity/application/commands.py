@@ -32,6 +32,15 @@ type Admits = Callable[[int], bool]
 
 @final
 @dataclass(frozen=True, slots=True)
+class Opening:
+    """What a branch or an emission point opens under: its code, unique where it opens, and its name."""
+
+    code: Code
+    name: Name
+
+
+@final
+@dataclass(frozen=True, slots=True)
 class Granted:
     """The membership a grant left, and whether the subject held no active role before it."""
 
@@ -61,8 +70,7 @@ async def _admitted(unit: IdentityUnit, company_id: CompanyId, admits: Admits, a
 
     The actor is judged as it stands once the company is locked: a role it lost meanwhile does not count.
     """
-    current = await _locked(unit, company_id)
-    (await _actor(unit, company_id, actor)).require(Permission.COMPANY_MANAGE)
+    current = await _managed(unit, company_id, actor)
     if not admits(current.version):
         raise StaleVersionError(current.id)
     return current
@@ -97,25 +105,34 @@ async def deactivate_company(
     return inactive
 
 
-async def open_branch(unit: IdentityUnit, company_id: CompanyId, *, code: Code, name: Name) -> Branch:
-    """Open a branch of the company under a code it does not use yet."""
-    opened = Branch.open(await _locked(unit, company_id), code=code, name=name, now=unit.now)
+async def open_branch(
+    unit: IdentityUnit, company_id: CompanyId, opening: Opening, *, actor: SubjectId
+) -> Branch:
+    """Open a branch of the company under a code it does not use yet, as ``actor`` may."""
+    company = await _managed(unit, company_id, actor)
+    opened = Branch.open(company, code=opening.code, name=opening.name, now=unit.now)
     if not await unit.branches.add(opened):
         raise BranchCodeTakenError
     return opened
 
 
 async def open_emission_point(
-    unit: IdentityUnit, company_id: CompanyId, branch_id: BranchId, *, code: Code, name: Name
+    unit: IdentityUnit, company_id: CompanyId, branch_id: BranchId, opening: Opening, *, actor: SubjectId
 ) -> EmissionPoint:
     """Open an emission point of one of the company's branches, under a code the branch does not use yet."""
-    owner = await _locked(unit, company_id)
-    opened = EmissionPoint.open(
-        owner, await branch(unit, company_id, branch_id), code=code, name=name, now=unit.now
-    )
+    company = await _managed(unit, company_id, actor)
+    within = await branch(unit, company_id, branch_id)
+    opened = EmissionPoint.open(company, within, code=opening.code, name=opening.name, now=unit.now)
     if not await unit.emission_points.add(opened):
         raise EmissionPointCodeTakenError
     return opened
+
+
+async def _managed(unit: IdentityUnit, company_id: CompanyId, actor: SubjectId) -> Company:
+    """The company, locked, if ``actor``'s membership allows managing it as it stands once locked."""
+    locked = await _locked(unit, company_id)
+    (await _actor(unit, company_id, actor)).require(Permission.COMPANY_MANAGE)
+    return locked
 
 
 async def _locked(unit: IdentityUnit, company_id: CompanyId) -> Company:

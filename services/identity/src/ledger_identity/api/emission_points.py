@@ -66,14 +66,18 @@ def router(context: ApiContext) -> APIRouter:
     ) -> Response:
         """Open an emission point of the branch under a code the branch does not use yet."""
         access = place.access
-        code, name = parse_code(body.code), parse_name(body.name)
+        opening = commands.Opening(parse_code(body.code), parse_name(body.name))
         attempt = attempt_of(request, access.principal, key, body)
         async with current.database.transaction(access.tenant) as transaction:
 
             async def open_it() -> StoredResponse:
                 unit = context.bind(transaction, current.outbox)
                 opened = await commands.open_emission_point(
-                    unit, access.tenant.company, place.branch, code=code, name=name
+                    unit,
+                    access.tenant.company,
+                    place.branch,
+                    opening,
+                    actor=access.principal.subject,
                 )
                 branch_path = f"/v1/companies/{opened.tenant.company}/branches/{opened.branch}"
                 location = f"{branch_path}/emission-points/{opened.id}"
