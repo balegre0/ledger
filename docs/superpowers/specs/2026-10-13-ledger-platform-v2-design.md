@@ -317,16 +317,19 @@ type wait in the inbox for the next roll forward (alerted by age), never fail.
   an operator.
 - **A row that cannot be fanned out never holds back the others**: a failed batch is redone one row at a time
   (savepoints of the pass), the failing row's `attempts` is counted (`ledger_outbox_failed`, logged with the
-  error's type only) when the error is the row's own or another row went through, and at 10 it is set aside,
-  kept and alerted until an operator resets `attempts`. When every row fails alike (a revoked grant, a lost
-  connection) none is blamed: the pass rolls back and raises, and the worker's supervisor backs off.
+  error's type only) only when the error is the row's own (unreadable, a constraint, a trigger's refusal), and
+  at 10 it is set aside, kept and alerted until an operator resets `attempts`. Any other error (a revoked grant,
+  a lost connection) blames no row: the row is skipped uncounted, a pass where every row failed so rolls back
+  and is logged (`outbox.pass_failed`, counted per schema), the other schemas still go, and only when every
+  schema failed does the fan-out raise for the worker's supervisor to back off.
 - **Ordering.** None promised across aggregates. Default for projections: **version-monotonic upserts** (a
   handler writes only when the event's `aggregate_version` is above the stored one, so order does not matter).
   Opt-in per consumer (`ordered = true` in the manifest): **head-of-line claim per (consumer, subject)**: the
   runner claims only the first row of each subject that is not dead, in the order (`aggregate_version`, event
   id) (an event published without a version is stored with 0), so a subject's events run in their aggregate's
-  order even when their ids are not, and a failing one blocks only its own subject. The heads are read in one
-  ordered pass over `inbox_head` (`DISTINCT ON (subject)`). One dispatcher fans out a schema at a time (a
+  order even when their ids are not, and a failing one blocks only its own subject. The heads are read once per
+  claim from `inbox_head` (`DISTINCT ON (subject)`). Known limit: that costs O(the consumer's live rows) per
+  claim; a skip scan (a recursive CTE from one subject's head to the next) is the fix when a backlog needs it. One dispatcher fans out a schema at a time (a
   transaction-level advisory lock per schema), so a subject's rows reach the inbox in id order. A dead row no
   longer blocks its subject (the rows behind it go on); replaying it is refused while an earlier live row of its
   subject waits. Events without a subject are not ordered.

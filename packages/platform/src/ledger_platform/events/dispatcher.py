@@ -9,12 +9,15 @@ a schema's events reach the inboxes in the order of their ids.
 
 A pass whose batch fails is done again one row at a time, each in a savepoint of the pass (which keeps the
 schema's lock): the good rows go. A row that still fails is blamed (its ``attempts`` counted,
-``outbox.fan_out_failed``, ``ledger_outbox_failed_total``) when the error is its own (it could not be read,
-broke a constraint, or a trigger refused it) or when another row of the pass went through; otherwise every row
-failed alike (a revoked grant, a lost connection), none is blamed, and the pass is rolled back and its error
-raised for the supervisor to back off. At ``MAX_FAN_OUT_ATTEMPTS`` a row is set aside, kept and alerted, until
-an operator resets its attempts. One poison row never holds back the rest, and a failure is never progress: a
-drain ends when nothing more goes through.
+``outbox.fan_out_failed``, ``ledger_outbox_failed_total``) only when the error is its own: it could not be
+read, broke a constraint, or a trigger refused it. Any other error (a revoked grant on one target inbox, a
+lost connection) is no row's fault: such a row is skipped uncounted, whatever the rows beside it did, and when
+every row of the pass failed that way the pass is rolled back and fails. A failed pass is logged
+(``outbox.pass_failed``, with the error's type) and counted (``ledger_outbox_pass_failed_total{schema}``), and
+the other schemas still go; only when every schema's pass failed is the error raised, for the supervisor to
+back off. At ``MAX_FAN_OUT_ATTEMPTS`` a row is set aside, kept and alerted, until an operator resets its
+attempts. One poison row never holds back the rest, and a failure is never progress: a drain ends when nothing
+more goes through.
 
 The routing table is cached and reloaded when ``platform.routing.version`` moves (one read per pass, in a
 short transaction of its own); every load makes the unrouted rows of the types it routes due again, so a row
@@ -181,7 +184,16 @@ def _due(outbox: AnyTable) -> tuple[ColumnElement[bool], ...]:
 class Dispatcher:
     """See the module."""
 
-    __slots__ = ("_batch", "_database", "_failed", "_routing", "_schemas", "_signals", "_unrouted")
+    __slots__ = (
+        "_batch",
+        "_database",
+        "_failed",
+        "_passes_failed",
+        "_routing",
+        "_schemas",
+        "_signals",
+        "_unrouted",
+    )
 
     def __init__(
         self,
@@ -201,9 +213,16 @@ class Dispatcher:
             registry, "ledger_outbox_unrouted", "Events marked unrouted: no consumer subscribed.", ["schema"]
         )
         self._failed = counter(registry, "ledger_outbox_failed", "Failed fan-outs of one event.", ["schema"])
+        self._passes_failed = counter(
+            registry,
+            "ledger_outbox_pass_failed",
+            "Fan-out passes of a schema that failed as a whole.",
+            ["schema"],
+        )
         for schema in self._schemas:  # exported at zero: a first event must show in increase()
             self._unrouted.labels(schema=schema)
             self._failed.labels(schema=schema)
+            self._passes_failed.labels(schema=schema)
 
     async def _current(self) -> Routing:
         """The routing table, reloaded when its version moved; a load makes newly routed rows due again."""
@@ -326,9 +345,11 @@ class Dispatcher:
                 continue
             taken, routed, unrouted = taken + moved.taken, routed + moved.routed, unrouted + moved.unrouted
         systemic = [cause for _, cause in failed if not _row_specific(cause)]
-        if systemic and not taken:  # every row failed, and not for a reason of its own: blame none
+        if systemic and len(systemic) == len(failed) and not taken:  # nothing went, through no row's fault
             raise systemic[0]
         for event_id, cause in failed:
+            if not _row_specific(cause):
+                continue  # not the row's fault (its target refuses the relay): skipped, never blamed
             counted = (
                 update(outbox)
                 .where(outbox.c.id == event_id)
@@ -345,8 +366,17 @@ class Dispatcher:
         """One pass over every schema; how many outbox rows went out or were marked (a failure is none)."""
         routing = await self._current()
         taken = 0
+        failed: list[Exception] = []
         for schema in self._schemas:
-            taken += await self._pass(schema, routing)
+            try:
+                taken += await self._pass(schema, routing)
+            except _FAILURES as error:  # this schema's pass: the others still go
+                reraise_when_stopping(error)
+                _logger.warning("outbox.pass_failed", schema=schema, error=error_type(error))
+                self._passes_failed.labels(schema=schema).inc()
+                failed.append(error)
+        if len(failed) == len(self._schemas):  # nothing works: for the supervisor to back off
+            raise failed[0]
         return taken
 
     async def run_until_idle(self) -> int:

@@ -24,12 +24,14 @@ from ledger_kernel.errors import InvalidInputError, UnavailableError
 from ledger_kernel.events import Event
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tenancy import Mode, Tenant
+from ledger_platform.data.bound import BoundDatabase
+from ledger_platform.data.unit_of_work import JobPolicy
 from ledger_platform.events import Consumer, Dispatcher, InboxRunner
 from ledger_platform.events.inbox import ReplayRefusedError
 from ledger_testing import waiting
 lazy from ledger_kernel.tenancy import Scope
-lazy from ledger_platform.data.bound import BoundDatabase
-lazy from ledger_platform.data.notifier import Channel
+lazy from ledger_platform.data.database import Database
+lazy from ledger_platform.data.notifier import Channel, Signals
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
 lazy from ledger_platform.events import RawEvent
 lazy from ledger_platform.observability.tracing import Tracing
@@ -559,3 +561,44 @@ async def test_an_expired_lease_waits_out_the_backoff_and_a_spent_one_is_dead(be
     assert logs == [{"event": "inbox_worker_lost", "consumer": NAME, "rows": 1, "log_level": "warning"}]
     assert bench.handled("dead") == 1
     assert bench.handler.calls == []
+
+
+REFUSE_FOLLOW_UPS: Final = """
+    CREATE FUNCTION other.refuse_jobs() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION 'refused by the test'; END $$;
+    CREATE TRIGGER refuse_jobs BEFORE INSERT ON other.jobs FOR EACH ROW EXECUTE FUNCTION other.refuse_jobs()
+"""
+
+
+async def test_a_handler_whose_records_cannot_be_written_is_retried_and_the_runner_goes_on(
+    bench: Bench, pool: Database, signals: Signals
+) -> None:
+    """The handler's enqueue is refused when the savepoint writes it: a failure like any other."""
+    (event,) = await bench.deliver(renamed())
+    following = BoundDatabase(
+        pool,
+        schema="other",
+        source="other",
+        jobs={"other.follow_up": JobPolicy(max_attempts=3, deadline=None)},
+        signals=signals,
+    )
+
+    async def follow_up(raw: RawEvent, unit: UnitOfWork) -> None:
+        unit.jobs.enqueue("other.follow_up", str(raw.id))
+
+    consumer = Consumer(
+        name=NAME, types=frozenset({RENAMED}), max_attempts=10, ordered=False, handler=follow_up
+    )
+    runner = InboxRunner(database=following, consumer=consumer, registry=bench.registry)
+    await bench.superuser.execute(REFUSE_FOLLOW_UPS)
+    try:
+        with capture_logs() as logs:
+            assert await runner.run_until_idle() == 1  # recorded, not raised
+        assert [entry["event"] for entry in logs] == ["inbox.handler_failed"]
+        assert await bench.state(event) == ("ready", 1, "internal")
+        assert bench.handled("retry") == 1
+    finally:
+        await bench.superuser.execute("DROP FUNCTION other.refuse_jobs() CASCADE")
+    await bench.make_due()
+    assert await runner.run_until_idle() == 1
+    assert await bench.rows("SELECT kind, key FROM other.jobs") == [("other.follow_up", str(event))]

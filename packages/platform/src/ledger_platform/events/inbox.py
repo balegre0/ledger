@@ -15,8 +15,11 @@ in the same unit, still under the row's lock, with the error's own code: retried
 (kept, replayable) when the error is ``INVALID`` or the attempts are spent.
 
 An ordered consumer claims only the first row of each subject that is not dead, in the order
-(``aggregate_version``, event id), a producer that gave no version having stored 0. The heads are read in one
-ordered pass over ``inbox_head`` (``DISTINCT ON (subject)``), never with a look back per row. Consequences
+(``aggregate_version``, event id), a producer that gave no version having stored 0. The heads are read once
+per claim from ``inbox_head`` (``DISTINCT ON (subject)``), never with a look back per row. Known limit: that
+read costs O(the consumer's live rows) per claim (PostgreSQL may sort them once), so a backlog of many
+thousands of live rows makes every claim pay for all of them; the fix, when a consumer needs it, is a skip
+scan (a recursive CTE that jumps from one subject's head to the next through ``inbox_head``). Consequences
 (Decision 18): a dead row no longer holds back its subject, so the rows behind it run before it, and so would
 a replay of it; a replay is therefore refused while an earlier row of its subject is still live. Events
 without a subject are not ordered (they have no subject to queue behind).
@@ -322,7 +325,7 @@ class InboxRunner:
                         if span is not None:  # the type only: a message can hold data, and spans leave
                             span.set_status(Status(StatusCode.ERROR))
                             span.add_event("exception", {"exception.type": failure.error})
-                        await unit.connection.execute(self._recorded(row, failure))
+                        (await unit.connection.execute(self._recorded(row, failure))).one()  # still ours
         except _LeaseLostError:
             self._lost(row)
             return
@@ -369,6 +372,7 @@ class InboxRunner:
             update(inbox)
             .where(*self._fenced(row))
             .values(**outcome, lease_until=None, lease_token=None, last_error_code=failure.code)
+            .returning(inbox.c.event_id)
         )
 
     async def replay(self, event_id: UUID) -> bool:

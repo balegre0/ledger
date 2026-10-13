@@ -134,6 +134,14 @@ INSERT_KEY: Final = text(
 OUTBOX_COUNT: Final = text("SELECT count(*) FROM probe.outbox")
 PURGE: Final = text("DELETE FROM probe.idempotency_keys WHERE expires_at < now()")
 """What the purge runs: a plain ``DELETE``, never ``RETURNING`` the stored responses (ruling 1)."""
+REFUSE_JOBS: Final = """
+    CREATE FUNCTION probe.refuse_jobs() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+        IF NEW.key = 'refused' THEN RAISE EXCEPTION 'refused by the test'; END IF;
+        RETURN NEW;
+    END $$;
+    CREATE TRIGGER refuse_jobs BEFORE INSERT ON probe.jobs FOR EACH ROW EXECUTE FUNCTION probe.refuse_jobs()
+"""
 AWKWARD: Final = 'quote " backslash \\ newline \n tab \t bell \x07 unit \x1f delete \x7f é ü 😀 / end'
 """Every escape PostgreSQL's ``jsonb`` output and Python's ``json`` could disagree on."""
 
@@ -816,3 +824,45 @@ async def test_a_savepoint_that_fails_undoes_its_part_and_the_unit_goes_on(
     assert await rows(admin, "SELECT payload FROM probe.outbox") == [({"name": "kept"},)]
     assert await rows(admin, "SELECT count(*) FROM probe.audit_events") == [(0,)]
     assert signals.sent == ["ledger_outbox"]
+
+
+async def test_a_savepoint_keeps_what_came_before_it_and_undoes_all_of_its_own_part(
+    probe: BoundDatabase, signals: RecordedSignals, admin: psycopg.AsyncConnection
+) -> None:
+    """Records made before it are written before it; its statements, records and callbacks go with it."""
+    ran: list[str] = []
+    with acting_as(ACTOR):
+        async with probe.unit(tenant(A, A1)) as uow:
+            uow.publish(renamed(tenant(A, A1), "before"))
+            uow.after_commit(lambda: ran.append("before"))
+            with contextlib.suppress(LookupError):
+                async with uow.savepoint():
+                    await uow.connection.execute(
+                        text('UPDATE probe.outbox SET payload = \'{"name": "changed"}\'')
+                    )
+                    uow.audit(action="probe.rename", subject=SUBJECT)
+                    uow.jobs.enqueue(EXPORT, "undone")
+                    uow.after_commit(lambda: ran.append("undone"))
+                    raise LookupError
+            assert uow.published  # the event published before it stays
+    assert await rows(admin, "SELECT payload FROM probe.outbox") == [({"name": "before"},)]
+    assert await rows(admin, COUNTS) == [(1, 0, 0)]
+    assert ran == ["before"]
+    assert signals.sent == ["ledger_outbox"]
+
+
+async def test_a_savepoint_whose_records_cannot_be_written_is_undone_with_them(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection
+) -> None:
+    """Its records are written inside it: a refused one fails the savepoint, not the unit."""
+    await admin.execute(REFUSE_JOBS)
+    try:
+        async with probe.unit(None) as uow:
+            uow.jobs.enqueue(EXPORT, "before")
+            with pytest.raises(DBAPIError, match="refused by the test"):
+                async with uow.savepoint():
+                    uow.jobs.enqueue(EXPORT, "refused")
+            assert not uow.published
+    finally:
+        await admin.execute("DROP FUNCTION probe.refuse_jobs() CASCADE")
+    assert await rows(admin, "SELECT key FROM probe.jobs") == [("before",)]

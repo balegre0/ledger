@@ -480,15 +480,20 @@ class UnitOfWork:
     async def savepoint(self) -> AsyncGenerator[None]:
         """A part of the unit undone on its own when it raises: its statements and what it recorded.
 
-        The rest of the unit (and the locks taken before it) stays; the unit can go on and commit.
+        What the unit recorded before it is written first, so it stays whatever happens inside; what is
+        recorded inside it is written inside it, before it ends, so a record the database refuses fails the
+        savepoint (and is undone with it), not the unit. The rest of the unit, and the locks taken before it,
+        stay; the unit can go on and commit.
         """
         self.require_open()
-        pending, callbacks, published = len(self._pending), len(self._after_commit), self._published
+        await self.flush()
+        callbacks, published = len(self._after_commit), self._published
         try:
             async with self.connection.begin_nested():
                 yield
+                await self.flush()
         except BaseException:
-            del self._pending[pending:]
+            self._pending.clear()
             del self._after_commit[callbacks:]
             self._published = published
             raise

@@ -75,6 +75,10 @@ PERMISSION_TRIGGER: Final = """
     END $$
 """
 """A row-specific failure dressed as a systemic one: only the row beside it tells them apart."""
+CREATED_IN_OTHER: Final = """
+    INSERT INTO other.outbox (id, type, version, source, occurred_at, payload)
+    VALUES (gen_random_uuid(), 'probe.thing.created', 1, 'probe', now(), '{}')
+"""
 HOLD_PROBE: Final = "SELECT pg_advisory_xact_lock(hashtext('ledger.fan_out'), hashtext('probe'))"
 _ROWS: Final = TypeAdapter(list[tuple[object, ...]])
 _COUNT: Final = TypeAdapter(int)
@@ -362,25 +366,57 @@ def test_fan_out_inserts_stay_under_postgresqls_parameter_limit() -> None:
 
 
 async def test_a_failure_of_every_row_alike_counts_against_none_and_is_raised(bench: Bench) -> None:
-    """The relay may not insert into the inbox (a broken grant): no row is to blame, none is set aside."""
+    """The relay may not insert into the inbox (a broken grant): no row is to blame, none is set aside.
+
+    A dispatcher whose every schema failed raises (its supervisor backs off and starts it again).
+    """
     bench.subscribe("other", RENAMES)
     await bench.publish(2)
+    await bench.superuser.execute(COPY_TO_OTHER)  # both producers' events go to the inbox it may not write
     await bench.superuser.execute("REVOKE INSERT ON other.inbox FROM ledger_relay")
+    both = Dispatcher(bench.probe.database, schemas=("probe", "other"), signals=bench.signals)
     try:
-        with pytest.raises(ProgrammingError, match="permission denied"):
-            await bench.dispatcher.run_until_idle()  # the supervisor backs off and starts it again
-        assert await bench.rows("SELECT attempts FROM probe.outbox") == [(0,), (0,)]
+        with capture_logs() as logs, pytest.raises(ProgrammingError, match="permission denied"):
+            await both.run_until_idle()
+        assert [entry["schema"] for entry in logs] == ["probe", "other"]
+        attempts = "SELECT attempts FROM probe.outbox UNION ALL SELECT attempts FROM other.outbox"
+        assert await bench.rows(attempts) == [(0,)] * 4
     finally:
         await bench.superuser.execute("GRANT INSERT ON other.inbox TO ledger_relay")
-    assert await bench.dispatcher.run_until_idle() == 2
-    assert await bench.count("other", "inbox") == 2
+    assert await both.run_until_idle() == 4
+    assert await bench.count("other", "inbox") == 4
 
 
-async def test_a_failure_beside_a_delivered_row_counts_against_its_row(bench: Bench, poisoned: None) -> None:
-    """Another row of the same pass went through: the failing one is to blame, whatever the error."""
+async def test_a_failure_that_is_not_the_rows_own_never_blames_it(bench: Bench, poisoned: None) -> None:
+    """Another row of the pass went through, but the error is not the row's own: skipped, uncounted."""
     del poisoned
     bench.subscribe("other", RENAMES)
     await bench.publish_named("poison", "fine")
     await bench.superuser.execute(PERMISSION_TRIGGER)
-    assert await bench.dispatcher.run_once() == 1
-    assert await bench.rows("SELECT payload ->> 'name', attempts FROM probe.outbox") == [("poison", 1)]
+    with capture_logs() as logs:
+        assert await bench.dispatcher.run_once() == 1
+    assert logs == []
+    assert await bench.rows("SELECT payload ->> 'name', attempts FROM probe.outbox") == [("poison", 0)]
+
+
+async def test_a_schema_whose_pass_fails_is_logged_and_the_others_still_go(
+    bench: Bench, registry: CollectorRegistry
+) -> None:
+    """probe's events go to an inbox the relay may no longer write; other's go elsewhere and are delivered."""
+    bench.subscribe("other", RENAMES)
+    bench.subscribe("probe", {"probe.echo": frozenset({"probe.thing.created"})})
+    await bench.publish()
+    await bench.superuser.execute(CREATED_IN_OTHER)
+    await bench.superuser.execute("REVOKE INSERT ON other.inbox FROM ledger_relay")
+    try:
+        with capture_logs() as logs:
+            assert await bench.dispatcher.run_once() == 1  # other's event; probe's failed, uncounted
+        failed_pass = [entry for entry in logs if entry["event"] == "outbox.pass_failed"]
+        assert [(entry["schema"], entry["log_level"]) for entry in failed_pass] == [("probe", "warning")]
+        assert _TEXT.validate_python(failed_pass[0]["error"]).startswith("sqlalchemy.exc.")
+        assert registry.get_sample_value("ledger_outbox_pass_failed_total", {"schema": "probe"}) == 1
+        assert await bench.rows("SELECT consumer FROM probe.inbox") == [("probe.echo",)]
+        assert await bench.rows("SELECT attempts FROM probe.outbox") == [(0,)]
+    finally:
+        await bench.superuser.execute("GRANT INSERT ON other.inbox TO ledger_relay")
+    assert await bench.dispatcher.run_until_idle() == 1
