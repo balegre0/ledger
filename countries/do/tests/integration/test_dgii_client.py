@@ -32,6 +32,7 @@ from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.fake_dgii.state import Scripted, Status
 from ledger_country_do_testing.samples import SIGNED_AT, consumer_invoice, credit_invoice
 from ledger_country_do_testing.transports import FAKE_HOSTS, BreaksAfterSending, Counting
+lazy from ledger_country_do.channels.ecf_v1.application.ports import CertificateValidity
 lazy from ledger_country_do_testing.clock import ManualClock
 lazy from ledger_country_do_testing.fake_dgii.app import FakeDgii
 lazy from ledger_country_do_testing.local_signer import KeyPairSigner
@@ -690,7 +691,7 @@ async def test_every_call_has_an_overall_deadline(
     async with client_over(httpx.MockTransport(stalls), signer, clock, sleeps, tight).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="result: timed_out"):
             await dgii.result(T, "a")
-        with pytest.raises(OutcomeUnknownError, match="timed_out"):
+        with pytest.raises(AuthorityUnavailableError, match="reception: timed_out"):
             await dgii.submit_ecf(T, ISSUER, FIRST, b"<ECF/>")
     assert sleeps == []
 
@@ -716,6 +717,10 @@ class SlowSigner(XmlSigner):
 
     def __init__(self, inner: KeyPairSigner) -> None:
         self._inner = inner
+
+    @override
+    async def certificate_validity(self) -> CertificateValidity:
+        return await self._inner.certificate_validity()
 
     @override
     async def sign_document(self, document: bytes) -> bytes:
@@ -791,3 +796,41 @@ async def test_the_directory_names_testecf_s_simulator(dgii: DgiiClient) -> None
         "https://ecf.fake.test/testecf/emisorreceptor",
     )
     assert await dgii.directory(Environment.TESTECF, "1") is not None
+
+
+async def test_a_document_is_not_sent_with_less_time_left_than_an_attempt_may_take(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
+) -> None:
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.url.path.rsplit("/", 1)[-1])
+        return seeded(request.url.path) or reply(200, b'{"codigo": 0}')
+
+    short = DgiiTimeouts(connect=5, total=5, call=1)
+    async with client_over(httpx.MockTransport(handler), signer, clock, sleeps, short).opened() as dgii:
+        with pytest.raises(AuthorityUnavailableError, match="reception: timed_out"):
+            await dgii.submit_ecf(T, ISSUER, FIRST, b"<ECF/>")
+        with pytest.raises(AuthorityUnavailableError, match="rfce: timed_out"):
+            await dgii.submit_rfce(T, ISSUER, FIRST, b"<RFCE/>")
+        assert (await dgii.result(T, "a")).code == 0
+    assert sent == ["semilla", "validarsemilla", "estado"]
+
+
+async def test_a_document_refused_401_is_not_sent_again_once_too_little_time_is_left(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
+) -> None:
+    sent: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.url.path.rsplit("/", 1)[-1])
+        if (found := seeded(request.url.path)) is not None:
+            return found
+        await asyncio.sleep(1.0)
+        return reply(401)
+
+    tight = DgiiTimeouts(connect=5, total=2, call=2.5)
+    async with client_over(httpx.MockTransport(handler), signer, clock, sleeps, tight).opened() as dgii:
+        with pytest.raises(AuthorityUnavailableError, match="reception: timed_out"):
+            await dgii.submit_ecf(T, ISSUER, FIRST, b"<ECF/>")
+    assert sent.count("facturaselectronicas") == 1

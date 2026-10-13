@@ -2,22 +2,44 @@
 
 ``XmlSigner`` becomes fiscal-kit's ``SignerPort`` (spec §8.4) at integration, implemented over the signer
 module's gRPC client; in the spike a key held in the test or CLI process implements it. ``Authority`` is
-DGII's web services for an emitter (spec §8.6.3), implemented by ``adapters.dgii.client``.
+DGII's web services for an emitter (spec §8.6.3), implemented by ``adapters.dgii.client``. ``EcfFormat`` is
+DGII's XML formats (written, checked against DGII's schemas, signatures verified), implemented by
+``adapters.xml.documents``.
 """
 
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import ClassVar, Protocol, final
+lazy from datetime import datetime
 
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfUnavailableError
+lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 lazy from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage
+lazy from ledger_country_do.channels.ecf_v1.domain.totals import Totals
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class CertificateValidity:
+    """When the signing certificate may sign: from ``not_before`` to ``not_after``, both included."""
+
+    not_before: datetime
+    not_after: datetime
+
+    def covers(self, moment: datetime) -> bool:
+        """Whether the certificate is valid at ``moment``."""
+        return self.not_before <= moment <= self.not_after
 
 
 class XmlSigner(Protocol, metaclass=ABCMeta):
     """Signs DGII's documents with the issuing company's certificate, in DGII's profile."""
+
+    @abstractmethod
+    async def certificate_validity(self) -> CertificateValidity:
+        """When the certificate the signatures carry is valid."""
 
     @abstractmethod
     async def sign_document(self, document: bytes) -> bytes:
@@ -131,3 +153,19 @@ class Authority(Protocol, metaclass=ABCMeta):
         self, environment: Environment, issuer_rnc: str, encf: Encf
     ) -> tuple[str, ...] | None:
         """Every track id DGII gave the e-NCF, oldest first; ``None`` where DGII has no such service."""
+
+
+class EcfFormat(Protocol, metaclass=ABCMeta):
+    """DGII's XML formats: documents written and checked against DGII's schemas."""
+
+    @abstractmethod
+    def ecf(self, draft: EcfDraft, totals: Totals, *, signed_at: datetime) -> bytes:
+        """``draft``'s unsigned e-CF, checked as it will be once signed."""
+
+    @abstractmethod
+    def rfce(self, draft: EcfDraft, totals: Totals, *, security_code: str) -> bytes:
+        """``draft``'s unsigned RFCE, checked as it will be once signed."""
+
+    @abstractmethod
+    def signed(self, draft: EcfDraft, signed: bytes, *, rfce: bool) -> str:
+        """``signed`` checked against its schema and its signature verified; its signature value."""

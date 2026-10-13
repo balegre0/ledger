@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 import pytest
 from cryptography.hazmat.primitives.serialization import BestAvailableEncryption, pkcs12
 
@@ -49,3 +51,15 @@ def test_the_key_is_never_shown() -> None:
     issued = Authority.root().issue(person())
     signer = KeyPairSigner.from_issued(issued)
     assert "PRIVATE" not in repr(signer)
+
+
+async def test_the_signer_s_validity_is_its_certificate_s() -> None:
+    issued = Authority.root().issue(person())
+    validity = await KeyPairSigner.from_issued(issued).certificate_validity()
+    assert (validity.not_before, validity.not_after) == (
+        issued.certificate.not_valid_before_utc,
+        issued.certificate.not_valid_after_utc,
+    )
+    assert validity.covers(validity.not_before)
+    assert validity.covers(validity.not_after)
+    assert not validity.covers(validity.not_after + timedelta(microseconds=1))

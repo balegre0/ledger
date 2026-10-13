@@ -26,9 +26,13 @@ def intermediate(authority: Authority) -> Authority:
     return authority.intermediate()
 
 
+SIGNER_VALID_FROM = datetime(2026, 1, 1, tzinfo=UTC)
+"""Before every moment the tests sign at (``clock``: 2026-10-13), whatever day they run."""
+
+
 @pytest.fixture(scope="session")
 def issued(intermediate: Authority) -> Issued:
-    return intermediate.issue(person())
+    return intermediate.issue(person(), not_before=SIGNER_VALID_FROM)
 
 
 @pytest.fixture(scope="session")

@@ -19,7 +19,8 @@ Queries are ``GET``; what carries a document (the signed seed, an e-CF, an RFCE)
 * **Failures.** ``AuthorityUnavailableError``, its ``failure`` one of ``ports.Failure``.
 * **Time.** Every attempt has a connect timeout and a total one; every call (token, retries and waits
   included) has an overall deadline, a minute by default (``DgiiTimeouts.call``), after which it fails
-  ``timed_out`` (or, for a document already sent, its outcome is unknown).
+  ``timed_out`` (or, for a document already sent, its outcome is unknown). A document is sent only while the
+  call has a whole attempt's time (``total``) left; with less it is not sent at all (``timed_out``).
 * **Answers.** ``Accept-Encoding: gzip``: an answer is plain or a single gzip layer, any other encoding is
   refused; it is decompressed here as it streams and refused once it passes 1 MiB, never read whole first.
 * **Transport.** Redirects are not followed; the environment's proxies and ``.netrc`` are ignored
@@ -394,6 +395,7 @@ class DgiiClient(Authority):
     ) -> httpx.Response:
         deadline = self._deadline()
         token = await self._token(environment, service, deadline)
+        self._require_time_to_send(service, deadline, idempotent=idempotent)
         response = await self._call(build(token), service, idempotent=idempotent, deadline=deadline)
         if response.status_code != _UNAUTHORIZED:
             return response
@@ -401,7 +403,13 @@ class DgiiClient(Authority):
         if cached is not None and cached.value == token:
             del self._tokens[environment]
         renewed = await self._token(environment, service, deadline)
+        self._require_time_to_send(service, deadline, idempotent=idempotent)
         return await self._call(build(renewed), service, idempotent=idempotent, deadline=deadline)
+
+    def _require_time_to_send(self, service: Service, deadline: float, *, idempotent: bool) -> None:
+        """A document is sent only with a whole attempt's time left: cut short, its fate is unknown."""
+        if not idempotent and asyncio.get_running_loop().time() + self._timeouts.total > deadline:
+            raise AuthorityUnavailableError(Failure.TIMED_OUT, service.value)
 
     def _send(
         self, environment: Environment, service: Service, name: str, signed: bytes

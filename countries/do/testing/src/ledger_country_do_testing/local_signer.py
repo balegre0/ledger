@@ -14,7 +14,7 @@ lazy from cryptography import x509
 lazy from cryptography.hazmat.primitives.asymmetric.types import PrivateKeyTypes
 
 from ledger_country_do.channels.ecf_v1.adapters.signing.signer import sign_enveloped
-from ledger_country_do.channels.ecf_v1.application.ports import XmlSigner
+from ledger_country_do.channels.ecf_v1.application.ports import CertificateValidity, XmlSigner
 lazy from ledger_country_do_testing.pki import Issued
 
 
@@ -52,6 +52,12 @@ class KeyPairSigner(XmlSigner):
     def certificate(self) -> x509.Certificate:
         """The certificate the signatures carry."""
         return self._certificate
+
+    @override
+    async def certificate_validity(self) -> CertificateValidity:
+        return CertificateValidity(
+            self._certificate.not_valid_before_utc, self._certificate.not_valid_after_utc
+        )
 
     @override
     async def sign_document(self, document: bytes) -> bytes:
