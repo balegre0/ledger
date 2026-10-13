@@ -1,7 +1,7 @@
 import asyncio
 import gzip
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Final, final, override
 
 import httpx
@@ -23,6 +23,7 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
     OutcomeUnknownError,
     Received,
     Refused,
+    TrackId,
     XmlSigner,
 )
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
@@ -72,7 +73,9 @@ async def test_an_e_cf_is_received_then_decided(
     assert isinstance(reception, Received)
     assert fake.received[-1].file_name == "101850043E310000000001.xml"
     assert fake.received[-1].host == "ecf.fake.test"
-    assert await dgii.result(T, reception.track_id) == Answer(code=1, messages=(), sequence_used=True)
+    assert await dgii.result(T, reception.track_id) == Answer(
+        code=1, messages=(), sequence_used=True, rnc=ISSUER, encf="E310000000001"
+    )
 
 
 async def test_dgii_s_messages_and_secuencia_utilizada_arrive_intact(
@@ -85,7 +88,11 @@ async def test_dgii_s_messages_and_secuencia_utilizada_arrive_intact(
     assert isinstance(reception, Received)
     answer = await dgii.result(T, reception.track_id)
     assert answer == Answer(
-        code=2, messages=(DgiiMessage("145", "El RNC no es emisor"),), sequence_used=False
+        code=2,
+        messages=(DgiiMessage("145", "El RNC no es emisor"),),
+        sequence_used=False,
+        rnc=ISSUER,
+        encf="E310000000001",
     )
 
 
@@ -105,7 +112,7 @@ async def test_the_rfce_is_answered_at_once_on_the_fc_host(
     draft = consumer_invoice()
     summary = await signer.sign_document(rfce.render(draft, compute_totals(draft), security_code="dcp79q"))
     answer = await dgii.submit_rfce(T, ISSUER, draft.encf, summary)
-    assert answer == Answer(code=1, messages=(), sequence_used=True)
+    assert answer == Answer(code=1, messages=(), sequence_used=True, encf="E320000000001")
     assert fake.received[-1].host == "fc.fake.test"
     assert fake.received[-1].file_name == f"101850043{draft.encf}.xml"
     refused = await dgii.submit_rfce(T, ISSUER, draft.encf, b"not xml")
@@ -122,18 +129,24 @@ async def test_the_rfce_s_messages_keep_their_string_codes_and_dgii_s_valor(
     summary = await signer.sign_document(rfce.render(draft, compute_totals(draft), security_code="dcp79q"))
     answer = await dgii.submit_rfce(T, ISSUER, draft.encf, summary)
     assert answer == Answer(
-        code=2, messages=(DgiiMessage("RFCE-7", "El monto no cuadra"),), sequence_used=False
+        code=2,
+        messages=(DgiiMessage("RFCE-7", "El monto no cuadra"),),
+        sequence_used=False,
+        encf="E320000000001",
     )
 
 
 async def test_track_ids_of_an_e_ncf_and_none_where_dgii_has_no_such_service(
-    dgii: DgiiClient, signer: KeyPairSigner
+    dgii: DgiiClient, signer: KeyPairSigner, clock: ManualClock
 ) -> None:
     first = await dgii.submit_ecf(T, ISSUER, FIRST, await signed_ecf(signer))
     second = await dgii.submit_ecf(T, ISSUER, FIRST, await signed_ecf(signer))
     assert isinstance(first, Received)
     assert isinstance(second, Received)
-    assert await dgii.track_ids(T, ISSUER, FIRST) == (first.track_id, second.track_id)
+    assert await dgii.track_ids(T, ISSUER, FIRST) == (
+        TrackId(first.track_id, clock.now),
+        TrackId(second.track_id, clock.now),
+    )
     assert await dgii.track_ids(Environment.CERTECF, ISSUER, FIRST) is None
 
 
@@ -646,7 +659,10 @@ async def test_track_ids_are_ordered_by_when_dgii_received_them(
         b' {"trackId": "d", "fechaRecepcion": "2026-10-13T12:00:00"}]'
     )
     async with client_over(scripted_dgii(GOOD_TOKEN, 200, answer), signer, clock, sleeps).opened() as dgii:
-        assert await dgii.track_ids(T, ISSUER, FIRST) == ("a", "b", "c", "d")
+        found = await dgii.track_ids(T, ISSUER, FIRST)
+    assert found is not None
+    assert tuple(each.track_id for each in found) == ("a", "b", "c", "d")
+    assert found[0].received_at == datetime(2026, 10, 13, 13, 15, tzinfo=UTC)
 
 
 async def test_a_broken_answer_to_a_query_is_retried_then_a_failure(
@@ -834,3 +850,30 @@ async def test_a_document_refused_401_is_not_sent_again_once_too_little_time_is_
         with pytest.raises(AuthorityUnavailableError, match="reception: timed_out"):
             await dgii.submit_ecf(T, ISSUER, FIRST, b"<ECF/>")
     assert sent.count("facturaselectronicas") == 1
+
+
+async def test_a_result_names_its_e_ncf_as_either_spelling_and_an_overlong_one_is_unreadable(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
+) -> None:
+    lower = b'{"codigo": 1, "rnc": "101850043", "encf": "E310000000001"}'
+    async with client_over(scripted_dgii(GOOD_TOKEN, 200, lower), signer, clock, sleeps).opened() as dgii:
+        answer = await dgii.result(T, "a")
+    assert (answer.rnc, answer.encf) == (ISSUER, "E310000000001")
+    overlong = b'{"codigo": 1, "eNCF": "E3100000000011"}'
+    async with client_over(scripted_dgii(GOOD_TOKEN, 200, overlong), signer, clock, sleeps).opened() as dgii:
+        with pytest.raises(AuthorityUnavailableError, match="result: unreadable"):
+            await dgii.result(T, "a")
+
+
+async def test_a_client_is_ready_for_an_environment_only_open_and_on_hosts_that_may_serve_it(
+    signer: KeyPairSigner, fake: FakeDgii, clock: ManualClock, sleeps: list[float]
+) -> None:
+    client = client_over(httpx.ASGITransport(app=fake.app), signer, clock, sleeps)
+    with pytest.raises(AuthorityUnavailableError, match="not_open"):
+        client.require_ready(T)
+    async with client.opened():
+        client.require_ready(T)
+        client.require_ready(Environment.CERTECF)
+        with pytest.raises(LiveHostRefusedError):
+            client.require_ready(Environment.ECF)
+    assert fake.received == []

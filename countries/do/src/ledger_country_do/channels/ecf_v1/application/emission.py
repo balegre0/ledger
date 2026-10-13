@@ -1,33 +1,43 @@
 """Emitting an e-CF end to end: total, route, write, sign, check, send, poll, map (spec §8.5, §8.6.3-§8.6.4).
 
-1. Totals with the regime's rates on the issue date; the route (``RFCE`` for a type 32 under the threshold).
-2. The e-CF written and checked, signed (``FechaHoraFirma`` is the clock's moment of signing), checked again;
-   its security code is the first six characters of its signature value. Nothing is signed unless the
-   signing certificate is valid at that moment (``CertificateNotValidError``), and nothing is sent whose
-   signature came back more than ``MAX_SIGNING_SKEW`` from it (``SigningSkewError``: a queued signer, a clock
-   that jumped): a document never states a signing time its certificate or the clock contradicts.
-3. RFCE route: the summary written with that code, signed, checked, sent to the ``fc`` host and decided at
-   once. The full signed e-CF is kept by the caller (IT §9.1). An RFCE is never sent again here.
-4. Reception route: sent once. If DGII may have taken it with its answer unknown, DGII is asked for the
-   e-NCF's track ids before anything is sent again: the newest is polled; with none the document is sent
-   once more (DGII never recorded it); where DGII cannot say (CerteCF) or the question fails, the outcome
-   stays unknown (never "not sent"). Then polled on the schedule (1, 2, 5, 10, 30, 60 s) until a final code;
-   after it the document is still pending with its track id (v2-M3's job continues).
-5. DGII's codes mapped by ``status_map.decide``: Aceptado Condicional is valid, its messages kept; a rejection
-   with ``secuenciaUtilizada = false`` releases the number, any other burns it; a refusal at the door burns
-   it too (never reuse what DGII may have recorded).
+Emission is two steps, so a caller can keep what was signed before anything leaves (v2-M3 persists it):
 
-**Once the e-CF is signed and its security code known, emission never raises.** Whatever fails after that
-point (the RFCE's signing or checks, an outcome DGII leaves unknown, an outage, a code DGII never
-documented) parks the document: ``Emitted`` carries everything signed so far, its security code, any track
-id and the last answer, and ``unknown`` says why (``Unknown``: the error's code, and DGII's failure where
-there is one). A parked document may be at DGII: whoever resumes it asks DGII first (track ids for an e-CF,
-``consultarfce`` for an RFCE: v2-M3) and never sends it blindly.
+* ``sign(draft) -> Signed``. Totals with the regime's rates on the issue date; the route (``RFCE`` for a type
+  32 under the threshold). The e-CF written and checked, signed (``FechaHoraFirma`` is the clock's moment of
+  signing) and checked again; its security code is the first six characters of its signature value. On the
+  RFCE route the summary is written with that code, signed and checked too. Nothing is signed unless DGII's
+  side is ready (``Authority.require_ready``: hosts allowed, connections open) and the signing certificate is
+  valid from the moment of signing to ``MAX_SIGNING_SKEW`` after it (``CertificateNotValidError``); nothing
+  is returned whose signature came back more than ``MAX_SIGNING_SKEW`` from that moment (``SigningSkewError``:
+  a queued signer, a clock that jumped). ``sign`` raises, or returns everything signed with its QR.
+* ``send(signed) -> Emitted`` **never raises a pack error**: whatever stops it parks the document, ``Emitted``
+  carrying the signed documents, any track id and the last answer, and ``unknown`` saying why (``Unknown``:
+  the error's code, DGII's failure where there is one, and whether the document left: ``False`` certainly
+  not, ``True`` DGII answered about it, ``None`` it may be at DGII). A parked document is never sent again
+  here: whoever resumes it asks DGII first (track ids for an e-CF, ``consultarfce`` for an RFCE: v2-M3).
 
-The use case holds no state between documents: numbering, persistence and retries across processes are
-v2-M3's (the spike's caller supplies each e-NCF).
+  - RFCE route: sent once to the ``fc`` host and decided at once; the full signed e-CF is kept by the caller
+    (IT §9.1).
+  - Reception route: sent once. If DGII may have taken it with its answer unknown, the emitter waits a settle
+    delay (``SETTLE_DELAY``, at least the client's per-attempt time, so a request still in flight has landed),
+    then asks DGII for the e-NCF's track ids and adopts the newest received no earlier than
+    ``RECEIPT_TOLERANCE`` before the moment of signing (an older one is another, earlier document). Anything
+    else (none listed yet, only older ones, CerteCF has no such service, the question fails) parks it: the
+    spike never sends a document twice. Then polled on the schedule (1, 2, 5, 10, 30, 60 s) until a final
+    code; after it the document is still pending with its track id (v2-M3's job continues).
+  - An answer that names another issuer or e-NCF than ours is never taken as ours (``AnswerMismatchError``).
+  - ``budget`` (``SEND_BUDGET``) bounds the whole send, calls, settle delay and polls together: a poll whose
+    wait would pass it is not made (still pending), and a call still running when it runs out is cut short
+    (parked, ``do_ecf_send_budget_spent``).
+  - DGII's codes mapped by ``status_map.decide``: Aceptado Condicional is valid, its messages kept; a
+    rejection with ``secuenciaUtilizada = false`` releases the number, any other burns it; a refusal at the
+    door burns it too (never reuse what DGII may have recorded).
+
+``emit(draft)`` is ``send(await sign(draft))``. The use case holds no state between documents: numbering,
+persistence and retries across processes are v2-M3's (the spike's caller supplies each e-NCF).
 """
 
+import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import ClassVar, Final, Required, TypedDict, Unpack, final
@@ -36,6 +46,7 @@ lazy from datetime import datetime
 
 from ledger_country_do.channels.ecf_v1.application.ports import (
     AuthorityUnavailableError,
+    Failure,
     OutcomeUnknownError,
     Received,
     Refused,
@@ -57,7 +68,6 @@ lazy from ledger_country_do.channels.ecf_v1.application.ports import (
     Answer,
     Authority,
     EcfFormat,
-    Failure,
     Reception,
     XmlSigner,
 )
@@ -71,6 +81,14 @@ lazy from ledger_country_do.regime.definitions import RegimeDef
 POLL_SCHEDULE: Final = (1.0, 2.0, 5.0, 10.0, 30.0, 60.0)
 MAX_SIGNING_SKEW: Final = timedelta(minutes=5)
 """How far a signature may come back from its ``FechaHoraFirma``, either way."""
+SETTLE_DELAY: Final = 30.0
+"""Seconds waited after an unknown outcome before DGII is asked: more than ``DgiiTimeouts.total`` (20 s)."""
+RECEIPT_TOLERANCE: Final = timedelta(minutes=2)
+"""How long before the moment of signing DGII's reception time of our document may read (clocks differ)."""
+SEND_BUDGET: Final = 300.0
+"""Seconds one ``send`` may take in all: the schedule (108 s), the settle delay and the calls' own limits."""
+_NOT_SENT: Final = frozenset({Failure.UNREACHABLE, Failure.THROTTLED, Failure.TIMED_OUT, Failure.NOT_OPEN})
+"""A submission's failures that mean it never left (the client's ``timed_out`` there is before sending)."""
 
 type Clock = Callable[[], datetime]
 type Sleep = Callable[[float], Awaitable[None]]
@@ -95,47 +113,41 @@ class SigningSkewError(EcfUnavailableError):
         super().__init__(f"a signature came back more than {minutes} minutes from its moment of signing")
 
 
+class AnswerMismatchError(EcfUnavailableError):
+    """DGII answered about another issuer or e-NCF than the document asked about."""
+
+    code: ClassVar[str] = "do_ecf_dgii_answer_mismatch"
+
+    def __init__(self) -> None:
+        super().__init__("DGII's answer names another issuer or e-NCF than the document sent")
+
+
+SEND_BUDGET_SPENT: Final = "do_ecf_send_budget_spent"
+"""``Unknown.code`` of a send cut short by its budget."""
+
+
 class EmitterOptions(TypedDict, total=False):
     """``Emitter``'s keywords beyond its ports: three required, the rest with defaults.
 
-    The environment, a clock (``FechaHoraFirma``) and a sleep (between polls); the poll schedule
-    (``POLL_SCHEDULE``), the QR's hosts (``OFFICIAL_QR``) and the regime (``REGIME``).
+    The environment, a clock (``FechaHoraFirma``) and a sleep (the settle delay, between polls); the poll
+    schedule (``POLL_SCHEDULE``), the settle delay (``SETTLE_DELAY``), the send budget (``SEND_BUDGET``), the
+    QR's hosts (``OFFICIAL_QR``) and the regime (``REGIME``).
     """
 
     environment: Required[Environment]
     clock: Required[Clock]
     sleep: Required[Sleep]
     schedule: tuple[float, ...]
+    settle: float
+    budget: float
     qr_hosts: QrHosts
     regime: RegimeDef
 
 
 @final
-@dataclass(frozen=True, slots=True)
-class Unknown:
-    """Why a signed document was parked: the code of the error that stopped emission, and DGII's failure.
-
-    ``failure`` is the ``OutcomeUnknownError``'s reason or the ``AuthorityUnavailableError``'s failure;
-    ``None`` for any other error (a code DGII never documented, a signature too late, a check refused).
-    """
-
-    code: str
-    failure: Failure | None
-
-    @classmethod
-    def of(cls, error: EcfError) -> Unknown:
-        """What ``error`` says of why the document was parked."""
-        if isinstance(error, OutcomeUnknownError):
-            return cls(error.code, error.reason)
-        if isinstance(error, AuthorityUnavailableError):
-            return cls(error.code, error.failure)
-        return cls(error.code, None)
-
-
-@final
 @dataclass(frozen=True, slots=True, kw_only=True)
-class Emitted:
-    """What emitting a document produced: what was signed and sent, and DGII's mapped answer."""
+class Signed:
+    """A document signed and checked, ready to send and to keep: what a printed representation shows too."""
 
     draft: EcfDraft
     totals: Totals
@@ -143,14 +155,42 @@ class Emitted:
     signed_at: datetime
     signed_ecf: bytes
     signed_rfce: bytes | None
-    """The signed RFCE; ``None`` on the reception route, or if emission stopped before it was signed."""
+    """The signed RFCE on the RFCE route; ``None`` on the reception route."""
     security_code: str
     qr: str
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class Unknown:
+    """Why a signed document was parked (see the module)."""
+
+    code: str
+    failure: Failure | None
+    sent: bool | None
+    """``False``: it certainly never left; ``True``: DGII answered about it; ``None``: it may be at DGII."""
+
+    @classmethod
+    def of(cls, error: EcfError, *, sent: bool | None) -> Unknown:
+        """What ``error`` says of why the document was parked."""
+        if isinstance(error, OutcomeUnknownError):
+            return cls(error.code, error.reason, sent)
+        if isinstance(error, AuthorityUnavailableError):
+            return cls(error.code, error.failure, sent)
+        return cls(error.code, None, sent)
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Emitted:
+    """What sending a signed document produced: DGII's mapped answer, or why it was parked."""
+
+    signed: Signed
     track_id: str | None
     outcome: Outcome | None
     """``None`` if DGII was never asked or never answered; a non-final outcome when still pending."""
     unknown: Unknown | None = None
-    """Why the document was parked (see the module); ``None`` if emission ran its course."""
+    """Why the document was parked (see the module); ``None`` if sending ran its course."""
 
     @property
     def pending(self) -> bool:
@@ -158,35 +198,45 @@ class Emitted:
         return self.outcome is None or not self.outcome.final
 
 
-@final
-@dataclass(frozen=True, slots=True)
-class _Signed:
-    totals: Totals
-    route: Route
-    signed_at: datetime
-    document: bytes
-    security_code: str
+@dataclass(slots=True)
+class _Progress:
+    """How far a send got: where it stops, the ``Emitted`` is built from it."""
+
+    begun: float
+    """When the send began, on the event loop's clock."""
+    slept: float = 0.0
+    """How long the injected sleep was asked to wait (a test's sleep returns at once)."""
+    sent: bool | None = False
+    track_id: str | None = None
+    outcome: Outcome | None = None
 
 
 def _refused(refusal: Refused) -> Outcome:
     return decide(DgiiCode.REJECTED, sequence_used=None, messages=refusal.messages)
 
 
-def _decided(answer: Answer, *, rfce: bool) -> Outcome:
+def _decided(answer: Answer, draft: EcfDraft, *, rfce: bool) -> Outcome:
+    """``answer`` mapped, once it is about ``draft`` (an issuer or e-NCF it does not name is not checked)."""
+    if (answer.rnc is not None and answer.rnc != draft.issuer.rnc) or (
+        answer.encf is not None and answer.encf.upper() != str(draft.encf)
+    ):
+        raise AnswerMismatchError
     return decide(answer.code, sequence_used=answer.sequence_used, messages=answer.messages, rfce=rfce)
 
 
 @final
 class Emitter:
-    """Emits one document at a time (see the module)."""
+    """Signs, then sends, one document at a time (see the module)."""
 
     __slots__ = (
         "_authority",
+        "_budget",
         "_clock",
         "_environment",
         "_qr_hosts",
         "_regime",
         "_schedule",
+        "_settle",
         "_signer",
         "_sleep",
         "_xml",
@@ -202,15 +252,81 @@ class Emitter:
         self._clock = options["clock"]
         self._sleep = options["sleep"]
         self._schedule = options.get("schedule", POLL_SCHEDULE)
+        self._settle = options.get("settle", SETTLE_DELAY)
+        self._budget = options.get("budget", SEND_BUDGET)
         self._qr_hosts = options.get("qr_hosts", OFFICIAL_QR)
         self._regime = options.get("regime", REGIME)
+        authority.require_ready(self._environment)
 
     async def emit(self, draft: EcfDraft) -> Emitted:
-        """``draft`` emitted (see the module)."""
-        signed = await self._signed_ecf(draft)
-        if signed.route is Route.RFCE:
-            return await self._summarized(draft, signed)
-        return await self._received(draft, signed)
+        """``draft`` signed, then sent (see the module)."""
+        return await self.send(await self.sign(draft))
+
+    async def sign(self, draft: EcfDraft) -> Signed:
+        """``draft`` signed and checked, its RFCE too on the RFCE route (see the module)."""
+        self._authority.require_ready(self._environment)
+        totals = compute_totals(draft, self._regime)
+        where = route(draft, totals, self._regime)
+        signed_at = self._clock()
+        validity = await self._signer.certificate_validity()
+        if not (validity.covers(signed_at) and validity.covers(signed_at + MAX_SIGNING_SKEW)):
+            raise CertificateNotValidError
+        signed = await self._sign(self._xml.ecf(draft, totals, signed_at=signed_at), signed_at)
+        code = security_code(self._xml.signed(draft, signed, rfce=False))
+        if where is Route.RFCE:
+            unsigned = self._xml.rfce(draft, totals, security_code=code)
+            summary = await self._sign(unsigned, signed_at)
+            self._xml.signed(draft, summary, rfce=True)
+            qr = rfce_qr_url(
+                RfceQrData(draft.issuer.rnc, draft.encf, totals.total, code),
+                environment=self._environment,
+                hosts=self._qr_hosts,
+            )
+            return Signed(
+                draft=draft,
+                totals=totals,
+                route=where,
+                signed_at=signed_at,
+                signed_ecf=signed,
+                signed_rfce=summary,
+                security_code=code,
+                qr=qr,
+            )
+        data = EcfQrData(
+            issuer_rnc=draft.issuer.rnc,
+            buyer_rnc=draft.buyer.rnc,
+            encf=draft.encf,
+            issued_on=draft.issued_on,
+            total=totals.total,
+            signed_at=signed_at,
+            security_code=code,
+        )
+        return Signed(
+            draft=draft,
+            totals=totals,
+            route=where,
+            signed_at=signed_at,
+            signed_ecf=signed,
+            signed_rfce=None,
+            security_code=code,
+            qr=qr_url(data, environment=self._environment, hosts=self._qr_hosts),
+        )
+
+    async def send(self, signed: Signed) -> Emitted:
+        """``signed`` sent and decided, or parked; never raises a pack error (see the module)."""
+        progress = _Progress(begun=asyncio.get_running_loop().time())
+        unknown: Unknown | None = None
+        try:
+            async with asyncio.timeout(self._budget):
+                if signed.signed_rfce is not None:
+                    await self._summary_sent(signed, signed.signed_rfce, progress)
+                else:
+                    await self._ecf_sent(signed, progress)
+        except TimeoutError:
+            unknown = Unknown(SEND_BUDGET_SPENT, Failure.TIMED_OUT, progress.sent)
+        except EcfError as error:
+            unknown = Unknown.of(error, sent=progress.sent)
+        return Emitted(signed=signed, track_id=progress.track_id, outcome=progress.outcome, unknown=unknown)
 
     async def _sign(self, document: bytes, signed_at: datetime) -> bytes:
         """``document`` signed, once its signature is back within ``MAX_SIGNING_SKEW`` of ``signed_at``."""
@@ -219,102 +335,72 @@ class Emitter:
             raise SigningSkewError
         return signed
 
-    async def _signed_ecf(self, draft: EcfDraft) -> _Signed:
-        totals = compute_totals(draft, self._regime)
-        where = route(draft, totals, self._regime)
-        signed_at = self._clock()
-        if not (await self._signer.certificate_validity()).covers(signed_at):
-            raise CertificateNotValidError
-        signed = await self._sign(self._xml.ecf(draft, totals, signed_at=signed_at), signed_at)
-        code = security_code(self._xml.signed(draft, signed, rfce=False))
-        return _Signed(totals, where, signed_at, signed, code)
-
-    async def _summarized(self, draft: EcfDraft, signed: _Signed) -> Emitted:
-        summary: bytes | None = None
-        outcome: Outcome | None = None
-        unknown: Unknown | None = None
+    async def _submitted[R](self, submit: Awaitable[R], progress: _Progress) -> R:
+        """``submit``'s answer, ``progress.sent`` saying whether the document left (see ``Unknown.sent``)."""
+        progress.sent = None
         try:
-            unsigned = self._xml.rfce(draft, signed.totals, security_code=signed.security_code)
-            summary = await self._sign(unsigned, signed.signed_at)
-            self._xml.signed(draft, summary, rfce=True)
-            answer = await self._authority.submit_rfce(
-                self._environment, draft.issuer.rnc, draft.encf, summary
-            )
-            outcome = _refused(answer) if isinstance(answer, Refused) else _decided(answer, rfce=True)
-        except EcfError as error:
-            unknown = Unknown.of(error)
-        qr = rfce_qr_url(
-            RfceQrData(draft.issuer.rnc, draft.encf, signed.totals.total, signed.security_code),
-            environment=self._environment,
-            hosts=self._qr_hosts,
+            answer = await submit
+        except OutcomeUnknownError:
+            raise
+        except AuthorityUnavailableError as error:
+            progress.sent = error.failure not in _NOT_SENT
+            raise
+        except EcfError:
+            progress.sent = False
+            raise
+        progress.sent = True
+        return answer
+
+    async def _summary_sent(self, signed: Signed, summary: bytes, progress: _Progress) -> None:
+        draft = signed.draft
+        answer = await self._submitted(
+            self._authority.submit_rfce(self._environment, draft.issuer.rnc, draft.encf, summary), progress
         )
-        return Emitted(
-            draft=draft,
-            totals=signed.totals,
-            route=signed.route,
-            signed_at=signed.signed_at,
-            signed_ecf=signed.document,
-            signed_rfce=summary,
-            security_code=signed.security_code,
-            qr=qr,
-            track_id=None,
-            outcome=outcome,
-            unknown=unknown,
+        progress.outcome = (
+            _refused(answer) if isinstance(answer, Refused) else _decided(answer, draft, rfce=True)
         )
 
-    async def _received(self, draft: EcfDraft, signed: _Signed) -> Emitted:
-        track_id: str | None = None
-        outcome: Outcome | None = None
-        unknown: Unknown | None = None
-        try:
-            reception = await self._reception(draft, signed.document)
-            if isinstance(reception, Refused):
-                outcome = _refused(reception)
-            else:
-                track_id = reception.track_id
-                for delay in self._schedule:
-                    await self._sleep(delay)
-                    answer = await self._authority.result(self._environment, track_id)
-                    outcome = _decided(answer, rfce=False)
-                    if outcome.final:
-                        break
-        except EcfError as error:
-            unknown = Unknown.of(error)
-        data = EcfQrData(
-            issuer_rnc=draft.issuer.rnc,
-            buyer_rnc=draft.buyer.rnc,
-            encf=draft.encf,
-            issued_on=draft.issued_on,
-            total=signed.totals.total,
-            signed_at=signed.signed_at,
-            security_code=signed.security_code,
-        )
-        return Emitted(
-            draft=draft,
-            totals=signed.totals,
-            route=signed.route,
-            signed_at=signed.signed_at,
-            signed_ecf=signed.document,
-            signed_rfce=None,
-            security_code=signed.security_code,
-            qr=qr_url(data, environment=self._environment, hosts=self._qr_hosts),
-            track_id=track_id,
-            outcome=outcome,
-            unknown=unknown,
-        )
+    async def _ecf_sent(self, signed: Signed, progress: _Progress) -> None:
+        reception = await self._reception(signed, progress)
+        if isinstance(reception, Refused):
+            progress.outcome = _refused(reception)
+            return
+        progress.track_id = reception.track_id
+        for delay in self._schedule:
+            if self._spent(progress) + delay > self._budget:
+                return
+            await self._waited(delay, progress)
+            answer = await self._authority.result(self._environment, reception.track_id)
+            progress.outcome = _decided(answer, signed.draft, rfce=False)
+            if progress.outcome.final:
+                return
 
-    async def _reception(self, draft: EcfDraft, signed: bytes) -> Reception:
-        """Sent once; sent again only once DGII names no track id for the e-NCF (see the module)."""
-        issuer = draft.issuer.rnc
+    @staticmethod
+    def _spent(progress: _Progress) -> float:
+        """The budget spent: the time passed, or the waits asked for when the sleep returns at once."""
+        return max(asyncio.get_running_loop().time() - progress.begun, progress.slept)
+
+    async def _waited(self, seconds: float, progress: _Progress) -> None:
+        await self._sleep(seconds)
+        progress.slept += seconds
+
+    async def _reception(self, signed: Signed, progress: _Progress) -> Reception:
+        """Sent once; after an unknown outcome, a fresh track id DGII lists is adopted, or it is parked."""
+        draft = signed.draft
+        submit = self._authority.submit_ecf(
+            self._environment, draft.issuer.rnc, draft.encf, signed.signed_ecf
+        )
         try:
-            return await self._authority.submit_ecf(self._environment, issuer, draft.encf, signed)
+            return await self._submitted(submit, progress)
         except OutcomeUnknownError as unknown:
+            await self._waited(self._settle, progress)
             try:
-                known = await self._authority.track_ids(self._environment, issuer, draft.encf)
-            except EcfUnavailableError as error:
+                known = await self._authority.track_ids(self._environment, draft.issuer.rnc, draft.encf)
+            except EcfError as error:
                 raise unknown from error
-            if known is None:
+            since = signed.signed_at - RECEIPT_TOLERANCE
+            fresh = [each for each in known or () if each.received_at >= since]
+            if not fresh:
                 raise
-            if known:
-                return Received(known[-1])
-        return await self._authority.submit_ecf(self._environment, issuer, draft.encf, signed)
+            progress.sent = True
+            return Received(max(fresh, key=lambda each: each.received_at).track_id)

@@ -10,7 +10,7 @@ not fit must not put the token in an error.
 
 from typing import ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 BEARER_ALPHABET = r"^[A-Za-z0-9._~+/=-]+$"
 """What a bearer token is made of (RFC 6750's ``b64token``): nothing that could break out of its header."""
@@ -45,13 +45,15 @@ class ReceptionAnswer(_Answer):
 
 
 class ResultAnswer(_Answer):
-    """``consultaresultado`` and the RFCE's reception: the code, DGII's messages, ``secuenciaUtilizada``."""
+    """``consultaresultado`` and the RFCE's reception: code, messages, ``secuenciaUtilizada``, RNC, e-NCF."""
 
     code: int = Field(alias="codigo")
     messages: list[MessageAnswer] = Field(
         default_factory=list[MessageAnswer], alias="mensajes", max_length=200
     )
     sequence_used: bool | None = Field(default=None, alias="secuenciaUtilizada")
+    rnc: str | None = Field(default=None, max_length=11)
+    encf: str | None = Field(default=None, validation_alias=AliasChoices("eNCF", "encf"), max_length=13)
 
 
 class TrackIdAnswer(_Answer):

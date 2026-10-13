@@ -72,11 +72,25 @@ type Reception = Received | Refused
 @final
 @dataclass(frozen=True, slots=True)
 class Answer:
-    """DGII's verdict as it arrives: its code, its messages, ``secuenciaUtilizada``."""
+    """DGII's verdict as it arrives: its code, its messages, ``secuenciaUtilizada``.
+
+    ``rnc`` and ``encf``: the issuer and e-NCF DGII says the verdict is about; ``None`` where it names none.
+    """
 
     code: int
     messages: tuple[DgiiMessage, ...]
     sequence_used: bool | None
+    rnc: str | None = None
+    encf: str | None = None
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class TrackId:
+    """A track id DGII gave an e-NCF, and when DGII received the document."""
+
+    track_id: str
+    received_at: datetime
 
 
 class Failure(StrEnum):
@@ -133,6 +147,10 @@ class Authority(Protocol, metaclass=ABCMeta):
     """DGII's services for an emitter (spec §8.6.3)."""
 
     @abstractmethod
+    def require_ready(self, environment: Environment) -> None:
+        """Raise unless ``environment`` can be served now (hosts allowed, connections open); sends nothing."""
+
+    @abstractmethod
     async def submit_ecf(
         self, environment: Environment, issuer_rnc: str, encf: Encf, signed: bytes
     ) -> Reception:
@@ -151,7 +169,7 @@ class Authority(Protocol, metaclass=ABCMeta):
     @abstractmethod
     async def track_ids(
         self, environment: Environment, issuer_rnc: str, encf: Encf
-    ) -> tuple[str, ...] | None:
+    ) -> tuple[TrackId, ...] | None:
         """Every track id DGII gave the e-NCF, oldest first; ``None`` where DGII has no such service."""
 
 

@@ -62,6 +62,7 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
     OutcomeUnknownError,
     Received,
     Refused,
+    TrackId,
 )
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError
 from ledger_country_do.channels.ecf_v1.domain.notation import SANTO_DOMINGO
@@ -148,6 +149,12 @@ def _now() -> datetime:
 
 def _messages(found: list[MessageAnswer]) -> tuple[DgiiMessage, ...]:
     return tuple(DgiiMessage(str(message.code), message.text) for message in found)
+
+
+def _answer(answer: ResultAnswer) -> Answer:
+    return Answer(
+        answer.code, _messages(answer.messages), answer.sequence_used, rnc=answer.rnc, encf=answer.encf
+    )
 
 
 def _received_at(text: str) -> datetime | None:
@@ -241,6 +248,11 @@ class DgiiClient(Authority):
             finally:
                 self._http = None
                 self._tokens.clear()
+
+    @override
+    def require_ready(self, environment: Environment) -> None:
+        self._client(Service.RECEPTION)
+        self._url(Service.RECEPTION, environment)
 
     def _client(self, service: Service) -> httpx.AsyncClient:
         if self._http is None:
@@ -463,31 +475,29 @@ class DgiiClient(Authority):
         response = await self._submit(environment, Service.RFCE, issuer_rnc, encf, signed)
         if isinstance(response, Refused):
             return response
-        answer = _submitted(_RESULT, response, Service.RFCE)
-        return Answer(answer.code, _messages(answer.messages), answer.sequence_used)
+        return _answer(_submitted(_RESULT, response, Service.RFCE))
 
     @override
     async def result(self, environment: Environment, track_id: str) -> Answer:
         response = await self._query(environment, Service.RESULT, {"trackid": track_id})
-        answer = read_answer(_RESULT, response, Service.RESULT)
-        return Answer(answer.code, _messages(answer.messages), answer.sequence_used)
+        return _answer(read_answer(_RESULT, response, Service.RESULT))
 
     @override
     async def track_ids(
         self, environment: Environment, issuer_rnc: str, encf: Encf
-    ) -> tuple[str, ...] | None:
+    ) -> tuple[TrackId, ...] | None:
         if not offered(Service.TRACK_IDS, environment):
             return None
         params = {"rncemisor": issuer_rnc, "encf": str(encf)}
         response = await self._query(environment, Service.TRACK_IDS, params)
         entries = read_answer(_TRACK_IDS, response, Service.TRACK_IDS)
         received = [(_received_at(entry.received_at), entry.track_id) for entry in entries]
-        ordered: list[tuple[datetime, str]] = []
+        ordered: list[TrackId] = []
         for moment, track_id in received:
             if moment is None:
                 raise AuthorityUnavailableError(Failure.UNREADABLE, Service.TRACK_IDS.value)
-            ordered.append((moment, track_id))
-        return tuple(track_id for _, track_id in sorted(ordered, key=lambda each: each[0]))
+            ordered.append(TrackId(track_id, moment))
+        return tuple(sorted(ordered, key=lambda each: each.received_at))
 
     async def directory(self, environment: Environment, rnc: str) -> DirectoryEntry | None:
         """The receiver ``rnc`` in DGII's directory; ``None`` if it is no electronic receiver (F5, F6)."""
