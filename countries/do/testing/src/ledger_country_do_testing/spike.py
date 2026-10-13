@@ -60,6 +60,7 @@ from ledger_country_do.channels.ecf_v1.domain.environments import (
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 from ledger_country_do.channels.ecf_v1.domain.notation import local_date
 from ledger_country_do.channels.ecf_v1.domain.printed import QrHosts
+from ledger_country_do.channels.ecf_v1.domain.routing import Route
 from ledger_country_do.channels.ecf_v1.domain.status_map import DOCUMENTED, FiscalStatus
 from ledger_country_do_testing.local_signer import BundleIncompleteError, KeyPairSigner
 from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
@@ -81,6 +82,7 @@ _USAGE: Final = 2
 _NOT_ACCEPTED: Final = 1
 _AUTH_PROBE: Final = "ledger-spike-authentication-check"
 """A track id that does not exist: ``consultaresultado`` needs a token, so asking about it proves one."""
+_RFCE_NOT_DELIVERED: Final = "a consumer invoice sent as an RFCE is not delivered (spec 8.6.5)"
 _SENT: Final = {True: "DGII answered about it", False: "it never left", None: "it may be at DGII"}
 _IDENTITY_ATTRIBUTES: Final = (
     (NameOID.SERIAL_NUMBER, "serialNumber"),
@@ -555,7 +557,12 @@ async def _emitted(draft: EcfDraft, trust: CounterpartyTrust | None, context: _R
     _report(emitted, settings, out)
     if emitted.unknown is not None or emitted.outcome is None or emitted.outcome.status not in _ACCEPTED:
         return _NOT_ACCEPTED
-    return 0 if trust is None else await _delivered(signed, trust, context)
+    if trust is None:
+        return 0
+    if signed.route is Route.RFCE:
+        _say(out, f"buyer: not applicable: {_RFCE_NOT_DELIVERED}")
+        return 0
+    return await _delivered(signed, trust, context)
 
 
 async def run(

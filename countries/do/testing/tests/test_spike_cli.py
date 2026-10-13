@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives.serialization import BestAvailableEncryption
 
 from ledger_country_do_testing import spike
 from ledger_country_do_testing.fake_dgii.app import DEFAULT_PUBLIC_URL, FakeDgii
-from ledger_country_do_testing.fake_dgii.state import Scripted, Status, dgii_check
+from ledger_country_do_testing.fake_dgii.state import DirectoryEntry, Scripted, Status, dgii_check
 from ledger_country_do_testing.pki import bundle, pem
 from ledger_country_do_testing.transports import FAKE_HOSTS, BreaksAfterSending
 lazy from ledger_country_do_testing.clock import ManualClock
@@ -233,7 +233,31 @@ async def test_an_accepted_credit_invoice_is_delivered_to_its_buyer(
     anonymous, summary = await run(
         fake, environ, "emit", "--type", "32", "--sequence", "4", "--deliver", clock=clock
     )
-    assert (anonymous, "buyer: not applicable: the buyer has no RNC or cédula" in summary) == (0, True)
+    assert (anonymous, "buyer: not applicable: a consumer invoice sent as an RFCE" in summary) == (0, True)
+
+
+async def test_an_rfce_route_invoice_is_never_delivered_even_naming_its_buyer(
+    fake: FakeDgii, environ: dict[str, str], clock: ManualClock
+) -> None:
+    code, output = await run(
+        fake, environ, "emit", "--type", "32", "--sequence", "30", "--named", "--deliver", clock=clock
+    )
+    assert (code, "route: rfce" in output) == (0, True)
+    assert "buyer: not applicable: a consumer invoice sent as an RFCE is not delivered (spec 8.6.5)" in output
+    assert [each.kind for each in fake.received] == ["rfce"]
+
+
+async def test_a_buyer_the_directory_does_not_list_under_its_own_rnc_is_not_delivered_to(
+    fake: FakeDgii, environ: dict[str, str], clock: ManualClock
+) -> None:
+    fake.state.directory["131098193"] = DirectoryEntry(
+        name="OTRO", rnc="101850043", reception=FAKE_HOSTS.ecf, approval=FAKE_HOSTS.ecf, authentication=None
+    )
+    code, output = await run(
+        fake, environ, "emit", "--type", "31", "--sequence", "31", "--deliver", clock=clock
+    )
+    assert (code, "buyer: not applicable: the buyer is not an electronic receiver" in output) == (0, True)
+    assert [each.kind for each in fake.received] == ["ecf"]
 
 
 async def test_a_buyer_that_refuses_the_document_is_reported(

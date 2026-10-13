@@ -71,7 +71,8 @@ an e-NCF from it.
 
 What `emit` does, in order: builds the sample; records its e-NCF; signs it (and its RFCE on that route);
 **writes the signed documents to `.dgii/out` before anything is sent**; sends once; polls; prints DGII's answer,
-the security code and the QR URL; writes a JSON summary. Exit codes: 0 accepted, 1 rejected, still pending,
+the security code and the QR URL; writes a JSON summary; with `--deliver`, once accepted, delivers an e-CF
+sent in full to its buyer (a consumer invoice sent as an RFCE is never delivered: spec §8.6.5). Exit codes: 0 accepted, 1 rejected, still pending,
 parked, unavailable or not received by the buyer, 2 a setting or argument refused.
 
 ## 3. Dry run against the fake DGII
