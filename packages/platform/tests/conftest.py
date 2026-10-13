@@ -1,7 +1,9 @@
 """Fixtures of the platform's tests: databases on the run's PostgreSQL (``ledger_testing``'s), and NATS."""
 
-lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
+from typing import Final, final
+lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Mapping
 
+import psycopg
 import pytest
 from nats.aio.client import Client
 from nats.js import JetStreamContext
@@ -9,15 +11,22 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from prometheus_client import CollectorRegistry
+from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
+lazy from sqlalchemy import Engine
 
 from ledger_kernel.ids import new_id
+from ledger_platform.data.bound import BoundDatabase
 from ledger_platform.data.database import Database
 from ledger_platform.data.migrations import PLATFORM_MIGRATIONS
+from ledger_platform.data.roles import SchemaRoles, identifier
+from ledger_platform.events.subscriptions import bump_routing, sync_subscriptions
 from ledger_platform.observability.tracing import Tracing
 from ledger_platform.schema import CHASSIS_METADATA
 from ledger_testing import waiting
 from ledger_testing.containers import nats_address, nats_server
-from ledger_testing.database import bootstrap, create_chassis, migrate
+from ledger_testing.database import app_url, bootstrap, create_chassis, migrate, migrator_url
+lazy from ledger_platform.data.notifier import Channel, Signals
 lazy from ledger_testing.postgres import PostgresServer, Template, WorkerDatabase
 
 SMALL_PAYLOAD_CONFIG = "/small-payload.conf"
@@ -150,3 +159,96 @@ def eventually() -> Callable[[Callable[[], Awaitable[bool]]], Awaitable[None]]:
     For what happens in a task of its own, such as a relay or a consumer, whose progress a test cannot await.
     """
     return waiting.eventually
+
+
+# ── Eventing (§3.5): the app's pool, the migrator, two bound modules, subscriptions ──────────────────────
+# Their names are their own (``pool``, ``superuser``, ...): the v1 tests use ``database`` above.
+
+RENAMED: Final = "probe.thing.renamed"
+CREATED: Final = "probe.thing.created"
+
+type Subscribe = Callable[[str, Mapping[str, frozenset[str]]], int]
+"""``subscribe(schema, {consumer: types})``: what migrate does for one schema; the new routing version."""
+
+
+@final
+class _Recorded:
+    """``Signals`` that write down what they were told, in order."""
+
+    __slots__ = ("_sent",)
+
+    def __init__(self, sent: list[Channel]) -> None:
+        self._sent = sent
+
+    def signal(self, channel: Channel) -> None:
+        self._sent.append(channel)
+
+
+@pytest.fixture
+async def pool(chassis: WorkerDatabase) -> AsyncGenerator[Database]:
+    """Four connections as ``ledger_app`` (``chassis`` empties the schemas after the test)."""
+    opened = Database.create(app_url(chassis), pool_size=4)
+    try:
+        yield opened
+    finally:
+        await opened.aclose()
+
+
+@pytest.fixture
+async def superuser(chassis: WorkerDatabase) -> AsyncGenerator[psycopg.AsyncConnection]:
+    """A superuser session for a test's setup and checks; it puts ``platform.routing`` back to 0 after."""
+    async with await psycopg.AsyncConnection.connect(chassis.admin_url(), autocommit=True) as connection:
+        yield connection
+        await connection.execute("UPDATE platform.routing SET version = 0")
+
+
+@pytest.fixture
+def migrator(chassis: WorkerDatabase) -> Iterator[Engine]:
+    """``ledger_migrator``, as ``ledger-migrate`` connects (synchronously)."""
+    engine = create_engine(migrator_url(chassis), poolclass=NullPool)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture
+def subscribe(migrator: Engine, superuser: psycopg.AsyncConnection) -> Subscribe:
+    """Sync a schema's subscriptions as its owner, then bump the routing version as ``platform_owner``."""
+    del superuser  # requested for its cleanup: the routing version goes back to 0
+
+    def run(schema: str, declared: Mapping[str, frozenset[str]]) -> int:
+        with migrator.begin() as connection:
+            connection.execute(text(f"SET LOCAL ROLE {identifier(SchemaRoles(schema=schema).owner)}"))
+            sync_subscriptions(connection, schema, declared)
+        with migrator.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE platform_owner"))
+            return bump_routing(connection)
+
+    return run
+
+
+@pytest.fixture
+def sent() -> list[Channel]:
+    """The channels ``signals`` was told about, in order."""
+    return []
+
+
+@pytest.fixture
+def signals(sent: list[Channel]) -> Signals:
+    """Signals that only record (``sent``)."""
+    return _Recorded(sent)
+
+
+@pytest.fixture
+def probe(pool: Database, signals: Signals) -> BoundDatabase:
+    """The producer: it publishes ``probe.thing.renamed`` and ``probe.thing.created``."""
+    return BoundDatabase(
+        pool, schema="probe", source="probe", publishes=frozenset({RENAMED, CREATED}), signals=signals
+    )
+
+
+@pytest.fixture
+def other(pool: Database, signals: Signals) -> BoundDatabase:
+    """Another module: it publishes nothing and consumes."""
+    return BoundDatabase(pool, schema="other", source="other", signals=signals)
