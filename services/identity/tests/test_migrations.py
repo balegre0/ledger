@@ -22,10 +22,12 @@ from ledger_identity.adapters.postgres import migrate
 from ledger_identity.adapters.postgres.migrate import (
     MIGRATION_LOCK_WAIT,
     SCRIPTS,
+    InvalidMigrationOptionError,
     MigrationLockTimeoutError,
     MigrationUrlMissingError,
     OfflineMigrationsError,
     SchemaNotCurrentError,
+    Target,
     downgrade,
     head,
     require_head,
@@ -274,6 +276,24 @@ async def test_the_readiness_check_passes_on_a_database_at_this_version_only(
 
 def test_a_migration_waits_for_another_long_but_not_forever() -> None:
     assert timedelta(minutes=10) == MIGRATION_LOCK_WAIT
+
+
+@pytest.mark.parametrize(
+    "wait",
+    [timedelta(0), timedelta(milliseconds=-1), timedelta(milliseconds=2**31)],
+    ids=["zero", "negative", "beyond-postgresql"],
+)
+def test_a_migration_waits_a_positive_time_postgresql_can_hold(wait: timedelta) -> None:
+    """Zero would be no bound at all to ``lock_timeout``; above 2^31 - 1 ms PostgreSQL refuses the setting."""
+    with pytest.raises(InvalidMigrationOptionError) as caught:
+        upgrade("postgresql+psycopg://nobody@localhost/nothing", lock_wait=wait)
+    assert caught.value.code == "invalid_migration_option"
+    assert str(caught.value).startswith("migration option lock_wait must be between 1 microsecond and ")
+
+
+def test_the_longest_wait_postgresql_can_hold_is_accepted() -> None:
+    longest = timedelta(milliseconds=2**31 - 1)
+    assert Target(url="postgresql+psycopg://nobody@localhost/nothing", lock_wait=longest).lock_wait == longest
 
 
 async def test_a_migration_that_waits_longer_than_its_bound_fails_saying_why(fresh_database_url: str) -> None:

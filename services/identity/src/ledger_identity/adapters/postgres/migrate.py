@@ -18,6 +18,7 @@ from sqlalchemy import String, column, func, select, table
 
 from ledger_identity.settings import IdentitySettings
 from ledger_kernel.errors import LedgerError, UnavailableError
+from ledger_platform.options import InvalidOptionError
 lazy from ledger_platform.database import Database
 
 SCRIPTS: Final = "ledger_identity.adapters.postgres:migrations"
@@ -38,6 +39,9 @@ MIGRATION_LOCK_WAIT: Final = timedelta(minutes=10)
 """How long a migration waits for another one to commit: far longer than any of identity's migrations takes,
 so that a replica starting while another migrates waits for it; yet finite, so that a migration stuck (or a
 session that took the lock and never let go) fails the next one loudly instead of hanging it forever."""
+_MILLISECOND: Final = timedelta(milliseconds=1)
+LONGEST_LOCK_WAIT: Final = timedelta(milliseconds=2**31 - 1)
+"""The longest ``lock_timeout`` PostgreSQL accepts."""
 
 
 class OfflineMigrationsError(LedgerError):
@@ -50,12 +54,19 @@ class OfflineMigrationsError(LedgerError):
 
 
 class MigrationUrlMissingError(LedgerError):
-    """The migrations were started without a database to run against."""
+    """The migrations were started with no target: Alembic's configuration holds no ``Target``."""
 
     code: ClassVar[str] = "migration_url_missing"
 
     def __init__(self) -> None:
         super().__init__("identity's migrations were started without a database URL")
+
+
+class InvalidMigrationOptionError(InvalidOptionError):
+    """A migration was asked to run with an option that cannot work."""
+
+    code: ClassVar[str] = "invalid_migration_option"
+    label: ClassVar[str] = "migration option"
 
 
 class MigrationLockTimeoutError(UnavailableError):
@@ -83,6 +94,15 @@ class Target:
 
     url: str = field(repr=False)  # it carries the password
     lock_wait: timedelta
+    """Positive, and at most ``LONGEST_LOCK_WAIT``: a zero ``lock_timeout`` would be no bound at all."""
+
+    def __post_init__(self) -> None:
+        if not timedelta(0) < self.lock_wait <= LONGEST_LOCK_WAIT:
+            raise InvalidMigrationOptionError(
+                option="lock_wait",
+                requirement=f"between 1 microsecond and {LONGEST_LOCK_WAIT // _MILLISECOND} milliseconds",
+                value=self.lock_wait,
+            )
 
 
 TARGET: Final = "target"

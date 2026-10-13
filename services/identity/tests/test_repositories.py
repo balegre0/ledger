@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import func, insert, select, text
 from sqlalchemy.exc import IntegrityError
 lazy from sqlalchemy import Insert
+lazy from sqlalchemy.ext.asyncio import AsyncConnection
 
 import ledger.events.identity.v1.events_pb2 as wire
 from ledger_contracts.envelope import Envelope
@@ -27,6 +28,7 @@ from ledger_identity.application import commands, queries
 from ledger_identity.domain.branches import Branch, EmissionPoint
 from ledger_identity.domain.errors import (
     BranchCodeTakenError,
+    CompanyInactiveError,
     CompanyNotFoundError,
     EmissionPointCodeTakenError,
     OwnersOnlyError,
@@ -46,13 +48,14 @@ from ledger_identity.domain.text import LegalName, parse_code, parse_legal_name,
 from ledger_kernel.access import Permission, Principal, SubjectId
 from ledger_kernel.countries.do import TaxId
 from ledger_kernel.ids import CompanyId, OrganizationId, Tenant, new_id
-from ledger_kernel.pagination import PageRequest
+from ledger_kernel.pagination import PageRequest, decode_cursor
 from ledger_platform.authentication import organization_of
 from ledger_platform.outbox import OutboxRecord
 from ledger_testing.waiting import eventually, waits_for_a_lock
 lazy from ledger_identity.application.ports import IdentityUnit
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_identity.domain.events import IdentityEvent
+lazy from ledger_kernel.pagination import Page
 lazy from ledger_platform.database import Database, Scope
 lazy from ledger_platform.outbox import Outbox
 
@@ -418,9 +421,30 @@ async def test_a_row_cannot_point_at_a_company_or_a_branch_of_another_tenant(
         assert isinstance(caught.value.orig, psycopg.errors.ForeignKeyViolation)
 
 
-async def test_the_repositories_keep_to_the_unit_s_organization_without_row_level_security(
+async def with_the_policies_off[T](
+    database: Database,
+    outbox: Outbox,
+    scope: Scope,
+    look: Callable[[IdentityUnit, AsyncConnection], Awaitable[T]],
+) -> T:
+    """What ``look`` sees in a unit of ``scope`` with row-level security off: the application filter alone."""
+    seen: list[T] = []
+
+    async def look_then_undo() -> None:
+        async with database.transaction(scope) as transaction:
+            for statement in ROW_LEVEL_SECURITY_OFF:
+                await transaction.connection.execute(statement)
+            seen.append(await look(bind(transaction, outbox, clock=lambda: NOW), transaction.connection))
+            raise UndoneError  # the policies come back with the rollback
+
+    with pytest.raises(UndoneError):
+        await look_then_undo()
+    return seen[0]
+
+
+async def a_company_with_a_branch_and_a_point(
     database: Database, outbox: Outbox
-) -> None:
+) -> tuple[Company, Branch, EmissionPoint]:
     company = await create(database, outbox)
     branch = await in_unit(
         database,
@@ -436,57 +460,88 @@ async def test_the_repositories_keep_to_the_unit_s_organization_without_row_leve
             unit, company.id, branch.id, code=parse_code("001"), name=parse_name("Caja")
         ),
     )
-    seen: list[object] = []
-
-    async def look_as_a_stranger_with_the_policies_off() -> None:
-        async with database.transaction(STRANGER.organization) as transaction:
-            for statement in ROW_LEVEL_SECURITY_OFF:
-                await transaction.connection.execute(statement)
-            unit = bind(transaction, outbox, clock=lambda: NOW)
-            every_company = select(func.count()).select_from(CompanyRecord)
-            seen.extend(
-                (
-                    (await transaction.connection.execute(every_company)).scalar_one(),
-                    await unit.organizations.get(FOUNDER.organization),
-                    await unit.companies.get(company.id),
-                    await unit.companies.locked(company.id),
-                    await unit.companies.update(company, version=company.version),
-                    (await unit.companies.of_member(OWNER, PageRequest())).items,
-                    await unit.memberships.get(company.id, OWNER),
-                    await unit.memberships.owners(company.id),
-                    (await unit.memberships.page(company.id, PageRequest())).items,
-                    await unit.branches.get(company.id, branch.id),
-                    (await unit.branches.page(company.id, PageRequest())).items,
-                    await unit.emission_points.get(company.id, point.id),
-                    (await unit.emission_points.page(company.id, branch.id, PageRequest())).items,
-                )
-            )
-            raise UndoneError  # the policies come back with the rollback
-
-    with pytest.raises(UndoneError):
-        await look_as_a_stranger_with_the_policies_off()
-    assert seen == [1, None, None, None, False, (), None, 0, (), None, (), None, ()]
+    return company, branch, point
 
 
-async def test_a_unit_refuses_to_write_a_row_of_another_organization(
+async def test_the_repositories_keep_to_the_unit_s_organization_without_row_level_security(
     database: Database, outbox: Outbox
 ) -> None:
+    company, branch, point = await a_company_with_a_branch_and_a_point(database, outbox)
+
+    async def look(unit: IdentityUnit, connection: AsyncConnection) -> list[object]:
+        every_company = select(func.count()).select_from(CompanyRecord)
+        return [
+            (await connection.execute(every_company)).scalar_one(),
+            await unit.organizations.get(FOUNDER.organization),
+            await unit.companies.get(company.id),
+            await unit.companies.locked(company.id),
+            (await unit.companies.of_member(OWNER, PageRequest())).items,
+            await unit.memberships.get(company.id, OWNER),
+            await unit.memberships.owners(company.id),
+            (await unit.memberships.page(company.id, PageRequest())).items,
+            await unit.branches.get(company.id, branch.id),
+            (await unit.branches.page(company.id, PageRequest())).items,
+            await unit.emission_points.get(company.id, point.id),
+            (await unit.emission_points.page(company.id, branch.id, PageRequest())).items,
+        ]
+
+    seen = await with_the_policies_off(database, outbox, STRANGER.organization, look)
+    assert seen == [1, None, None, None, (), None, 0, (), None, (), None, ()]
+
+
+async def test_the_repositories_keep_to_the_unit_s_company_without_row_level_security(
+    database: Database, outbox: Outbox
+) -> None:
+    company, branch, point = await a_company_with_a_branch_and_a_point(database, outbox)
+    sister = await create(database, outbox, tax_id=TaxId.parse("130000012"))
+
+    async def look(unit: IdentityUnit, connection: AsyncConnection) -> list[object]:
+        del connection
+        return [
+            await unit.branches.get(company.id, branch.id),
+            (await unit.branches.page(company.id, PageRequest())).items,
+            await unit.emission_points.get(company.id, point.id),
+            (await unit.emission_points.page(company.id, branch.id, PageRequest())).items,
+        ]
+
+    nothing: Final = [None, (), None, ()]
+    assert await with_the_policies_off(database, outbox, sister.tenant, look) == nothing
+    assert await with_the_policies_off(database, outbox, company.organization, look) == nothing
+    own = await with_the_policies_off(database, outbox, company.tenant, look)
+    assert own == [branch, (branch,), point, (point,)]  # the same statements, in the company's own unit
+
+
+async def test_a_unit_refuses_to_write_a_row_of_another_tenant(database: Database, outbox: Outbox) -> None:
     """Row-level security would refuse each of these too: the repositories do not count on it."""
     company = await create(database, outbox)
+    sister = await create(database, outbox, tax_id=TaxId.parse("130000012"))
     branch = Branch.open(company, code=parse_code("SUC1"), name=parse_name("S"), now=NOW)
     point = EmissionPoint.open(company, branch, code=parse_code("001"), name=parse_name("Caja"), now=NOW)
     owner, _ = found(company, FOUNDER, now=NOW)
-    writes: tuple[Callable[[IdentityUnit], Awaitable[object]], ...] = (
+    renamed, _ = company.rename(parse_legal_name("Duarte S.A."), now=NOW)
+    of_another_organization: tuple[Callable[[IdentityUnit], Awaitable[object]], ...] = (
         lambda unit: unit.organizations.add(Organization.of(FOUNDER, now=NOW)),
         lambda unit: unit.companies.add(company),
+        lambda unit: unit.companies.update(renamed, version=company.version),
         lambda unit: unit.branches.add(branch),
         lambda unit: unit.emission_points.add(point),
         lambda unit: unit.memberships.put(owner),
     )
-    for write_as_a_stranger in writes:
+    of_another_company: tuple[Callable[[IdentityUnit], Awaitable[object]], ...] = (
+        lambda unit: unit.branches.add(branch),
+        lambda unit: unit.emission_points.add(point),
+    )
+    attempts: tuple[tuple[Scope, Callable[[IdentityUnit], Awaitable[object]]], ...] = (
+        *((STRANGER.organization, write) for write in of_another_organization),
+        *((sister.tenant, write) for write in of_another_company),
+        *((company.organization, write) for write in of_another_company),  # a unit of no company at all
+    )
+    for scope, write_elsewhere in attempts:
         with pytest.raises(ForeignTenantError) as caught:
-            await in_unit(database, outbox, STRANGER.organization, write_as_a_stranger)
+            await in_unit(database, outbox, scope, write_elsewhere)
         assert caught.value.code == "foreign_tenant"
+    kept = await in_unit(database, outbox, company.tenant, lambda unit: queries.company(unit, company.id))
+    assert kept == company
 
 
 async def test_a_unit_reads_its_clock_once_for_its_time_and_its_events(
@@ -651,17 +706,99 @@ async def test_a_deactivated_company_lets_other_services_read_only_and_identity_
     database: Database, outbox: Outbox
 ) -> None:
     company = await create(database, outbox)
+    tenant = company.tenant
+
+    async def grant(role: Role) -> commands.Granted:
+        return await in_unit(
+            database,
+            outbox,
+            tenant,
+            lambda unit: commands.grant_role(
+                unit, company.id, subject=MEMBER.subject, role=role, actor=OWNER
+            ),
+        )
+
+    await grant(Role.ISSUER)
     await in_unit(
-        database,
-        outbox,
-        company.tenant,
-        lambda unit: commands.deactivate_company(unit, company.id, admits=anything),
+        database, outbox, tenant, lambda unit: commands.deactivate_company(unit, company.id, admits=anything)
     )
     for_other_services = await in_unit(
         database, outbox, FOUNDER.organization, lambda unit: queries.permissions_of(unit, company.id, OWNER)
     )
     assert for_other_services == READ_ONLY
-    assert await MembershipPermissions(database).permissions(FOUNDER, company.id) == frozenset(Permission)
+    permissions = MembershipPermissions(database)
+    assert await permissions.permissions(FOUNDER, company.id) == frozenset(Permission)
+    with pytest.raises(CompanyInactiveError):  # no role is granted there any more ...
+        await grant(Role.VIEWER)
+    await in_unit(  # ... but one is still taken away
+        database,
+        outbox,
+        tenant,
+        lambda unit: commands.revoke_role(unit, company.id, subject=MEMBER.subject, actor=OWNER),
+    )
+    assert await permissions.permissions(MEMBER, company.id) == frozenset()
+    types = [envelope.type.rsplit(".", 1)[1] for envelope in await published(database)]
+    assert types[-2:] == ["CompanyDeactivated", "MembershipRevoked"]
+
+
+# ── Pages of branches and emission points ───────────────────────────────────────
+
+
+async def test_branches_and_emission_points_are_paged_in_id_order_by_cursor(
+    database: Database, outbox: Outbox
+) -> None:
+    company, first_branch, first_point = await a_company_with_a_branch_and_a_point(database, outbox)
+    tenant = company.tenant
+
+    async def open_branch(code: str) -> Branch:
+        return await in_unit(
+            database,
+            outbox,
+            tenant,
+            lambda unit: commands.open_branch(unit, company.id, code=parse_code(code), name=parse_name(code)),
+        )
+
+    async def open_point(code: str) -> EmissionPoint:
+        return await in_unit(
+            database,
+            outbox,
+            tenant,
+            lambda unit: commands.open_emission_point(
+                unit, company.id, first_branch.id, code=parse_code(code), name=parse_name(code)
+            ),
+        )
+
+    async def branch_page(request: PageRequest) -> Page[Branch]:
+        return await in_unit(
+            database, outbox, tenant, lambda unit: queries.branches(unit, company.id, request)
+        )
+
+    async def point_page(request: PageRequest) -> Page[EmissionPoint]:
+        return await in_unit(
+            database,
+            outbox,
+            tenant,
+            lambda unit: queries.emission_points(unit, company.id, first_branch.id, request),
+        )
+
+    branches = sorted(
+        [first_branch, await open_branch("SUC2"), await open_branch("SUC3")], key=lambda b: b.id
+    )
+    points = sorted([first_point, await open_point("002"), await open_point("003")], key=lambda p: p.id)
+    first = await branch_page(PageRequest(size=2))
+    assert first.next_cursor is not None
+    rest = await branch_page(PageRequest(size=2, after=decode_cursor(first.next_cursor)))
+    assert (first.items, rest.items, rest.next_cursor) == (tuple(branches[:2]), tuple(branches[2:]), None)
+    first_points = await point_page(PageRequest(size=2))
+    assert first_points.next_cursor is not None
+    rest_points = await point_page(PageRequest(size=2, after=decode_cursor(first_points.next_cursor)))
+    assert (first_points.items, rest_points.items, rest_points.next_cursor) == (
+        tuple(points[:2]),
+        tuple(points[2:]),
+        None,
+    )
+    exactly_full = await point_page(PageRequest(size=3))
+    assert (exactly_full.items, exactly_full.next_cursor) == (tuple(points), None)
 
 
 # ── The wire ────────────────────────────────────────────────────────────────────

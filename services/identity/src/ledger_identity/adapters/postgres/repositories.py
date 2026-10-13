@@ -1,7 +1,8 @@
 """identity's repositories: the ports of ``application.ports`` over one transaction (SQLAlchemy Core).
 
-Every repository is bound to the organization of its unit and names it in every read, update and upsert, with
-the company where a row is a company's; row-level security enforces the unit's scope again. Tenancy is checked
+Every repository is bound to the organization of its unit and names it in every read, update and upsert; the
+repositories of a company's rows (branches, emission points) are bound to the unit's company as well, and name
+it too. Row-level security enforces the unit's scope again. Tenancy is checked
 twice (§2): a statement that forgot its filter still sees nothing of another tenant, and a policy dropped by
 mistake still leaves every read and change inside the organization. An insert that could collide uses ``ON
 CONFLICT DO NOTHING`` against the constraint that would refuse it, and reads the outcome from ``RETURNING``:
@@ -14,9 +15,9 @@ from typing import ClassVar, final, override
 lazy from datetime import datetime
 lazy from uuid import UUID
 
-from sqlalchemy import and_, func, select, update
+from sqlalchemy import and_, false, func, select, update
 from sqlalchemy.dialects.postgresql import insert
-lazy from sqlalchemy import Row, Select
+lazy from sqlalchemy import ColumnElement, Row, Select
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
 lazy from sqlalchemy.orm import InstrumentedAttribute
 
@@ -56,6 +57,22 @@ def _require_own(organization: OrganizationId, unit: OrganizationId) -> None:
     """Refuse a row of ``organization`` in a unit of the organization ``unit``."""
     if organization != unit:
         raise ForeignTenantError
+
+
+def _require_own_company(tenant: Tenant, organization: OrganizationId, company: CompanyId | None) -> None:
+    """Refuse a company's row in a unit of another organization or company, or of no company at all."""
+    if company is None or tenant != Tenant(organization, company):
+        raise ForeignTenantError
+
+
+def _in_the_unit_s_company(
+    column: InstrumentedAttribute[UUID], company: CompanyId | None
+) -> ColumnElement[bool]:
+    """``column`` is the unit's company; a unit scoped to a whole organization sees no company's row.
+
+    Row-level security's own rule for the rows a company owns: the application states it again.
+    """
+    return false() if company is None else column == company
 
 
 _ORGANIZATION = select(OrganizationRecord.id, OrganizationRecord.provider_id, OrganizationRecord.created_at)
@@ -233,6 +250,7 @@ class PgCompanies(Companies):
 
     @override
     async def update(self, company: Company, *, version: int) -> bool:
+        _require_own(company.organization, self._organization)
         changed = await self._connection.execute(
             update(CompanyRecord)
             .where(
@@ -269,17 +287,20 @@ class PgCompanies(Companies):
 
 @final
 class PgBranches(Branches):
-    """The branches of the unit's company, in PostgreSQL."""
+    """The branches of the unit's company, in PostgreSQL: none in a unit of a whole organization."""
 
-    __slots__ = ("_connection", "_organization")
+    __slots__ = ("_company", "_connection", "_organization")
 
-    def __init__(self, connection: AsyncConnection, organization: OrganizationId) -> None:
+    def __init__(
+        self, connection: AsyncConnection, organization: OrganizationId, company: CompanyId | None
+    ) -> None:
         self._connection = connection
         self._organization = organization
+        self._company = company
 
     @override
     async def add(self, branch: Branch) -> bool:
-        _require_own(branch.tenant.organization, self._organization)
+        _require_own_company(branch.tenant, self._organization, self._company)
         added = await self._connection.execute(
             insert(BranchRecord)
             .values(
@@ -307,23 +328,28 @@ class PgBranches(Branches):
 
     def _of(self, company: CompanyId) -> Select[UUID, UUID, UUID, str, str, datetime]:
         return _BRANCH.where(
-            BranchRecord.organization_id == self._organization, BranchRecord.company_id == company
+            BranchRecord.organization_id == self._organization,
+            _in_the_unit_s_company(BranchRecord.company_id, self._company),
+            BranchRecord.company_id == company,
         )
 
 
 @final
 class PgEmissionPoints(EmissionPoints):
-    """The emission points of the unit's company, in PostgreSQL."""
+    """The emission points of the unit's company, in PostgreSQL: none in a unit of a whole organization."""
 
-    __slots__ = ("_connection", "_organization")
+    __slots__ = ("_company", "_connection", "_organization")
 
-    def __init__(self, connection: AsyncConnection, organization: OrganizationId) -> None:
+    def __init__(
+        self, connection: AsyncConnection, organization: OrganizationId, company: CompanyId | None
+    ) -> None:
         self._connection = connection
         self._organization = organization
+        self._company = company
 
     @override
     async def add(self, point: EmissionPoint) -> bool:
-        _require_own(point.tenant.organization, self._organization)
+        _require_own_company(point.tenant, self._organization, self._company)
         added = await self._connection.execute(
             insert(EmissionPointRecord)
             .values(
@@ -355,6 +381,7 @@ class PgEmissionPoints(EmissionPoints):
     def _of(self, company: CompanyId) -> Select[UUID, UUID, UUID, UUID, str, str, datetime]:
         return _POINT.where(
             EmissionPointRecord.organization_id == self._organization,
+            _in_the_unit_s_company(EmissionPointRecord.company_id, self._company),
             EmissionPointRecord.company_id == company,
         )
 

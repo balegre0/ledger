@@ -41,10 +41,10 @@ def _lock_timeout(connection: Connection, value: str) -> None:
 def _serialized(connection: Connection, wait: timedelta) -> None:
     """Wait at most ``wait`` for any other migration to commit, then bound every other wait again.
 
-    ``wait`` is rounded up to a whole millisecond, the unit of ``lock_timeout``, and to one at least: a zero
-    ``lock_timeout`` would mean no bound at all.
+    ``wait``, positive (``Target`` checks it), is rounded up to a whole millisecond, the unit of
+    ``lock_timeout``: never down to zero, which would mean no bound at all.
     """
-    _lock_timeout(connection, f"{max(1, math.ceil(wait / _MILLISECOND))}ms")
+    _lock_timeout(connection, f"{math.ceil(wait / _MILLISECOND)}ms")
     try:
         connection.execute(select(func.pg_advisory_xact_lock(MIGRATION_LOCK)))
     except OperationalError as error:
