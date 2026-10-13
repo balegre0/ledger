@@ -6,6 +6,7 @@ both of DGII's hosts (``ecf.dgii.gov.do`` and ``fc.dgii.gov.do``): their paths n
 each request was sent to is recorded.
 """
 
+import os
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import Final, final
@@ -16,8 +17,10 @@ from starlette.responses import Response
 from starlette.routing import Route
 lazy from starlette.requests import Request
 
-from ledger_country_do_testing.fake_dgii.emitter import EmitterServices
-from ledger_country_do_testing.fake_dgii.state import FakeState
+from ledger_country_do_testing.fake_dgii.emitter import EmitterServices, UploadTooLargeError
+from ledger_country_do_testing.fake_dgii.receiver import ReceiverServices
+from ledger_country_do_testing.fake_dgii.state import FakeState, dgii_check
+from ledger_country_do_testing.pki import Authority, organization
 lazy from ledger_country_do_testing.fake_dgii.emitter import Handler
 lazy from ledger_country_do_testing.fake_dgii.state import Received, Script, SignatureCheck
 lazy from ledger_country_do_testing.pki import Issued
@@ -47,7 +50,10 @@ class FakeDgii:
         self.state: FakeState = FakeState(
             check=check, receiver=receiver, clock=clock or _utc_now, public_url=public_url
         )
-        self._handlers: dict[tuple[str, str], Handler] = EmitterServices(self.state).handlers()
+        self._handlers: dict[tuple[str, str], Handler] = {
+            **EmitterServices(self.state).handlers(),
+            **ReceiverServices(self.state).handlers(),
+        }
         self.app: Starlette = Starlette(
             routes=[Route("/{path:path}", self._dispatch, methods=["GET", "POST"])]
         )
@@ -71,4 +77,22 @@ class FakeDgii:
         if outage:
             self.state.script.outage = outage - 1 if outage > 0 else outage
             return Response(status_code=HTTPStatus.SERVICE_UNAVAILABLE)
-        return await handler(request, environment)
+        try:
+            return await handler(request, environment)
+        except UploadTooLargeError:
+            return Response(status_code=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+
+
+def create_app() -> Starlette:
+    """Granian's factory for a fake run by hand (``ledger-fake-dgii``).
+
+    Every document's schema and signature are checked as the tests' fake checks them (``dgii_check``: our
+    verifier, strict, and signxml), by any signer (the owner's real certificate is unknown to the fake); the
+    simulator signs its ARECFs with a certificate made at start. ``LEDGER_FAKE_DGII_PUBLIC_URL`` is where
+    clients reach it (default ``DEFAULT_PUBLIC_URL``).
+    """
+    public_url = os.environ.get("LEDGER_FAKE_DGII_PUBLIC_URL", DEFAULT_PUBLIC_URL)
+    receiver = Authority.root("LEDGER FAKE DGII CA").issue(
+        organization("131880738", name="EMISOR RECEPTOR DGII")
+    )
+    return FakeDgii(check=dgii_check(trusted=None), receiver=receiver, public_url=public_url).app

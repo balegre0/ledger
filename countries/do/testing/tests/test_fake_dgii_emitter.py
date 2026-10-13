@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from typing import Final
+lazy from collections.abc import AsyncIterator
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
@@ -7,12 +8,13 @@ lazy import httpx
 
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import INBOUND
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf, rfce
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import texts
+from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import MAX_DOCUMENT, texts
 from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import violations
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.answers import json_list, json_object, objects
 from ledger_country_do_testing.fake_dgii.app import DEFAULT_PUBLIC_URL, FakeDgii
+from ledger_country_do_testing.fake_dgii.emitter import MAX_UPLOAD
 from ledger_country_do_testing.fake_dgii.state import (
     EveryCheck,
     Scripted,
@@ -412,3 +414,36 @@ def test_without_a_clock_the_fake_keeps_utc_time(issued: Issued, receiver_identi
     assert before <= fake.state.clock() <= datetime.now(UTC)
     assert fake.state.public_url == DEFAULT_PUBLIC_URL
     assert issued.certificate != receiver_identity.certificate
+
+
+def padded(size: int) -> bytes:
+    """A well-formed document of exactly ``size`` bytes."""
+    return b"<a>" + b" " * (size - len(b"<a></a>")) + b"</a>"
+
+
+async def test_a_body_beyond_the_document_limit_is_refused_before_it_is_read(
+    http: httpx.AsyncClient, fake: FakeDgii
+) -> None:
+    live = bearer(fake.state.token_for_test())
+    assert MAX_DOCUMENT < MAX_UPLOAD
+    declared_too_large = padded(MAX_UPLOAD)
+    file_too_large = padded(MAX_DOCUMENT + 1)
+    for document in (declared_too_large, file_too_large):
+        assert (await http.post(RECEPTION, files=xml(document), headers=live)).status_code == 413
+    assert (await http.post(RECEPTION, files=xml(padded(MAX_DOCUMENT)), headers=live)).status_code == 400
+
+    chunk = 64 * 1024
+
+    async def undeclared() -> AsyncIterator[bytes]:
+        yield b'--b\r\nContent-Disposition: form-data; name="xml"; filename="a.xml"\r\n\r\n'
+        for _ in range(MAX_UPLOAD // chunk + 1):
+            yield b" " * chunk
+
+    streamed = await http.post(
+        RECEPTION, content=undeclared(), headers={**live, "Content-Type": "multipart/form-data; boundary=b"}
+    )
+    assert "content-length" not in streamed.request.headers
+    assert streamed.status_code == 413
+    seed_too_large = await http.post(f"{AUTH}/validarsemilla", files=xml(file_too_large))
+    assert seed_too_large.status_code == 413
+    assert fake.received == []

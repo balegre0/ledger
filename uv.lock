@@ -715,6 +715,7 @@ version = "0.1.0"
 source = { editable = "countries/do/testing" }
 dependencies = [
     { name = "cryptography" },
+    { name = "granian" },
     { name = "httpx" },
     { name = "ledger-country-do" },
     { name = "lxml" },
@@ -729,6 +730,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=50.0.2" },
+    { name = "granian", specifier = ">=2.8.4" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "ledger-country-do" },
     { name = "lxml", specifier = ">=6.1.3" },

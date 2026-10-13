@@ -14,6 +14,10 @@
   encf, secuenciaUtilizada, codigo, estado, mensajes[{valor, codigo}]}``, its ``codigo`` a *string* of its
   own set (``RFCE_QUERY_CODES``), not ``consultaresultado``'s.
 
+What is uploaded is bounded before it is read into memory: a body declared or streamed beyond ``MAX_UPLOAD``,
+or a file beyond the hardened parser's ``MAX_DOCUMENT``, raises ``UploadTooLargeError`` (the application
+answers 413).
+
 DGII is an ASP.NET service: paths (``app``) and query parameter names (``query``) are read whatever their
 case.
 
@@ -36,10 +40,15 @@ lazy from datetime import datetime
 
 import xmlschema
 from starlette.datastructures import UploadFile
+from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-lazy from starlette.requests import Request
+lazy from starlette.types import Message, Receive
 
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import UnreadableDocumentError, texts
+from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import (
+    MAX_DOCUMENT,
+    UnreadableDocumentError,
+    texts,
+)
 from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import corrected
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.notation import SANTO_DOMINGO
@@ -89,6 +98,10 @@ RNC_LENGTHS: Final = frozenset({9, 11})
 """An RNC (9 digits) or a cédula (11)."""
 ENCF_LENGTH_OF: Final = 13
 _ENCF: Final = re.compile(r"E\d{12}", re.IGNORECASE)
+MULTIPART_ALLOWANCE: Final = 64 * 1024
+"""Room for the multipart envelope around a document (boundaries, part headers, a file name)."""
+MAX_UPLOAD: Final = MAX_DOCUMENT + MULTIPART_ALLOWANCE
+"""The largest request body read."""
 _UTC: Final = "%Y-%m-%dT%H:%M:%SZ"
 _REPORTED: Final = 5
 
@@ -124,12 +137,45 @@ def query(request: Request, name: str) -> str:
     return next((value for key, value in request.query_params.multi_items() if key.lower() == wanted), "")
 
 
+class UploadTooLargeError(Exception):
+    """A request body over ``MAX_UPLOAD``, or an uploaded file over ``MAX_DOCUMENT``: refused unread."""
+
+    def __init__(self) -> None:
+        super().__init__(f"an upload is at most {MAX_DOCUMENT} bytes")
+
+
+def _replay(body: bytes) -> Receive:
+    async def receive() -> Message:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return receive
+
+
+async def _bounded_body(request: Request) -> bytes:
+    """The request's body, refused as soon as its declared or streamed length passes ``MAX_UPLOAD``."""
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > MAX_UPLOAD:
+        raise UploadTooLargeError
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > MAX_UPLOAD:
+            raise UploadTooLargeError
+    return bytes(body)
+
+
 async def upload(request: Request) -> tuple[bytes, str] | None:
-    """The multipart field ``xml`` (DGII's one input) and its file name; ``None`` without it."""
-    async with request.form() as form:
+    """The multipart field ``xml`` (DGII's one input) and its file name; ``None`` without it.
+
+    ``UploadTooLargeError`` when the body passes ``MAX_UPLOAD`` or the file ``MAX_DOCUMENT`` (see the module).
+    """
+    bounded = Request(request.scope, receive=_replay(await _bounded_body(request)))
+    async with bounded.form() as form:
         found = form.get("xml")
         if not isinstance(found, UploadFile):
             return None
+        if found.size is None or found.size > MAX_DOCUMENT:
+            raise UploadTooLargeError
         return await found.read(), found.filename or ""
 
 
