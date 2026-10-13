@@ -1,22 +1,24 @@
 """The inbox runner (§3.5): one consumer's rows, claimed with a lease and handled exactly once in effect.
 
-A claim, in a short unit of its own, takes due rows of the consumer's own types (``ready`` and due, or
-``running`` with an expired lease), counts the attempt, and sets a fencing token. Each row is handled in its
-own unit, in the consumer's module role and the event's scope. The unit's first statement extends the lease,
-fenced by the token (``WHERE lease_token = :token``): if it finds nothing, another worker took the row over
-and the handler does not run (``inbox_lease_lost``); if it does, the unit holds the row's lock until it ends,
-so no other worker can claim the row while the handler works, however long that takes. The handler's writes
-and the deletion of the row commit together. A failure is recorded in another unit, fenced the same way:
-retried with backoff, or ``dead`` (kept, replayable) when the error is ``INVALID`` or the attempts are spent.
+A claim, in a short unit of its own, first recovers the consumer's rows whose lease ran out (``ready`` a
+backoff later, or ``dead`` with ``worker_lost`` once the attempts are spent, ``inbox_worker_lost``), then
+takes due ``ready`` rows of the consumer's own types, counts the attempt, and sets a fencing token. Each row
+is handled in its own unit, in the consumer's module role and the event's scope. The unit's first statement
+extends the lease, fenced by the token (``WHERE lease_token = :token``): if it finds nothing, another worker
+took the row over and the handler does not run (``inbox_lease_lost``); if it does, the unit holds the row's
+lock until it ends, so no other worker can claim the row while the handler works, however long that takes. The
+handler's writes and the deletion of the row commit together. A failure is recorded in another unit, fenced
+the same way: retried with backoff, or ``dead`` (kept, replayable) when the error is ``INVALID`` or the
+attempts are spent.
 
 An ordered consumer claims only the first row of each subject that is not dead, in the order
 (``aggregate_version``, event id), a missing version first. Consequences (Decision 18): a dead row no longer
 holds back its subject, so the rows behind it run before it, and so would a replay of it; a replay is
-therefore refused while an earlier row of its subject is still live. Events without a subject are not
-ordered (they have no subject to queue behind).
+therefore refused while an earlier row of its subject is still live. Events without a subject are not ordered
+(they have no subject to queue behind).
 
-Every time is the database's (§3.6): due rows and expired leases are compared with the claim unit's
-``now()``; a lease extension and a retry run from the statement that writes them (``statement_timestamp()``).
+Every time is the database's (§3.6): due rows and expired leases are compared with the claim unit's ``now()``;
+a lease extension and a retry run from the statement that writes them (``statement_timestamp()``).
 ``ledger_inbox_unhandled_oldest_seconds`` is the age of the consumer's oldest ready row of a type it has no
 handler for (rows of a newer version's types wait for its rollout, §3.5), measured once per drain.
 """
@@ -31,14 +33,14 @@ lazy from uuid import UUID
 
 import structlog
 from pydantic import TypeAdapter
-from sqlalchemy import and_, delete, exists, func, or_, select, text, tuple_, update
+from sqlalchemy import and_, delete, exists, func, select, text, tuple_, update
 lazy from prometheus_client import CollectorRegistry
 lazy from sqlalchemy import ColumnElement, RowMapping
 
 from ledger_kernel.errors import ConflictError, ErrorKind, LedgerError
 from ledger_platform.data.audit import Actor, acting_as
 from ledger_platform.data.notifier import INBOX
-from ledger_platform.data.queue import DEFAULT_BACKOFF, claim
+from ledger_platform.data.queue import DEFAULT_BACKOFF, claim, recover
 from ledger_platform.events.consumers import raw_event_of
 from ledger_platform.events.dispatcher import POLL, reraise_when_stopping
 from ledger_platform.events.metrics import counter, gauge
@@ -188,26 +190,37 @@ class InboxRunner:
         due = and_(
             inbox.c.consumer == self._consumer.name,
             inbox.c.type.in_(sorted(self._consumer.types)),
-            or_(
-                and_(inbox.c.status == "ready", inbox.c.next_attempt_at <= now),
-                and_(inbox.c.status == "running", inbox.c.lease_until < now),
-            ),
+            inbox.c.status == "ready",
+            inbox.c.next_attempt_at <= now,
         )
         return and_(due, ~_earlier_live(inbox)) if self._consumer.ordered else due
 
     async def claim_now(self) -> Sequence[ClaimedEvent]:
         """Claim the due rows (see the module), oldest first; ``run_once`` handles them (a test seam too)."""
         inbox = self._database.tables.inbox
+        keys = ("consumer", "event_id")
         async with self._database.unit(None) as unit:
+            lost = await recover(
+                unit.connection,
+                inbox,
+                keys=keys,
+                group=inbox.c.consumer == self._consumer.name,
+                due_column="next_attempt_at",
+                max_attempts=self._consumer.max_attempts,
+                backoff=self._backoff,
+            )
             rows = await claim(
                 unit.connection,
                 inbox,
-                keys=("consumer", "event_id"),
+                keys=keys,
                 due=self._due(),
-                order_by=(inbox.c.next_attempt_at, inbox.c.event_id),
+                order_by=(inbox.c.next_attempt_at,),
                 limit=self._batch,
                 lease=self._lease,
             )
+        if lost:
+            _logger.warning("inbox_worker_lost", consumer=self._consumer.name, rows=lost)
+            self._handled.labels(consumer=self._consumer.name, outcome="dead").inc(lost)
         return sorted((_claimed(row) for row in rows), key=lambda row: (row.next_attempt_at, row.event.id))
 
     def _fenced(self, row: ClaimedEvent) -> tuple[ColumnElement[bool], ...]:

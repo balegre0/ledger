@@ -1,21 +1,23 @@
 """The job runner (§3.6, ADR 0003): claim due jobs, run their handlers, record what they answered.
 
-A claim takes due jobs of one kind in a short unit of its own: ``ready`` ones whose ``run_at`` has come and
-``running`` ones whose lease ran out (their worker died), ``FOR UPDATE SKIP LOCKED``, so two workers never
-take one job. It marks them ``running`` under a lease of the kind's length with a fresh fencing token, and
-counts the attempt then, so a worker that dies mid-run still spends it: a job whose lease ran out after its
-last attempt is not claimed again but made ``dead`` (``worker_lost``), and a crash loop ends. A due or
-abandoned job whose deadline has passed is made ``dead`` too (``deadline_passed``): no handler runs past it.
+A claim works on one kind in a short unit of its own. A due or abandoned job whose deadline has passed is made
+``dead`` first (``deadline_passed``): no handler runs past it. Then jobs whose lease ran out (their worker
+died) are recovered by the queue's shared rule: ``ready`` again a backoff after the lease ran out, or ``dead``
+(``worker_lost``) once their attempts are spent, so a crash loop ends. Then ``ready`` jobs whose ``run_at``
+has come are taken ``FOR UPDATE SKIP LOCKED``, so two workers never take one job, and marked ``running`` under
+a lease of the kind's length with a fresh fencing token; the attempt is counted then, so a worker that dies
+mid-run still spends it.
 
-The handler runs outside any unit, as its job (``acting_as``) and in the trace that enqueued it. While it
-runs, the runner renews the lease every third of its length under the job's token; a renewal that finds the
-lease taken over, or that fails, cancels the handler (``job_lease_lost``): an unrenewed lease runs out and
-another worker would run the job too. Its outcome is recorded in another unit by an ``UPDATE`` that names
-the job's fencing token: a worker whose lease was taken over (a zombie) records nothing, logs
-``job_lease_lost`` and counts it. ``Done`` finishes the job; ``RunAgain(at)`` makes it ready at ``at`` with
-its attempts started over (dead when ``at`` is past its deadline); ``Park(reason)`` waits for a wake. An
-error of kind ``INVALID`` or ``CONFLICT`` or a failure of the last attempt makes the job dead with the
-error's code; a retry that would come after the deadline makes it dead with ``deadline_passed``; any other
+The handler runs outside any unit, as its job (``acting_as``) and in the trace that enqueued it. Before it
+starts, the runner renews the lease once: a job taken over between the claim and the start never runs here
+(``job_lease_lost``). While it runs, the runner renews the lease every third of its length under the job's
+token; a renewal that finds the lease taken over, or that fails, cancels the handler (``job_lease_lost``): an
+unrenewed lease runs out and another worker would run the job too. Its outcome is recorded in another unit by
+an ``UPDATE`` that names the job's fencing token: a worker whose lease was taken over (a zombie) records
+nothing, logs ``job_lease_lost`` and counts it. ``Done`` finishes the job; ``RunAgain(at)`` makes it ready at
+``at`` with its attempts started over (dead when ``at`` is past its deadline); ``Park(reason)`` waits for a
+wake. An error of kind ``INVALID`` or ``CONFLICT`` or a failure of the last attempt makes the job dead with
+the error's code; a retry that would come after the deadline makes it dead with ``deadline_passed``; any other
 error makes it ready again after the kind's backoff. Dead jobs are kept for an operator.
 
 Time is the database's: due and lease comparisons are ``now()`` in SQL, and the times a record writes are the
@@ -36,14 +38,14 @@ lazy from datetime import datetime
 import structlog
 from prometheus_client import Counter
 from pydantic import AwareDatetime, BaseModel, ConfigDict, TypeAdapter
-from sqlalchemy import and_, case, func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 lazy from prometheus_client import CollectorRegistry
-lazy from sqlalchemy import ColumnElement, RowMapping, Update
+lazy from sqlalchemy import RowMapping, Update
 
 from ledger_kernel.errors import ErrorKind, LedgerError
 from ledger_platform.data.audit import Actor, acting_as
 from ledger_platform.data.codec import JsonValue
-from ledger_platform.data.queue import DEFAULT_BACKOFF, claim
+from ledger_platform.data.queue import DEFAULT_BACKOFF, claim, recover
 from ledger_platform.data.scopes import scope_of
 from ledger_platform.jobs.outcomes import Done, Job, Park, RunAgain
 lazy from ledger_platform.data.bound import BoundDatabase
@@ -58,7 +60,6 @@ POLL: Final = 1.0
 _FINAL: Final = frozenset({ErrorKind.INVALID, ErrorKind.CONFLICT})
 """Error kinds no retry can cure."""
 _DEADLINE_PASSED: Final = "deadline_passed"
-_WORKER_LOST: Final = "worker_lost"
 _CLAIM_RETRY_LONGEST: Final = 30.0
 """Seconds a runner waits at most before claiming again after the database refused a claim."""
 _CLAIM_RETRY_DOUBLINGS: Final = 16
@@ -285,6 +286,8 @@ class JobRunner:
 
         A renewal that finds the lease taken, or that fails, cancels the handler: ``LeaseLostError``.
         """
+        if not await self._renewed(job):  # taken over since the claim, or unrenewable: never start it
+            raise LeaseLostError(job.kind)
         work = asyncio.ensure_future(handler(job))
         lost = asyncio.Event()
         keeper = asyncio.create_task(self._keep(job, decl, work, lost))
@@ -304,36 +307,47 @@ class JobRunner:
         interval = decl.lease.total_seconds() / 3
         while True:
             await asyncio.sleep(interval)
-            try:
-                kept = await self.renew(job)
-            except Exception:  # unrenewed, the lease runs out and another worker may run the job: stop
-                _logger.exception("job_lease_renewal_failed", kind=job.kind)
-                kept = False
-            if not kept:
+            if not await self._renewed(job):
                 lost.set()
                 work.cancel()
                 return
 
+    async def _renewed(self, job: Job) -> bool:
+        """``renew``; a failure counts as a lost lease (unrenewed, another worker may take it)."""
+        try:
+            return await self.renew(job)
+        except Exception:  # the database: the lease cannot be vouched for
+            _logger.exception("job_lease_renewal_failed", kind=job.kind)
+            return False
+
     async def _claim(self, kind: str, decl: JobDecl, limit: int) -> list[Job]:
         jobs = self._database.tables.jobs
-        expired = and_(jobs.c.status == "running", jobs.c.lease_until < func.now())
-        due = and_(jobs.c.status == "ready", jobs.c.run_at <= func.now())
+        keys = ("kind", "key")
         async with self._database.unit(None) as unit:
-            buried = _CODES.validate_python(
-                (await unit.connection.execute(_bury(jobs, kind, due, expired))).scalars().all()
+            passed = len(
+                _CODES.validate_python((await unit.connection.execute(_bury(jobs, kind))).scalars().all())
+            )
+            lost = await recover(
+                unit.connection,
+                jobs,
+                keys=keys,
+                group=jobs.c.kind == kind,
+                due_column="run_at",
+                max_attempts=jobs.c.max_attempts,
+                backoff=self._backoff,
+                extra={"updated_at": func.now()},
             )
             rows = await claim(
                 unit.connection,
                 jobs,
-                keys=("kind", "key"),
-                due=and_(jobs.c.kind == kind, or_(due, expired)),
+                keys=keys,
+                due=and_(jobs.c.kind == kind, jobs.c.status == "ready", jobs.c.run_at <= func.now()),
                 order_by=(jobs.c.run_at,),
                 limit=limit,
                 lease=decl.lease,
                 extra={"updated_at": func.now()},
             )
-        for code, event in ((_WORKER_LOST, "job_worker_lost"), (_DEADLINE_PASSED, "job_deadline_passed")):
-            count = buried.count(code)
+        for count, event in ((lost, "job_worker_lost"), (passed, "job_deadline_passed")):
             if count:
                 _logger.warning(event, kind=kind, jobs=count)
                 self._finished.labels(kind=kind, outcome="dead").inc(count)
@@ -382,19 +396,17 @@ class JobRunner:
         self._lease_lost.labels(kind=job.kind).inc()
 
 
-def _bury(jobs: AnyTable, kind: str, due: ColumnElement[bool], expired: ColumnElement[bool]) -> Update:
-    """Jobs of ``kind`` no handler may run: dead, never claimed again; their codes, returned.
+def _bury(jobs: AnyTable, kind: str) -> Update:
+    """Jobs of ``kind`` whose deadline has passed, due or abandoned: dead (``deadline_passed``), their codes.
 
-    A job whose lease ran out after its last attempt (``worker_lost``: its workers kept dying), and a due or
-    abandoned job whose deadline has passed (``deadline_passed``: a handler would run past it).
+    A handler would run past the deadline. Jobs whose lease ran out otherwise are the queue's (``recover``).
     """
-    past = jobs.c.deadline_at < func.now()
+    now = func.now()
+    due = and_(jobs.c.status == "ready", jobs.c.run_at <= now)
+    expired = and_(jobs.c.status == "running", jobs.c.lease_until < now)
     doomed = (
         select(jobs.c.kind, jobs.c.key)
-        .where(
-            jobs.c.kind == kind,
-            or_(and_(expired, jobs.c.attempts >= jobs.c.max_attempts), and_(or_(due, expired), past)),
-        )
+        .where(jobs.c.kind == kind, or_(due, expired), jobs.c.deadline_at < now)
         .with_for_update(skip_locked=True)
         .cte("doomed")
     )
@@ -403,7 +415,7 @@ def _bury(jobs: AnyTable, kind: str, due: ColumnElement[bool], expired: ColumnEl
         .where(jobs.c.kind == doomed.c.kind, jobs.c.key == doomed.c.key)
         .values(
             status="dead",
-            last_error_code=case((past, _DEADLINE_PASSED), else_=_WORKER_LOST),
+            last_error_code=_DEADLINE_PASSED,
             lease_until=None,
             lease_token=None,
             updated_at=func.now(),

@@ -1,10 +1,15 @@
 """The claim/lease/fencing/retry engine shared by inboxes and jobs (§3.5, §3.6).
 
-A claim selects due rows ``FOR UPDATE SKIP LOCKED`` (two workers never claim one row), marks them
-``running`` with a lease (``lease_until``) and a fresh fencing token (``lease_token``), and counts the attempt
-on the claim, so a worker that crashes mid-run still used it. A row whose lease ran out is due again (the
-caller's ``due`` says so). Whoever records the outcome names the token; a late writer whose lease was taken
-over records nothing.
+A claim selects due rows ``FOR UPDATE SKIP LOCKED`` (two workers never claim one row), marks them ``running``
+with a lease (``lease_until``) and a fresh fencing token (``lease_token``), and counts the attempt on the
+claim, so a worker that crashes mid-run still used it. Whoever records the outcome names the token; a late
+writer whose lease was taken over records nothing.
+
+A row whose lease ran out (its worker died) is recovered before the claim, the way a failed run is recorded:
+``ready`` again a backoff after its lease ran out, or ``dead`` with ``worker_lost`` once its attempts are
+spent, so a crash loop ends. The claim then takes ``ready`` rows only. Each statement reads one partial index
+(``*_due`` for the claim, ``*_expired`` for the recovery) in its order, under its ``LIMIT``: neither sorts the
+due set.
 
 Time is the database's, so every worker measures against one clock, whatever its host's says (§3.6). A lease
 runs from the claiming statement's time (``statement_timestamp()``), not from its transaction's start
@@ -19,8 +24,9 @@ from types import MappingProxyType
 from typing import Final, NotRequired, TypedDict, Unpack, final
 lazy from collections.abc import Mapping, Sequence
 
-from sqlalchemy import func, select, update
-lazy from sqlalchemy import ColumnElement, RowMapping
+from pydantic import TypeAdapter
+from sqlalchemy import case, func, select, update
+lazy from sqlalchemy import ColumnElement, RowMapping, Update
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
 
 lazy from ledger_platform.data.database import AnyTable
@@ -45,6 +51,11 @@ DEFAULT_BACKOFF: Final = Backoff(
 )
 """§3.5: 1 s, 10 s, 1 min, 5 min, then every 10 min."""
 _NOTHING: Final[Mapping[str, object]] = MappingProxyType({})
+WORKER_LOST: Final = "worker_lost"
+"""The code of a row whose lease ran out: retried after the backoff, or dead once its attempts are spent."""
+RECOVERY_BATCH: Final = 100
+"""Expired rows a recovery takes at most (the rest at the next claim)."""
+_STATUSES: Final = TypeAdapter(list[str])
 
 
 class Window(TypedDict):
@@ -60,18 +71,14 @@ class Window(TypedDict):
     """More columns to set on the claimed rows (``updated_at``)."""
 
 
-async def claim(
-    connection: AsyncConnection,
+def claim_statement(
     table: AnyTable,
     *,
     keys: Sequence[str],
     due: ColumnElement[bool],
     **window: Unpack[Window],
-) -> Sequence[RowMapping]:
-    """Claim up to ``limit`` rows of ``table`` that are ``due`` (see the module): the claimed rows, as stored.
-
-    ``keys`` are the primary key's columns. ``RETURNING`` keeps no order: a caller that needs one sorts.
-    """
+) -> Update:
+    """The ``UPDATE`` that ``claim`` runs (for ``EXPLAIN``, and for ``claim``)."""
     chosen = (
         select(*(table.c[key] for key in keys))
         .where(due)
@@ -80,7 +87,7 @@ async def claim(
         .with_for_update(skip_locked=True)
         .cte("chosen")
     )
-    claimed = (
+    return (
         update(table)
         .where(*(table.c[key] == chosen.c[key] for key in keys))
         .values(
@@ -92,5 +99,90 @@ async def claim(
         )
         .returning(table)
     )
-    rows: Sequence[RowMapping] = (await connection.execute(claimed)).mappings().all()
+
+
+async def claim(
+    connection: AsyncConnection,
+    table: AnyTable,
+    *,
+    keys: Sequence[str],
+    due: ColumnElement[bool],
+    **window: Unpack[Window],
+) -> Sequence[RowMapping]:
+    """Claim up to ``limit`` rows of ``table`` that are ``due`` (see the module): the claimed rows, as stored.
+
+    ``keys`` are the primary key's columns; ``due`` names ``ready`` rows (``recover`` first makes expired ones
+    ready). ``RETURNING`` keeps no order: a caller that needs one sorts.
+    """
+    rows: Sequence[RowMapping] = (
+        (await connection.execute(claim_statement(table, keys=keys, due=due, **window))).mappings().all()
+    )
     return rows
+
+
+class Recovery(TypedDict):
+    """How expired rows of a group are recovered."""
+
+    due_column: str
+    """The column that says when a ``ready`` row is due (``run_at``, ``next_attempt_at``)."""
+    max_attempts: int | ColumnElement[object]
+    """Attempts after which the row is dead: a number, or the row's own column."""
+    backoff: Backoff
+    """The wait after the attempt the dead worker used, counted from when its lease ran out."""
+    limit: NotRequired[int]
+    """At most this many rows (``RECOVERY_BATCH``)."""
+    extra: NotRequired[Mapping[str, object]]
+    """More columns to set on the recovered rows (``updated_at``)."""
+
+
+def recovery_statement(
+    table: AnyTable, *, keys: Sequence[str], group: ColumnElement[bool], **recovery: Unpack[Recovery]
+) -> Update:
+    """The ``UPDATE`` that ``recover`` runs (for ``EXPLAIN``, and for ``recover``)."""
+    expired = (
+        select(*(table.c[key] for key in keys))
+        .where(group, table.c.status == "running", table.c.lease_until < func.now())
+        .order_by(table.c.lease_until)
+        .limit(recovery.get("limit", RECOVERY_BATCH))
+        .with_for_update(skip_locked=True)
+        .cte("expired")
+    )
+    backoff = recovery["backoff"]
+    wait = case(
+        *((table.c.attempts == number, step) for number, step in enumerate(backoff.steps, start=1)),
+        else_=backoff.then,
+    )
+    due_column = recovery["due_column"]
+    spent = table.c.attempts >= recovery["max_attempts"]
+    return (
+        update(table)
+        .where(*(table.c[key] == expired.c[key] for key in keys))
+        .values(
+            {
+                "status": case((spent, "dead"), else_="ready"),
+                due_column: case((spent, table.c[due_column]), else_=table.c.lease_until + wait),
+                "lease_until": None,
+                "lease_token": None,
+                "last_error_code": WORKER_LOST,
+                **recovery.get("extra", _NOTHING),
+            }
+        )
+        .returning(table.c.status)
+    )
+
+
+async def recover(
+    connection: AsyncConnection,
+    table: AnyTable,
+    *,
+    keys: Sequence[str],
+    group: ColumnElement[bool],
+    **recovery: Unpack[Recovery],
+) -> int:
+    """Recover ``group``'s rows whose lease ran out (see the module); how many were made dead."""
+    statuses = _STATUSES.validate_python(
+        (await connection.execute(recovery_statement(table, keys=keys, group=group, **recovery)))
+        .scalars()
+        .all()
+    )
+    return statuses.count("dead")

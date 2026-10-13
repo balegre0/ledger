@@ -291,3 +291,29 @@ async def test_lease_rows_are_made_once_per_scheduler(databases: tuple[Database,
     await one.run_due()
     await one.run_due()
     assert len(inserts) == 1
+
+
+REFUSE_LEASES: Final = """
+    CREATE FUNCTION platform.refuse_leases() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION 'refused by the test'; END $$
+"""
+REFUSE_TRIGGER: Final = """
+    CREATE TRIGGER refuse_leases BEFORE INSERT ON platform.schedule_leases
+    FOR EACH ROW EXECUTE FUNCTION platform.refuse_leases()
+"""
+
+
+async def test_a_failure_making_the_lease_rows_is_logged_and_tried_again_at_the_next_poll(
+    databases: tuple[Database, Database], admin: psycopg.AsyncConnection
+) -> None:
+    """N3: ``run`` must not end on it: the next poll makes the rows and fires."""
+    one = scheduler(databases[0], "a")
+    await admin.execute(REFUSE_LEASES)
+    await admin.execute(REFUSE_TRIGGER)
+    try:
+        with capture_logs() as logs:
+            assert await one.run_due() == 0
+        assert [log["event"] for log in logs] == ["schedule_leases_failed"]
+    finally:
+        await admin.execute("DROP FUNCTION platform.refuse_leases() CASCADE")
+    assert await one.run_due() == 1

@@ -44,7 +44,9 @@ RENAMED: Final = "probe.thing.renamed"
 CREATED: Final = "probe.thing.created"
 SCHEMAS: Final = ("probe", "other")
 STATE: Final = "SELECT status, attempts, last_error_code FROM other.inbox WHERE event_id = %s"
-EXPIRE: Final = "UPDATE other.inbox SET lease_until = now() - interval '1 millisecond'"
+EXPIRE: Final = "UPDATE other.inbox SET lease_until = now() - interval '1 hour'"
+"""Long enough ago that any backoff since has passed too: the row is due again at once."""
+JUST_EXPIRED: Final = "UPDATE other.inbox SET lease_until = now() - interval '1 millisecond'"
 TAKE_OVER: Final = (
     "UPDATE other.inbox SET lease_token = gen_random_uuid(), lease_until = now() + interval '1 minute'"
 )
@@ -531,3 +533,23 @@ async def test_the_age_of_rows_no_handler_takes_is_exported(bench: Bench) -> Non
     age = bench.oldest_unhandled()
     assert age is not None
     assert 3600 <= age < 3600 + 60
+
+
+async def test_an_expired_lease_waits_out_the_backoff_and_a_spent_one_is_dead(bench: Bench) -> None:
+    """I4: a row whose worker died is ready again after the backoff, or dead once its attempts are spent."""
+    (event,) = await bench.deliver(renamed())
+    runner = bench.runner(max_attempts=2)
+    await runner.claim_now()
+    await bench.superuser.execute(JUST_EXPIRED)
+    assert await runner.claim_now() == []
+    assert await bench.state(event) == ("ready", 1, "worker_lost")
+    await bench.make_due()
+    (again,) = await runner.claim_now()
+    assert again.attempts == 2
+    await bench.superuser.execute(EXPIRE)
+    with capture_logs() as logs:
+        assert await runner.claim_now() == []
+    assert await bench.state(event) == ("dead", 2, "worker_lost")
+    assert logs == [{"event": "inbox_worker_lost", "consumer": NAME, "rows": 1, "log_level": "warning"}]
+    assert bench.handled("dead") == 1
+    assert bench.handler.calls == []

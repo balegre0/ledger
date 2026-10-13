@@ -98,11 +98,16 @@ class Scheduler:
     async def run_due(self) -> int:
         """Fire every schedule whose slot has come and whose lease is free; how many fired.
 
-        The first call makes the lease rows of schedules seen for the first time; a schedule that fails is
-        logged (``schedule_failed``) and the others still fire.
+        The first call makes the lease rows of schedules seen for the first time (a failure to make them is
+        logged, ``schedule_leases_failed``, and tried again at the next call); a schedule that fails is logged
+        (``schedule_failed``) and the others still fire.
         """
         if not self._known:
-            await self._make_lease_rows()
+            try:
+                await self._make_lease_rows()
+            except Exception:  # the database: tried again at the next poll, never the end of ``run``
+                _logger.exception("schedule_leases_failed")
+                return 0
             self._known = True
         fired = 0
         for schedule in self._schedules:

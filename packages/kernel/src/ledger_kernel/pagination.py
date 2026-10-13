@@ -15,7 +15,7 @@ from typing import ClassVar, Final, final
 from uuid import UUID
 lazy from collections.abc import Callable, Sequence
 
-from ledger_kernel.errors import InvalidInputError, described, excerpt
+from ledger_kernel.errors import InvalidInputError, described
 
 DEFAULT_PAGE_SIZE: Final = 50
 MAX_PAGE_SIZE: Final = 100
@@ -29,8 +29,8 @@ class InvalidCursorError(InvalidInputError):
 
     code: ClassVar[str] = "invalid_cursor"
 
-    def __init__(self, text: str) -> None:
-        super().__init__(f"not a cursor: {excerpt(text)}")
+    def __init__(self) -> None:
+        super().__init__("not a cursor this service handed out")  # none of it is quoted: it is the client's
 
 
 class ConflictingCursorsError(InvalidInputError):
@@ -60,10 +60,10 @@ def encode_cursor(after: UUID) -> str:
 def decode_cursor(text: str) -> UUID:
     """The id a cursor of ours continues after; anything else is an ``InvalidCursorError``."""
     if _CURSOR.fullmatch(text) is None:
-        raise InvalidCursorError(text)
+        raise InvalidCursorError
     raw = base64.urlsafe_b64decode(text + "=")
     if raw[:1] != _VERSION:
-        raise InvalidCursorError(text)
+        raise InvalidCursorError
     return UUID(bytes=raw[1:])
 
 

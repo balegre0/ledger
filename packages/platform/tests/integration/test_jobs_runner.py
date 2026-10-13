@@ -53,7 +53,11 @@ STATE: Final = """
     FROM probe.jobs WHERE key = %s
 """
 DUE: Final = "UPDATE probe.jobs SET run_at = now() - interval '1 second' WHERE status = 'ready'"
-EXPIRED: Final = "UPDATE probe.jobs SET lease_until = now() - interval '1 second' WHERE status = 'running'"
+EXPIRED: Final = "UPDATE probe.jobs SET lease_until = now() - interval '1 hour' WHERE status = 'running'"
+"""Long enough ago that any backoff since has passed too: the job is due again at once."""
+JUST_EXPIRED: Final = (
+    "UPDATE probe.jobs SET lease_until = now() - interval '1 millisecond' WHERE status = 'running'"
+)
 UNLEASED: Final = (None, None)
 
 _LEASE: Final = TypeAdapter(tuple[AwareDatetime, uuid.UUID])
@@ -393,8 +397,8 @@ async def test_a_zombie_records_nothing_after_its_lease_was_taken_over(
     await enqueue(probe, "k1", "k2")
     stale = {job.key: job for job in await zombie.claim_now()}
     await run(admin, EXPIRED)
-    handler.will("k1", Park("x"), Done())
-    handler.will("k2", Done(), Park("x"))
+    handler.will("k1", Done())  # the zombie never runs either: its first renewal finds B's token
+    handler.will("k2", Done())
     taken = {job.key: job for job in await live.claim_now()}
     with capture_logs() as logs:
         await zombie.handle(stale["k1"])  # B holds k1 and has not recorded yet
@@ -405,13 +409,14 @@ async def test_a_zombie_records_nothing_after_its_lease_was_taken_over(
     await live.handle(taken["k2"])
     with capture_logs() as later:
         await zombie.handle(stale["k2"])  # B finished k2 already
-    for key in ("k1", "k2"):
-        assert (await state(admin, key))[:4] == ("done", 2, None, None)
+    for key in ("k1", "k2"):  # the code says why the second attempt came: the first one's worker was lost
+        assert (await state(admin, key))[:4] == ("done", 2, "worker_lost", None)
     lost = {"event": "job_lease_lost", "kind": EXPORT, "log_level": "warning"}
     assert [*logs, *later] == [lost, lost]
     assert zombie_metrics.get_sample_value("ledger_job_lease_lost_total", {"kind": EXPORT}) == 2
     assert finished(zombie_metrics, "parked") is None
     assert finished(live_metrics, "done") == 2
+    assert [job.lease_token for job in handler.seen] == [taken["k1"].lease_token, taken["k2"].lease_token]
 
 
 async def test_two_runners_never_run_one_job_twice(
@@ -560,7 +565,9 @@ async def test_a_handler_that_outlives_its_lease_keeps_it(
     handling = asyncio.create_task(runner.handle(job))
 
     async def renewed_past_the_first_lease() -> bool:
-        cursor = await admin.execute("SELECT now() > %s AND lease_until > now() FROM probe.jobs", (first,))
+        cursor = await admin.execute(
+            "SELECT now() > %s AND lease_until - now() > interval '0.5 seconds' FROM probe.jobs", (first,)
+        )
         return await cursor.fetchall() == [(True,)]
 
     await waiting.eventually(renewed_past_the_first_lease)
@@ -594,10 +601,14 @@ async def test_a_handler_whose_lease_was_taken_is_cancelled(
     assert registry.get_sample_value("ledger_job_lease_lost_total", {"kind": SLOW}) == 1
 
 
-async def test_a_lease_that_cannot_be_renewed_cancels_the_handler(
-    chassis: WorkerDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry
+@pytest.mark.parametrize("started", [True, False], ids=["while-it-runs", "before-it-starts"])
+async def test_a_lease_that_cannot_be_renewed_stops_the_handler(
+    chassis: WorkerDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry, *, started: bool
 ) -> None:
-    """M1: a renewal that fails (here: a lock it may not wait for) cannot vouch for the lease: stop."""
+    """M1, N1: a renewal that fails (a lock it may not wait for) cannot vouch for the lease.
+
+    While the handler runs, it is cancelled; before it starts, it never starts.
+    """
     limits = DatabaseLimits(lock_timeout=timedelta(milliseconds=100))
     database = Database.create(app_url(chassis), pool_size=2, limits=limits)
     try:
@@ -607,13 +618,17 @@ async def test_a_lease_that_cannot_be_renewed_cancels_the_handler(
         await enqueue(probe, "k1", kind=SLOW)
         (job,) = await runner.claim_now()
         async with await psycopg.AsyncConnection.connect(chassis.admin_url()) as locking:
-            await locking.execute("SELECT 1 FROM probe.jobs FOR UPDATE")
             with capture_logs() as logs:
-                await asyncio.wait_for(runner.handle(job), timeout=5)
+                handling = asyncio.create_task(runner.handle(job)) if started else None
+                if handling is not None:
+                    await blocking.started.wait()
+                await locking.execute("SELECT 1 FROM probe.jobs FOR UPDATE")
+                await asyncio.wait_for(handling or runner.handle(job), timeout=5)
             await locking.rollback()
     finally:
         await database.aclose()
-    assert blocking.cancelled
+    assert blocking.cancelled is started
+    assert blocking.started.is_set() is started
     assert [log["event"] for log in logs] == ["job_lease_renewal_failed", "job_lease_lost"]
     assert (await state(admin, "k1"))[:2] == ("running", 1)
 
@@ -696,3 +711,52 @@ async def test_a_runner_stopped_mid_job_stops_the_handler_and_records_nothing(
     assert blocking.cancelled
     assert (await state(admin, "k1"))[:2] == ("running", 1)
     assert registry.get_sample_value("ledger_job_lease_lost_total", {"kind": SLOW}) is None
+
+
+async def test_a_job_whose_lease_ran_out_waits_out_its_backoff_before_another_claim(
+    runner: JobRunner, probe: BoundDatabase, admin: psycopg.AsyncConnection
+) -> None:
+    """I4: its worker died just now; the job is ready again after the backoff, like a failed run."""
+    await enqueue(probe, "k1")
+    await runner.claim_now()
+    await run(admin, JUST_EXPIRED)
+    assert await runner.claim_now() == []
+    assert (await state(admin, "k1"))[:6] == ("ready", 1, "worker_lost", None, *UNLEASED)
+    cursor = await admin.execute("SELECT run_at > now() FROM probe.jobs")
+    assert await cursor.fetchall() == [(True,)]
+    await run(admin, DUE)
+    (again,) = await runner.claim_now()
+    assert again.attempts == 2
+
+
+async def test_a_job_whose_lease_was_taken_before_its_handler_started_is_not_run(
+    runner: JobRunner, probe: BoundDatabase, handler: Scripted, admin: psycopg.AsyncConnection
+) -> None:
+    """N1: the first renewal comes before the handler: a taken lease never runs it."""
+    await enqueue(probe, "k1")
+    (job,) = await runner.claim_now()
+    await run(admin, "UPDATE probe.jobs SET lease_token = gen_random_uuid()")
+    with capture_logs() as logs:
+        await runner.handle(job)
+    assert handler.seen == []
+    assert logs == [{"event": "job_lease_lost", "kind": EXPORT, "log_level": "warning"}]
+
+
+async def test_a_record_after_the_job_was_taken_over_while_it_ran_changes_nothing(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry
+) -> None:
+    """Review Focus 2: taken over between two renewals, the run's outcome is refused when it is recorded."""
+
+    async def taken_meanwhile(job: Job) -> JobOutcome:
+        del job
+        await run(admin, "UPDATE probe.jobs SET lease_token = gen_random_uuid()")
+        return Park("x")
+
+    runner = JobRunner(database=probe, kinds={EXPORT: (DECLS[EXPORT], taken_meanwhile)}, registry=registry)
+    await enqueue(probe, "k1")
+    (job,) = await runner.claim_now()
+    with capture_logs() as logs:
+        await runner.handle(job)
+    assert logs == [{"event": "job_lease_lost", "kind": EXPORT, "log_level": "warning"}]
+    assert (await state(admin, "k1"))[:4] == ("running", 1, None, None)
+    assert finished(registry, "parked") is None

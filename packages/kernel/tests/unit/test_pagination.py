@@ -42,7 +42,7 @@ def test_a_cursor_is_short_and_url_safe() -> None:
 def test_a_cursor_that_was_not_made_here_is_refused_without_being_echoed(text: str) -> None:
     with pytest.raises(InvalidCursorError, match="not a cursor") as caught:
         decode_cursor(text)
-    assert len(str(caught.value)) < 80
+    assert str(caught.value) == "not a cursor this service handed out"  # no part of it is quoted
     assert caught.value.code == "invalid_cursor"
 
 

@@ -328,7 +328,9 @@ type wait in the inbox for the next roll forward (alerted by age), never fail.
   longer blocks its subject (the rows behind it go on); replaying it is refused while an earlier live row of its
   subject waits. Events without a subject are not ordered.
 - **Retries**: backoff 1 s, 10 s, 1 min, 5 min, then every 10 min; `max_attempts` 10 (overridable per
-  consumer); then `dead`. Operators replay with `ledger-worker replay --consumer X --event evt_…`.
+  consumer); then `dead`. A row whose worker died (its lease ran out) is retried the same way, a backoff after
+  the lease ran out, and is `dead` with `worker_lost` once its attempts are spent (one rule for inboxes and
+  jobs). Operators replay with `ledger-worker replay --consumer X --event evt_…`.
 - **Wake-ups**: one `LISTEN ledger_outbox, ledger_inbox` connection per worker process, opened **directly**
   to PostgreSQL (never through a transaction pooler, §6.7); NOTIFYs are coalesced per process (at most one per
   channel per 10 ms). The poll safety net is 1 s per worker for all schemas together (one `UNION ALL` probe of
