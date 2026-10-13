@@ -150,7 +150,7 @@ def workspace() -> Workspace:
 def test_every_package_of_the_workspace_is_in_every_list_the_gate_runs_from() -> None:
     config = workspace()
     found = packages(ROOT, config)
-    assert {"packages/kernel", "contracts", "packages/platform", "modules/identity"} <= found.keys()
+    assert {"packages/kernel", "packages/platform", "packages/testing", "modules/identity"} <= found.keys()
     assert unguarded(found, config) == []
 
 

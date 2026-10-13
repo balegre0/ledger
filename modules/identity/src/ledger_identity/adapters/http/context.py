@@ -4,12 +4,10 @@ from dataclasses import dataclass
 from typing import final
 
 from ledger_identity.adapters.permissions import MembershipPermissions
-from ledger_platform.http.deps import company_in_path
-from ledger_platform.http.idempotency import Idempotency
-lazy from ledger_platform.auth.access import PermissionSource
-lazy from ledger_platform.data.bound import BoundDatabase
-lazy from ledger_platform.http.authentication import Authentication
-lazy from ledger_platform.http.deps import Caller, InCompany
+from ledger_platform.http import Idempotency, company_in_path
+lazy from ledger_platform.auth import PermissionSource
+lazy from ledger_platform.data import BoundDatabase
+lazy from ledger_platform.http import Authentication, Caller, InCompany
 
 
 @final

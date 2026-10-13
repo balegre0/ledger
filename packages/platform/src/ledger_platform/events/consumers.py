@@ -17,9 +17,9 @@ from pydantic import TypeAdapter
 from ledger_kernel.errors import LedgerError
 from ledger_platform.data.scopes import scope_of
 lazy from ledger_kernel.tenancy import Scope
+lazy from ledger_platform.config.manifest import ConsumerDecl
 lazy from ledger_platform.data.codec import JsonValue
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
-lazy from ledger_platform.runtime.manifest import ConsumerDecl
 
 type Handler = Callable[[RawEvent, UnitOfWork], Awaitable[None]]
 """Handles one event inside the unit its inbox row is deleted in."""

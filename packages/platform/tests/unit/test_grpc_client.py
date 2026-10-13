@@ -8,11 +8,11 @@ import pytest
 from prometheus_client import CollectorRegistry
 
 from ledger_kernel.errors import ErrorKind, NotFoundError, truncate
+from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.grpc.client import (
     ERROR_CODE_KEY,
     MAX_DEADLINE,
     REMOTE_CODE_LIMIT,
-    InvalidGrpcClientOptionError,
     RemoteConflictError,
     RemoteDefectError,
     RemoteError,
@@ -205,7 +205,7 @@ async def test_a_service_that_is_not_there_is_unavailable() -> None:
 async def test_every_call_has_a_bounded_deadline(
     call: grpc.aio.UnaryUnaryMultiCallable[bytes, bytes], deadline: float
 ) -> None:
-    with pytest.raises(InvalidGrpcClientOptionError, match="gRPC client option deadline must be"):
+    with pytest.raises(InvalidOptionError, match="gRPC client option deadline must be"):
         await call_unary(call, b"hello", rpc=RPC, deadline=deadline)
 
 

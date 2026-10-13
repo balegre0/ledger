@@ -24,33 +24,34 @@ from ledger_identity.domain.text import parse_legal_name
 from ledger_kernel.access import Permission
 from ledger_kernel.countries.do import TaxId
 from ledger_kernel.tenancy import OrganizationScope, Tenant
-from ledger_platform.http.deps import (
+from ledger_platform.http import (
+    REPLAYED_HEADER,
+    Page,
     allowed,
+    answer,
+    attempt_of,
     etag,
     holding,
+    idempotency_key,
     if_match,
     if_match_required,
     in_organization,
-)
-from ledger_platform.http.idempotency import (
-    REPLAYED_HEADER,
-    answer,
-    attempt_of,
-    idempotency_key,
     json_response,
+    ledger_mode,
+    page_of_items,
+    page_query,
+    precondition_checked,
+    problems,
+    success,
 )
-from ledger_platform.http.mode import ledger_mode
-from ledger_platform.http.models import Page, page_of_items, page_query
-from ledger_platform.http.openapi import precondition_checked, problems, success
 lazy from ledger_identity.adapters.http.context import ApiContext
 lazy from ledger_identity.adapters.http.models import CompanyChanges, NewCompany
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_kernel.access import Principal
 lazy from ledger_kernel.pagination import PageRequest
 lazy from ledger_kernel.tenancy import Mode
-lazy from ledger_platform.auth.access import CompanyAccess
-lazy from ledger_platform.http.deps import IfMatch
-lazy from ledger_platform.http.idempotency import StoredResponse
+lazy from ledger_platform.auth import CompanyAccess
+lazy from ledger_platform.http import IfMatch, StoredResponse
 
 
 def stored(status: HTTPStatus, company: Company) -> StoredResponse:

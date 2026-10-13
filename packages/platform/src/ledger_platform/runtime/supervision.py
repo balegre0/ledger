@@ -1,13 +1,13 @@
 """Background workers that come back: one that fails starts again, later each time, unless that cannot help.
 
-A worker is an endless coroutine (an outbox relay, a consumer) that ends only when it fails or is cancelled.
-``Supervisor`` runs each in a task of its own. A failure it is told is permanent (a configuration mistake)
-ends the worker for good. Any other is logged with its traceback, and the worker starts again after a delay:
-``FIRST_RESTART_DELAY`` seconds, twice that after the next failure in a row, and so on up to
-``MAX_RESTART_DELAY``. Each delay is shortened at random by up to ``RESTART_JITTER`` of itself, so that
-replicas that failed together (a NATS outage) do not all come back at the same instant, those that reached the
-ceiling included; no delay is ever longer than ``MAX_RESTART_DELAY``. A worker that ran for ``HEALTHY_RUN``
-seconds before it failed starts its delays over.
+A worker is an endless coroutine (a fan-out, an inbox or job runner) that ends only when it fails or is
+cancelled (a stopped one waits for it in ``data.queue.parked``). ``Supervisor`` runs each in a task of its
+own. A failure it is told is permanent (a configuration mistake) ends the worker for good. Any other is logged
+with its traceback, and the worker starts again after a delay: ``FIRST_RESTART_DELAY`` seconds, twice that
+after the next failure in a row, and so on up to ``MAX_RESTART_DELAY``. Each delay is shortened at random by
+up to ``RESTART_JITTER`` of itself, so that replicas that failed together (a database outage) do not all come
+back at the same instant, those that reached the ceiling included; no delay is ever longer than
+``MAX_RESTART_DELAY``. A worker that ran for ``HEALTHY_RUN`` seconds before it failed starts its delays over.
 
 A worker waiting to start again is not dead: only one that ended for good is (``dead``), whether by a
 permanent error or because something other than ``stop`` cancelled it. Nothing brings such a worker back but a
@@ -28,6 +28,7 @@ from prometheus_client import Counter
 lazy from prometheus_client import CollectorRegistry
 
 from ledger_kernel.errors import LedgerError
+from ledger_platform.data.queue import being_cancelled
 lazy from ledger_kernel.clock import MonotonicClock, Sleep
 
 FIRST_RESTART_DELAY: Final = 1.0
@@ -66,24 +67,6 @@ def restart_delay(in_a_row: int, draw: float) -> float:
     """
     backoff = min(FIRST_RESTART_DELAY * 2.0 ** min(in_a_row, _DOUBLINGS), MAX_RESTART_DELAY)
     return backoff * (1 - RESTART_JITTER * draw)
-
-
-async def parked() -> Never:
-    """Wait to be cancelled: where a stopped worker's loop ends (a worker never returns)."""
-    forever: asyncio.Future[None] = asyncio.get_running_loop().create_future()  # nothing completes it
-    while True:
-        await forever
-
-
-def being_cancelled() -> bool:
-    """Whether the task running this has been asked to stop.
-
-    For a loop that catches every ``Exception`` to carry on: a clean-up that failed while the task was being
-    cancelled (a rollback on a broken connection) turns the cancellation into its own error, and such a loop
-    must end on it all the same, by raising it again.
-    """
-    current = asyncio.current_task()
-    return current is not None and current.cancelling() > 0
 
 
 @final

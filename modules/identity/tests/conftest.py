@@ -24,7 +24,7 @@ from ledger_platform.data.database import Database
 from ledger_platform.data.migrations import PLATFORM_MIGRATIONS
 from ledger_platform.data.roles import APP, MIGRATOR
 from ledger_platform.runtime.app import App
-from ledger_testing.api import Caller, created
+from ledger_testing.api import TestPrincipal, created
 from ledger_testing.database import TEST_LOGINS, app_url, bootstrap, fresh_database, migrate, migrator_url
 lazy from ledger_platform.data.notifier import Channel, Signals
 lazy from ledger_testing.issuer import LocalIssuer
@@ -119,14 +119,14 @@ async def client(api: App, database: Database) -> AsyncGenerator[httpx.AsyncClie
 
 
 @pytest.fixture
-def owner(local_issuer: LocalIssuer) -> Caller:
+def owner(local_issuer: LocalIssuer) -> TestPrincipal:
     """Subject ``2001`` of the provider's organization ``1001``, its administrator (``ORGANIZATION_ADMIN``):
     it owns every company it registers."""
-    return Caller(local_issuer, roles=(ORGANIZATION_ADMIN,))
+    return TestPrincipal(local_issuer, roles=(ORGANIZATION_ADMIN,))
 
 
 @pytest.fixture
-async def company(client: httpx.AsyncClient, owner: Caller) -> str:
+async def company(client: httpx.AsyncClient, owner: TestPrincipal) -> str:
     """The id of a company ``owner`` registered (``COMPANY``, with the key ``c-1``, in test mode)."""
     return await created(client, "/v1/companies", COMPANY, owner.posting("c-1"))
 

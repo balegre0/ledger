@@ -71,9 +71,9 @@ from ledger_platform.runtime.assembly import PLATFORM, Shared, assemble
 from ledger_platform.runtime.registries import installed
 from ledger_platform.runtime.supervision import Supervisor
 lazy from ledger_kernel.clock import Clock
+lazy from ledger_platform.config.manifest import AppRole, PackageManifest
 lazy from ledger_platform.config.settings import Settings
 lazy from ledger_platform.data.bound import BoundDatabase
-lazy from ledger_platform.runtime.manifest import AppRole, PackageManifest
 lazy from ledger_platform.runtime.registries import Discover
 
 NOTIFY_LIMITS: Final = DatabaseLimits(

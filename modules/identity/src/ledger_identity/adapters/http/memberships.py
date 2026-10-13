@@ -15,13 +15,11 @@ from ledger_identity.adapters.http.models import MembershipView
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import commands, queries
 from ledger_kernel.access import Permission, parse_subject
-from ledger_platform.http.deps import allowed
-from ledger_platform.http.models import Page, page_of_items, page_query
-from ledger_platform.http.openapi import problems
+from ledger_platform.http import Page, allowed, page_of_items, page_query, problems
 lazy from ledger_identity.adapters.http.context import ApiContext
 lazy from ledger_identity.adapters.http.models import RoleAssignment
 lazy from ledger_kernel.pagination import PageRequest
-lazy from ledger_platform.auth.access import CompanyAccess
+lazy from ledger_platform.auth import CompanyAccess
 
 
 def router(context: ApiContext) -> APIRouter:

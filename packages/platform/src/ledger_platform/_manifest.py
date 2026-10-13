@@ -5,7 +5,7 @@ Edit the manifest, then run `uv run ledger-devtools sync`.
 
 from typing import Final
 
-from ledger_platform.runtime.manifest import PackageManifest
+from ledger_platform.config.manifest import PackageManifest
 
 MANIFEST: Final = PackageManifest.model_validate(
     {

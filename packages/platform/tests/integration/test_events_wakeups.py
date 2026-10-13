@@ -22,7 +22,10 @@ from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.data.bound import BoundDatabase
 from ledger_platform.data.notifier import Notifier
 from ledger_platform.data.roles import APP
-from ledger_platform.events import Consumer, Dispatcher, InboxRunner, Wakeups
+from ledger_platform.events.consumers import Consumer
+from ledger_platform.events.dispatcher import Dispatcher
+from ledger_platform.events.inbox import InboxRunner
+from ledger_platform.events.wakeups import Wakeups
 from ledger_testing.database import TEST_LOGINS, libpq_as
 lazy from ledger_platform.data.database import Database
 lazy from ledger_platform.data.notifier import Channel, Signals

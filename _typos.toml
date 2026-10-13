@@ -1,7 +1,6 @@
 [files]
 extend-exclude = [
     "uv.lock",
-    "contracts/src/ledger/",
     "countries/do/src/ledger_country_do/channels/ecf_v1/adapters/xsd/",
     "countries/do/tests/contract/golden/",
 ]

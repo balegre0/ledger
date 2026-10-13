@@ -8,6 +8,7 @@ import pytest
 
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tenancy import Mode, Tenant
+from ledger_platform.config.manifest import ConsumerDecl
 from ledger_platform.events.consumers import (
     Consumer,
     ConsumerMismatchError,
@@ -15,7 +16,6 @@ from ledger_platform.events.consumers import (
     RawEvent,
     raw_event_of,
 )
-from ledger_platform.runtime.manifest import ConsumerDecl
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
 
 ORGANIZATION, COMPANY, SUBJECT, EVENT = uuid.uuid7(), uuid.uuid7(), uuid.uuid7(), uuid.uuid7()

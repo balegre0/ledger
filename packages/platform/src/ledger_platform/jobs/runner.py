@@ -52,17 +52,16 @@ lazy from sqlalchemy import RowMapping, Update
 from ledger_kernel.errors import ErrorKind, LedgerError
 from ledger_platform.data.audit import Actor, acting_as
 from ledger_platform.data.codec import JsonValue
-from ledger_platform.data.queue import DEFAULT_BACKOFF, RELEASE_TIMEOUT, claim, recover, release
+from ledger_platform.data.queue import DEFAULT_BACKOFF, RELEASE_TIMEOUT, claim, parked, recover, release
 from ledger_platform.data.scopes import scope_of
 from ledger_platform.jobs.outcomes import Done, Job, Park, RunAgain
 from ledger_platform.observability.metrics import counter
-from ledger_platform.runtime.supervision import parked
+lazy from ledger_platform.config.manifest import JobDecl
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.database import AnyTable
 lazy from ledger_platform.data.queue import Backoff
 lazy from ledger_platform.jobs.outcomes import JobHandler, JobOutcome
 lazy from ledger_platform.observability.tracing import Tracing
-lazy from ledger_platform.runtime.manifest import JobDecl
 
 POLL: Final = 1.0
 """Seconds between two claims of an idle runner (Decision 17: each runner polls its own claim)."""

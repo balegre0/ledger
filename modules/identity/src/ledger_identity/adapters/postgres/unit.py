@@ -12,7 +12,7 @@ from ledger_identity.adapters.postgres.repositories import (
 from ledger_identity.application.ports import Events, IdentityUnit
 from ledger_kernel.errors import LedgerError
 lazy from ledger_identity.events import IdentityEvent
-lazy from ledger_platform.data.unit_of_work import UnitOfWork
+lazy from ledger_platform.data import UnitOfWork
 
 
 class UnscopedUnitError(LedgerError):

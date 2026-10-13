@@ -14,8 +14,7 @@ lazy from datetime import datetime
 import sqlalchemy as sa
 from alembic import op
 
-from ledger_platform.data.chassis_schema import chassis_schema_v1
-from ledger_platform.data.rls import RlsScope, policy
+from ledger_platform.data import RlsScope, chassis_schema_v1, policy
 
 revision: str = "0001"
 down_revision: str | None = None

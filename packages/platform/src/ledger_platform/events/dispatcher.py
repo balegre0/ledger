@@ -57,10 +57,10 @@ lazy from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ledger_kernel.errors import LedgerError, error_type
 from ledger_platform.data.notifier import INBOX, OUTBOX
+from ledger_platform.data.queue import being_cancelled
 from ledger_platform.data.tables import chassis_tables
 from ledger_platform.events.routing import load_routing, routing_version
 from ledger_platform.observability.metrics import counter, gauge
-from ledger_platform.runtime.supervision import being_cancelled
 lazy from ledger_platform.data.codec import JsonValue
 lazy from ledger_platform.data.database import AnyTable, Database
 lazy from ledger_platform.data.notifier import Signals

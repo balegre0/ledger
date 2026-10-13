@@ -33,7 +33,7 @@ from ledger_kernel.errors import (
     UnavailableError,
     described,
 )
-from ledger_platform.config.settings import LogFormat, ServiceSettings
+from ledger_platform.config.settings import LogFormat, Settings
 from ledger_platform.http.app import ApiInfo, Observability, create_app
 from ledger_platform.http.metrics import AmbiguousRouteError
 from ledger_platform.http.mode import ledger_mode
@@ -66,7 +66,7 @@ class BrokenInvariantError(LedgerError):
 
 
 class RefusedTokenError(UnauthenticatedError):
-    """What the platform's token verifier raises (Task 3), as far as the HTTP app can tell: the code."""
+    """What the platform's token verifier raises, as far as the HTTP app can tell: the code."""
 
     code: ClassVar[str] = "invalid_token"
 
@@ -456,7 +456,7 @@ async def test_liveness_fails_while_a_check_is_wedged_and_recovers_when_it_ends(
         ended.set()
 
     health = Health(timeout=0.02, wedge_after=30, clock=moment)
-    health.add("nats", stubborn)
+    health.add("broker", stubborn)
     try:
         observability = Observability(health=health, registry=registry, tracer_provider=tracing.provider)
         async with serving(build(observability, router)) as client:
@@ -466,7 +466,7 @@ async def test_liveness_fails_while_a_check_is_wedged_and_recovers_when_it_ends(
             wedged = await client.get("/livez")
             assert (wedged.status_code, LIVENESS.validate_json(wedged.content)) == (
                 503,
-                {"status": "unrecoverable", "wedged": ["nats"], "dead": []},
+                {"status": "unrecoverable", "wedged": ["broker"], "dead": []},
             )
             release.set()
             await ended.wait()
@@ -487,10 +487,10 @@ async def test_readiness_reports_each_check(client: httpx.AsyncClient, health: H
     async def down() -> None:
         raise ConnectionError
 
-    health.add("nats", down)
+    health.add("broker", down)
     response = await client.get("/readyz")
     assert response.status_code == 503
-    assert response.json() == {"status": "not_ready", "checks": {"database": True, "nats": False}}
+    assert response.json() == {"status": "not_ready", "checks": {"database": True, "broker": False}}
 
 
 async def test_requests_are_measured_by_route_template(client: httpx.AsyncClient) -> None:
@@ -722,8 +722,8 @@ async def test_a_response_that_breaks_its_model_is_logged_without_what_it_held(
 ) -> None:
     """FastAPI's error quotes the response it refused; the log says where and of which type, once."""
     configure_logging(
-        ServiceSettings(
-            service_name="web-test",
+        Settings(
+            environment="test",
             database_url=SecretStr("postgresql+psycopg://x"),
             log_format=LogFormat.JSON,
         ),

@@ -10,8 +10,8 @@ from ledger_identity._manifest import MANIFEST
 from ledger_identity.adapters.http import branches, companies, emission_points, memberships, organization
 from ledger_identity.adapters.http.context import ApiContext
 from ledger_identity.adapters.postgres.schema import migrations
-from ledger_platform.runtime.contexts import Module, ModuleParts
-lazy from ledger_platform.runtime.contexts import ModuleContext
+from ledger_platform.runtime import Module, ModuleParts
+lazy from ledger_platform.runtime import ModuleContext
 
 
 def assemble(context: ModuleContext) -> ModuleParts:

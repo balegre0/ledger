@@ -28,7 +28,10 @@ lazy from collections.abc import Mapping
 import grpc
 
 from ledger_kernel.errors import ErrorKind, LedgerError, truncate
-from ledger_platform.config.options import InvalidOptionError, require_seconds
+from ledger_platform.config.options import require_seconds
+
+_COMPONENT: Final = "gRPC client"
+"""What this module's option errors name (``InvalidOptionError.component``)."""
 
 ERROR_CODE_KEY: Final = "ledger-error-code"
 """The trailing metadata that carries a failed call's stable code."""
@@ -39,13 +42,6 @@ REMOTE_CODE_LIMIT: Final = 64
 """The longest code taken from the other side, and what is kept of one that is not a stable code."""
 _STABLE_CODE: Final = re.compile(rf"[a-z][a-z0-9_]{{0,{REMOTE_CODE_LIMIT - 1}}}", re.ASCII)
 _UNKNOWN_CODE: Final = "unknown"
-
-
-class InvalidGrpcClientOptionError(InvalidOptionError):
-    """A gRPC client option that cannot work."""
-
-    code: ClassVar[str] = "invalid_grpc_client_option"
-    label: ClassVar[str] = "gRPC client option"
 
 
 class RemoteError(LedgerError):
@@ -124,7 +120,7 @@ def require_deadline(deadline: float) -> None:
 
     For a client that takes its deadline once, to refuse it when it is made rather than on its first call.
     """
-    require_seconds(InvalidGrpcClientOptionError, "deadline", deadline, ceiling=MAX_DEADLINE)
+    require_seconds(_COMPONENT, "deadline", deadline, ceiling=MAX_DEADLINE)
 
 
 def remote_error(error: grpc.aio.AioRpcError, rpc: str) -> RemoteError:

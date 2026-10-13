@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError, StatementError
 from structlog.testing import capture_logs
 lazy from structlog.typing import EventDict
 
-from ledger_platform.config.settings import LogFormat, ServiceSettings
+from ledger_platform.config.settings import LogFormat, Settings
 from ledger_platform.data.database import Database
 from ledger_platform.observability.logs import Throttled, configure_logging
 from ledger_testing.clock import Moment
@@ -27,9 +27,9 @@ PASSWORD: Final = "hunter2-correct-horse"
 FAILURE: Final = "connection refused"
 
 
-def settings(log_format: LogFormat, level: Level = "INFO") -> ServiceSettings:
-    return ServiceSettings(
-        service_name="invoicing",
+def settings(log_format: LogFormat, level: Level = "INFO") -> Settings:
+    return Settings(
+        environment="local",
         database_url=SecretStr("postgresql+psycopg://x"),
         log_format=log_format,
         log_level=level,
@@ -237,11 +237,11 @@ async def taxpayers(database: Database) -> AsyncGenerator[Database]:
 
 async def unique_violation(database: Database) -> IntegrityError:
     """A real one: the same tax id twice. PostgreSQL's answer quotes it."""
-    async with database.transaction(None) as unit:
-        await unit.connection.execute(insert(TAXPAYERS).values(tax_id=TAX_ID))
+    async with database.engine.begin() as connection:
+        await connection.execute(insert(TAXPAYERS).values(tax_id=TAX_ID))
     with pytest.raises(IntegrityError) as violated:
-        async with database.transaction(None) as unit:
-            await unit.connection.execute(insert(TAXPAYERS).values(tax_id=TAX_ID))
+        async with database.engine.begin() as connection:
+            await connection.execute(insert(TAXPAYERS).values(tax_id=TAX_ID))
     assert TAX_ID in str(violated.value)
     return violated.value
 
@@ -377,7 +377,7 @@ def test_an_exception_of_another_type_keeps_its_message(capsys: pytest.CaptureFi
 
 def test_a_recurring_warning_is_logged_once_per_interval_and_says_how_many_were_not() -> None:
     moment = Moment()
-    errors = Throttled(structlog.stdlib.get_logger("ledger.test"), "nats.error", every=60, clock=moment)
+    errors = Throttled(structlog.stdlib.get_logger("ledger.test"), "listener.error", every=60, clock=moment)
     with capture_logs() as logs:
         errors.warning(error="ConnectionRefusedError")  # the first: at once
         for second in (2.0, 4.0, 59.9):
@@ -388,14 +388,14 @@ def test_a_recurring_warning_is_logged_once_per_interval_and_says_how_many_were_
         moment.now = 61.0
         errors.warning(error="TimeoutError")
     assert logs == [
-        {"event": "nats.error", "log_level": "warning", "error": "ConnectionRefusedError"},
-        {"event": "nats.error", "log_level": "warning", "error": "TimeoutError", "repeated": 3},
+        {"event": "listener.error", "log_level": "warning", "error": "ConnectionRefusedError"},
+        {"event": "listener.error", "log_level": "warning", "error": "TimeoutError", "repeated": 3},
     ]
 
 
 def test_settling_says_how_many_went_unlogged_and_the_next_warning_is_logged_at_once() -> None:
     moment = Moment()
-    errors = Throttled(structlog.stdlib.get_logger("ledger.test"), "nats.error", every=60, clock=moment)
+    errors = Throttled(structlog.stdlib.get_logger("ledger.test"), "listener.error", every=60, clock=moment)
     with capture_logs() as logs:
         errors.warning()
         errors.warning()
@@ -404,4 +404,4 @@ def test_settling_says_how_many_went_unlogged_and_the_next_warning_is_logged_at_
         assert errors.settle() == 0
         moment.now = 1.0
         errors.warning()  # a new outage
-    assert [entry["event"] for entry in logs] == ["nats.error", "nats.error"]
+    assert [entry["event"] for entry in logs] == ["listener.error", "listener.error"]

@@ -14,9 +14,9 @@ lazy from collections.abc import Callable, Iterator, Mapping
 from pydantic import TypeAdapter
 
 from ledger_devtools.workspace import MODULE_LAYERS
-from ledger_platform.runtime.manifest import PackageKind
+from ledger_platform.config.manifest import PackageKind
 lazy from ledger_devtools.workspace import Package, Workspace
-lazy from ledger_platform.runtime.manifest import (
+lazy from ledger_platform.config.manifest import (
     ChannelEntry,
     EventsSection,
     IdPrefix,

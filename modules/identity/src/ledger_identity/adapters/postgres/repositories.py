@@ -44,7 +44,7 @@ from ledger_kernel.errors import LedgerError
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.pagination import page_of
 from ledger_kernel.tenancy import Tenant
-from ledger_platform.data.paging import paged
+from ledger_platform.data import paged
 lazy from ledger_kernel.pagination import Page, PageRequest
 
 

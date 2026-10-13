@@ -18,13 +18,13 @@ from ledger_platform.auth.providers.zitadel import organization_of, project_role
 from ledger_platform.auth.tokens import (
     MAX_TOKEN_LENGTH,
     InvalidTokenError,
-    InvalidTokenOptionError,
     MissingTokenError,
     TokenPolicy,
     TokenProblem,
     TokenVerifier,
 )
-from ledger_platform.config.settings import ApiSettings
+from ledger_platform.config.options import InvalidOptionError
+from ledger_platform.config.settings import Settings
 from ledger_testing.clock import Moment
 from ledger_testing.issuer import (
     AUDIENCE,
@@ -588,8 +588,8 @@ async def test_no_payload_or_signature_under_a_valid_header_breaks_the_verifier(
 
 
 def test_the_policy_comes_from_the_settings() -> None:
-    settings = ApiSettings(
-        service_name="identity",
+    settings = Settings(
+        environment="local",
         database_url=SecretStr("postgresql+psycopg://identity:secret@localhost/identity"),
         token_issuer=ISSUER,
         token_audience=AUDIENCE,
@@ -597,7 +597,7 @@ def test_the_policy_comes_from_the_settings() -> None:
         token_leeway_seconds=10,
     )
     expected = TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url="http://localhost/keys", leeway=10)
-    assert TokenPolicy.of(settings) == expected
+    assert TokenPolicy.of_settings(settings) == expected
 
 
 @pytest.mark.parametrize(
@@ -644,5 +644,6 @@ def test_the_policy_comes_from_the_settings() -> None:
     ],
 )
 def test_a_policy_that_cannot_work_is_refused(build: Callable[[], TokenPolicy], option: str) -> None:
-    with pytest.raises(InvalidTokenOptionError, match=f"token option {option} must be"):
+    with pytest.raises(InvalidOptionError, match=f"token option {option} must be") as caught:
         build()
+    assert caught.value.component == "token"

@@ -37,6 +37,7 @@ lazy from fastapi import FastAPI, Request
 from ledger_kernel.errors import ErrorKind, InvalidInputError, LedgerError, described, truncate
 from ledger_platform.http.metrics import declared_route
 from ledger_platform.http.request_fields import remembered
+from ledger_platform.observability.logs import MAX_ISSUES, location_of
 
 PROBLEM_JSON: Final = "application/problem+json"
 REQUEST_ID_HEADER: Final = "Request-Id"
@@ -83,10 +84,6 @@ _CHALLENGE: Final = 'Bearer realm="ledger"'
 _REFUSED_CODE: Final = "invalid_token"
 """The one code a challenge repeats (RFC 6750 section 3.1): a token was sent, and it cannot be trusted. A
 request without one gets the bare challenge, as the RFC asks."""
-_MAX_ISSUES: Final = 20
-"""A request can break the schema a million times over; a client is told about this many."""
-_LOCATION_PART: Final = 40
-"""A location names fields, but a key the client chose is a field name too: it is cut at this length."""
 _TEXT_LIMIT: Final = 200
 """Text that comes from elsewhere (a validator's message, the detail of an ``HTTPException``) is cut here."""
 _QUOTES_THE_INPUT: Final[Mapping[str, str]] = {
@@ -219,7 +216,7 @@ def _challenge(code: str) -> Mapping[str, str]:
 
 
 def _field_problems(error: RequestValidationError) -> dict[str, object]:
-    """The first ``_MAX_ISSUES`` problems of a request: where, of which type, what to do, how many were cut.
+    """The first ``MAX_ISSUES`` problems of a request: where, of which type, what to do, how many were cut.
 
     Nothing of the request is read but where it went wrong: ``input`` is not, a location is cut part by part,
     the message of a pydantic type that quotes the input is replaced (``_QUOTES_THE_INPUT``) and any other is
@@ -227,16 +224,16 @@ def _field_problems(error: RequestValidationError) -> dict[str, object]:
     input, as the platform's errors do with ``excerpt``.
     """
     raised = error.errors()
-    issues = _ISSUES.validate_python(raised[:_MAX_ISSUES])
+    issues = _ISSUES.validate_python(raised[:MAX_ISSUES])
     problems = [
         _FieldProblem(
-            location=".".join(truncate(str(part), _LOCATION_PART) for part in issue["loc"]),
+            location=location_of(issue["loc"]),
             type=issue["type"],
             message=_QUOTES_THE_INPUT.get(issue["type"]) or truncate(issue["msg"], _TEXT_LIMIT),
         )
         for issue in issues
     ]
-    return {"errors": problems, "omitted_errors": max(len(raised) - _MAX_ISSUES, 0)}
+    return {"errors": problems, "omitted_errors": max(len(raised) - MAX_ISSUES, 0)}
 
 
 def _logged(detail: object) -> str:

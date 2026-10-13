@@ -10,7 +10,7 @@ lazy import httpx
 lazy import psycopg
 
 from ledger_platform.auth.providers.zitadel import organization_of
-from ledger_testing.api import Caller, created, document
+from ledger_testing.api import TestPrincipal, created, document
 lazy from ledger_testing.issuer import LocalIssuer
 
 ORGANIZATION: Final = organization_of("1001")
@@ -35,7 +35,7 @@ async def outbox(admin: psycopg.AsyncConnection) -> list[Row]:
 
 
 async def test_a_new_company_and_its_owner_are_announced_with_the_change(
-    client: httpx.AsyncClient, owner: Caller, admin: psycopg.AsyncConnection
+    client: httpx.AsyncClient, owner: TestPrincipal, admin: psycopg.AsyncConnection
 ) -> None:
     company = UUID(await created(client, "/v1/companies", DUARTE, owner.posting("c-1")))
     registered, granted = await outbox(admin)
@@ -57,7 +57,7 @@ async def test_a_new_company_and_its_owner_are_announced_with_the_change(
 
 
 async def test_an_event_carries_the_trace_of_the_request_that_caused_it(
-    client: httpx.AsyncClient, owner: Caller, admin: psycopg.AsyncConnection
+    client: httpx.AsyncClient, owner: TestPrincipal, admin: psycopg.AsyncConnection
 ) -> None:
     """The server's span is linked to the caller's trace (not its child): the event carries the server's."""
     headers = owner.posting("c-traced") | {"traceparent": TRACEPARENT}
@@ -70,7 +70,7 @@ async def test_an_event_carries_the_trace_of_the_request_that_caused_it(
 
 
 async def test_renames_and_deactivations_are_announced_at_the_company_s_versions(
-    client: httpx.AsyncClient, owner: Caller, company: str, admin: psycopg.AsyncConnection
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str, admin: psycopg.AsyncConnection
 ) -> None:
     path = f"/v1/companies/{company}"
     renamed = await client.patch(
@@ -97,12 +97,12 @@ async def test_renames_and_deactivations_are_announced_at_the_company_s_versions
 
 
 async def test_a_request_that_fails_or_replays_announces_nothing_more(
-    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: Caller, admin: psycopg.AsyncConnection
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal, admin: psycopg.AsyncConnection
 ) -> None:
     await created(client, "/v1/companies", DUARTE, owner.posting("c-1"))
     replayed = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("c-1"))
     taken = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("c-2"))
-    stranger = Caller(local_issuer, organization="1002", roles=owner.roles)
+    stranger = TestPrincipal(local_issuer, organization="1002", roles=owner.roles)
     elsewhere = await client.post("/v1/companies", json=DUARTE, headers=stranger.posting("c-1"))
     assert (replayed.headers["idempotent-replayed"], document(taken)["code"], elsewhere.status_code) == (
         "true",
@@ -113,7 +113,7 @@ async def test_a_request_that_fails_or_replays_announces_nothing_more(
 
 
 async def test_a_membership_granted_changed_and_revoked_twice_is_announced_once_each(
-    client: httpx.AsyncClient, owner: Caller, company: str, admin: psycopg.AsyncConnection
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str, admin: psycopg.AsyncConnection
 ) -> None:
     path = f"/v1/companies/{company}/memberships/3001"
     assert (await client.put(path, json={"role": "viewer"}, headers=owner.bearer())).status_code == 201

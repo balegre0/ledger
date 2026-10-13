@@ -9,8 +9,8 @@ neither assembled nor migrated.
 from typing import Final, final
 lazy from collections.abc import Iterable
 
+from ledger_platform.config.manifest import PackageKind, PackageStatus
 from ledger_platform.runtime.contexts import ChannelPack, Module
-from ledger_platform.runtime.manifest import PackageKind, PackageStatus
 from ledger_platform.runtime.registries import (
     CHANNELS,
     MODULES,

@@ -22,6 +22,7 @@ from ledger_kernel.errors import LedgerError
 from ledger_platform.runtime.facade import require_facades
 lazy from ledger_kernel.clock import Clock
 lazy from ledger_kernel.regimes import RegimeDef
+lazy from ledger_platform.config.manifest import AppRole, ChannelEntry, PackageManifest
 lazy from ledger_platform.config.settings import Settings
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.migrations import SchemaMigrations
@@ -31,7 +32,6 @@ lazy from ledger_platform.jobs.outcomes import JobSpec
 lazy from ledger_platform.observability.health import Check
 lazy from ledger_platform.observability.tracing import Tracing
 lazy from ledger_platform.runtime.keys import ApiDirectory, Binding, Directory, ExtensionDirectory, Ports
-lazy from ledger_platform.runtime.manifest import AppRole, ChannelEntry, PackageManifest
 lazy from ledger_platform.runtime.registries import Regimes
 
 NO_CHECKS: Final[Mapping[str, Check]] = MappingProxyType({})

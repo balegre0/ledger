@@ -38,7 +38,7 @@ class Signals(Protocol):
 class Notifier(Signals):
     """Sends a NOTIFY per channel at most once per ``window`` seconds, one sender per channel.
 
-    The NOTIFYs go through ``database``'s pool; a dedicated connection is the runtime's choice (Task 14).
+    The NOTIFYs go through ``database``'s pool; a dedicated connection is the runtime's choice (``App``).
     """
 
     __slots__ = ("_database", "_dirty", "_senders", "_window")

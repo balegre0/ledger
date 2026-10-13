@@ -38,6 +38,13 @@ from ledger_platform.runtime.keys import Directory
 from ledger_platform.runtime.packs import Channels, load_modules
 from ledger_platform.runtime.registries import Regimes
 lazy from ledger_kernel.clock import Clock
+lazy from ledger_platform.config.manifest import (
+    AppRole,
+    EventsSection,
+    JobDecl,
+    PackageManifest,
+    ScheduleDecl,
+)
 lazy from ledger_platform.config.settings import Settings
 lazy from ledger_platform.data.database import Database
 lazy from ledger_platform.data.migrations import SchemaMigrations
@@ -48,13 +55,6 @@ lazy from ledger_platform.jobs.outcomes import JobHandler, JobSpec
 lazy from ledger_platform.observability.health import Check
 lazy from ledger_platform.observability.tracing import Tracing
 lazy from ledger_platform.runtime.contexts import ChannelPack, Module
-lazy from ledger_platform.runtime.manifest import (
-    AppRole,
-    EventsSection,
-    JobDecl,
-    PackageManifest,
-    ScheduleDecl,
-)
 lazy from ledger_platform.runtime.registries import Discover
 
 PLATFORM: Final = "platform"

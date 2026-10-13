@@ -47,6 +47,8 @@ from ledger_platform.http.metrics import full_template
 lazy from ledger_kernel.access import Principal
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
 
+_COMPONENT: Final = "idempotency"
+"""What this module's option errors name (``InvalidOptionError.component``)."""
 DEFAULT_RETENTION: Final = timedelta(days=7)
 MAX_KEY_LENGTH: Final = 255
 MAX_STORED_BODY: Final = 1024 * 1024
@@ -71,6 +73,7 @@ _UNSTORED_HEADERS: Final = frozenset(
         "upgrade",
     }
 )
+
 """Headers (lowercase) a replay must not repeat: a session or a credential handed to whoever retries, what the
 server sets anew on every response (the date, the length), and the hop-by-hop headers of one connection."""
 _KEY: Final = re.compile(rf"[!-~]{{1,{MAX_KEY_LENGTH}}}", re.ASCII)
@@ -155,13 +158,6 @@ class ServerFailureResponseError(LedgerError):
     def __init__(self, response: StoredResponse) -> None:
         super().__init__(f"the work answered {response.status}; a server failure is never stored")
         self.response: Final = response
-
-
-class InvalidIdempotencyOptionError(InvalidOptionError):
-    """An idempotency option that cannot work."""
-
-    code: ClassVar[str] = "idempotency_option_invalid"
-    label: ClassVar[str] = "idempotency option"
 
 
 @final
@@ -267,8 +263,8 @@ class Idempotency:
 
     def __init__(self, *, retention: timedelta = DEFAULT_RETENTION) -> None:
         if retention <= timedelta(0):
-            raise InvalidIdempotencyOptionError(
-                option="retention", requirement="longer than zero", value=retention
+            raise InvalidOptionError(
+                component=_COMPONENT, option="retention", requirement="longer than zero", value=retention
             )
         self._retention = retention
 

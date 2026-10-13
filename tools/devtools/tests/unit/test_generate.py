@@ -14,7 +14,7 @@ from ledger_devtools.generate import (
     targets,
 )
 from ledger_devtools.workspace import Workspace
-from ledger_platform.runtime.manifest import PackageManifest
+from ledger_platform.config.manifest import PackageManifest
 
 type Writer = Callable[[str, str, tuple[str, ...]], Path]
 

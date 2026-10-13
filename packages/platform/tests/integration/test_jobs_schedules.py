@@ -23,7 +23,7 @@ from ledger_kernel.errors import InvalidValueError
 from ledger_platform.data.bound import BoundDatabase
 from ledger_platform.data.database import Database
 from ledger_platform.data.unit_of_work import JobPolicy, UndeclaredJobKindError
-from ledger_platform.jobs import Schedule, Scheduler
+from ledger_platform.jobs.schedules import Schedule, Scheduler
 from ledger_testing import waiting
 from ledger_testing.database import app_url
 lazy from ledger_platform.data.notifier import Channel

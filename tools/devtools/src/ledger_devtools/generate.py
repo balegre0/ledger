@@ -15,7 +15,7 @@ lazy from collections.abc import Iterator, Mapping, Sequence
 
 from ledger_devtools.names import TEST_TOOLING, distribution_of, import_names, renamed
 from ledger_devtools.workspace import MANIFEST_GLOBS, MODULE_LAYERS
-from ledger_platform.runtime.manifest import PackageKind
+from ledger_platform.config.manifest import PackageKind
 lazy from ledger_devtools.workspace import Package, Workspace
 
 GENERATED_HEADER: Final = (
@@ -38,10 +38,13 @@ PLATFORM_LAYERS: Final = (
     "auth",
     "data",
     "observability",
-    "config",
     "_manifest",
+    "config",
 )
-"""The chassis's own layering (§5.2): fixed by the platform's design, not by a manifest."""
+"""The chassis's own layering (§5.2): fixed by the platform's design, not by a manifest.
+
+``_manifest`` sits above ``config``: the generated file validates its data with ``config.manifest``'s model.
+"""
 _PROTECTED: Final = ("domain", "application", "adapters", "assembly", "_manifest")
 """A module's layers nothing else in production imports (contract 7)."""
 _INNER: Final = ("domain", "application", "adapters")
@@ -244,7 +247,7 @@ def manifest_module_text(package: Package) -> str:
         f"{MANIFEST_MODULE_HEADER}\n"
         'Edit the manifest, then run `uv run ledger-devtools sync`.\n"""\n\n'
         "from typing import Final\n\n"
-        "from ledger_platform.runtime.manifest import PackageManifest\n\n"
+        "from ledger_platform.config.manifest import PackageManifest\n\n"
         "MANIFEST: Final = PackageManifest.model_validate(\n"
         f"{_python(package.raw, 1, '', '')}"
         ")\n"

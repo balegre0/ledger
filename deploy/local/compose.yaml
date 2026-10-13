@@ -1,10 +1,8 @@
 # Infrastructure for local development. Services join it as they are built (milestone 2 onwards).
 #
-# What a service running on the host is configured with (the LEDGER_* variables of ServiceSettings):
+# What an app running on the host is configured with (the LEDGER_* variables of Settings):
 #   LEDGER_DATABASE_URL=postgresql+psycopg://ledger_app:ledger_app@127.0.0.1:5432/ledger
-#   LEDGER_NATS_URL=nats://127.0.0.1:4222
-# A service that runs inside this network uses the same URLs with the host names `postgres` and `nats` in
-# place of 127.0.0.1.
+# An app that runs inside this network uses the same URL with the host name `postgres` in place of 127.0.0.1.
 #
 # PostgreSQL's administrator is `postgres`. A service never connects as that role: a superuser bypasses
 # row-level security, and a database that ignored the policies would hide exactly the bugs they exist to
@@ -37,20 +35,6 @@ services:
       # listens on a socket only), as the runtime role, to its own database. `pg_isready` would say yes
       # before the init script has created either.
       test: ["CMD-SHELL", "PGPASSWORD=ledger_app psql -h 127.0.0.1 -U ledger_app -d ledger -tAc 'SELECT 1'"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  nats:
-    # The same server version the platform's tests run (nats:2.12.15), in its Alpine variant: the default
-    # image holds nothing but the server binary, and the healthcheck needs a shell and wget.
-    image: nats:2.12.15-alpine
-    command: ["--jetstream", "--store_dir=/data", "--http_port=8222"]
-    ports: ["127.0.0.1:4222:4222", "127.0.0.1:8222:8222"]
-    volumes: ["nats:/data"]
-    healthcheck:
-      # 200 only when the server is up and JetStream is enabled; the monitoring port answers either way.
-      test: ["CMD-SHELL", "wget -q --spider 'http://127.0.0.1:8222/healthz?js-enabled-only=true'"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -99,5 +83,4 @@ services:
 
 volumes:
   postgres: {}
-  nats: {}
   zitadel-bootstrap: {}

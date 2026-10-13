@@ -50,8 +50,8 @@ lazy from ledger_kernel.clock import MonotonicClock
 
 WITHHELD: Final = "(message withheld: it can quote values)"
 """What a log says in place of the message of an error of the database."""
-_MAX_ISSUES: Final = 20
-"""How many problems of a validation error a log names; the rest are counted."""
+MAX_ISSUES: Final = 20
+"""How many problems of a validation error a log or a problem names; the rest are counted."""
 _LOCATION_PART: Final = 40
 """A location names fields, but a key a client chose is a field name too: it is cut at this length."""
 _STATEMENT_LIMIT: Final = 300
@@ -81,14 +81,15 @@ _ISSUES: Final = TypeAdapter(list[_Issue])
 _STACKS: Final = TypeAdapter(list[_Stack])
 
 
-def _location(loc: Sequence[str | int]) -> str:
+def location_of(loc: Sequence[str | int]) -> str:
+    """Where a validation problem is, as a log or a problem tells it: field names joined by dots, each cut."""
     return ".".join(truncate(str(part), _LOCATION_PART) for part in loc)
 
 
 def _validation(count: int, issues: Sequence[_Issue], title: str | None = None) -> str:
     """``count`` problems, the first of them named by location and type: never the input."""
-    named = ", ".join(f"{_location(issue['loc'])} ({issue['type']})" for issue in issues[:_MAX_ISSUES])
-    more = f", and {count - _MAX_ISSUES} more" if count > _MAX_ISSUES else ""
+    named = ", ".join(f"{location_of(issue['loc'])} ({issue['type']})" for issue in issues[:MAX_ISSUES])
+    more = f", and {count - MAX_ISSUES} more" if count > MAX_ISSUES else ""
     subject = "" if title is None else f" for {title}"
     return f"{count} validation errors{subject}" + (f": {named}{more}" if named else "")
 
@@ -96,7 +97,7 @@ def _validation(count: int, issues: Sequence[_Issue], title: str | None = None) 
 def _readable(problems: Sequence[object]) -> list[_Issue]:
     """The first problems of a FastAPI validation error, or none if they are not pydantic's."""
     try:
-        return _ISSUES.validate_python(problems[:_MAX_ISSUES])
+        return _ISSUES.validate_python(problems[:MAX_ISSUES])
     except ValidationError:
         return []
 
@@ -296,7 +297,7 @@ def _trace_fields(logger: object, method_name: str, event_dict: EventDict) -> Ev
 
 
 class LogSettings(Protocol, metaclass=ABCMeta):
-    """What logging reads of an app's settings (v2's ``Settings``, v1's ``ServiceSettings``)."""
+    """What logging reads of an app's settings (``Settings``)."""
 
     @property
     @abstractmethod

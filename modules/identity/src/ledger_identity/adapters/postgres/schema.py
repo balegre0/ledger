@@ -3,7 +3,7 @@
 from typing import Final
 
 from ledger_identity.adapters.postgres.tables import SCHEMA, IdentityTable
-from ledger_platform.data.migrations import SchemaMigrations
+from ledger_platform.data import SchemaMigrations
 
 
 def migrations() -> SchemaMigrations:

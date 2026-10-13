@@ -5,24 +5,22 @@ from typing import ClassVar, Final, Never, final
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
-from nats.js.errors import ServerError, ServiceUnavailableError
 from prometheus_client import CollectorRegistry
 from structlog.testing import capture_logs
 
 from ledger_kernel.errors import LedgerError
-from ledger_platform.config.options import InvalidOptionError
-from ledger_platform.consumer import ConsumerRefusedError
 from ledger_platform.runtime.supervision import (
     FIRST_RESTART_DELAY,
     HEALTHY_RUN,
     MAX_RESTART_DELAY,
     RESTART_JITTER,
+    DuplicateWorkerError,
     Supervisor,
     restart_delay,
 )
 from ledger_testing.clock import Moment
 
-NAME: Final = "consumer payments-ledger"
+NAME: Final = "inbox payments-ledger"
 NO_JITTER: Final = 0.0
 """The draw that shortens nothing: the delay is exactly the backoff's."""
 
@@ -114,6 +112,15 @@ async def finish(worker: asyncio.Task[Never]) -> None:
     """Cancel a worker a test is done with, and wait for it."""
     worker.cancel()
     await asyncio.wait((worker,))
+
+
+async def test_two_workers_cannot_share_a_name(supervisor: Supervisor, clock: Moment) -> None:
+    """Their logs and their restart counts would be one."""
+    first = supervisor.start(NAME, Flaky(clock))
+    with pytest.raises(DuplicateWorkerError, match=r"^a worker named 'inbox payments-ledger' already runs$"):
+        supervisor.start(NAME, Flaky(clock)).cancel()  # a twin that did start is not left running
+    assert supervisor.workers == (first,)
+    await finish(first)
 
 
 async def test_a_worker_that_fails_is_restarted_after_growing_delays_and_each_restart_counted(
@@ -318,28 +325,3 @@ async def test_workers_stop_together_within_one_grace_and_each_that_did_not_is_n
 async def test_a_stop_with_no_worker_running_waits_for_nothing(supervisor: Supervisor) -> None:
     async with asyncio.timeout(1):
         await supervisor.stop(grace=60)
-
-
-@pytest.mark.parametrize(
-    "error",
-    [ServiceUnavailableError(), ServerError(code=500, err_code=10009)],
-    ids=["no responders", "no leader"],
-)
-async def test_a_consumer_that_jetstream_could_not_serve_is_started_again_and_not_dead(
-    registry: CollectorRegistry, clock: Moment, pause: Pause, error: Exception
-) -> None:
-    """With the service's permanent errors: a JetStream that cannot serve for now restarts the consumer, and
-    leaves the process live; a configuration JetStream refuses leaves it dead."""
-    supervisor = Supervisor(
-        registry=registry, permanent=(ConsumerRefusedError, InvalidOptionError), sleep=pause, clock=clock
-    )
-    transient = Flaky(clock, (0, error))
-    worker = supervisor.start(NAME, transient)
-    async with asyncio.timeout(5):
-        await transient.running.wait()
-    assert (transient.started, supervisor.dead()) == (2, ())
-    refused = ConsumerRefusedError(consumer=NAME, stream="EVENTS", fields=(), reason="stream not found")
-    dead = supervisor.start("consumer orphan", Flaky(clock, (0, refused)))
-    await asyncio.wait((dead,))
-    assert supervisor.dead() == ("consumer orphan",)
-    await finish(worker)

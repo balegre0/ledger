@@ -4,7 +4,8 @@ Under xdist the controller starts the server and hands its address to each worke
 The template is built once per server, under an advisory lock, into ``<name>_building`` and renamed when the
 hooks (``pytest_ledger_template``) are done, so a failed build never leaves a half template behind. Clones are
 serialized by the same lock: ``CREATE DATABASE ... TEMPLATE`` refuses a template another session is using.
-Every connection here is the superuser's; tests connect as the roles a service connects as.
+Every connection here is the superuser's; tests connect as the roles an app connects as. The platform is
+imported lazily: the pytest plugin loads this module before coverage measures anything.
 """
 
 import json
@@ -21,6 +22,7 @@ from pydantic import TypeAdapter
 from testcontainers.community.postgres import PostgresContainer
 
 from ledger_testing.images import image
+lazy from ledger_platform.config.settings import DATABASE_URL_SCHEME
 
 TEMPLATE: Final = "ledger_template"
 _LOCK: Final = 0x6C65646774706C00
@@ -51,7 +53,7 @@ class PostgresServer:
 
     def sqlalchemy(self, database: str, *, role: str, password: str) -> str:
         """The SQLAlchemy URL (async psycopg driver) of ``database`` as ``role``."""
-        return f"postgresql+psycopg://{role}:{password}@{self.host}:{self.port}/{database}"
+        return f"{DATABASE_URL_SCHEME}{role}:{password}@{self.host}:{self.port}/{database}"
 
     def database(self, name: str, *, role: str, password: str) -> str:
         """A new database ``name`` owned by a new login role ``role`` (no superuser, no BYPASSRLS): its URL.

@@ -13,7 +13,6 @@
 .hypothesis
 .coverage
 htmlcov
-.tilt-dev
 docs
 deploy
 **/tests

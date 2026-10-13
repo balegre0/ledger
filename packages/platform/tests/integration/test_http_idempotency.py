@@ -20,6 +20,7 @@ from sqlalchemy.exc import OperationalError
 from ledger_kernel.access import Principal, SubjectId
 from ledger_kernel.tenancy import Mode, OrganizationScope
 from ledger_platform.auth.providers.zitadel import organization_of
+from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.data.bound import BoundDatabase
 from ledger_platform.data.database import Database
 from ledger_platform.data.unit_of_work import JobPolicy
@@ -29,7 +30,6 @@ from ledger_platform.http.idempotency import (
     Idempotency,
     IdempotencyKeyInUseError,
     IdempotencyKeyReusedError,
-    InvalidIdempotencyOptionError,
     OversizedStoredResponseError,
     ServerFailureResponseError,
     StoredResponse,
@@ -332,5 +332,5 @@ async def test_a_committed_key_without_an_answer_is_a_defect(
 
 
 def test_a_retention_of_nothing_is_refused() -> None:
-    with pytest.raises(InvalidIdempotencyOptionError, match="retention"):
+    with pytest.raises(InvalidOptionError, match="retention"):
         Idempotency(retention=timedelta(0))

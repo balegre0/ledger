@@ -36,6 +36,9 @@ from ledger_kernel.errors import ErrorKind, LedgerError
 from ledger_platform.config.options import InvalidOptionError, require_seconds
 from ledger_platform.grpc.client import ERROR_CODE_KEY
 
+_COMPONENT: Final = "gRPC"
+"""What this module's option errors name (``InvalidOptionError.component``)."""
+
 _STATUS: Final[Mapping[ErrorKind, grpc.StatusCode]] = {
     ErrorKind.INVALID: grpc.StatusCode.INVALID_ARGUMENT,
     ErrorKind.NOT_FOUND: grpc.StatusCode.NOT_FOUND,
@@ -48,13 +51,6 @@ _STATUS: Final[Mapping[ErrorKind, grpc.StatusCode]] = {
 _INTERNAL_CODE: Final = "internal"
 _MAX_PORT: Final = 65535
 _logger = structlog.stdlib.get_logger(__name__)
-
-
-class InvalidGrpcOptionError(InvalidOptionError):
-    """A gRPC server option that cannot work."""
-
-    code: ClassVar[str] = "invalid_grpc_option"
-    label: ClassVar[str] = "gRPC option"
 
 
 class GrpcBindError(LedgerError):
@@ -276,7 +272,9 @@ class GuardInterceptor(grpc.aio.ServerInterceptor):
 
 def _require_port(port: int) -> None:
     if not 0 <= port <= _MAX_PORT:
-        raise InvalidGrpcOptionError(option="port", requirement=f"between 0 and {_MAX_PORT}", value=port)
+        raise InvalidOptionError(
+            component=_COMPONENT, option="port", requirement=f"between 0 and {_MAX_PORT}", value=port
+        )
 
 
 def _bind(server: grpc.aio.Server, port: int) -> int:
@@ -315,10 +313,10 @@ def serve_grpc(
     The port is insecure: transport security is the mesh's job (Linkerd mTLS). On exit the server stops taking
     calls and gives those in flight ``grace`` seconds to finish before it cancels them.
 
-    Raises ``InvalidGrpcOptionError``, at once, for a ``port`` outside 0..65535 or a ``grace`` that is not a
+    Raises ``InvalidOptionError``, at once, for a ``port`` outside 0..65535 or a ``grace`` that is not a
     positive, finite number of seconds; and ``GrpcBindError`` on entering when the port cannot be bound, with
     nothing left running.
     """
     _require_port(port)
-    require_seconds(InvalidGrpcOptionError, "grace", grace)
+    require_seconds(_COMPONENT, "grace", grace)
     return _serving(port, register, registry, grace)

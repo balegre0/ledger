@@ -23,8 +23,8 @@ from ledger_kernel.events import Event
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.data.database import Database
-from ledger_platform.events import Dispatcher, PostgresEventBus
-from ledger_platform.events.dispatcher import ROWS_PER_INSERT, NoSchemasError, chunked
+from ledger_platform.events import PostgresEventBus
+from ledger_platform.events.dispatcher import ROWS_PER_INSERT, Dispatcher, NoSchemasError, chunked
 from ledger_testing.database import app_url
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.notifier import Channel

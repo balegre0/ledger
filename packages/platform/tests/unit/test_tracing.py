@@ -15,9 +15,6 @@ from opentelemetry.trace import NonRecordingSpan, SpanContext, SpanKind, StatusC
 from structlog.testing import capture_logs
 lazy from opentelemetry.sdk.trace import ReadableSpan
 
-from ledger_contracts.envelope import Envelope
-from ledger_kernel.clock import utc_now
-from ledger_kernel.ids import new_id
 from ledger_platform.observability.tracing import RedactingSpanExporter, Tracing
 
 TRACEPARENT: Final = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
@@ -126,18 +123,6 @@ def answer_a_query(tracing: Tracing) -> None:
     """A request span as FastAPI records it: the route, and the query string as the client sent it."""
     with tracing.tracer.start_as_current_span("GET /customers") as span:
         span.set_attributes({"http.route": "/customers", "url.query": QUERY})
-
-
-def event_carrying(traceparent: str | None) -> Envelope:
-    return Envelope(
-        id=new_id(),
-        type="ledger.events.invoicing.v1.DocumentIssued",
-        source="invoicing",
-        tenant=None,
-        time=utc_now(),
-        data=b"",
-        traceparent=traceparent,
-    )
 
 
 @pytest.fixture(scope="module")
@@ -262,7 +247,7 @@ def test_a_cancelled_consumer_is_not_reported_as_a_failure(
     span_id=st.integers(min_value=1, max_value=2**64 - 1),
     sampled=st.booleans(),
 )
-def test_whatever_trace_is_active_travels_through_an_event_and_is_continued(
+def test_whatever_trace_is_active_is_continued_from_its_traceparent(
     unexported: Tracing, trace_id: int, span_id: int, *, sampled: bool
 ) -> None:
     flags = TraceFlags(TraceFlags.SAMPLED if sampled else TraceFlags.DEFAULT)
@@ -270,9 +255,7 @@ def test_whatever_trace_is_active_travels_through_an_event_and_is_continued(
     with use_span(active):
         traceparent = unexported.current_traceparent()
     assert traceparent is not None
-    event = event_carrying(traceparent)
-    received = Envelope.from_headers(event.headers(), event.data)
-    with unexported.consuming("consume", received.traceparent) as consumer:
+    with unexported.consuming("consume", traceparent) as consumer:
         continued = consumer.get_span_context()
     assert continued.trace_id == trace_id
     assert continued.trace_flags.sampled is sampled

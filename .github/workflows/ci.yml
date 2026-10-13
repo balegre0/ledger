@@ -25,19 +25,17 @@ jobs:
           enable-cache: true
       - name: Install (locked)
         run: uv sync --locked
-      - name: Generated code is up to date
-        run: |
-          uv run poe proto
-          git add --intent-to-add contracts/src/ledger
-          git diff --exit-code -- contracts/src/ledger
       - name: Protobuf breaking changes against main
-        if: github.event_name == 'pull_request'
-        # Runs as the owner of the checkout, not as root: nothing root-owned lands in the workspace and git never
-        # has to trust a repository owned by someone else. HOME must be writable for buf's cache directory.
+        # Only once contracts/proto holds a .proto (the signer milestone adds the first). Runs as the owner of the
+        # checkout, not as root: nothing root-owned lands in the workspace and git never has to trust a
+        # repository owned by someone else. HOME must be writable for buf's cache directory. The image is the
+        # one deploy/local/images.toml pins.
+        if: github.event_name == 'pull_request' && hashFiles('contracts/proto/**/*.proto') != ''
         run: |
+          buf_image="$(uv run python -c 'import tomllib; print(tomllib.load(open("deploy/local/images.toml", "rb"))["images"]["buf"])')"
           if git cat-file -e origin/main:contracts/buf.yaml 2>/dev/null; then
             docker run --rm --user "$(id -u):$(id -g)" --env HOME=/tmp \
-              --volume "$PWD:/repo" --workdir /repo/contracts bufbuild/buf:1.73.0@sha256:75d8f756f0919dcded71e67968a91adfe55fe4dd62c4900c57bbfcd7fe625608 \
+              --volume "$PWD:/repo" --workdir /repo/contracts "$buf_image" \
               breaking --against '/repo/.git#branch=origin/main,subdir=contracts'
           fi
       - name: Format, lint, types x2, architecture, deps, spelling, tests

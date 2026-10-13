@@ -19,13 +19,16 @@ the whole lease. Callers claim in short units of their own, where the two differ
 
 A worker that stops gives back what it claimed and holds (``release``): the rows are ``ready`` again at once,
 their leases cleared, instead of waiting for the leases to run out. A row whose handler never started gets
-its attempt back; one whose handler started (and was stopped) keeps it, as a crash would.
+its attempt back; one whose handler started (and was stopped) keeps it, as a crash would. Its loop then ends
+in ``parked`` (a worker never returns: the runtime's ``Supervisor`` cancels it), and a loop that carries on
+past every ``Exception`` asks ``being_cancelled`` whether the one it caught is really its own cancellation.
 """
 
+import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
 from types import MappingProxyType
-from typing import Final, NotRequired, TypedDict, Unpack, final
+from typing import Final, Never, NotRequired, TypedDict, Unpack, final
 lazy from collections.abc import Mapping, Sequence
 
 from pydantic import TypeAdapter
@@ -232,3 +235,21 @@ async def recover(
         .all()
     )
     return Recovered(dead=statuses.count("dead"), ready=statuses.count("ready"))
+
+
+async def parked() -> Never:
+    """Wait to be cancelled: where a stopped worker's loop ends (a worker never returns)."""
+    forever: asyncio.Future[None] = asyncio.get_running_loop().create_future()  # nothing completes it
+    while True:
+        await forever
+
+
+def being_cancelled() -> bool:
+    """Whether the task running this has been asked to stop.
+
+    For a loop that catches every ``Exception`` to carry on: a clean-up that failed while the task was being
+    cancelled (a rollback on a broken connection) turns the cancellation into its own error, and such a loop
+    must end on it all the same, by raising it again.
+    """
+    current = asyncio.current_task()
+    return current is not None and current.cancelling() > 0

@@ -19,6 +19,7 @@ from ledger_kernel.jurisdiction import CountryCode, Jurisdiction
 from ledger_kernel.money import Currency, RoundingMode
 from ledger_kernel.regimes import Locale, RegimeDef, RegimeKey, RoundingPoint, RoundingRule, Source
 from ledger_platform.auth.tokens import TokenSettingsMissingError
+from ledger_platform.config.manifest import ChannelEntry, load_manifest
 from ledger_platform.config.settings import Settings
 from ledger_platform.data.migrations import SchemaMigrations
 from ledger_platform.events.consumers import ConsumerSpec
@@ -58,7 +59,6 @@ from ledger_platform.runtime.contexts import (
 )
 from ledger_platform.runtime.facade import UnguardedFacadeError, facade
 from ledger_platform.runtime.keys import BindingMissingError, Key, UndeclaredDependencyError
-from ledger_platform.runtime.manifest import ChannelEntry, load_manifest
 from ledger_platform.runtime.registries import CHANNELS, MODULES, REGIMES, Discovered
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
 lazy from ledger_platform.events.consumers import RawEvent

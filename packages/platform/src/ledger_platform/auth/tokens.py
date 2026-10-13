@@ -64,7 +64,10 @@ from ledger_platform.auth.providers.zitadel import (
 )
 from ledger_platform.config.options import InvalidOptionError, require_seconds
 from ledger_platform.config.settings import TokenAlgorithm
-lazy from ledger_platform.config.settings import ApiSettings, Settings
+lazy from ledger_platform.config.settings import Settings
+
+_COMPONENT: Final = "token"
+"""What this module's option errors name (``InvalidOptionError.component``)."""
 
 ASYMMETRIC_ALGORITHMS: Final = frozenset[str](get_args(TokenAlgorithm))
 """Every algorithm a token may be verified with: the ones the settings offer, all of them asymmetric."""
@@ -114,13 +117,6 @@ class InvalidTokenError(UnauthenticatedError):
     def __init__(self, problem: TokenProblem) -> None:
         super().__init__(f"the access token was refused: {problem}")
         self.problem = problem
-
-
-class InvalidTokenOptionError(InvalidOptionError):
-    """A token policy that cannot work."""
-
-    code: ClassVar[str] = "invalid_token_option"
-    label: ClassVar[str] = "token option"
 
 
 class TokenSettingsMissingError(LedgerError):
@@ -179,32 +175,27 @@ class TokenPolicy:
             ("keys_url", self.keys_url),
         ):
             if not value:
-                raise InvalidTokenOptionError(option=option, requirement="not empty", value=value)
+                raise InvalidOptionError(
+                    component=_COMPONENT, option=option, requirement="not empty", value=value
+                )
         if not self.algorithms or not self.algorithms <= ASYMMETRIC_ALGORITHMS:
-            raise InvalidTokenOptionError(
+            raise InvalidOptionError(
+                component=_COMPONENT,
                 option="algorithms",
                 requirement=f"some of {', '.join(sorted(ASYMMETRIC_ALGORITHMS))}",
                 value=sorted(self.algorithms),
             )
         if not 0 <= self.leeway <= MAX_LEEWAY:
-            raise InvalidTokenOptionError(
-                option="leeway", requirement=f"between 0 and {MAX_LEEWAY} seconds", value=self.leeway
+            raise InvalidOptionError(
+                component=_COMPONENT,
+                option="leeway",
+                requirement=f"between 0 and {MAX_LEEWAY} seconds",
+                value=self.leeway,
             )
-        require_seconds(InvalidTokenOptionError, "keys_ttl", self.keys_ttl)
-        require_seconds(InvalidTokenOptionError, "keys_max_age", self.keys_max_age, floor=self.keys_ttl)
-        require_seconds(InvalidTokenOptionError, "refresh_floor", self.refresh_floor)
-        require_seconds(InvalidTokenOptionError, "fetch_timeout", self.fetch_timeout)
-
-    @classmethod
-    def of(cls, settings: ApiSettings) -> TokenPolicy:
-        """The policy a service's settings describe."""
-        return cls(
-            issuer=settings.token_issuer,
-            audience=settings.token_audience,
-            keys_url=settings.token_jwks_url,
-            algorithms=frozenset(settings.token_algorithms),
-            leeway=settings.token_leeway_seconds,
-        )
+        require_seconds(_COMPONENT, "keys_ttl", self.keys_ttl)
+        require_seconds(_COMPONENT, "keys_max_age", self.keys_max_age, floor=self.keys_ttl)
+        require_seconds(_COMPONENT, "refresh_floor", self.refresh_floor)
+        require_seconds(_COMPONENT, "fetch_timeout", self.fetch_timeout)
 
     @classmethod
     def of_settings(cls, settings: Settings) -> TokenPolicy:

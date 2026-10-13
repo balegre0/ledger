@@ -1,4 +1,4 @@
-"""Calling a service's public API in a test: a caller's headers, its answers as JSON, what a POST made.
+"""Calling a module's public API in a test: a principal's headers, its answers as JSON, what a POST made.
 
 Every module's API takes a bearer token, an ``Idempotency-Key`` and a ``Ledger-Mode`` on each ``POST``, and
 answers pages as ``{"items": [...], "has_more": ..., "next_cursor": ..., "previous_cursor": ...}`` (§9.7):
@@ -6,7 +6,7 @@ these helpers speak that, with tokens of ``LocalIssuer``.
 """
 
 from dataclasses import dataclass
-from typing import Final, TypedDict, final
+from typing import ClassVar, Final, TypedDict, final
 lazy from collections.abc import Mapping
 
 from pydantic import TypeAdapter
@@ -52,8 +52,11 @@ def page(response: httpx.Response) -> Page:
 
 @final
 @dataclass(frozen=True, slots=True)
-class Caller:
+class TestPrincipal:
     """A principal of ``issuer``, ``subject`` of ``organization`` holding ``roles``: its requests' headers."""
+
+    __test__: ClassVar[bool] = False
+    """Not a test class, though its name starts like one: pytest leaves it uncollected."""
 
     issuer: LocalIssuer
     subject: str = SUBJECT

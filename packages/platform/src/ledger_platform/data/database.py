@@ -1,31 +1,24 @@
-"""PostgreSQL: one transaction per unit of work, with the tenant enforced by row-level security.
+"""PostgreSQL: the pool of an app's connections, its limits, and what a unit of work checks of them.
 
-Every transaction sets ``ledger.organization_id``, ``ledger.company_id`` and ``ledger.mode``
-(transaction-local) from its scope (``ledger_kernel.tenancy.Scope``): a company of an organization
-(``Tenant``), or an organization alone (``OrganizationScope``), each in a mode or in none. Tables protected by
-``tenant_isolation`` show and accept only the rows of that organization and company; tables an organization
-owns as a whole, protected by ``organization_isolation``, the rows of that organization. Without a scope they
-show nothing and accept nothing (fail closed). A transaction commits only if every statement in
-it succeeded, and what runs after the commit can no longer change the outcome.
+``Database`` pools the connections (``BoundDatabase`` opens the units of work on it, ``data.bound``) and
+probes the server on connections of their own. ``scope_settings`` is what a unit sets its scope from, and
+``is_committable`` whether its transaction can still commit.
 """
 
 from abc import ABCMeta, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
-from functools import partial
 from math import ceil
-from types import BuiltinFunctionType, FunctionType, MethodType
 from typing import ClassVar, Final, Protocol, final
-lazy from collections.abc import AsyncGenerator, Callable, Sequence
+lazy from collections.abc import AsyncGenerator
 
 import psycopg
 import structlog
 from psycopg.pq import TransactionStatus
-from sqlalchemy import MetaData, Text, event, func, select, text, type_coerce
+from sqlalchemy import event, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import NullPool
 lazy from sqlalchemy import Column, Table
 lazy from sqlalchemy.engine import URL
@@ -35,35 +28,23 @@ lazy from sqlalchemy.sql.base import ReadOnlyColumnCollection
 
 from ledger_kernel.errors import LedgerError
 from ledger_platform.config.options import InvalidOptionError, require_at_least
+from ledger_platform.config.settings import DATABASE_URL_SCHEME
 lazy from ledger_kernel.tenancy import Scope
 
-_DRIVERS: Final = ("postgresql+psycopg", "postgresql+psycopg_async")
+_COMPONENT: Final = "database"
+"""What this module's option errors name (``InvalidOptionError.component``)."""
+
+_DRIVER: Final = DATABASE_URL_SCHEME.removesuffix("://")
+_DRIVERS: Final = (_DRIVER, f"{_DRIVER}_async")
 """The only driver, in the two spellings SQLAlchemy has for its asynchronous use (one dialect, one
 connection class): transactions are checked through its connection (see ``is_committable``)."""
 _OWNED_PARAMETERS: Final = ("application_name", "connect_timeout", "options")
 """Connection parameters the chassis sets from ``Database.create``'s arguments: a URL must not carry them."""
-SET_SCOPE: Final = text(
-    """
-    SELECT set_config('ledger.organization_id', :organization, true),
-           set_config('ledger.company_id', :company, true),
-           set_config('ledger.mode', :mode, true)
-    """
-)
-"""Sets the transaction's scope: run it with ``scope_settings(scope)``, before any statement of the scope."""
 _PING: Final = text("SELECT 1")
-_TENANT_COLUMNS: Final = ("organization_id", "company_id")
-"""Each is also the name of a setting: ``ledger.organization_id``, ``ledger.company_id``."""
-TENANT_POLICY: Final = "tenant_isolation"
-ORGANIZATION_POLICY: Final = "organization_isolation"
-_ORGANIZATION_SETTING: Final = "organization_id"
-_IDENTIFIERS: Final = make_url(f"{_DRIVERS[0]}://").get_dialect()().identifier_preparer
-"""Quotes a name exactly when PostgreSQL needs it quoted: DDL is text, so the names in it must be safe.
-
-The preparer of the dialect the engine uses, found through its URL scheme (the dialect class is untyped).
-"""
 _SECOND: Final = timedelta(seconds=1)
-_MILLISECOND: Final = timedelta(milliseconds=1)
-_LONGEST: Final = timedelta(milliseconds=2**31 - 1)
+MILLISECOND: Final = timedelta(milliseconds=1)
+"""The unit of PostgreSQL's timeouts (``statement_timeout``, ``lock_timeout``, ...)."""
+LONGEST_TIMEOUT: Final = timedelta(milliseconds=2**31 - 1)
 """PostgreSQL keeps its timeouts in 32-bit milliseconds and refuses every connection that asks for more
 (about 24.8 days); the limits that are not PostgreSQL's follow the same ceiling."""
 _logger = structlog.stdlib.get_logger(__name__)
@@ -74,26 +55,6 @@ type AnyTable = Table[ReadOnlyColumnCollection[str, Column[object]]]
 SQLAlchemy 2.1 gives a bare ``Table`` the default ``Table[ReadOnlyColumnCollection[str, Column[Any]]]``, and
 mypy refuses the ``Any`` of that default wherever it is spelled out; ``object`` accepts the same tables.
 """
-
-
-class PlatformTable(DeclarativeBase):
-    """Tables the chassis adds to every service's database (outbox, inbox, idempotency keys).
-
-    Each table registers in ``metadata`` when the module of its class is imported (``outbox``, ``consumer``,
-    ``idempotency``), so migrations create ``ledger_platform.schema.CHASSIS_METADATA`` instead, which has
-    imported them all.
-    """
-
-    metadata: ClassVar[MetaData] = MetaData()
-
-
-class MissingTenantColumnError(LedgerError):
-    """``tenant_isolation`` asked for a table that lacks ``organization_id`` or ``company_id``."""
-
-    code: ClassVar[str] = "missing_tenant_column"
-
-    def __init__(self, table: str, columns: tuple[str, ...]) -> None:
-        super().__init__(f"table {table!r} is missing the tenant columns {', '.join(columns)}")
 
 
 class AbortedTransactionError(LedgerError):
@@ -113,26 +74,20 @@ class AbortedTransactionError(LedgerError):
 
 
 class ClosedUnitOfWorkError(LedgerError):
-    """A callback was added to a unit of work whose transaction has ended. A bug in the caller."""
+    """Work was added to a unit of work whose transaction has ended. A bug in the caller."""
 
     code: ClassVar[str] = "closed_unit_of_work"
 
     def __init__(self) -> None:
-        super().__init__("the transaction has ended: add after-commit callbacks inside it, before it exits")
-
-
-class InvalidDatabaseOptionError(InvalidOptionError):
-    """A database option that cannot work."""
-
-    code: ClassVar[str] = "invalid_database_option"
-    label: ClassVar[str] = "database option"
+        super().__init__("the transaction has ended: add its work and callbacks inside it, before it exits")
 
 
 def _within(option: str, value: timedelta, *, floor: timedelta, named: str) -> None:
-    if not floor <= value <= _LONGEST:
-        raise InvalidDatabaseOptionError(
+    if not floor <= value <= LONGEST_TIMEOUT:
+        raise InvalidOptionError(
+            component=_COMPONENT,
             option=option,
-            requirement=f"between {named} and {_LONGEST // _MILLISECOND} milliseconds",
+            requirement=f"between {named} and {LONGEST_TIMEOUT // MILLISECOND} milliseconds",
             value=value,
         )
 
@@ -144,7 +99,7 @@ def _whole_seconds(option: str, value: timedelta) -> None:
 
 def _milliseconds(option: str, value: timedelta) -> None:
     """Zero would switch the limit off in PostgreSQL, and so would anything that rounds down to it."""
-    _within(option, value, floor=_MILLISECOND, named="one millisecond")
+    _within(option, value, floor=MILLISECOND, named="one millisecond")
 
 
 @final
@@ -192,8 +147,11 @@ DEFAULT_POOL_SIZE: Final = 10
 def _require_psycopg(url: URL) -> None:
     driver = url.drivername
     if driver not in _DRIVERS:
-        raise InvalidDatabaseOptionError(
-            option="url driver", requirement=" or ".join(repr(name) for name in _DRIVERS), value=driver
+        raise InvalidOptionError(
+            component=_COMPONENT,
+            option="url driver",
+            requirement=" or ".join(repr(name) for name in _DRIVERS),
+            value=driver,
         )
 
 
@@ -201,118 +159,18 @@ def _leave_the_owned_parameters_out(url: URL) -> None:
     """A parameter of the URL would be overwritten by the chassis's own value without a word."""
     for key in _OWNED_PARAMETERS:
         if key in url.query:
-            raise InvalidDatabaseOptionError(
-                option=f"url query {key}", requirement="absent (the chassis sets it)", value=url.query[key]
+            raise InvalidOptionError(
+                component=_COMPONENT,
+                option=f"url query {key}",
+                requirement="absent (the chassis sets it)",
+                value=url.query[key],
             )
-
-
-def _matches(column: str, setting: str) -> str:
-    """``column`` equals the ``ledger.<setting>`` the transaction set; no or empty setting matches nothing."""
-    return f"{_IDENTIFIERS.quote(column)} = NULLIF(current_setting('ledger.{setting}', true), '')::uuid"
-
-
-def ddl_name(table: AnyTable) -> str:
-    """``table``'s name as DDL spells it: with its schema if it has one, quoted where PostgreSQL needs it."""
-    return _IDENTIFIERS.format_table(table)
-
-
-def tenant_isolation(table: AnyTable) -> tuple[str, ...]:
-    """DDL (for a migration) that shows and accepts only the current tenant's rows of ``table``.
-
-    A row belongs to the tenant when both its ``organization_id`` and its ``company_id`` are the ones the
-    transaction set; both columns are required. Running the DDL again replaces the policy.
-
-    The policy is permissive, PostgreSQL's default, and has to be: with row-level security on, a table shows
-    nothing unless a permissive policy lets the row through, and a restrictive policy only narrows what the
-    permissive ones allow, so a restrictive one alone would deny every row. Policies are OR-ed, so another
-    permissive policy on the table would open it to more rows: narrow with restrictive ones.
-    """
-    missing = tuple(column for column in _TENANT_COLUMNS if column not in table.c)
-    if missing:
-        raise MissingTenantColumnError(table.name, missing)
-    name = ddl_name(table)
-    rule = " AND ".join(_matches(column, column) for column in _TENANT_COLUMNS)
-    return (
-        f"ALTER TABLE {name} ENABLE ROW LEVEL SECURITY",
-        f"ALTER TABLE {name} FORCE ROW LEVEL SECURITY",
-        f"DROP POLICY IF EXISTS {TENANT_POLICY} ON {name}",
-        f"CREATE POLICY {TENANT_POLICY} ON {name} USING ({rule}) WITH CHECK ({rule})",
-    )
-
-
-def tenant_isolation_removal(table: AnyTable) -> tuple[str, ...]:
-    """DDL (for a migration's downgrade) that undoes ``tenant_isolation``; harmless on a table without it."""
-    name = ddl_name(table)
-    return (
-        f"DROP POLICY IF EXISTS {TENANT_POLICY} ON {name}",
-        f"ALTER TABLE {name} NO FORCE ROW LEVEL SECURITY",
-        f"ALTER TABLE {name} DISABLE ROW LEVEL SECURITY",
-    )
-
-
-def organization_isolation(table: AnyTable, *, column: str = _ORGANIZATION_SETTING) -> tuple[str, ...]:
-    """DDL (for a migration) that shows and accepts only the current organization's rows of ``table``.
-
-    For a table an organization owns as a whole (its companies, its memberships): a transaction scoped to the
-    organization, or to any of its companies, sees all of its rows and no other organization's; without a
-    scope, none. ``column`` holds the organization's id (``id`` for the table of organizations itself).
-    Running the DDL again replaces the policy. Like ``tenant_isolation``'s, the policy is permissive: another
-    permissive policy on the same table would widen it.
-    """
-    if column not in table.c:
-        raise MissingTenantColumnError(table.name, (column,))
-    name = ddl_name(table)
-    rule = _matches(column, _ORGANIZATION_SETTING)
-    return (
-        f"ALTER TABLE {name} ENABLE ROW LEVEL SECURITY",
-        f"ALTER TABLE {name} FORCE ROW LEVEL SECURITY",
-        f"DROP POLICY IF EXISTS {ORGANIZATION_POLICY} ON {name}",
-        f"CREATE POLICY {ORGANIZATION_POLICY} ON {name} USING ({rule}) WITH CHECK ({rule})",
-    )
-
-
-def organization_isolation_removal(table: AnyTable) -> tuple[str, ...]:
-    """DDL (for a migration's downgrade) that undoes ``organization_isolation``; harmless without it."""
-    name = ddl_name(table)
-    return (
-        f"DROP POLICY IF EXISTS {ORGANIZATION_POLICY} ON {name}",
-        f"ALTER TABLE {name} NO FORCE ROW LEVEL SECURITY",
-        f"ALTER TABLE {name} DISABLE ROW LEVEL SECURITY",
-    )
-
-
-type Callback = Callable[[], None]
-"""Runs after a commit. A plain function: a coroutine function is rejected by the type checkers."""
-
-
-@final
-class _Callbacks:
-    """The callbacks of one transaction: taken while it is open, handed over once when it has ended."""
-
-    __slots__ = ("_closed", "_taken")
-
-    def __init__(self) -> None:
-        self._taken: list[Callback] = []
-        self._closed = False
-
-    def add(self, callback: Callback) -> None:
-        if self._closed:
-            raise ClosedUnitOfWorkError
-        self._taken.append(callback)
-
-    def close(self) -> tuple[Callback, ...]:
-        """Take no more callbacks; the ones taken so far, which no one else will ever run."""
-        self._closed = True
-        taken = tuple(self._taken)
-        self._taken.clear()
-        return taken
 
 
 def scope_settings(scope: Scope | None) -> dict[str, str]:
     """What ``ledger.organization_id``, ``ledger.company_id`` and ``ledger.mode`` are set to; empty if absent.
 
-    The parameters of ``SET_SCOPE``: ``Database.transaction`` sets them, and so does a data migration that
-    runs a statement in each scope (``ledger_platform.migrations.run_per_scope``).
+    A unit of work sets them as it begins (``BoundDatabase``), transaction-local, from its scope.
     """
     if scope is None:
         return {"organization": "", "company": "", "mode": ""}
@@ -322,47 +180,6 @@ def scope_settings(scope: Scope | None) -> dict[str, str]:
         "company": "" if company is None else str(company),
         "mode": "" if mode is None else mode.value,
     }
-
-
-@final
-class UnitOfWork:
-    """One open transaction: state changes, outbox and inbox commit together or not at all.
-
-    Built by ``Database.transaction``, which closes it when the transaction ends and runs its callbacks.
-    """
-
-    __slots__ = ("_after_commit", "_connection", "_scope")
-
-    def __init__(self, connection: AsyncConnection, after_commit: _Callbacks, scope: Scope | None) -> None:
-        self._connection = connection
-        self._after_commit = after_commit
-        self._scope = scope
-
-    @property
-    def scope(self) -> Scope | None:
-        """Whose rows the transaction may touch, as ``Database.transaction`` was given it.
-
-        For repositories that name the same tenant in their statements: row-level security enforces the scope,
-        and the application filters by it as well (tenancy is checked twice, §2).
-        """
-        return self._scope
-
-    @property
-    def connection(self) -> AsyncConnection:
-        """For repositories: every statement runs inside the transaction."""
-        return self._connection
-
-    def after_commit(self, callback: Callback) -> None:
-        """Call ``callback`` once the transaction has committed; never if it rolls back.
-
-        Callbacks run in the order added, once. They only schedule or signal. One that raises is logged and
-        does not stop the others: the commit has happened and nothing a callback does can undo it.
-
-        Add them inside the ``async with``. Once the transaction has ended, whether it committed or rolled
-        back, and also from inside a callback, this raises ``ClosedUnitOfWorkError``: a callback that could
-        never run must not be accepted in silence.
-        """
-        self._after_commit.add(callback)
 
 
 async def is_committable(connection: AsyncConnection) -> bool:
@@ -375,28 +192,6 @@ async def is_committable(connection: AsyncConnection) -> bool:
         isinstance(driver, psycopg.AsyncConnection)
         and driver.info.transaction_status is not TransactionStatus.INERROR
     )
-
-
-def _name_of(callback: Callback) -> str:
-    """Where to find ``callback`` in the code: module and qualified name of the function or method behind it.
-
-    A partial says so and names the function it wraps; any other callable is named by its type.
-    """
-    if isinstance(callback, partial):
-        return f"partial({_name_of(callback.func)})"
-    if isinstance(callback, FunctionType | MethodType | BuiltinFunctionType):
-        return f"{callback.__module__ or 'builtins'}.{callback.__qualname__}"
-    kind = type(callback)
-    return f"{kind.__module__}.{kind.__qualname__}"
-
-
-def _run(callbacks: tuple[Callback, ...]) -> None:
-    """Run each callback, in order, whatever the others do."""
-    for callback in callbacks:
-        try:
-            callback()
-        except Exception:
-            _logger.exception("database.after_commit_failed", callback=_name_of(callback))
 
 
 _SESSION_RESET: Final = "RESET ROLE; RESET ALL"
@@ -477,7 +272,7 @@ def _server_options(limits: DatabaseLimits) -> str:
         "lock_timeout": limits.lock_timeout,
         "idle_in_transaction_session_timeout": limits.idle_in_transaction_session_timeout,
     }
-    return " ".join(f"-c {name}={timeout // _MILLISECOND}" for name, timeout in timeouts.items())
+    return " ".join(f"-c {name}={timeout // MILLISECOND}" for name, timeout in timeouts.items())
 
 
 @final
@@ -523,7 +318,7 @@ class Database:
         values, such as the ``Key (...)=(...)`` of a unique violation: the logs withhold it
         (``ledger_platform.observability.logs``).
         """
-        require_at_least(InvalidDatabaseOptionError, "pool_size", pool_size)
+        require_at_least(_COMPONENT, "pool_size", pool_size)
         parsed = make_url(url)
         _require_psycopg(parsed)
         _leave_the_owned_parameters_out(parsed)
@@ -574,38 +369,8 @@ class Database:
 
     @property
     def engine(self) -> AsyncEngine:
-        """For migrations and tests; services use ``transaction``."""
+        """The pool: units of work run on it (``BoundDatabase``), and so do migrations and tests."""
         return self._engine
-
-    @asynccontextmanager
-    async def transaction(self, scope: Scope | None) -> AsyncGenerator[UnitOfWork]:
-        """A transaction scoped to ``scope``: commits on normal exit, rolls back on an exception.
-
-        A ``Tenant`` scopes it to one company of an organization, an ``OrganizationScope`` to the rows the
-        organization owns as a whole, ``None`` to no protected row; the scope's mode is set too. It never
-        reports a commit that did not happen: if a statement failed and the caller went on, the exit raises
-        ``AbortedTransactionError`` and the callbacks do not run.
-        """
-        callbacks = _Callbacks()
-        try:
-            async with self._engine.begin() as connection:
-                await connection.execute(SET_SCOPE, scope_settings(scope))
-                yield UnitOfWork(connection, callbacks, scope)
-                if not await is_committable(connection):
-                    raise AbortedTransactionError
-        finally:
-            after_commit = callbacks.close()  # rolled back or committed, the unit takes no more callbacks
-        _run(after_commit)  # reached only when the transaction committed
-
-    async def missing_tables(self, names: Sequence[str]) -> tuple[str, ...]:
-        """Which of the tables ``names`` the database lacks (``to_regclass``, by the search path).
-
-        On a connection of its own, like ``ping``: for a readiness check, never waiting for the pool.
-        """
-        found = select(*(type_coerce(func.to_regclass(name), Text) for name in names))
-        async with self.probing() as connection:
-            row = (await connection.execute(found)).one()
-        return tuple(name for name, table in zip(names, row, strict=True) if table is None)
 
     async def ping(self) -> None:
         """Raises unless PostgreSQL answers, on a connection of its own (``probing``)."""

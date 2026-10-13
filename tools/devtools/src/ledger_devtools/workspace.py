@@ -8,8 +8,8 @@ lazy from collections.abc import Mapping
 lazy from pathlib import Path
 
 from ledger_kernel.errors import LedgerError
-from ledger_platform.runtime.manifest import InvalidManifestError, PackageKind, load_manifest
-lazy from ledger_platform.runtime.manifest import PackageManifest
+from ledger_platform.config.manifest import InvalidManifestError, PackageKind, load_manifest
+lazy from ledger_platform.config.manifest import PackageManifest
 
 MANIFEST_GLOBS: Final = (
     "packages/*/manifest.toml",

@@ -18,7 +18,7 @@ from ledger_kernel.access import SubjectId
 from ledger_kernel.ids import CompanyId, new_id
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.providers.zitadel import organization_of
-from ledger_testing.api import Caller, created, document, page
+from ledger_testing.api import TestPrincipal, created, document, page
 from ledger_testing.database import app_url
 from ledger_testing.issuer import LocalIssuer
 from ledger_testing.waiting import eventually, waits_for_a_lock
@@ -53,7 +53,7 @@ def segment(part: dict[str, object]) -> str:
 
 
 async def test_a_company_is_created_owned_by_its_creator_and_readable(
-    client: httpx.AsyncClient, owner: Caller
+    client: httpx.AsyncClient, owner: TestPrincipal
 ) -> None:
     response = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("k-1"))
     assert response.status_code == 201
@@ -75,7 +75,7 @@ async def test_a_company_is_created_owned_by_its_creator_and_readable(
 
 
 async def test_the_organization_is_unknown_until_its_first_company(
-    client: httpx.AsyncClient, owner: Caller
+    client: httpx.AsyncClient, owner: TestPrincipal
 ) -> None:
     response = await client.get("/v1/organization", headers=owner.bearer())
     assert (response.status_code, document(response)["code"]) == (404, "organization_not_found")
@@ -97,7 +97,9 @@ async def test_every_route_needs_a_bearer_token(client: httpx.AsyncClient, metho
     assert (response.status_code, document(response)["code"]) == (401, "missing_token")
 
 
-async def test_a_post_without_an_idempotency_key_is_refused(client: httpx.AsyncClient, owner: Caller) -> None:
+async def test_a_post_without_an_idempotency_key_is_refused(
+    client: httpx.AsyncClient, owner: TestPrincipal
+) -> None:
     headers = owner.bearer() | {"Ledger-Mode": "test"}
     response = await client.post("/v1/companies", json=DUARTE, headers=headers)
     assert (response.status_code, document(response)["code"]) == (422, "invalid_request")
@@ -107,7 +109,7 @@ async def test_a_post_without_an_idempotency_key_is_refused(client: httpx.AsyncC
     ("mode", "code"), [(None, "mode_required"), ("TEST", "mode_invalid")], ids=["missing", "not-a-mode"]
 )
 async def test_a_post_acts_in_the_mode_it_names(
-    client: httpx.AsyncClient, owner: Caller, mode: str | None, code: str
+    client: httpx.AsyncClient, owner: TestPrincipal, mode: str | None, code: str
 ) -> None:
     """An idempotent route is a moded route (Decision 4): its key is kept per mode."""
     headers = owner.bearer() | {"Idempotency-Key": "k-1"} | ({} if mode is None else {"Ledger-Mode": mode})
@@ -116,7 +118,7 @@ async def test_a_post_acts_in_the_mode_it_names(
     assert page(await client.get("/v1/companies", headers=owner.bearer()))["items"] == []
 
 
-async def test_a_key_is_kept_per_mode(client: httpx.AsyncClient, owner: Caller) -> None:
+async def test_a_key_is_kept_per_mode(client: httpx.AsyncClient, owner: TestPrincipal) -> None:
     """The same key and body in live mode are a new request there: it runs, and finds the taxpayer taken
     (one active company per tax id, whatever the mode); in test mode the key replays."""
     registered = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("k-1"))
@@ -128,7 +130,7 @@ async def test_a_key_is_kept_per_mode(client: httpx.AsyncClient, owner: Caller) 
 
 
 async def test_a_retried_post_creates_once_and_answers_the_same(
-    client: httpx.AsyncClient, owner: Caller
+    client: httpx.AsyncClient, owner: TestPrincipal
 ) -> None:
     first = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("k-1"))
     again = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("k-1"))
@@ -141,7 +143,7 @@ async def test_a_retried_post_creates_once_and_answers_the_same(
 
 
 async def test_a_retry_with_its_fields_in_another_order_is_the_same_request(
-    client: httpx.AsyncClient, owner: Caller
+    client: httpx.AsyncClient, owner: TestPrincipal
 ) -> None:
     first = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("k-1"))
     reordered = '{"legal_name": "Ferretería Duarte, S.R.L.",   "tax_id": "101-85004-3"}'
@@ -156,7 +158,7 @@ async def test_a_retry_with_its_fields_in_another_order_is_the_same_request(
 async def test_registering_a_company_without_the_organization_s_admin_role_is_forbidden(
     client: httpx.AsyncClient, local_issuer: LocalIssuer, roles: tuple[str, ...]
 ) -> None:
-    member = Caller(local_issuer, subject="2002", roles=roles)
+    member = TestPrincipal(local_issuer, subject="2002", roles=roles)
     response = await client.post("/v1/companies", json=DUARTE, headers=member.posting("k-1"))
     assert (response.status_code, document(response)["code"]) == (403, "forbidden")
     assert page(await client.get("/v1/companies", headers=member.bearer()))["items"] == []
@@ -166,11 +168,13 @@ async def test_the_role_is_checked_before_what_the_request_must_carry(
     client: httpx.AsyncClient, local_issuer: LocalIssuer
 ) -> None:
     """As every route checks the caller's permission before its Idempotency-Key and its body."""
-    response = await client.post("/v1/companies", json={}, headers=Caller(local_issuer).bearer())
+    response = await client.post("/v1/companies", json={}, headers=TestPrincipal(local_issuer).bearer())
     assert (response.status_code, document(response)["code"]) == (403, "forbidden")
 
 
-async def test_a_key_reused_for_another_body_is_refused(client: httpx.AsyncClient, owner: Caller) -> None:
+async def test_a_key_reused_for_another_body_is_refused(
+    client: httpx.AsyncClient, owner: TestPrincipal
+) -> None:
     await created(client, "/v1/companies", DUARTE, owner.posting("k-1"))
     other = {"tax_id": "130000012", "legal_name": "Otra"}
     response = await client.post("/v1/companies", json=other, headers=owner.posting("k-1"))
@@ -178,13 +182,13 @@ async def test_a_key_reused_for_another_body_is_refused(client: httpx.AsyncClien
 
 
 async def test_a_key_belongs_to_its_caller(
-    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: Caller
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal
 ) -> None:
     mine = await created(client, "/v1/companies", DUARTE, owner.posting("k-1"))
     theirs = await client.post(
         "/v1/companies",
         json=DUARTE | {"tax_id": "401500022"},
-        headers=Caller(local_issuer, organization="1002", roles=(ORGANIZATION_ADMIN,)).posting("k-1"),
+        headers=TestPrincipal(local_issuer, organization="1002", roles=(ORGANIZATION_ADMIN,)).posting("k-1"),
     )
     assert theirs.status_code == 201
     assert "idempotent-replayed" not in theirs.headers
@@ -192,7 +196,7 @@ async def test_a_key_belongs_to_its_caller(
 
 
 async def test_two_posts_with_one_key_at_once_create_one_company(
-    client: httpx.AsyncClient, owner: Caller
+    client: httpx.AsyncClient, owner: TestPrincipal
 ) -> None:
     headers = owner.posting("k-together")
     first, second = await asyncio.gather(
@@ -219,14 +223,14 @@ async def test_two_posts_with_one_key_at_once_create_one_company(
     ids=["tax-id", "legal-name", "unknown-field", "missing-field"],
 )
 async def test_a_company_that_cannot_be_registered_is_refused(
-    client: httpx.AsyncClient, owner: Caller, payload: dict[str, str], code: str
+    client: httpx.AsyncClient, owner: TestPrincipal, payload: dict[str, str], code: str
 ) -> None:
     response = await client.post("/v1/companies", json=payload, headers=owner.posting("k-bad"))
     assert (response.status_code, document(response)["code"]) == (422, code)
 
 
 async def test_a_tax_id_the_organization_has_is_a_conflict(
-    client: httpx.AsyncClient, owner: Caller, company: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
     del company
     response = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("k-2"))
@@ -234,12 +238,12 @@ async def test_a_tax_id_the_organization_has_is_a_conflict(
 
 
 async def test_a_taxpayer_another_organization_holds_is_the_same_conflict_telling_nothing_more(
-    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: Caller, company: str
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal, company: str
 ) -> None:
     """One RNC, one active company, wherever it is: the answer is the one the caller's organization gets."""
     del company
     ours = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("k-2"))
-    other = Caller(local_issuer, organization="1002", roles=(ORGANIZATION_ADMIN,))
+    other = TestPrincipal(local_issuer, organization="1002", roles=(ORGANIZATION_ADMIN,))
     theirs = await client.post("/v1/companies", json=DUARTE, headers=other.posting("k-1"))
     told, answered = document(theirs), document(ours)
     del told["request_id"], answered["request_id"]  # each request's own trace
@@ -248,11 +252,11 @@ async def test_a_taxpayer_another_organization_holds_is_the_same_conflict_tellin
 
 
 async def test_a_deactivated_company_s_taxpayer_may_be_registered_again(
-    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: Caller, company: str
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal, company: str
 ) -> None:
     headers = owner.posting("k-off") | {"If-Match": "*"}
     assert (await client.post(f"/v1/companies/{company}/deactivate", headers=headers)).status_code == 200
-    other = Caller(local_issuer, organization="1002", roles=(ORGANIZATION_ADMIN,))
+    other = TestPrincipal(local_issuer, organization="1002", roles=(ORGANIZATION_ADMIN,))
     theirs = await created(client, "/v1/companies", DUARTE, other.posting("k-1"))
     assert theirs != company
 
@@ -301,7 +305,7 @@ async def test_a_token_for_another_audience_is_refused(
 
 
 async def test_an_id_token_of_the_same_project_is_refused_as_no_access_token(
-    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: Caller, company: str
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal, company: str
 ) -> None:
     """Shaped as Zitadel v4's ID token of a login: signed by the provider, the project among its audiences."""
     id_token = local_issuer.token(
@@ -328,7 +332,7 @@ async def test_an_id_token_of_the_same_project_is_refused_as_no_access_token(
 
 
 async def test_without_a_key_ever_fetched_a_token_cannot_be_checked(
-    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: Caller
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal
 ) -> None:
     local_issuer.failure = (HTTPStatus.BAD_GATEWAY, b"down")
     response = await client.get("/v1/companies", headers=owner.bearer())
@@ -336,7 +340,7 @@ async def test_without_a_key_ever_fetched_a_token_cannot_be_checked(
 
 
 async def test_keys_held_keep_working_while_the_provider_is_down(
-    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: Caller
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal
 ) -> None:
     assert (await client.get("/v1/companies", headers=owner.bearer())).status_code == 200
     local_issuer.failure = (HTTPStatus.BAD_GATEWAY, b"down")
@@ -345,7 +349,7 @@ async def test_keys_held_keep_working_while_the_provider_is_down(
 
 
 async def test_the_age_of_the_provider_s_keys_is_a_metric_of_the_service(
-    client: httpx.AsyncClient, owner: Caller
+    client: httpx.AsyncClient, owner: TestPrincipal
 ) -> None:
     before = (await client.get("/metrics")).text
     assert "\nledger_auth_keys_age_seconds +Inf\n" in before
@@ -359,7 +363,7 @@ async def test_the_age_of_the_provider_s_keys_is_a_metric_of_the_service(
 
 
 async def test_a_caller_pages_through_the_companies_it_holds_a_role_in(
-    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: Caller
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal
 ) -> None:
     for number, rnc in enumerate(("101850043", "130000012", "401007551")):
         payload = {"tax_id": rnc, "legal_name": f"Company {number}"}
@@ -383,9 +387,11 @@ async def test_a_caller_pages_through_the_companies_it_holds_a_role_in(
         )
     )
     assert (back["items"], back["has_more"], back["previous_cursor"]) == (first["items"], False, None)
-    partner = page(await client.get("/v1/companies", headers=Caller(local_issuer, subject="2002").bearer()))
+    partner = page(
+        await client.get("/v1/companies", headers=TestPrincipal(local_issuer, subject="2002").bearer())
+    )
     stranger = page(
-        await client.get("/v1/companies", headers=Caller(local_issuer, organization="1002").bearer())
+        await client.get("/v1/companies", headers=TestPrincipal(local_issuer, organization="1002").bearer())
     )
     assert (partner["items"], stranger["items"]) == ([], [])
 
@@ -405,7 +411,7 @@ async def test_a_caller_pages_through_the_companies_it_holds_a_role_in(
     ids=["no-items", "too-many", "foreign-cursor", "foreign-cursor-backwards", "both-cursors"],
 )
 async def test_a_page_that_cannot_be_asked_for_is_refused(
-    client: httpx.AsyncClient, owner: Caller, params: dict[str, str | int], code: str
+    client: httpx.AsyncClient, owner: TestPrincipal, params: dict[str, str | int], code: str
 ) -> None:
     response = await client.get("/v1/companies", params=params, headers=owner.bearer())
     assert (response.status_code, document(response)["code"]) == (422, code)
@@ -428,7 +434,10 @@ async def test_a_company_is_not_found_by_whoever_holds_no_role_in_it(
     client: httpx.AsyncClient, local_issuer: LocalIssuer, company: str, reach: Reach
 ) -> None:
     method, suffix, extra = reach
-    for caller in (Caller(local_issuer, subject="2002"), Caller(local_issuer, organization="1002")):
+    for caller in (
+        TestPrincipal(local_issuer, subject="2002"),
+        TestPrincipal(local_issuer, organization="1002"),
+    ):
         response = await client.request(
             method,
             f"/v1/companies/{company}{suffix}",
@@ -436,7 +445,7 @@ async def test_a_company_is_not_found_by_whoever_holds_no_role_in_it(
             headers=caller.bearer() | extra,
         )
         assert (response.status_code, document(response)["code"]) == (404, "company_not_found")
-    owner = Caller(local_issuer)
+    owner = TestPrincipal(local_issuer)
     unknown = await client.request(
         method, f"/v1/companies/{new_id()}{suffix}", headers=owner.bearer() | extra
     )
@@ -453,7 +462,7 @@ async def test_a_viewer_reads_but_does_not_change(
     client: httpx.AsyncClient, local_issuer: LocalIssuer, identity_db: BoundDatabase, company: str
 ) -> None:
     await grant(identity_db, company, "3001", Role.VIEWER)
-    viewer = Caller(local_issuer, subject="3001")
+    viewer = TestPrincipal(local_issuer, subject="3001")
     assert (await client.get(f"/v1/companies/{company}", headers=viewer.bearer())).status_code == 200
     listed = page(await client.get("/v1/companies", headers=viewer.bearer()))
     assert [item["id"] for item in listed["items"]] == [company]
@@ -471,7 +480,7 @@ async def test_a_caller_without_the_permission_is_refused_before_its_preconditio
     client: httpx.AsyncClient, local_issuer: LocalIssuer, identity_db: BoundDatabase, company: str
 ) -> None:
     await grant(identity_db, company, "3001", Role.VIEWER)
-    viewer = Caller(local_issuer, subject="3001")
+    viewer = TestPrincipal(local_issuer, subject="3001")
     unconditional = await client.patch(
         f"/v1/companies/{company}", json={"legal_name": "X"}, headers=viewer.bearer()
     )
@@ -489,7 +498,7 @@ async def test_an_admin_demoted_while_its_deactivation_waits_for_the_company_can
 ) -> None:
     await grant(identity_db, company, "2002", Role.ADMIN)
     tenant = Tenant(organization_of("1001"), CompanyId(UUID(company)), None)
-    headers = Caller(local_issuer, subject="2002").posting("k-off") | {"If-Match": '"1"'}
+    headers = TestPrincipal(local_issuer, subject="2002").posting("k-off") | {"If-Match": '"1"'}
     outside = contextvars.copy_context()  # the request is another client's: it holds no unit of the test's
     async with identity_db.unit(tenant) as unit:  # holds the company's lock
         await commands.grant_role(
@@ -505,11 +514,13 @@ async def test_an_admin_demoted_while_its_deactivation_waits_for_the_company_can
         await eventually(partial(waits_for_a_lock, app_url(migrated)))
     refused = await waiting
     assert (refused.status_code, document(refused)["code"]) == (403, "permission_denied")
-    read = await client.get(f"/v1/companies/{company}", headers=Caller(local_issuer).bearer())
+    read = await client.get(f"/v1/companies/{company}", headers=TestPrincipal(local_issuer).bearer())
     assert (document(read)["status"], read.headers["etag"]) == ("active", '"1"')
 
 
-async def test_a_company_id_that_is_not_an_id_is_refused(client: httpx.AsyncClient, owner: Caller) -> None:
+async def test_a_company_id_that_is_not_an_id_is_refused(
+    client: httpx.AsyncClient, owner: TestPrincipal
+) -> None:
     response = await client.get("/v1/companies/not-an-id", headers=owner.bearer())
     assert (response.status_code, document(response)["code"]) == (422, "invalid_id")
 
@@ -518,7 +529,7 @@ async def test_a_company_id_that_is_not_an_id_is_refused(client: httpx.AsyncClie
 
 
 async def test_a_change_needs_the_version_it_was_made_from(
-    client: httpx.AsyncClient, owner: Caller, company: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
     path = f"/v1/companies/{company}"
     missing = await client.patch(path, json={"legal_name": "Duarte Hermanos"}, headers=owner.bearer())
@@ -551,7 +562,7 @@ async def test_a_change_needs_the_version_it_was_made_from(
     ids=["blank-name", "tax-id-never-changes"],
 )
 async def test_a_change_that_cannot_be_made_is_refused(
-    client: httpx.AsyncClient, owner: Caller, company: str, payload: dict[str, str], code: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str, payload: dict[str, str], code: str
 ) -> None:
     response = await client.patch(
         f"/v1/companies/{company}", json=payload, headers=owner.bearer() | {"If-Match": '"1"'}
@@ -560,7 +571,7 @@ async def test_a_change_that_cannot_be_made_is_refused(
 
 
 async def test_of_two_changes_of_one_version_only_one_applies(
-    client: httpx.AsyncClient, owner: Caller, company: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
     headers = owner.bearer() | {"If-Match": '"1"'}
     responses = await asyncio.gather(
@@ -574,7 +585,7 @@ async def test_of_two_changes_of_one_version_only_one_applies(
 
 
 async def test_a_deactivated_company_changes_no_more_and_the_deactivation_replays(
-    client: httpx.AsyncClient, owner: Caller, company: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
     path = f"/v1/companies/{company}/deactivate"
     headers = owner.posting("k-off") | {"If-Match": '"1"'}
@@ -598,7 +609,7 @@ async def test_a_deactivated_company_changes_no_more_and_the_deactivation_replay
 
 
 async def test_a_deactivation_needs_a_key_and_a_version(
-    client: httpx.AsyncClient, owner: Caller, company: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
     path = f"/v1/companies/{company}/deactivate"
     keyless = await client.post(path, headers=owner.bearer() | {"If-Match": '"1"', "Ledger-Mode": "test"})
@@ -610,7 +621,7 @@ async def test_a_deactivation_needs_a_key_and_a_version(
 
 
 async def test_a_deactivation_that_failed_frees_its_key_for_the_retry(
-    client: httpx.AsyncClient, owner: Caller, company: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
     path = f"/v1/companies/{company}/deactivate"
     failed = await client.post(path, headers=owner.posting("k-off") | {"If-Match": '"7"'})
@@ -621,7 +632,7 @@ async def test_a_deactivation_that_failed_frees_its_key_for_the_retry(
 
 
 async def test_two_deactivations_with_one_key_at_once_deactivate_once(
-    client: httpx.AsyncClient, owner: Caller, company: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
     headers = owner.posting("k-off") | {"If-Match": '"1"'}
     path = f"/v1/companies/{company}/deactivate"

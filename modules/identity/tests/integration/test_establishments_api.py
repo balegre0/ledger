@@ -3,17 +3,17 @@ from typing import Final
 import pytest
 lazy import httpx
 
-from ledger_testing.api import Caller, created, document, page
+from ledger_testing.api import TestPrincipal, created, document, page
 lazy from ledger_testing.issuer import LocalIssuer
 
 OTHER: Final = {"tax_id": "130000012", "legal_name": "Otra"}
 
 
-async def another_company(client: httpx.AsyncClient, owner: Caller) -> str:
+async def another_company(client: httpx.AsyncClient, owner: TestPrincipal) -> str:
     return await created(client, "/v1/companies", OTHER, owner.posting("c-2"))
 
 
-async def branch(client: httpx.AsyncClient, owner: Caller, company: str, code: str = "SUC1") -> str:
+async def branch(client: httpx.AsyncClient, owner: TestPrincipal, company: str, code: str = "SUC1") -> str:
     """The id of a branch ``owner`` opened in ``company`` under ``code`` (a key per company and code)."""
     payload = {"code": code, "name": "Santiago"}
     path = f"/v1/companies/{company}/branches"
@@ -21,7 +21,7 @@ async def branch(client: httpx.AsyncClient, owner: Caller, company: str, code: s
 
 
 async def test_a_branch_is_opened_under_its_code_and_found_again(
-    client: httpx.AsyncClient, owner: Caller, company: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
     path, payload = f"/v1/companies/{company}/branches", {"code": "SUC1", "name": " Santiago  Centro "}
     response = await client.post(path, json=payload, headers=owner.posting("b-1"))
@@ -36,7 +36,7 @@ async def test_a_branch_is_opened_under_its_code_and_found_again(
 
 
 async def test_where_a_new_branch_lives_is_spelled_by_the_service(
-    client: httpx.AsyncClient, owner: Caller, company: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
     response = await client.post(
         f"/v1/companies/{company.upper()}/branches",
@@ -48,7 +48,7 @@ async def test_where_a_new_branch_lives_is_spelled_by_the_service(
 
 
 async def test_a_branch_code_is_taken_once_per_company(
-    client: httpx.AsyncClient, owner: Caller, company: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
     second = await another_company(client, owner)
     await branch(client, owner, company)
@@ -65,7 +65,7 @@ async def test_a_branch_code_is_taken_once_per_company(
     ids=["code", "name"],
 )
 async def test_a_branch_that_cannot_be_opened_is_refused(
-    client: httpx.AsyncClient, owner: Caller, company: str, payload: dict[str, str], code: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str, payload: dict[str, str], code: str
 ) -> None:
     response = await client.post(
         f"/v1/companies/{company}/branches", json=payload, headers=owner.posting("b-bad")
@@ -74,7 +74,7 @@ async def test_a_branch_that_cannot_be_opened_is_refused(
 
 
 async def test_branches_are_listed_page_by_page(
-    client: httpx.AsyncClient, owner: Caller, company: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
     for code in ("SUC1", "SUC2"):
         await branch(client, owner, company, code)
@@ -93,7 +93,7 @@ async def test_branches_are_listed_page_by_page(
 
 
 async def test_a_branch_is_found_under_its_own_company_only(
-    client: httpx.AsyncClient, owner: Caller, company: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
     second = await another_company(client, owner)
     branch_id = await branch(client, owner, company)
@@ -102,7 +102,7 @@ async def test_a_branch_is_found_under_its_own_company_only(
 
 
 async def test_emission_points_open_in_a_branch_under_a_code_unique_there(
-    client: httpx.AsyncClient, owner: Caller, company: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
     first, second = await branch(client, owner, company, "SUC1"), await branch(client, owner, company, "SUC2")
     base = f"/v1/companies/{company}/branches/{first}/emission-points"
@@ -129,7 +129,7 @@ async def test_emission_points_open_in_a_branch_under_a_code_unique_there(
 
 
 async def test_an_emission_point_needs_a_branch_that_exists(
-    client: httpx.AsyncClient, owner: Caller, company: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
     missing = "0192f7a4-6b1e-7c3d-8e4f-5a6b7c8d9e0f"
     base = f"/v1/companies/{company}/branches/{missing}/emission-points"
@@ -145,14 +145,14 @@ async def test_an_emission_point_needs_a_branch_that_exists(
 
 
 async def test_a_viewer_reads_branches_and_opens_none(
-    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: Caller, company: str
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal, company: str
 ) -> None:
     await branch(client, owner, company)
     granted = await client.put(
         f"/v1/companies/{company}/memberships/3001", json={"role": "viewer"}, headers=owner.bearer()
     )
     assert granted.status_code == 201
-    viewer = Caller(local_issuer, subject="3001")
+    viewer = TestPrincipal(local_issuer, subject="3001")
     assert (await client.get(f"/v1/companies/{company}/branches", headers=viewer.bearer())).status_code == 200
     refused = await client.post(
         f"/v1/companies/{company}/branches", json={"code": "SUC9", "name": "X"}, headers=viewer.posting("b-v")
@@ -161,7 +161,7 @@ async def test_a_viewer_reads_branches_and_opens_none(
 
 
 async def test_nothing_opens_in_a_deactivated_company(
-    client: httpx.AsyncClient, owner: Caller, company: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
     branch_id = await branch(client, owner, company)
     off = await client.post(
@@ -185,10 +185,10 @@ async def test_nothing_opens_in_a_deactivated_company(
 
 
 async def test_another_organization_finds_no_establishment_of_the_company(
-    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: Caller, company: str
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal, company: str
 ) -> None:
     branch_id = await branch(client, owner, company)
-    stranger = Caller(local_issuer, organization="1002")
+    stranger = TestPrincipal(local_issuer, organization="1002")
     paths = [
         f"/v1/companies/{company}/branches",
         f"/v1/companies/{company}/branches/{branch_id}",
@@ -227,7 +227,7 @@ async def test_every_route_under_a_company_needs_a_bearer_token(
 
 
 async def test_a_branch_is_opened_once_per_key_and_a_key_reused_for_another_branch_is_refused(
-    client: httpx.AsyncClient, owner: Caller, company: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
     path = f"/v1/companies/{company}/branches"
     await created(client, path, {"code": "SUC1", "name": "A"}, owner.posting("b-key"))
@@ -237,7 +237,7 @@ async def test_a_branch_is_opened_once_per_key_and_a_key_reused_for_another_bran
 
 
 async def test_a_branch_of_another_company_has_no_emission_points_here(
-    client: httpx.AsyncClient, owner: Caller, company: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
     second = await another_company(client, owner)
     theirs = await branch(client, owner, second)
@@ -259,7 +259,7 @@ async def test_a_branch_of_another_company_has_no_emission_points_here(
 
 
 async def test_a_page_ending_before_a_branch_holds_the_ones_just_before_it(
-    client: httpx.AsyncClient, owner: Caller, company: str
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
     """Read backwards from the newest (§9.7): the rows nearest the cursor, in id order, and more before."""
     for code in ("SUC1", "SUC2", "SUC3"):

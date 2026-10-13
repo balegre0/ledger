@@ -15,17 +15,17 @@ from prometheus_client import CollectorRegistry
 from sqlalchemy import event
 
 from ledger_kernel.ids import OrganizationId
+from ledger_platform.config.manifest import JobDecl
 from ledger_platform.data.bound import BoundDatabase
 from ledger_platform.data.database import Database
 from ledger_platform.data.unit_of_work import JobPolicy
-from ledger_platform.jobs import (
+from ledger_platform.jobs.maintenance import (
     DONE_JOBS_KEPT,
     PURGE_DONE_JOBS,
     PURGE_IDEMPOTENCY_KEYS,
-    JobRunner,
     maintenance_jobs,
 )
-from ledger_platform.runtime.manifest import JobDecl
+from ledger_platform.jobs.runner import JobRunner
 from ledger_testing.database import app_url
 lazy from ledger_platform.data.notifier import Channel
 lazy from ledger_testing.postgres import WorkerDatabase

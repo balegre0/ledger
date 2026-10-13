@@ -1,10 +1,9 @@
 [project]
 name = "ledger-testing"
 version = "0.1.0"
-description = "What the tests of every ledger package share: real PostgreSQL and NATS, a local OpenID provider, the logging baseline, the schema a migration built, roles and schemas made as production makes them."
+description = "What the tests of every ledger package share: real PostgreSQL, a local OpenID provider, the logging baseline, the schema a migration built, roles and schemas made as production makes them."
 requires-python = ">=3.15"
 dependencies = [
-    "ledger-kernel",
     "ledger-platform",
     "alembic>=1.20.0",
     "httpx>=0.28.1",
@@ -21,7 +20,6 @@ dependencies = [
 ledger = "ledger_testing.plugin"
 
 [tool.uv.sources]
-ledger-kernel = { workspace = true }
 ledger-platform = { workspace = true }
 
 [build-system]

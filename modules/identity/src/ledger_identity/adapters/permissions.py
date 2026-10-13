@@ -12,10 +12,10 @@ from typing import final, override
 
 from ledger_identity.adapters.postgres.repositories import PgMemberships
 from ledger_kernel.tenancy import OrganizationScope
-from ledger_platform.auth.access import PermissionSource
+from ledger_platform.auth import PermissionSource
 lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_kernel.ids import CompanyId
-lazy from ledger_platform.data.bound import BoundDatabase
+lazy from ledger_platform.data import BoundDatabase
 
 
 @final

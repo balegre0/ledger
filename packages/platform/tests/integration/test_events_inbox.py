@@ -26,8 +26,10 @@ from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.data.bound import BoundDatabase
 from ledger_platform.data.unit_of_work import JobPolicy
-from ledger_platform.events import Consumer, Dispatcher, InboxRunner, Wakeups
-from ledger_platform.events.inbox import ReplayRefusedError
+from ledger_platform.events.consumers import Consumer
+from ledger_platform.events.dispatcher import Dispatcher
+from ledger_platform.events.inbox import InboxRunner, ReplayRefusedError
+from ledger_platform.events.wakeups import Wakeups
 from ledger_testing import waiting
 lazy from ledger_kernel.tenancy import Scope
 lazy from ledger_platform.data.database import Database

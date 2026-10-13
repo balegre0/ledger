@@ -26,12 +26,14 @@ lazy from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemory
 from ledger_kernel.errors import ConflictError, InvalidInputError, UnavailableError
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tenancy import Mode, Tenant
+from ledger_platform.config.manifest import JobDecl
 from ledger_platform.data.bound import BoundDatabase
 from ledger_platform.data.database import Database, DatabaseLimits
 from ledger_platform.data.queue import Backoff, release
 from ledger_platform.data.unit_of_work import JobPolicy
-from ledger_platform.jobs import Done, Job, JobOutcome, JobRunner, Park, RunAgain
-from ledger_platform.runtime.manifest import JobDecl
+from ledger_platform.jobs import Done, Job, Park, RunAgain
+from ledger_platform.jobs.outcomes import JobOutcome
+from ledger_platform.jobs.runner import JobRunner
 from ledger_testing import waiting
 from ledger_testing.database import app_url
 lazy from ledger_platform.data.notifier import Channel

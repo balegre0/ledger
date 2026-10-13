@@ -15,7 +15,7 @@ curl -X POST "http://127.0.0.1:${LEDGER_IDENTITY_PORT:-8100}/v1/companies" \
   -d '{"tax_id": "101850043", "legal_name": "Mi Empresa, S.R.L."}'
 ```
 
-`tilt up` does not start Zitadel: run the first command (compose's profile `zitadel`) beside it.
+The local stack does not start Zitadel: run the first command (compose's profile `zitadel`) beside it.
 
 `bootstrap.sh` makes sure the project `ledger` (its id is the tokens' audience) with its role
 `ledger.organization.admin`, the API application `ledger-api` and the machine user `ledger-dev`, whose access
@@ -58,7 +58,7 @@ which on Windows and on most Linux distributions does not: add `127.0.0.1 zitade
 
 ## Start over
 
-Zitadel alone (its container, database and bootstrap volume, and `.local`; identity's data and NATS stay):
+Zitadel alone (its container, database and bootstrap volume, and `.local`; identity's data stays):
 
 ```sh
 sh deploy/local/zitadel/reset.sh
@@ -66,7 +66,7 @@ docker compose -f deploy/local/compose.yaml --profile zitadel up -d --wait
 sh deploy/local/zitadel/bootstrap.sh && docker compose -f deploy/local/compose.yaml up -d identity
 ```
 
-The whole stack, every volume included (every service's database, NATS's streams, Zitadel):
+The whole stack, every volume included (every database, Zitadel):
 
 ```sh
 docker compose -f deploy/local/compose.yaml --profile zitadel down -v

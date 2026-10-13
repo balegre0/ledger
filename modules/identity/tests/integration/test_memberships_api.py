@@ -15,7 +15,7 @@ from ledger_kernel.access import SubjectId
 from ledger_kernel.ids import CompanyId
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.providers.zitadel import organization_of
-from ledger_testing.api import Caller, document, page
+from ledger_testing.api import TestPrincipal, document, page
 from ledger_testing.database import app_url
 from ledger_testing.waiting import eventually, waits_for_a_lock
 lazy from ledger_platform.data.bound import BoundDatabase
@@ -36,18 +36,18 @@ class Members:
         return await self.client.put(
             f"/v1/companies/{self.company}/memberships/{subject}",
             json={"role": role},
-            headers=Caller(self.issuer, subject=by).bearer(),
+            headers=TestPrincipal(self.issuer, subject=by).bearer(),
         )
 
     async def revoke(self, subject: str, by: str = "2001") -> httpx.Response:
         return await self.client.delete(
             f"/v1/companies/{self.company}/memberships/{subject}",
-            headers=Caller(self.issuer, subject=by).bearer(),
+            headers=TestPrincipal(self.issuer, subject=by).bearer(),
         )
 
     async def read_company(self, by: str) -> httpx.Response:
         return await self.client.get(
-            f"/v1/companies/{self.company}", headers=Caller(self.issuer, subject=by).bearer()
+            f"/v1/companies/{self.company}", headers=TestPrincipal(self.issuer, subject=by).bearer()
         )
 
 
@@ -90,9 +90,9 @@ async def test_the_memberships_of_a_company_are_listed_to_whoever_may_read_them(
     await members.assign("3003", "viewer")
     await members.revoke("3003")
     path = f"/v1/companies/{members.company}/memberships"
-    listed = page(await client.get(path, headers=Caller(local_issuer, subject="3001").bearer()))
+    listed = page(await client.get(path, headers=TestPrincipal(local_issuer, subject="3001").bearer()))
     assert sorted(str(item["subject"]) for item in listed["items"]) == ["2001", "3001", "3002"]
-    refused = await client.get(path, headers=Caller(local_issuer, subject="3002").bearer())
+    refused = await client.get(path, headers=TestPrincipal(local_issuer, subject="3002").bearer())
     assert (refused.status_code, document(refused)["code"]) == (403, "permission_denied")
 
 
@@ -117,7 +117,7 @@ async def test_a_company_always_keeps_an_owner(members: Members) -> None:
 
 
 async def test_a_role_is_given_in_an_active_company_only_and_taken_in_any(
-    client: httpx.AsyncClient, owner: Caller, members: Members
+    client: httpx.AsyncClient, owner: TestPrincipal, members: Members
 ) -> None:
     await members.assign("3001", "viewer")
     headers = owner.posting("off") | {"If-Match": '"1"'}
@@ -139,7 +139,7 @@ async def test_a_role_is_given_in_an_active_company_only_and_taken_in_any(
     ids=["subject", "role", "unknown-field"],
 )
 async def test_a_role_that_cannot_be_given_is_refused(
-    members: Members, owner: Caller, subject: str, payload: dict[str, str], expected: tuple[int, str]
+    members: Members, owner: TestPrincipal, subject: str, payload: dict[str, str], expected: tuple[int, str]
 ) -> None:
     response = await members.client.put(
         f"/v1/companies/{members.company}/memberships/{subject}", json=payload, headers=owner.bearer()
@@ -155,7 +155,7 @@ async def test_revoking_a_role_nobody_holds_is_not_found(members: Members) -> No
 async def test_memberships_of_another_organization_are_out_of_reach(
     client: httpx.AsyncClient, local_issuer: LocalIssuer, company: str
 ) -> None:
-    stranger = Caller(local_issuer, organization="1002").bearer()
+    stranger = TestPrincipal(local_issuer, organization="1002").bearer()
     response = await client.put(
         f"/v1/companies/{company}/memberships/3001", json={"role": "owner"}, headers=stranger
     )
@@ -205,7 +205,7 @@ async def test_a_member_without_the_permission_cannot_give_or_take_a_role(member
 async def test_memberships_are_listed_page_by_page(client: httpx.AsyncClient, members: Members) -> None:
     await members.assign("3001", "viewer")
     path = f"/v1/companies/{members.company}/memberships"
-    owner = Caller(members.issuer).bearer()
+    owner = TestPrincipal(members.issuer).bearer()
     first = page(await client.get(path, params={"limit": 1}, headers=owner))
     rest = page(
         await client.get(path, params={"limit": 1, "starting_after": first["next_cursor"]}, headers=owner)

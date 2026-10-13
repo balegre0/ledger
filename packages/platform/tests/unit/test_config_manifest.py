@@ -3,7 +3,7 @@ from types import MappingProxyType
 
 import pytest
 
-from ledger_platform.runtime.manifest import (
+from ledger_platform.config.manifest import (
     InvalidManifestError,
     PackageKind,
     load_manifest,

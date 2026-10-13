@@ -5,7 +5,7 @@ from typing import Final
 import pytest
 
 from ledger_devtools.workspace import Workspace, WorkspaceError
-from ledger_platform.runtime.manifest import PackageKind
+from ledger_platform.config.manifest import PackageKind
 
 DO_TESTING: Final = """
 [package]

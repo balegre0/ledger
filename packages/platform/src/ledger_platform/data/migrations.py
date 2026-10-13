@@ -30,6 +30,7 @@ from sqlalchemy.pool import NullPool
 lazy from sqlalchemy import Connection, MetaData
 
 from ledger_kernel.errors import LedgerError, UnavailableError
+from ledger_platform.data.database import MILLISECOND
 from ledger_platform.data.roles import PLATFORM, SchemaRoles, identifier, migrated_statements
 lazy from ledger_platform.data.database import Database
 
@@ -39,7 +40,6 @@ _OTHER_LOCKS: Final = "10s"
 """What every other lock of a migration is waited for: it fails rather than queue the app behind it."""
 _TARGET: Final = "ledger.target"
 """The key of the ``_Target`` among the attributes of Alembic's configuration."""
-_MILLISECOND: Final = timedelta(milliseconds=1)
 _SET_LOCK_TIMEOUT: Final = text("SELECT set_config('lock_timeout', :wait, false)")
 _LOCK: Final = text("SELECT pg_advisory_lock(:key)")
 _RECORDED: Final = text("SELECT to_regclass(:table) IS NOT NULL")
@@ -112,7 +112,7 @@ def run_schema_migrations() -> None:
 
 def _milliseconds(wait: timedelta) -> str:
     """``lock_timeout``'s text for ``wait``, rounded up: never zero, which PostgreSQL reads as no limit."""
-    return f"{max(1, math.ceil(wait / _MILLISECOND))}ms"
+    return f"{max(1, math.ceil(wait / MILLISECOND))}ms"
 
 
 @final

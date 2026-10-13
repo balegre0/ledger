@@ -22,11 +22,11 @@ from ledger_kernel.errors import (
     UnauthenticatedError,
     UnavailableError,
 )
+from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.grpc.client import ERROR_CODE_KEY
 from ledger_platform.grpc.server import (
     GrpcBindError,
     GuardInterceptor,
-    InvalidGrpcOptionError,
     serve_grpc,
 )
 from ledger_testing.ports import occupy_a_port, port_of
@@ -483,7 +483,7 @@ async def test_a_call_that_outlives_the_grace_is_cancelled_and_is_no_bug(registr
 @example(number=-1)
 @example(number=65536)
 def test_a_port_outside_the_range_is_refused_at_once(number: int) -> None:
-    with pytest.raises(InvalidGrpcOptionError, match=r"^gRPC option port must be between 0 and 65535, not "):
+    with pytest.raises(InvalidOptionError, match=r"^gRPC option port must be between 0 and 65535, not "):
         serve_grpc(port=number, register=register, registry=CollectorRegistry())
 
 
@@ -492,9 +492,7 @@ def test_a_port_outside_the_range_is_refused_at_once(number: int) -> None:
 @example(seconds=inf)
 @example(seconds=nan)
 def test_a_grace_that_is_not_a_positive_finite_time_is_refused_at_once(seconds: float) -> None:
-    with pytest.raises(
-        InvalidGrpcOptionError, match=r"^gRPC option grace must be a positive, finite number "
-    ):
+    with pytest.raises(InvalidOptionError, match=r"^gRPC option grace must be a positive, finite number "):
         serve_grpc(port=0, register=register, registry=CollectorRegistry(), grace=seconds)
 
 

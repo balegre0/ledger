@@ -28,6 +28,7 @@ lazy from fastapi import FastAPI
 from ledger_kernel.events import Event
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tenancy import Mode, Tenant
+from ledger_platform.config.manifest import load_manifest
 from ledger_platform.config.settings import Settings
 from ledger_platform.data.migrations import SchemaMigrations
 from ledger_platform.data.roles import APP, MIGRATOR
@@ -35,7 +36,6 @@ from ledger_platform.events.consumers import ConsumerSpec
 from ledger_platform.jobs.outcomes import Done, JobSpec
 from ledger_platform.runtime.app import App
 from ledger_platform.runtime.contexts import Module, ModuleParts
-from ledger_platform.runtime.manifest import load_manifest
 from ledger_platform.runtime.registries import MODULES, Discovered
 from ledger_testing.database import TEST_LOGINS, fresh_database
 from ledger_testing.issuer import SUBJECT

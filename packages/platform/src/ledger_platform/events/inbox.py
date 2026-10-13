@@ -60,11 +60,10 @@ lazy from sqlalchemy import ColumnElement, RowMapping, Update
 from ledger_kernel.errors import ConflictError, ErrorKind, LedgerError, error_type
 from ledger_platform.data.audit import Actor, acting_as
 from ledger_platform.data.notifier import INBOX
-from ledger_platform.data.queue import DEFAULT_BACKOFF, RELEASE_TIMEOUT, claim, recover, release
+from ledger_platform.data.queue import DEFAULT_BACKOFF, RELEASE_TIMEOUT, claim, parked, recover, release
 from ledger_platform.events.consumers import raw_event_of
 from ledger_platform.events.dispatcher import POLL, reraise_when_stopping
 from ledger_platform.observability.metrics import counter, gauge
-from ledger_platform.runtime.supervision import parked
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.database import AnyTable
 lazy from ledger_platform.data.queue import Backoff

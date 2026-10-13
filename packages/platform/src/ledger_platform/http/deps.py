@@ -1,9 +1,9 @@
-"""What a service's routes declare: who calls, for which company, and how the request applies.
+"""What a module's routes declare: who calls, for which company, and how the request applies.
 
 * ``authenticated(verifier)``: a dependency giving the caller (``Principal``) its bearer token proves; 401
   without one that holds. It is also the OpenAPI document's security scheme (HTTP bearer, JWT).
 * ``company_in_path(caller, permissions)`` and ``company_in_header(...)``: the company of the request (the
-  path's ``company_id``, or the ``Ledger-Company-Id`` header) and what the caller may do there
+  path's ``company_id``, or the ``Ledger-Company`` header, §9.7) and what the caller may do there
   (``CompanyAccess``); 404 when it may do nothing there, whichever organization the company is of. The caller
   is proven first: an unauthenticated request never has a company looked up. The header must be sent once
   (else 422 ``invalid_header``), and a route whose path has a ``company_id`` takes its company from there,
@@ -12,17 +12,13 @@
   requires, declared as its first dependency: a permission in the request's company (403 without it, after
   the 404 of no role there), a role the identity provider granted in the organization (403), or no more than
   being a principal of the organization, for a route about the organization as a whole. ``unguarded_routes``
-  names every route of an app that needs no bearer token or declares none of them: a service's test asserts it
+  names every route of an app that needs no bearer token or declares none of them: a module's test asserts it
   finds none under ``/v1``.
-* ``page_request``: the ``limit`` and ``cursor`` of a list.
 * ``if_match``: the versions an update may apply to; 428 without ``If-Match``. A header sent in several lines
   is read as one list (RFC 9110 section 5.3), at most 1024 characters in all. The route compares the
   version it reads, and sets the next one only where it is still that version (compare and set), else
-  ``precondition_failed`` (412). ``etag`` is what it answers in ``ETag``. Its route documents the header
-  with ``openapi_extra=if_match_required()``.
-* ``idempotency_key``: the ``Idempotency-Key`` every POST requires.
-* ``attempt_of``, ``json_response`` and ``answer``: run a POST's work once per key (``Idempotency.once``,
-  called before the work's own statements), and answer it.
+  answers 412 (``precondition_checked``). ``etag`` is what it answers in ``ETag``. Its route documents the
+  header with ``openapi_extra=if_match_required()``.
 
 The dependencies bind what they learn (``organization_id``, ``subject``, ``company_id``) to the log context
 for the rest of the request, and unbind it when the request ends. They also leave it in the request
@@ -33,44 +29,35 @@ from abc import ABCMeta, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass
 from http import HTTPStatus
-from types import MappingProxyType
 from typing import Annotated, ClassVar, Final, Protocol, final
 from weakref import WeakSet
-lazy from collections.abc import AsyncGenerator, Callable, Coroutine, Generator, Iterator, Mapping, Sequence
+lazy from collections.abc import AsyncGenerator, Callable, Coroutine, Generator, Iterator, Sequence
 
 import structlog
-from fastapi import Depends, Header, Path, Query, Response
+from fastapi import Depends, Header, Path
 from fastapi.routing import APIRoute, iter_route_contexts
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.exceptions import HTTPException
 lazy from fastapi import Request
 lazy from fastapi.dependencies.models import Dependant
-lazy from pydantic import BaseModel
 lazy from starlette.routing import BaseRoute
 
 from ledger_kernel.errors import ForbiddenError, InvalidInputError, LedgerError
 from ledger_kernel.ids import CompanyId, parse_uuid
-from ledger_kernel.pagination import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, PageRequest, decode_cursor
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.access import CompanyAccess, NoCompanyAccessError
 from ledger_platform.auth.tokens import MissingTokenError
 from ledger_platform.http.request_fields import remember
-from ledger_platform.idempotency import MAX_KEY_LENGTH, Attempt, StoredResponse, canonical_body
 lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_platform.auth.access import PermissionSource
-lazy from ledger_platform.idempotency import Outcome
 
-COMPANY_HEADER: Final = "Ledger-Company-Id"
+COMPANY_HEADER: Final = "Ledger-Company"
 IF_MATCH: Final = "If-Match"
 _COMPANY_PARAMETER: Final = "company_id"
-REPLAYED_HEADER: Final = "Idempotent-Replayed"
-JSON: Final = "application/json"
 _ANY: Final = "*"
 _MAX_VERSION_DIGITS: Final = 18
 """A version of ours fits a PostgreSQL ``bigint``; a longer tag cannot name one."""
-_MAX_CURSOR_LENGTH: Final = 64
 _MAX_IF_MATCH_LENGTH: Final = 1024
-_NO_HEADERS: Final[Mapping[str, str]] = MappingProxyType({})
 _BEARER: Final = HTTPBearer(
     auto_error=False,
     bearerFormat="JWT",
@@ -89,8 +76,8 @@ class Verifier(Protocol, metaclass=ABCMeta):
 type Caller = Callable[[Request, HTTPAuthorizationCredentials | None], AsyncGenerator[Principal]]
 """The dependency ``authenticated`` makes: a route declares ``Annotated[Principal, Depends(caller)]``."""
 type PermissionsDependency[**P] = Callable[P, Coroutine[object, object, PermissionSource]]
-"""A dependency handing the service's ``PermissionSource``; its parameters (``P``) are dependencies of its
-own, such as the service's runtime."""
+"""A dependency handing the module's ``PermissionSource``; its parameters (``P``) are dependencies of its
+own, such as the module's context."""
 type InCompany = Callable[[Request, str, Principal, PermissionSource], AsyncGenerator[CompanyAccess]]
 """The dependency ``company_in_path`` or ``company_in_header`` makes: from the request, the company's id, the
 caller and the source, the caller's access to that company."""
@@ -183,7 +170,7 @@ def company_in_path[**P](caller: Caller, permissions: PermissionsDependency[P]) 
 
 
 def company_in_header[**P](caller: Caller, permissions: PermissionsDependency[P]) -> InCompany:
-    """A route's company from the ``Ledger-Company-Id`` header, with the caller's access to it.
+    """A route's company from the ``Ledger-Company`` header, with the caller's access to it.
 
     The header must be sent once. A route whose path names a ``company_id`` must not use this: it fails its
     requests with ``AmbiguousCompanyError``. (The header's parameter is not named ``company_id``: FastAPI
@@ -288,22 +275,6 @@ def unguarded_routes(routes: Sequence[BaseRoute], *, prefix: str = "/v1") -> tup
     return tuple(found)
 
 
-async def page_request(
-    limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE, description="How many items the page holds.")] = (
-        DEFAULT_PAGE_SIZE
-    ),
-    cursor: Annotated[
-        str | None,
-        Query(
-            max_length=_MAX_CURSOR_LENGTH,
-            description="Where the page starts: the next_cursor of the page before.",
-        ),
-    ] = None,
-) -> PageRequest:
-    """The page a list request asks for."""
-    return PageRequest(size=limit, after=None if cursor is None else decode_cursor(cursor))
-
-
 @final
 @dataclass(frozen=True, slots=True)
 class IfMatch:
@@ -380,42 +351,3 @@ def if_match_required() -> dict[str, object]:
         "schema": {"type": "string", "maxLength": _MAX_IF_MATCH_LENGTH},
     }
     return {"parameters": [parameter]}
-
-
-def precondition_failed() -> HTTPException:
-    """What an update answers when ``If-Match`` names no current version: 412."""
-    return HTTPException(HTTPStatus.PRECONDITION_FAILED)
-
-
-async def idempotency_key(
-    key: Annotated[
-        str,
-        Header(
-            alias="Idempotency-Key",
-            min_length=1,
-            max_length=MAX_KEY_LENGTH,
-            pattern=r"^[!-~]+$",
-            description="Makes a retry safe: the same key and body change state once and answer the same.",
-        ),
-    ],
-) -> str:
-    """The ``Idempotency-Key`` every POST requires (§10)."""
-    return key
-
-
-def attempt_of(request: Request, principal: Principal, key: str, body: BaseModel | None = None) -> Attempt:
-    """``principal``'s use of ``key`` for ``request``: the body counts as its validated, canonical JSON."""
-    return Attempt.of(principal, key, method=request.method, path=request.url.path, body=canonical_body(body))
-
-
-def json_response(status: int, body: BaseModel, headers: Mapping[str, str] = _NO_HEADERS) -> StoredResponse:
-    """A JSON response as it is stored for replays."""
-    return StoredResponse(status, body.model_dump_json().encode(), {"Content-Type": JSON, **headers})
-
-
-def answer(outcome: Outcome) -> Response:
-    """The response of an idempotent request: byte for byte the stored one, marked when it is a replay."""
-    headers = dict(outcome.response.headers)
-    if outcome.replayed:
-        headers[REPLAYED_HEADER] = "true"
-    return Response(content=outcome.response.body, status_code=outcome.response.status, headers=headers)

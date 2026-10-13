@@ -8,8 +8,7 @@ from ledger_identity.adapters.http.models import OrganizationView
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import queries
 from ledger_kernel.tenancy import OrganizationScope
-from ledger_platform.http.deps import in_organization
-from ledger_platform.http.openapi import problems
+from ledger_platform.http import in_organization, problems
 lazy from ledger_identity.adapters.http.context import ApiContext
 lazy from ledger_kernel.access import Principal
 

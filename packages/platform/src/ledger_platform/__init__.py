@@ -1,1 +1,1 @@
-"""The service chassis every ledger service is built on."""
+"""The chassis every ledger app is built on: its subpackages are its public surface."""

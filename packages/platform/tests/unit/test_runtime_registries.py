@@ -18,8 +18,8 @@ from ledger_kernel.regimes import (
     TaxIdSchemeDef,
 )
 from ledger_kernel.tax_ids import TaxIdCheck, TaxIdScheme
+from ledger_platform.config.manifest import ChannelEntry, load_manifest
 from ledger_platform.runtime.contexts import ChannelPack, ChannelParts, Module, ModuleParts
-from ledger_platform.runtime.manifest import ChannelEntry, load_manifest
 from ledger_platform.runtime.packs import Channels, load_modules
 from ledger_platform.runtime.registries import (
     CHANNELS,

@@ -6,6 +6,7 @@ lazy from collections.abc import AsyncIterator, Coroutine
 
 import pytest
 
+from ledger_platform.config.manifest import load_manifest
 from ledger_platform.runtime.contexts import ModuleParts, api_view, bind_parts, extension_view
 from ledger_platform.runtime.facade import (
     NotCoroutineFunctionError,
@@ -21,8 +22,7 @@ from ledger_platform.runtime.keys import (
     UndeclaredBindingError,
     UndeclaredDependencyError,
 )
-from ledger_platform.runtime.manifest import load_manifest
-lazy from ledger_platform.runtime.manifest import PackageManifest
+lazy from ledger_platform.config.manifest import PackageManifest
 
 
 @runtime_checkable

@@ -9,7 +9,8 @@ import pytest
 from structlog.testing import capture_logs
 
 from ledger_kernel.errors import ErrorKind
-from ledger_platform.observability.health import DuplicateCheckError, Health, InvalidHealthOptionError
+from ledger_platform.config.options import InvalidOptionError
+from ledger_platform.observability.health import DuplicateCheckError, Health
 from ledger_testing.clock import Moment
 
 
@@ -28,9 +29,9 @@ async def stuck() -> None:
 async def test_every_check_is_reported() -> None:
     health = Health(timeout=0.05)
     health.add("database", healthy)
-    health.add("nats", broken)
+    health.add("broker", broken)
     health.add("slow", stuck)
-    assert await health.run() == {"database": True, "nats": False, "slow": False}
+    assert await health.run() == {"database": True, "broker": False, "slow": False}
 
 
 async def test_checks_run_concurrently() -> None:
@@ -343,8 +344,8 @@ def test_a_liveness_condition_is_no_readiness_check() -> None:
 
 async def test_a_readiness_check_is_no_liveness_condition() -> None:
     health = Health()
-    health.add("nats", broken)
-    assert await health.run() == {"nats": False}
+    health.add("broker", broken)
+    assert await health.run() == {"broker": False}
     assert health.dead() == ()
 
 
@@ -390,7 +391,7 @@ async def test_a_check_that_hangs_is_logged_once_as_timed_out_and_then_only_in_p
         await release.wait()
 
     health = Health(timeout=0.02)
-    health.add("nats", hangs)
+    health.add("broker", hangs)
     try:
         with capture_logs() as logs:
             for _ in range(3):
@@ -422,16 +423,20 @@ async def test_a_check_that_cancels_itself_is_logged_once_and_then_only_in_passi
 
 @pytest.mark.parametrize("timeout", [0.0, -1.0, nan, inf])
 def test_a_time_limit_that_is_not_a_positive_finite_number_of_seconds_is_refused(timeout: float) -> None:
-    with pytest.raises(InvalidHealthOptionError, match=r"^health option timeout must be a positive, finite"):
+    with pytest.raises(InvalidOptionError, match=r"^health option timeout must be a positive, finite"):
         Health(timeout=timeout)
 
 
 @pytest.mark.parametrize("wedge_after", [0.0, -1.0, nan, inf, 1.9])
 def test_a_wedge_limit_that_is_not_at_least_the_time_limit_is_refused(wedge_after: float) -> None:
     """A check is left behind only once it outlives its time limit: it cannot be wedged any sooner."""
-    with pytest.raises(InvalidHealthOptionError, match="wedge_after") as refused:
+    with pytest.raises(InvalidOptionError, match="wedge_after") as refused:
         Health(timeout=2.0, wedge_after=wedge_after)
-    assert (refused.value.code, refused.value.kind) == ("invalid_health_option", ErrorKind.INTERNAL)
+    assert (refused.value.code, refused.value.component, refused.value.kind) == (
+        "invalid_option",
+        "health",
+        ErrorKind.INTERNAL,
+    )
 
 
 def test_a_wedge_limit_of_the_time_limit_itself_is_accepted() -> None:

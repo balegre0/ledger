@@ -4,11 +4,11 @@
 #   docker build -f modules/identity/Dockerfile -t ledger-identity:local .
 #
 # Deploying it:
-# - Probes: /livez for liveness (the process answers), /readyz for readiness (PostgreSQL, NATS, the workers, the
+# - Probes: /livez for liveness (the process answers), /readyz for readiness (PostgreSQL, the workers, the
 #   chassis's tables and identity's migrations); a failing dependency takes a replica out of rotation, it does
 #   not restart it.
 # - Stopping: Granian first drains HTTP, then the chassis stops within its stop budget (25 s by default: gRPC
-#   grace, workers, NATS drain, span flush); Granian kills a worker still running 30 s after it asked it to stop.
+#   grace, workers, span flush); Granian kills a worker still running 30 s after it asked it to stop.
 #   The platform must wait longer than that before its SIGKILL: a grace period of at least 40 s (compose
 #   `stop_grace_period`, Kubernetes `terminationGracePeriodSeconds`, whose default of 30 is too short).
 # - Scaling: by replicas, never by Granian workers. The gRPC server and the service's workers (the outbox relay)

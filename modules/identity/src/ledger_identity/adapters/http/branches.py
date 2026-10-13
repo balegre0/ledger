@@ -17,23 +17,26 @@ from ledger_identity.domain.text import parse_code, parse_name
 from ledger_kernel.access import Permission
 from ledger_kernel.ids import parse_uuid
 from ledger_kernel.tenancy import Tenant
-from ledger_platform.http.deps import allowed
-from ledger_platform.http.idempotency import (
+from ledger_platform.http import (
     REPLAYED_HEADER,
+    Page,
+    allowed,
     answer,
     attempt_of,
     idempotency_key,
     json_response,
+    ledger_mode,
+    page_of_items,
+    page_query,
+    problems,
+    success,
 )
-from ledger_platform.http.mode import ledger_mode
-from ledger_platform.http.models import Page, page_of_items, page_query
-from ledger_platform.http.openapi import problems, success
 lazy from ledger_identity.adapters.http.context import ApiContext
 lazy from ledger_identity.adapters.http.models import NewBranch
 lazy from ledger_kernel.pagination import PageRequest
 lazy from ledger_kernel.tenancy import Mode
-lazy from ledger_platform.auth.access import CompanyAccess
-lazy from ledger_platform.http.idempotency import StoredResponse
+lazy from ledger_platform.auth import CompanyAccess
+lazy from ledger_platform.http import StoredResponse
 
 READ: Final = problems(401, 403, 404, 422)
 """The error answers of a read under a company."""
