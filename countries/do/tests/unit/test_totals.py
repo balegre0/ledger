@@ -181,3 +181,17 @@ def test_the_kernel_s_calculator_totals_the_lines_as_dgii_does(lines: list[Line]
     kernel = TaxCalculator(REGIME).totals(taxed, draft.issued_on)
     assert kernel.tax.amount == (totals.itbis_total or D(0))
     assert kernel.gross.amount == totals.total
+    by_category = {category.category: category for category in kernel.categories}
+    for group in totals.groups:
+        found = by_category.pop(TaxCategoryKey(CATEGORY_OF[group.indicator]))
+        assert (found.base.amount, found.percent, found.tax.amount) == (
+            group.base,
+            group.percent,
+            group.itbis,
+        )
+    exempt = by_category.pop(TaxCategoryKey(CATEGORY_OF[BillingIndicator.EXEMPT]), None)
+    assert by_category == {}
+    if exempt is None:
+        assert totals.exempt is None
+    else:
+        assert (exempt.base.amount, exempt.tax.amount) == (totals.exempt, D(0))

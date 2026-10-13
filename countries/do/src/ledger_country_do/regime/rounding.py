@@ -28,7 +28,6 @@ ROUNDING: Final = RoundingRule(
 UNIT_PRICE_PLACES: Final = 4
 GLOBAL_TOLERANCE_PER_LINE: Final = Decimal(1)
 ROUNDING_SOURCE: Final = TECHNICAL_REPORT
-CENT: Final = Decimal("0.01")
 DECIMAL_ROUNDING: Final[Mapping[RoundingMode, str]] = MappingProxyType(
     {
         RoundingMode.HALF_UP: ROUND_HALF_UP,
