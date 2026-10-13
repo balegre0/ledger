@@ -17,18 +17,21 @@ lazy from fastapi import Request, Response
 from ledger_identity.api.context import precondition_checked, problems, success
 from ledger_identity.api.models import CompanyPage, CompanyView
 from ledger_identity.application import commands, queries
-from ledger_identity.domain.organization import require_organization_admin
+from ledger_identity.domain.organization import ORGANIZATION_ADMIN
 from ledger_identity.domain.text import parse_legal_name
 from ledger_kernel.access import Permission
 from ledger_kernel.countries.do import TaxId
 from ledger_platform.routes import (
     REPLAYED_HEADER,
+    allowed,
     answer,
     attempt_of,
     etag,
+    holding,
     idempotency_key,
     if_match,
     if_match_required,
+    in_organization,
     json_response,
     page_request,
 )
@@ -56,12 +59,12 @@ def router(context: ApiContext) -> APIRouter:
     """The companies' routes."""
     companies = APIRouter(prefix="/v1/companies", tags=["companies"])
     caller, runtime = context.caller, context.runtime
-    reader, manager = context.allowed(Permission.COMPANY_READ), context.allowed(Permission.COMPANY_MANAGE)
-
-    async def registrar(principal: Annotated[Principal, Depends(caller)]) -> Principal:
-        """The caller, if it may register companies: checked before the request's key and body (403)."""
-        require_organization_admin(principal)
-        return principal
+    in_company = context.in_company
+    reader, manager = (
+        allowed(in_company, Permission.COMPANY_READ),
+        allowed(in_company, Permission.COMPANY_MANAGE),
+    )
+    registrar, member = holding(caller, ORGANIZATION_ADMIN), in_organization(caller)
 
     @companies.post(
         "",
@@ -95,7 +98,7 @@ def router(context: ApiContext) -> APIRouter:
 
     @companies.get("", response_model=CompanyPage, responses=problems(401, 422))
     async def list_companies(
-        principal: Annotated[Principal, Depends(caller)],
+        principal: Annotated[Principal, Depends(member)],
         page: Annotated[PageRequest, Depends(page_request)],
         current: Annotated[Runtime[IdentitySettings], Depends(runtime)],
     ) -> CompanyPage:

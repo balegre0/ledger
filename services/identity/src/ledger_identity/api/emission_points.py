@@ -15,7 +15,7 @@ from ledger_identity.domain.ids import BranchId, EmissionPointId
 from ledger_identity.domain.text import parse_code, parse_name
 from ledger_kernel.access import Permission
 from ledger_kernel.ids import parse_id
-from ledger_platform.routes import answer, attempt_of, idempotency_key, json_response, page_request
+from ledger_platform.routes import allowed, answer, attempt_of, idempotency_key, json_response, page_request
 lazy from ledger_identity.api.context import ApiContext
 lazy from ledger_identity.api.models import NewEmissionPoint
 lazy from ledger_identity.settings import IdentitySettings
@@ -47,9 +47,9 @@ def router(context: ApiContext) -> APIRouter:
 
     def in_branch(permission: Permission) -> BranchDependency:
         """The path's branch, once the caller is known to hold ``permission`` in its company."""
-        allowed = context.allowed(permission)
+        guard = allowed(context.in_company, permission)
 
-        async def place(branch_id: str, access: Annotated[CompanyAccess, Depends(allowed)]) -> InBranch:
+        async def place(branch_id: str, access: Annotated[CompanyAccess, Depends(guard)]) -> InBranch:
             return InBranch(access, BranchId(parse_id(branch_id)))
 
         return place

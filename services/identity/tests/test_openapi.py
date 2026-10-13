@@ -9,7 +9,7 @@ lazy from fastapi.dependencies.models import Dependant
 from ledger_identity import openapi
 from ledger_identity.main import VERSION, create_app
 from ledger_identity.openapi import app, document
-from ledger_platform.routes import if_match
+from ledger_platform.routes import if_match, unguarded_routes
 
 PUBLISHED: Final = Path(__file__).parents[1] / "openapi.json"
 Parameter = TypedDict("Parameter", {"name": str, "in": str, "required": bool})
@@ -139,6 +139,14 @@ def test_every_operation_is_for_bearers_of_a_token() -> None:
     for operations in parsed["paths"].values():
         for operation in operations.values():
             assert operation.get("security") == [{"HTTPBearer": []}]
+
+
+def test_every_route_needs_a_bearer_token_and_declares_what_it_requires() -> None:
+    """The route inventory: a permission in the company, a role in the organization, or the organization."""
+    routes = app().routes
+    v1 = [context.path for context in iter_route_contexts(routes) if (context.path or "").startswith("/v1")]
+    assert len(v1) == len(operations())  # every operation the document lists is a route looked at
+    assert unguarded_routes(routes) == ()
 
 
 def test_every_error_an_operation_documents_is_a_problem_document() -> None:

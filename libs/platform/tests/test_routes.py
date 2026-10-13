@@ -26,26 +26,30 @@ from ledger_platform.routes import (
     COMPANY_HEADER,
     REPLAYED_HEADER,
     IfMatch,
+    allowed,
     answer,
     attempt_of,
     authenticated,
     company_in_header,
     company_in_path,
     etag,
+    holding,
     idempotency_key,
     if_match,
     if_match_required,
+    in_organization,
     json_response,
     page_request,
     parse_if_match,
     precondition_failed,
+    unguarded_routes,
 )
 from ledger_platform.web import ApiInfo, Observability, create_app
 from ledger_testing.issuer import AUDIENCE, ISSUER, PROVIDER_ORGANIZATION, SUBJECT, LocalIssuer
 lazy from ledger_kernel.ids import OrganizationId
 lazy from ledger_kernel.pagination import PageRequest
 lazy from ledger_platform.authorization import CompanyAccess
-lazy from ledger_platform.routes import InCompany
+lazy from ledger_platform.routes import Caller, InCompany
 lazy from ledger_platform.tracing import Tracing
 
 COMPANY: Final = CompanyId(new_id())
@@ -138,6 +142,28 @@ def add_defective_routes(routes: APIRouter, in_path: InCompany, in_header: InCom
         del access
 
 
+ADMIN: Final = "ledger.organization.admin"
+UNDECLARED: Final = "declares no requirement (allowed, holding or in_organization)"
+
+
+def add_guarded_routes(routes: APIRouter, caller: Caller, in_path: InCompany) -> None:
+    """Routes that declare what they require: a permission in the company, a role, or the organization."""
+
+    @routes.post("/companies/{company_id}/managed")
+    async def managed(
+        access: Annotated[CompanyAccess, Depends(allowed(in_path, Permission.COMPANY_MANAGE))],
+    ) -> str:
+        return str(access.tenant.company)
+
+    @routes.post("/registered")
+    async def registered(principal: Annotated[Principal, Depends(holding(caller, ADMIN))]) -> str:
+        return principal.subject
+
+    @routes.get("/mine")
+    async def mine(principal: Annotated[Principal, Depends(in_organization(caller))]) -> str:
+        return str(principal.organization)
+
+
 def router(verifier: TokenVerifier, grants: Grants) -> APIRouter:
     routes = APIRouter()
     caller = authenticated(verifier)
@@ -162,6 +188,7 @@ def router(verifier: TokenVerifier, grants: Grants) -> APIRouter:
         return {"company": str(access.tenant.company), "organization": str(access.tenant.organization)}
 
     add_defective_routes(routes, in_path, in_header)
+    add_guarded_routes(routes, caller, in_path)
 
     @routes.get("/pages")
     async def pages(page: Annotated[PageRequest, Depends(page_request)]) -> dict[str, object]:
@@ -353,6 +380,55 @@ async def test_a_role_without_the_permission_is_forbidden(
     response = await client.get(f"/companies/{COMPANY}/things", headers=bearer(issuer.token()))
     assert response.status_code == 403
     assert problem_code(response) == "permission_denied"
+
+
+async def test_a_route_allowed_a_permission_refuses_a_role_without_it_and_a_company_without_a_role(
+    client: httpx.AsyncClient, issuer: LocalIssuer, grants: Grants
+) -> None:
+    grants.grant(COMPANY, Permission.COMPANY_READ, Permission.COMPANY_MANAGE)
+    grants.grant(OTHER_COMPANY, Permission.COMPANY_READ)
+    token = bearer(issuer.token())
+    managed = await client.post(f"/companies/{COMPANY}/managed", headers=token)
+    assert (managed.status_code, managed.json()) == (200, str(COMPANY))
+    read_only = await client.post(f"/companies/{OTHER_COMPANY}/managed", headers=token)
+    assert (read_only.status_code, problem_code(read_only)) == (403, "permission_denied")
+    unknown = await client.post(f"/companies/{CompanyId(new_id())}/managed", headers=token)
+    assert (unknown.status_code, problem_code(unknown)) == (404, "company_not_found")
+
+
+async def test_a_route_holding_a_role_refuses_a_caller_the_provider_did_not_grant_it(
+    client: httpx.AsyncClient, issuer: LocalIssuer
+) -> None:
+    granted = await client.post("/registered", headers=bearer(issuer.token(roles=[ADMIN])))
+    assert (granted.status_code, granted.json()) == (200, SUBJECT)
+    refused = await client.post("/registered", headers=bearer(issuer.token(roles=["ledger.viewer"])))
+    assert (refused.status_code, problem_code(refused)) == (403, "forbidden")
+    assert (
+        PROBLEM.validate_json(refused.content)["detail"] == f"this needs the role {ADMIN} in the organization"
+    )
+
+
+async def test_a_route_of_the_whole_organization_takes_any_of_its_principals(
+    client: httpx.AsyncClient, issuer: LocalIssuer
+) -> None:
+    response = await client.get("/mine", headers=bearer(issuer.token()))
+    assert (response.status_code, response.json()) == (200, str(organization_of(PROVIDER_ORGANIZATION)))
+    anonymous = await client.get("/mine")
+    assert (anonymous.status_code, problem_code(anonymous)) == (401, "missing_token")
+
+
+def test_the_guarded_routes_are_the_ones_that_need_a_token_and_declare_what_they_require(
+    app: FastAPI,
+) -> None:
+    for guarded in ("/companies/{company_id}/managed", "/registered", "/mine"):
+        assert unguarded_routes(app.routes, prefix=guarded) == ()
+    assert unguarded_routes(app.routes, prefix="/whoami") == (f"GET /whoami: {UNDECLARED}",)
+    assert unguarded_routes(app.routes, prefix="/pages") == (
+        f"GET /pages: needs no bearer token; {UNDECLARED}",
+    )
+    assert (
+        unguarded_routes(app.routes, prefix="/docs") == ()
+    )  # the framework's own pages are no routes of ours
 
 
 async def test_a_company_id_that_is_not_an_id_is_refused_unechoed(

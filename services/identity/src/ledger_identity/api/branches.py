@@ -15,6 +15,7 @@ from ledger_kernel.access import Permission
 from ledger_kernel.ids import parse_id
 from ledger_platform.routes import (
     REPLAYED_HEADER,
+    allowed,
     answer,
     attempt_of,
     idempotency_key,
@@ -39,7 +40,10 @@ def router(context: ApiContext) -> APIRouter:
     """The routes of branches."""
     branches = APIRouter(prefix="/v1/companies/{company_id}/branches", tags=["branches"])
     runtime = context.runtime
-    reader, manager = context.allowed(Permission.COMPANY_READ), context.allowed(Permission.COMPANY_MANAGE)
+    reader, manager = (
+        allowed(context.in_company, Permission.COMPANY_READ),
+        allowed(context.in_company, Permission.COMPANY_MANAGE),
+    )
 
     @branches.post("", status_code=HTTPStatus.CREATED, response_model=BranchView, responses=OPEN)
     async def open_branch(

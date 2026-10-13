@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Annotated, Final, Literal, final
-lazy from collections.abc import Callable, Coroutine, Generator
+lazy from collections.abc import Callable, Generator
 
 from fastapi import Depends
 
@@ -14,9 +14,8 @@ from ledger_platform.routes import REPLAYED_HEADER, authenticated, company_in_pa
 from ledger_platform.web import PROBLEM_JSON
 lazy from ledger_identity.application.ports import IdentityUnit
 lazy from ledger_identity.settings import IdentitySettings
-lazy from ledger_kernel.access import Permission
 lazy from ledger_platform.authentication import TokenVerifier
-lazy from ledger_platform.authorization import CompanyAccess, PermissionSource
+lazy from ledger_platform.authorization import PermissionSource
 lazy from ledger_platform.database import Database, UnitOfWork
 lazy from ledger_platform.idempotency import Idempotency
 lazy from ledger_platform.outbox import Outbox
@@ -27,8 +26,6 @@ type BindUnit = Callable[[UnitOfWork, Outbox], IdentityUnit]
 """identity's unit of work over a chassis transaction (``adapters.postgres.unit.bind``)."""
 type PermissionsOf = Callable[[Database], PermissionSource]
 """identity's permission source over its database (``adapters.permissions.MembershipPermissions``)."""
-type Allowed = Callable[[CompanyAccess], Coroutine[object, object, CompanyAccess]]
-"""The dependency ``ApiContext.allowed`` makes: the caller's access to the path's company, checked."""
 type Answers = dict[int | str, dict[str, object]]
 """What a route documents as ``responses``: its answers by status."""
 type SuccessHeader = Literal["Location", "ETag", "Idempotent-Replayed"]
@@ -88,19 +85,6 @@ class ApiContext:
             bind=bind,
             idempotency=idempotency,
         )
-
-    def allowed(self, permission: Permission) -> Allowed:
-        """The dependency giving the caller's access to the path's company, if it holds ``permission`` there.
-
-        A dependency, declared before any other of the route's: a caller without the permission is refused
-        (403) before its request's preconditions (``If-Match``, ``Idempotency-Key``) or its body are read.
-        """
-
-        async def checked(access: Annotated[CompanyAccess, Depends(self.in_company)]) -> CompanyAccess:
-            access.require(permission)
-            return access
-
-        return checked
 
 
 def problems(*statuses: int) -> Answers:

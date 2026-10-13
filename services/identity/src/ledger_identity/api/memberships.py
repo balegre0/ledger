@@ -15,7 +15,7 @@ from ledger_identity.api.context import problems
 from ledger_identity.api.models import MembershipPage, MembershipView
 from ledger_identity.application import commands, queries
 from ledger_kernel.access import Permission, parse_subject
-from ledger_platform.routes import page_request
+from ledger_platform.routes import allowed, page_request
 lazy from ledger_identity.api.context import ApiContext
 lazy from ledger_identity.api.models import RoleAssignment
 lazy from ledger_identity.settings import IdentitySettings
@@ -28,8 +28,8 @@ def router(context: ApiContext) -> APIRouter:
     """The routes of memberships."""
     memberships = APIRouter(prefix="/v1/companies/{company_id}/memberships", tags=["memberships"])
     runtime = context.runtime
-    reader = context.allowed(Permission.MEMBERSHIP_READ)
-    manager = context.allowed(Permission.MEMBERSHIP_MANAGE)
+    reader = allowed(context.in_company, Permission.MEMBERSHIP_READ)
+    manager = allowed(context.in_company, Permission.MEMBERSHIP_MANAGE)
 
     @memberships.get("", response_model=MembershipPage, responses=problems(401, 403, 404, 422))
     async def list_memberships(

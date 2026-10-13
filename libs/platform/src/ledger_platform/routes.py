@@ -8,6 +8,12 @@
   is proven first: an unauthenticated request never has a company looked up. The header must be sent once
   (else 422 ``invalid_header``), and a route whose path has a ``company_id`` takes its company from there,
   never from the header: one that declares both is a defect (``AmbiguousCompanyError``, at its first request).
+* ``allowed(in_company, permission)``, ``holding(caller, role)`` and ``in_organization(caller)``: what a route
+  requires, declared as its first dependency: a permission in the request's company (403 without it, after
+  the 404 of no role there), a role the identity provider granted in the organization (403), or no more than
+  being a principal of the organization, for a route about the organization as a whole. ``unguarded_routes``
+  names every route of an app that needs no bearer token or declares none of them: a service's test asserts it
+  finds none under ``/v1``.
 * ``page_request``: the ``limit`` and ``cursor`` of a list.
 * ``if_match``: the versions an update may apply to; 428 without ``If-Match``. A header sent in several lines
   is read as one list (RFC 9110 section 5.3), at most 1024 characters in all. The route compares the
@@ -28,23 +34,27 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from types import MappingProxyType
 from typing import Annotated, ClassVar, Final, final
-lazy from collections.abc import AsyncGenerator, Callable, Coroutine, Generator, Mapping
+from weakref import WeakSet
+lazy from collections.abc import AsyncGenerator, Callable, Coroutine, Generator, Iterator, Mapping, Sequence
 
 import structlog
 from fastapi import Depends, Header, Path, Query, Response
+from fastapi.routing import APIRoute, iter_route_contexts
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.exceptions import HTTPException
 lazy from fastapi import Request
+lazy from fastapi.dependencies.models import Dependant
 lazy from pydantic import BaseModel
+lazy from starlette.routing import BaseRoute
 
-from ledger_kernel.errors import InvalidInputError, LedgerError
+from ledger_kernel.errors import ForbiddenError, InvalidInputError, LedgerError
 from ledger_kernel.ids import CompanyId, Tenant, parse_id
 from ledger_kernel.pagination import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, PageRequest, decode_cursor
 from ledger_platform.authentication import MissingTokenError
 from ledger_platform.authorization import CompanyAccess, NoCompanyAccessError
 from ledger_platform.idempotency import MAX_KEY_LENGTH, Attempt, StoredResponse, canonical_body
 from ledger_platform.request_fields import remember
-lazy from ledger_kernel.access import Principal
+lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_platform.authentication import TokenVerifier
 lazy from ledger_platform.authorization import PermissionSource
 lazy from ledger_platform.idempotency import Outcome
@@ -74,6 +84,15 @@ own, such as the service's runtime."""
 type InCompany = Callable[[Request, str, Principal, PermissionSource], AsyncGenerator[CompanyAccess]]
 """The dependency ``company_in_path`` or ``company_in_header`` makes: from the request, the company's id, the
 caller and the source, the caller's access to that company."""
+type Allowed = Callable[[CompanyAccess], Coroutine[object, object, CompanyAccess]]
+"""The dependency ``allowed`` makes: the caller's access to the request's company, its permission checked."""
+type InOrganization = Callable[[Principal], Coroutine[object, object, Principal]]
+"""The dependency ``holding`` or ``in_organization`` makes: the caller, acting in its whole organization."""
+
+_GUARDS: Final[WeakSet[object]] = WeakSet()
+"""Every dependency ``allowed``, ``holding`` and ``in_organization`` made: how ``unguarded_routes`` tells a
+route that declares what it requires."""
+_NO_REQUIREMENT: Final = "declares no requirement (allowed, holding or in_organization)"
 
 
 class InvalidHeaderError(InvalidInputError):
@@ -83,6 +102,13 @@ class InvalidHeaderError(InvalidInputError):
 
     def __init__(self, name: str, requirement: str) -> None:
         super().__init__(f"the header {name} must be {requirement}")
+
+
+class MissingRoleError(ForbiddenError):
+    """The caller is a principal of the organization, but the identity provider did not grant it the role."""
+
+    def __init__(self, role: str) -> None:
+        super().__init__(f"this needs the role {role} in the organization")
 
 
 class AmbiguousCompanyError(LedgerError):
@@ -170,6 +196,86 @@ def company_in_header[**P](caller: Caller, permissions: PermissionsDependency[P]
             yield granted
 
     return access
+
+
+def allowed(in_company: InCompany, permission: Permission) -> Allowed:
+    """The dependency giving the caller's access to the request's company, if it holds ``permission`` there.
+
+    Declared before any other dependency of the route: a caller without the permission is refused (403) before
+    the request's preconditions (``If-Match``, ``Idempotency-Key``) or its body are read.
+    """
+
+    async def checked(access: Annotated[CompanyAccess, Depends(in_company)]) -> CompanyAccess:
+        access.require(permission)
+        return access
+
+    _GUARDS.add(checked)
+    return checked
+
+
+def holding(caller: Caller, role: str) -> InOrganization:
+    """The dependency giving the caller, if the identity provider granted it ``role`` in its organization.
+
+    For what the organization does as a whole (registering a company); ``MissingRoleError`` (403) otherwise.
+    """
+
+    async def checked(principal: Annotated[Principal, Depends(caller)]) -> Principal:
+        if role not in principal.roles:
+            raise MissingRoleError(role)
+        return principal
+
+    _GUARDS.add(checked)
+    return checked
+
+
+def in_organization(caller: Caller) -> InOrganization:
+    """The dependency giving the caller, for a route about its own organization that any principal may use.
+
+    The caller's own organization is the route's scope, and what the route answers is filtered by the caller's
+    roles (the companies it holds a role in), so it requires nothing beyond the token: this says so.
+    """
+
+    async def member(principal: Annotated[Principal, Depends(caller)]) -> Principal:
+        return principal
+
+    _GUARDS.add(member)
+    return member
+
+
+def _calls(dependant: Dependant) -> Iterator[object]:
+    """What ``dependant`` and every dependency below it call."""
+    yield dependant.call
+    for dependency in dependant.dependencies:
+        yield from _calls(dependency)
+
+
+def _declared(call: object) -> bool:
+    return callable(call) and call in _GUARDS
+
+
+def unguarded_routes(routes: Sequence[BaseRoute], *, prefix: str = "/v1") -> tuple[str, ...]:
+    """Every route under ``prefix`` that needs no bearer token, or declares no requirement, and why.
+
+    ``routes`` are an app's (``app.routes``), its included routers' too. A route needs a token when it
+    depends, directly or through another dependency, on ``authenticated``'s bearer scheme; it declares a
+    requirement when one of its dependencies was made by ``allowed``, ``holding`` or ``in_organization``. Both
+    are read from the route's own dependencies: a dependency an ``APIRouter`` adds to all its routes is not
+    seen. Empty when every route is guarded: a service's test asserts so.
+    """
+    found: list[str] = []
+    for context in iter_route_contexts(routes):
+        route, path = context.original_route, context.path
+        if not isinstance(route, APIRoute) or path is None or not path.startswith(prefix):
+            continue
+        calls = list(_calls(route.dependant))
+        missing = [
+            *(() if _BEARER in calls else ("needs no bearer token",)),
+            *(() if any(_declared(call) for call in calls) else (_NO_REQUIREMENT,)),
+        ]
+        if missing:
+            why = "; ".join(missing)
+            found.extend(f"{method} {path}: {why}" for method in sorted(route.methods or ()))
+    return tuple(found)
 
 
 async def page_request(
