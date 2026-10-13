@@ -30,10 +30,13 @@ from sqlalchemy.pool import NullPool
 lazy from sqlalchemy import Connection, MetaData
 
 from ledger_kernel.errors import LedgerError, UnavailableError
-from ledger_platform.data.database import MILLISECOND
+from ledger_platform.config.options import InvalidOptionError
+from ledger_platform.data.database import LONGEST_TIMEOUT, MILLISECOND
 from ledger_platform.data.roles import PLATFORM, SchemaRoles, identifier, migrated_statements
 lazy from ledger_platform.data.database import Database
 
+_COMPONENT: Final = "migrations"
+"""What this module's option errors name (``InvalidOptionError.component``)."""
 MIGRATION_LOCK_WAIT: Final = timedelta(minutes=10)
 """How long a migrator waits for another one of the same schema: far longer than a migration takes, finite."""
 _OTHER_LOCKS: Final = "10s"
@@ -152,8 +155,16 @@ class SchemaMigrations:
         """Bring the schema at ``url`` (as ``ledger_migrator``, direct) to head (see the module).
 
         Raises ``MigrationLockTimeoutError`` when another migrator holds the schema for longer than
-        ``lock_wait``.
+        ``lock_wait``, and ``InvalidOptionError`` at once for a ``lock_wait`` PostgreSQL cannot keep (less
+        than a millisecond, which it would read as no limit, or more than ``LONGEST_TIMEOUT``).
         """
+        if not MILLISECOND <= lock_wait <= LONGEST_TIMEOUT:
+            raise InvalidOptionError(
+                component=_COMPONENT,
+                option="lock_wait",
+                requirement=f"between one millisecond and {LONGEST_TIMEOUT // MILLISECOND} milliseconds",
+                value=lock_wait,
+            )
         engine = create_engine(url, poolclass=NullPool)
         try:
             with engine.connect() as connection:

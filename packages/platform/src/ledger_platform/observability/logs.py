@@ -30,7 +30,6 @@ import re
 import sys
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
-from time import monotonic
 from typing import Final, Protocol, TypedDict, final
 lazy from collections.abc import Iterator, Sequence
 lazy from typing import TextIO
@@ -46,7 +45,6 @@ lazy from structlog.typing import EventDict, ExcInfo, Processor
 
 from ledger_kernel.errors import error_type, truncate
 from ledger_platform.config.settings import LogFormat
-lazy from ledger_kernel.clock import MonotonicClock
 
 WITHHELD: Final = "(message withheld: it can quote values)"
 """What a log says in place of the message of an error of the database."""
@@ -226,49 +224,6 @@ def _withholding_traceback(sio: TextIO, exc_info: ExcInfo) -> None:
     traceback = io.StringIO()
     structlog.dev.plain_traceback(traceback, exc_info)
     sio.write(_redact(traceback.getvalue(), _replacements(exc_info[1])))
-
-
-@final
-class Throttled:
-    """A warning that recurs while something stays broken, logged at most once per ``every`` seconds.
-
-    The first is logged at once. Those that follow within ``every`` seconds are counted, not written, and the
-    next one written says how many were not (``repeated``). ``settle`` ends the episode (the connection is
-    back): it says how many went unlogged since the last line, and the next warning is written at once.
-    """
-
-    __slots__ = ("_clock", "_event", "_every", "_logged_at", "_logger", "_unlogged")
-
-    def __init__(
-        self,
-        logger: structlog.stdlib.BoundLogger,
-        event: str,
-        *,
-        every: float,
-        clock: MonotonicClock = monotonic,
-    ) -> None:
-        self._logger = logger
-        self._event = event
-        self._every = every
-        self._clock = clock
-        self._logged_at: float | None = None
-        self._unlogged = 0
-
-    def warning(self, **fields: object) -> None:
-        """Log the warning with ``fields``, unless one was logged less than ``every`` seconds ago."""
-        now = self._clock()
-        if self._logged_at is not None and now - self._logged_at < self._every:
-            self._unlogged += 1
-            return
-        repeated = {"repeated": self._unlogged} if self._unlogged else {}
-        self._logger.warning(self._event, **fields, **repeated)
-        self._logged_at, self._unlogged = now, 0
-
-    def settle(self) -> int:
-        """End the episode: how many went unlogged since the last line; the next is logged at once."""
-        unlogged = self._unlogged
-        self._logged_at, self._unlogged = None, 0
-        return unlogged
 
 
 @final

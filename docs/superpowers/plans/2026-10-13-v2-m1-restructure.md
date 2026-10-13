@@ -8453,6 +8453,24 @@ git commit -m "refactor: delete the v1 chassis, NATS and the Python contracts; c
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
+> **As built (Task 16), binding on Tasks 17-21.** The final contract of Step 4 could not hold as written: the
+> generated `_manifest.py` (bottom layer), `events.consumers` and `jobs.runner` import the manifest model, which
+> lived in `runtime`. So:
+> - the manifest model is `ledger_platform.config.manifest` (was `runtime/manifest.py`; `AppRole` is re-exported by
+>   `ledger_platform.runtime`), and every `runtime.manifest` / `runtime/manifest` in this plan from here on means
+>   `config.manifest`; devtools' generator writes `from ledger_platform.config.manifest import PackageManifest`;
+> - the platform layers are `["runtime", "http | grpc", "events | jobs", "auth", "data", "observability",
+>   "_manifest", "config"]` (`_manifest` above `config`), in the root contract and in devtools' `PLATFORM_LAYERS`
+>   (Task 19 generates exactly this);
+> - `parked` and `being_cancelled` (where a worker's loop ends) live in `ledger_platform.data.queue`, not in
+>   `runtime.supervision`;
+> - `Telemetry` is exported by `ledger_platform.runtime` (it lives in `runtime.contexts`), not by `observability`;
+> - `http` exports `page_query` (v2) instead of `page_request`; `precondition_failed` is gone (use
+>   `precondition_checked`); `InvalidOptionError(*, component, option, requirement, value)` has the one code
+>   `invalid_option`; `tests/test_errors.py` keeps codes unique across every exception class of the workspace
+>   (Task 18 empties its `SHARED_UNTIL_THE_VOCABULARY_CUTOVER`).
+> - For Task 20: `deploy/docker/ledger.Dockerfile` still `COPY`s `contracts/pyproject.toml`, which no longer exists.
+
 ---
 
 ### Task 17: The `api`, `worker` and `migrate` apps (∥ Task 18)

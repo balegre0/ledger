@@ -1,7 +1,9 @@
 """Every error code means one thing: no two error classes of the workspace declare the same code.
 
 A client matches on ``code`` (§9.6); two classes declaring one code would make one code mean two failures. A
-subclass that declares no code of its own shares its base's on purpose and is not counted.
+subclass that declares no code of its own shares its base's on purpose and is not counted. Every exception
+class of a first-party module counts, ``LedgerError`` or not (the DO pack's errors stand on a base of their
+own until they join the kernel's).
 """
 
 import importlib
@@ -29,22 +31,27 @@ def imported(package: str) -> None:
             importlib.import_module(found.name)
 
 
-def subclasses(base: type[LedgerError]) -> set[type[LedgerError]]:
-    found: set[type[LedgerError]] = set()
+def subclasses(base: type[BaseException]) -> set[type[BaseException]]:
+    found: set[type[BaseException]] = set()
     for child in base.__subclasses__():
         found |= {child, *subclasses(child)}
     return found
 
 
-def declared_codes(classes: set[type[LedgerError]], packages: tuple[str, ...]) -> dict[str, list[str]]:
+def declared_codes(classes: set[type[BaseException]], packages: tuple[str, ...]) -> dict[str, list[str]]:
     """Each code a class of ``packages`` declares in its own body, with the classes that declare it.
 
-    Classes of other modules (the tests' own) are left out.
+    Classes of other modules (the tests' own, the standard library's) are left out.
     """
     codes: dict[str, list[str]] = defaultdict(list)
     for error in classes:
-        if "code" in vars(error) and error.__module__.partition(".")[0] in packages:
-            codes[error.code].append(f"{error.__module__}.{error.__qualname__}")
+        if error.__module__.partition(".")[0] not in packages:
+            continue
+        match vars(error):
+            case {"code": str() as code}:
+                codes[code].append(f"{error.__module__}.{error.__qualname__}")
+            case _:
+                pass
     return codes
 
 
@@ -83,7 +90,7 @@ def test_no_two_error_classes_of_the_workspace_declare_one_code() -> None:
     packages = first_party()
     for package in packages:
         imported(package)
-    codes = declared_codes(subclasses(LedgerError) | {LedgerError}, packages)
+    codes = declared_codes(subclasses(BaseException), packages)
     twice = {code: sorted(owners) for code, owners in codes.items() if len(owners) > 1}
     assert twice == SHARED_UNTIL_THE_VOCABULARY_CUTOVER
 
@@ -104,3 +111,15 @@ def test_a_code_two_classes_declare_is_named() -> None:
         "ledger_example.test_a_code_two_classes_declare_is_named.<locals>.FirstError",
         "ledger_example.test_a_code_two_classes_declare_is_named.<locals>.SecondError",
     ]
+
+
+def test_a_code_an_error_outside_the_ledger_hierarchy_shares_is_named() -> None:
+    class PackError(Exception):
+        code: ClassVar[str] = "twice"
+
+    class KernelError(LedgerError):
+        code: ClassVar[str] = "twice"
+
+    PackError.__module__ = KernelError.__module__ = "ledger_pack"
+    codes = declared_codes(subclasses(BaseException), ("ledger_pack",))
+    assert sorted(name.rpartition(".")[2] for name in codes["twice"]) == ["KernelError", "PackError"]
