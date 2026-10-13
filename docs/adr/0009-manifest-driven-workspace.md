@@ -13,18 +13,22 @@ tool that generates and validates everything derived from it.
 
 ## Decision
 
-- uv workspace members by glob (`packages/*`, `modules/*`, `countries/*`, `apps/*`, `tools/*`); one package
-  per unit (`ledger-<name>`, one top-level import package each).
+- uv workspace members by glob (`packages/*`, `modules/*`, `countries/*`, `countries/*/testing`, `apps/*`,
+  `tools/*`); one package per unit (`ledger-<name>`, one top-level import package each).
 - `manifest.toml` per package is the source of truth: name, kind, owners, status, dependencies, schema, id
-  prefixes, permissions with their built-in roles, events published and consumed, jobs, schedules, extension
-  points, HTTP prefixes, quality tier.
-- `ledger-devtools`, a tested workspace member: `sync` generates each package's `pyproject.toml` and
-  `_manifest.py`, `.importlinter`, coverage targets, CODEOWNERS, database roles, identity's role grants and the
-  reference docs; `check` validates manifests and fails on stale generated files; `affected` selects CI work;
-  `scaffold` renders copier templates; `gate` runs the quality gate per package.
+  prefixes, permissions with their built-in roles, events published (with optional public names) and consumed,
+  jobs, schedules, extension points and provided ports, HTTP prefixes; for countries also regimes and channels
+  (with environments, document kinds and tier). The platform has a manifest too (its schema, prefix, schedules).
+- `ledger-devtools`, a tested workspace member, built now with three commands: `sync` generates each package's
+  `pyproject.toml` and `_manifest.py`, `.importlinter`, coverage targets, database roles and grants (modules,
+  channels, platform), identity's role grants and event schema snapshots; `check` validates manifests (including
+  the module graph with subscription edges) and fails on stale generated files; `gate` runs the quality gate per
+  package. `affected` with a CI matrix, `scaffold`, CODEOWNERS and reference docs come later.
+- Devtools treats each channel like a module for schemas, roles, grants, id prefixes, permissions,
+  subscriptions and job kinds.
 - Coverage is 100 % branch per package; vulture, deptry, typos and buf complete the gate.
 
 ## Consequences
 
-- Positive: adding a module or country touches only its directory; CI time stays flat with `affected`.
+- Positive: adding a module or country touches only its directory and generated files.
 - Negative: a generator to maintain; contributors edit manifests, never generated files.

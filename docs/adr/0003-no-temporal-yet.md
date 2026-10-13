@@ -14,10 +14,14 @@ state machines persisted with the document; what is generic is queueing, retries
 ## Decision
 
 Each module schema has a `jobs` table (primary key `kind, key`; `run_at`, lease, attempts, deadline, a payload of
-ids). Handlers return `Done`, `RunAgain(at)` or `Park(reason)`, or raise; retryable errors back off; invalid ones
-or the deadline make the job `dead`. Fiscal documents are explicit channel state machines persisted in
-PostgreSQL and advanced one step per run; no transaction spans a network call. Schedules only enqueue jobs and
-run under an advisory lock.
+ids). Enqueueing an existing key is ignored while the job is active and resets it when done or dead. A claim sets
+a lease and a fencing token and counts the attempt; every record checks the token. Handlers return `Done`,
+`RunAgain(at)` or `Park(reason)` (woken by `wake` or `wake_all(kind, company, reason)`), or raise; retryable
+errors back off; invalid ones or the deadline make the job `dead`. Jobs live outside RLS and hold ids only;
+handlers open scoped units. Concurrency is per kind per process; per-company fairness is deferred. Fiscal
+documents are explicit channel state machines persisted in PostgreSQL and advanced one step per run; no
+transaction spans a network call. Schedules only enqueue jobs and run under a lease row in
+`platform.schedule_leases` (safe behind a transaction pooler).
 
 ## Revisit triggers
 

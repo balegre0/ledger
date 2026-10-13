@@ -18,8 +18,10 @@ inside one process.
 One codebase organized as modules (bounded contexts), each with a public `api.py` (Protocols and DTOs) and
 `events.py`, enforced by generated import-linter contracts. Five deployables from one image: `api`, `worker`,
 `signer`, `receiver`, `migrate`. Modules call each other in process through their API Protocols and publish
-facts as events. A module is extracted only for a runtime reason (security isolation, scaling or latency
-profile, data residency, failure isolation); extraction swaps transports, never domain code.
+facts as events. Consuming an event is a dependency edge exactly like an import: imports and subscriptions
+together form an acyclic module graph, and a facade is never called while a unit of work is open. A module is
+extracted only for a runtime reason (security isolation, scaling or latency profile, data residency, failure
+isolation); extraction swaps transports, never domain code.
 
 ## Considered options
 

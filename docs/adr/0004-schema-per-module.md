@@ -12,16 +12,22 @@ extractable and tenants shardable later.
 
 ## Decision
 
-- One database; each module and each channel family owns one schema (`identity`, `invoicing`, `do_ecf`, ...).
-  No cross-schema foreign key, join, view or function.
+- One database; each module, each channel family and the platform own one schema (`identity`, `invoicing`,
+  `do_ecf`, `platform`, ...). No cross-schema foreign key, join, view or function.
 - Roles: `<schema>_owner` (DDL, used only by `migrate`), `<schema>_rw` (DML); logins `ledger_app` (`NOINHERIT`
-  member of every `_rw` except the signer's), `ledger_signer`, `ledger_migrator`; `ledger_relay` for the event
-  fan-out. No superuser and no `BYPASSRLS` anywhere.
-- Every unit of work starts with `SET LOCAL ROLE <schema>_rw`, `SET LOCAL search_path` and the RLS settings
-  `ledger.organization_id`, `ledger.company_id`, `ledger.mode`: one bounded pool serves every module while the
-  database still refuses cross-schema access.
-- RLS policies per command, produced by one builder, with the mode in the predicate; a generated
-  deny-by-default test per table.
+  member of every `_rw` except the signer's), `ledger_signer`, `ledger_migrator`; group `ledger_relay` for the
+  event fan-out (outbox, inbox and subscriptions tables only). No superuser and no `BYPASSRLS` anywhere.
+- Every unit of work starts with `SET LOCAL ROLE <schema>_rw` and the transaction-local settings
+  `ledger.organization_id`, `ledger.company_id`, `ledger.mode`. The role is bound when the runtime assembles the
+  module, never passed by callers. Tables are schema-qualified; there is no `search_path`. One bounded pool serves
+  every module while the database still refuses cross-schema access.
+- All per-transaction state is transaction-scoped, so a transaction pooler works; `LISTEN` connections and
+  `migrate` (session advisory locks, DDL) connect directly. Schedules use lease rows, not session locks.
+- RLS: one policy per command, from one builder, in three scopes (tenant; organization; moded organization);
+  settings read as `(SELECT NULLIF(current_setting('ledger.x', true), ''))` because a pooled connection returns
+  an empty string, not NULL, once a setting has been used. A generated deny-by-default test per table.
+- Every schema starts with `chassis_schema_v1`: outbox, inbox, jobs, subscriptions, idempotency keys and
+  append-only audit events, with partial claim indexes and queue-friendly fillfactor and autovacuum settings.
 - `organization_id` on every tenant row is the shard key; nothing is unique across organizations except
   identity's global tax-id registry.
 
@@ -33,5 +39,6 @@ extractable and tenants shardable later.
 
 ## Consequences
 
-- Positive: database-enforced ownership; extraction by logical replication of one schema; bounded connections.
-- Negative: a chassis bug could set the wrong role; mitigated because only the unit of work sets it.
+- Positive: database-enforced ownership; extraction by logical replication of one schema; bounded connections;
+  pooler-compatible.
+- Negative: a chassis bug could set the wrong role; mitigated because only the runtime-bound unit of work sets it.

@@ -13,19 +13,31 @@ several formats (Spain has four), and that generic EDI state machines fail (Odoo
 ## Decision
 
 - `countries/<iso2>/` is one package holding a **regime** (pure typed, effective-dated data: currency, time
-  zone, tax-id schemes, tax categories, document types, rounding, extension fields, sources; it imports the
-  kernel only) and one or more **channels** keyed `<cc>-<format>-v<N>` (builders, vendored schemas, signing
-  profile, gateway, numbering, status map, explicit state machine, contingency, receiver routes, requirements).
-- Registries load the entry points `ledger.countries.regimes` and `ledger.countries.channels` at startup,
-  validate and freeze them. Modules never import countries; countries never import modules or each other;
-  channels get what they need through fiscal-kit ports bound by the apps.
-- `fiscal-kit` generalizes plumbing (drafts, numbering ranges and voids, submission steps, circuit breaker,
-  status-map exhaustiveness, hardened XML, conformance suites), never an authority's states.
-- One regime-parameterized tax calculator in the kernel computes totals for invoicing; channels verify with it.
-- Quality tiers (Bronze, Silver, Gold) per channel are declared in the manifest and checked by devtools.
+  zone, tax-id schemes, tax categories, document types, rounding, law-level fields, dated parameters, sources;
+  it imports the kernel only) and one or more **channels** keyed `<cc>-<format>-v<N>` (builders, vendored
+  schemas, signing profile, gateway, numbering, status map, explicit state machine, contingency, delivery,
+  printed representation, receiver routes, requirements, format-level fields). Dev-only fakes live in a separate
+  distribution (`ledger-country-<cc>-testing`).
+- Registries in `platform.runtime.registries` load the entry points `ledger.countries.regimes` and
+  `ledger.countries.channels` at startup, validate and freeze them. Modules never import countries; countries
+  never import modules or each other; channels receive ports (`SignerPort`, `CompanyDirectory`, `ArchivePort`)
+  through a `ChannelContext` built by the runtime from what modules provide.
+- `fiscal-kit` holds only the contract between `fiscal` and channels: `Channel`, `FiscalDraft`, `FiscalStatus`,
+  `StatusMap`, the kit events, hardened XML helpers and the ports above plus `NumberingPolicy` (authorized
+  ranges with an optional opaque artifact, or free series per establishment). Numbering allocation, submission
+  loops, the circuit breaker and the conformance harness stay in the first channel until a second one needs them
+  (rule of two). The kit never generalizes an authority's states.
+- Country fields share the wire namespace `fiscal.<regime>.<field>`: the regime declares law-level fields,
+  channels declare format-level ones; requests are validated against the company's enrolled channels.
+- The pure regime schema types and the one regime-parameterized tax calculator live in the kernel (stdlib only);
+  invoicing computes totals with it and channels verify with it. **Accepted deviation from R3** (the kernel was to
+  hold generic value types only), accepted by the controller on the owner's behalf; if the owner vetoes, the same
+  contents move to a `ledger-regime-sdk` package.
+- Quality tiers (Bronze, Silver, Gold) per channel are declared in the manifest; live mode needs Silver plus the
+  authority's authorization evidence; the automated rule catalogue is deferred.
 
 ## Consequences
 
 - Positive: a new country or format version is a new package or channel, with no module edits.
-- Negative: two registries and a kit to maintain; logic can accumulate in packs (review rule: logic two packs
-  need moves into the kit).
+- Negative: two registries and a small kit to maintain; logic can accumulate in packs (review rule: logic two
+  packs need moves into the kit).
