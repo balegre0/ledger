@@ -1001,7 +1001,7 @@ async def test_a_server_error_raised_by_a_route_is_logged_and_a_client_error_is_
             "detail": "d" * 200 + "...",
         }
     ]
-    assert "ddd" not in failed.text
+    assert "ddd" not in str(PROBLEM.validate_json(failed.content).get("detail", ""))
 
 
 async def test_the_lifespan_reaches_the_app_through_its_middleware(app: FastAPI) -> None:

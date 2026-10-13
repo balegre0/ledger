@@ -9,11 +9,12 @@ marks itself open on the task (``open_unit``) for the facade guard (§3.4, rule 
 """
 
 import hashlib
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
 from typing import ClassVar, Final, final
-lazy from collections.abc import Awaitable, Callable, Mapping
+lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 lazy from contextvars import Token
 lazy from datetime import datetime, timedelta
 lazy from uuid import UUID
@@ -426,7 +427,7 @@ class UnitOfWork:
                 source=self._binding.source,
                 **_scope_columns(event.scope),
                 subject=event.subject,
-                aggregate_version=event.aggregate_version,
+                aggregate_version=0 if event.aggregate_version is None else event.aggregate_version,
                 occurred_at=self.now,
                 traceparent=current_traceparent(),
                 payload=payload,
@@ -474,6 +475,23 @@ class UnitOfWork:
         """
         self.require_open()
         self._after_commit.append(callback)
+
+    @asynccontextmanager
+    async def savepoint(self) -> AsyncGenerator[None]:
+        """A part of the unit undone on its own when it raises: its statements and what it recorded.
+
+        The rest of the unit (and the locks taken before it) stays; the unit can go on and commit.
+        """
+        self.require_open()
+        pending, callbacks, published = len(self._pending), len(self._after_commit), self._published
+        try:
+            async with self.connection.begin_nested():
+                yield
+        except BaseException:
+            del self._pending[pending:]
+            del self._after_commit[callbacks:]
+            self._published = published
+            raise
 
     async def flush(self) -> None:
         """Write what was recorded, in order (``BoundDatabase.unit`` calls it before the commit)."""

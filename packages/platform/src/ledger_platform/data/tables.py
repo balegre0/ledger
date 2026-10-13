@@ -45,7 +45,7 @@ def _envelope() -> tuple[SchemaItem, ...]:
         Column("source", Text, nullable=False),
         *_tenant(),
         Column("subject", Uuid()),
-        Column("aggregate_version", BigInteger),
+        Column("aggregate_version", BigInteger, nullable=False, server_default=text("0")),
         _moment("occurred_at", nullable=False),
         Column("traceparent", Text),
         Column("payload", JSONB, nullable=False),

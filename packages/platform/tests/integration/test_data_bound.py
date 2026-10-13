@@ -445,7 +445,7 @@ async def test_publish_writes_the_envelope_with_the_units_time_and_signals_after
     kind, version, now = Renamed.TYPE, Renamed.VERSION, uow.now
     assert await rows(admin, OUTBOX) == [
         (kind, version, "probe", A, A1, "test", SUBJECT, 3, now, None, {"name": "x"}, 0, None),
-        (kind, version, "probe", A, None, None, None, None, now, None, {"name": "y"}, 0, None),
+        (kind, version, "probe", A, None, None, None, 0, now, None, {"name": "y"}, 0, None),
     ]
 
 
@@ -797,3 +797,22 @@ async def test_a_purging_connection_sees_expired_keys_of_every_organization_only
     async with probe.unit(None) as uow:
         await uow.connection.execute(text("SET LOCAL ledger.purge = 'on'"))
         assert await count(uow) == 0
+
+
+async def test_a_savepoint_that_fails_undoes_its_part_and_the_unit_goes_on(
+    probe: BoundDatabase, signals: RecordedSignals, admin: psycopg.AsyncConnection
+) -> None:
+    with acting_as(ACTOR):
+        async with probe.unit(tenant(A, A1)) as uow:
+            with contextlib.suppress(LookupError):
+                async with uow.savepoint():
+                    uow.publish(renamed(tenant(A, A1), "undone"))
+                    uow.audit(action="probe.rename", subject=SUBJECT)
+                    uow.after_commit(lambda: signals.sent.append("ledger_inbox"))
+                    raise LookupError
+            assert not uow.published
+            async with uow.savepoint():
+                uow.publish(renamed(tenant(A, A1), "kept"))
+    assert await rows(admin, "SELECT payload FROM probe.outbox") == [({"name": "kept"},)]
+    assert await rows(admin, "SELECT count(*) FROM probe.audit_events") == [(0,)]
+    assert signals.sent == ["ledger_outbox"]

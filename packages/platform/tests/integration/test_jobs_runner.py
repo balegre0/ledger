@@ -19,6 +19,7 @@ import pytest
 from opentelemetry import trace
 from prometheus_client import CollectorRegistry
 from pydantic import AwareDatetime, TypeAdapter
+from sqlalchemy import event
 from structlog.testing import capture_logs
 lazy from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -34,6 +35,7 @@ from ledger_platform.runtime.manifest import JobDecl
 from ledger_testing import waiting
 from ledger_testing.database import app_url
 lazy from ledger_platform.data.notifier import Channel
+lazy from ledger_platform.jobs.outcomes import JobHandler
 lazy from ledger_platform.observability.tracing import Tracing
 lazy from ledger_testing.postgres import WorkerDatabase
 
@@ -714,13 +716,16 @@ async def test_a_runner_stopped_mid_job_stops_the_handler_and_records_nothing(
 
 
 async def test_a_job_whose_lease_ran_out_waits_out_its_backoff_before_another_claim(
-    runner: JobRunner, probe: BoundDatabase, admin: psycopg.AsyncConnection
+    runner: JobRunner, probe: BoundDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry
 ) -> None:
     """I4: its worker died just now; the job is ready again after the backoff, like a failed run."""
     await enqueue(probe, "k1")
     await runner.claim_now()
     await run(admin, JUST_EXPIRED)
-    assert await runner.claim_now() == []
+    with capture_logs() as logs:
+        assert await runner.claim_now() == []
+    assert logs == [{"event": "job_worker_recovered", "kind": EXPORT, "jobs": 1, "log_level": "warning"}]
+    assert registry.get_sample_value("ledger_job_worker_recovered_total", {"kind": EXPORT}) == 1
     assert (await state(admin, "k1"))[:6] == ("ready", 1, "worker_lost", None, *UNLEASED)
     cursor = await admin.execute("SELECT run_at > now() FROM probe.jobs")
     assert await cursor.fetchall() == [(True,)]
@@ -760,3 +765,38 @@ async def test_a_record_after_the_job_was_taken_over_while_it_ran_changes_nothin
     assert logs == [{"event": "job_lease_lost", "kind": EXPORT, "log_level": "warning"}]
     assert (await state(admin, "k1"))[:4] == ("running", 1, None, None)
     assert finished(registry, "parked") is None
+
+
+async def test_a_kind_at_its_concurrency_is_not_claimed_while_the_others_are(
+    probe: BoundDatabase, databases: tuple[Database, Database], admin: psycopg.AsyncConnection
+) -> None:
+    """``run`` claims a kind for its free slots only: at its concurrency it is skipped, the next is not."""
+    blocking = Blocking()
+    single = JobDecl(kind=EXPORT, lease=LEASE, max_attempts=3, concurrency=1)
+    kinds: dict[str, tuple[JobDecl, JobHandler]] = {
+        EXPORT: (single, blocking),
+        POLL: (DECLS[POLL], Scripted()),
+    }
+    runner = JobRunner(database=probe, kinds=kinds, poll=0.02)
+    claims: list[str] = []
+
+    def heard(*arguments: object) -> None:
+        if "WITH chosen" in str(arguments[2]):  # the statement of a claim
+            claims.append("claim")
+
+    event.listen(databases[0].engine.sync_engine, "before_cursor_execute", heard)
+    await enqueue(probe, "k1", "k2")
+    task = asyncio.create_task(runner.run())
+    try:
+        await blocking.started.wait()
+        seen = len(claims)
+
+        async def a_later_pass_claimed() -> bool:  # every pass claims POLL; EXPORT, full, is skipped first
+            return len(claims) >= seen + 2
+
+        await waiting.eventually(a_later_pass_claimed)
+        assert [(await state(admin, key))[0] for key in ("k1", "k2")] == ["running", "ready"]
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task

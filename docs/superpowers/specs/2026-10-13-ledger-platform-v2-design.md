@@ -317,13 +317,16 @@ type wait in the inbox for the next roll forward (alerted by age), never fail.
   an operator.
 - **A row that cannot be fanned out never holds back the others**: a failed batch is redone one row at a time
   (savepoints of the pass), the failing row's `attempts` is counted (`ledger_outbox_failed`, logged with the
-  error's type only), and at 10 it is set aside, kept and alerted until an operator resets `attempts`.
+  error's type only) when the error is the row's own or another row went through, and at 10 it is set aside,
+  kept and alerted until an operator resets `attempts`. When every row fails alike (a revoked grant, a lost
+  connection) none is blamed: the pass rolls back and raises, and the worker's supervisor backs off.
 - **Ordering.** None promised across aggregates. Default for projections: **version-monotonic upserts** (a
   handler writes only when the event's `aggregate_version` is above the stored one, so order does not matter).
   Opt-in per consumer (`ordered = true` in the manifest): **head-of-line claim per (consumer, subject)**: the
   runner claims only the first row of each subject that is not dead, in the order (`aggregate_version`, event
-  id) (a missing version sorts first), so a subject's events run in their aggregate's order even when their
-  ids are not, and a failing one blocks only its own subject. One dispatcher fans out a schema at a time (a
+  id) (an event published without a version is stored with 0), so a subject's events run in their aggregate's
+  order even when their ids are not, and a failing one blocks only its own subject. The heads are read in one
+  ordered pass over `inbox_head` (`DISTINCT ON (subject)`). One dispatcher fans out a schema at a time (a
   transaction-level advisory lock per schema), so a subject's rows reach the inbox in id order. A dead row no
   longer blocks its subject (the rows behind it go on); replaying it is refused while an earlier live row of its
   subject waits. Events without a subject are not ordered.
@@ -947,7 +950,7 @@ CREATE TABLE {s}.outbox (
   id               uuid PRIMARY KEY,                 -- event id (UUIDv7: time-ordered)
   type             text NOT NULL, version smallint NOT NULL, source text NOT NULL,
   organization_id  uuid, company_id uuid, mode text CHECK (mode IN ('test','live')),
-  subject          uuid, aggregate_version bigint,
+  subject          uuid, aggregate_version bigint NOT NULL DEFAULT 0,   -- 0: the producer gave none
   occurred_at      timestamptz NOT NULL, traceparent text,
   payload          jsonb NOT NULL CHECK (octet_length(payload::text) <= 65536),
   attempts         int NOT NULL DEFAULT 0,          -- failed fan-outs of this row; set aside at 10
@@ -960,7 +963,7 @@ CREATE TABLE {s}.inbox (
   consumer text NOT NULL, event_id uuid NOT NULL,
   type text NOT NULL, version smallint NOT NULL, source text NOT NULL,
   organization_id uuid, company_id uuid, mode text,
-  subject uuid, aggregate_version bigint, occurred_at timestamptz NOT NULL, traceparent text,
+  subject uuid, aggregate_version bigint NOT NULL DEFAULT 0, occurred_at timestamptz NOT NULL, traceparent text,
   payload jsonb NOT NULL,
   status text NOT NULL DEFAULT 'ready' CHECK (status IN ('ready','running','dead')),
   attempts int NOT NULL DEFAULT 0, next_attempt_at timestamptz NOT NULL DEFAULT now(),

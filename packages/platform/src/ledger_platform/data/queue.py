@@ -120,6 +120,15 @@ async def claim(
     return rows
 
 
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Recovered:
+    """What a recovery did: rows made ``dead`` (attempts spent) and rows made ``ready`` again."""
+
+    dead: int
+    ready: int
+
+
 class Recovery(TypedDict):
     """How expired rows of a group are recovered."""
 
@@ -178,11 +187,11 @@ async def recover(
     keys: Sequence[str],
     group: ColumnElement[bool],
     **recovery: Unpack[Recovery],
-) -> int:
-    """Recover ``group``'s rows whose lease ran out (see the module); how many were made dead."""
+) -> Recovered:
+    """Recover ``group``'s rows whose lease ran out (see the module): how many became dead, how many ready."""
     statuses = _STATUSES.validate_python(
         (await connection.execute(recovery_statement(table, keys=keys, group=group, **recovery)))
         .scalars()
         .all()
     )
-    return statuses.count("dead")
+    return Recovered(dead=statuses.count("dead"), ready=statuses.count("ready"))

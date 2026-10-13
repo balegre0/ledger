@@ -45,7 +45,7 @@ class RawEvent:
     source: str
     scope: Scope | None
     subject: UUID | None
-    aggregate_version: int | None
+    aggregate_version: int
     occurred_at: datetime
     traceparent: str | None
     payload: Mapping[str, JsonValue]
@@ -64,7 +64,7 @@ class _StoredEnvelope:
     company_id: UUID | None
     mode: str | None
     subject: UUID | None
-    aggregate_version: int | None
+    aggregate_version: int
     occurred_at: datetime
     traceparent: str | None
     payload: dict[str, JsonValue]

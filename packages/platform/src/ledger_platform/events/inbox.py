@@ -1,43 +1,54 @@
 """The inbox runner (§3.5): one consumer's rows, claimed with a lease and handled exactly once in effect.
 
 A claim, in a short unit of its own, first recovers the consumer's rows whose lease ran out (``ready`` a
-backoff later, or ``dead`` with ``worker_lost`` once the attempts are spent, ``inbox_worker_lost``), then
-takes due ``ready`` rows of the consumer's own types, counts the attempt, and sets a fencing token. Each row
-is handled in its own unit, in the consumer's module role and the event's scope. The unit's first statement
-extends the lease, fenced by the token (``WHERE lease_token = :token``): if it finds nothing, another worker
-took the row over and the handler does not run (``inbox_lease_lost``); if it does, the unit holds the row's
-lock until it ends, so no other worker can claim the row while the handler works, however long that takes. The
-handler's writes and the deletion of the row commit together. A failure is recorded in another unit, fenced
-the same way: retried with backoff, or ``dead`` (kept, replayable) when the error is ``INVALID`` or the
-attempts are spent.
+backoff later, ``inbox_worker_recovered``, or ``dead`` with ``worker_lost`` once the attempts are spent,
+``inbox_worker_lost``), then takes due ``ready`` rows of the consumer's own types, counts the attempt, and
+sets a fencing token.
+
+Each row is handled in its own unit, in the consumer's module role and the event's scope. The unit's first
+statement extends the lease, fenced by the token (``WHERE lease_token = :token``): if it finds nothing,
+another worker took the row over and the handler does not run (``inbox_lease_lost``); if it does, the unit
+holds the row's lock until it ends, so no other worker can take the row while the handler works, however long
+that takes. The handler runs in a savepoint of the unit: its writes and the deletion of the row commit
+together. If it fails, the savepoint is undone (its writes and what it recorded) and the failure is recorded
+in the same unit, still under the row's lock, with the error's own code: retried with backoff, or ``dead``
+(kept, replayable) when the error is ``INVALID`` or the attempts are spent.
 
 An ordered consumer claims only the first row of each subject that is not dead, in the order
-(``aggregate_version``, event id), a missing version first. Consequences (Decision 18): a dead row no longer
-holds back its subject, so the rows behind it run before it, and so would a replay of it; a replay is
-therefore refused while an earlier row of its subject is still live. Events without a subject are not ordered
-(they have no subject to queue behind).
+(``aggregate_version``, event id), a producer that gave no version having stored 0. The heads are read in one
+ordered pass over ``inbox_head`` (``DISTINCT ON (subject)``), never with a look back per row. Consequences
+(Decision 18): a dead row no longer holds back its subject, so the rows behind it run before it, and so would
+a replay of it; a replay is therefore refused while an earlier row of its subject is still live. Events
+without a subject are not ordered (they have no subject to queue behind).
+
+Rows of a type the running code has no handler for (a newer version's, after a rollback) are never claimed:
+they wait, as many as the fan-out delivers while the subscription stays active, for the version that handles
+them. Nothing else bounds them; ``ledger_inbox_unhandled_oldest_seconds`` (the age of the oldest, measured
+once per drain) is what an alert watches, and an ordered subject whose head is one of them waits behind it.
 
 Every time is the database's (§3.6): due rows and expired leases are compared with the claim unit's ``now()``;
 a lease extension and a retry run from the statement that writes them (``statement_timestamp()``).
-``ledger_inbox_unhandled_oldest_seconds`` is the age of the consumer's oldest ready row of a type it has no
-handler for (rows of a newer version's types wait for its rollout, §3.5), measured once per drain.
 """
 
 import contextlib
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import ClassVar, Final, Never, NotRequired, TypedDict, Unpack, final
-lazy from collections.abc import Generator, Sequence
+lazy from collections.abc import Sequence
+lazy from contextlib import AbstractContextManager
 lazy from datetime import datetime
 lazy from uuid import UUID
 
 import structlog
+from opentelemetry.trace import Status, StatusCode
 from pydantic import TypeAdapter
-from sqlalchemy import and_, delete, exists, func, select, text, tuple_, update
+from sqlalchemy import and_, delete, exists, func, or_, select, text, tuple_, update
+from sqlalchemy.dialects.postgresql import distinct_on
+lazy from opentelemetry.trace import Span
 lazy from prometheus_client import CollectorRegistry
-lazy from sqlalchemy import ColumnElement, RowMapping
+lazy from sqlalchemy import ColumnElement, RowMapping, Update
 
-from ledger_kernel.errors import ConflictError, ErrorKind, LedgerError
+from ledger_kernel.errors import ConflictError, ErrorKind, LedgerError, error_type
 from ledger_platform.data.audit import Actor, acting_as
 from ledger_platform.data.notifier import INBOX
 from ledger_platform.data.queue import DEFAULT_BACKOFF, claim, recover
@@ -47,6 +58,7 @@ from ledger_platform.events.metrics import counter, gauge
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.database import AnyTable
 lazy from ledger_platform.data.queue import Backoff
+lazy from ledger_platform.data.unit_of_work import UnitOfWork
 lazy from ledger_platform.events.consumers import Consumer, RawEvent
 lazy from ledger_platform.events.wakeups import Waker
 lazy from ledger_platform.observability.tracing import Tracing
@@ -134,17 +146,51 @@ def _claimed(row: RowMapping) -> ClaimedEvent:
 def _earlier_live(inbox: AnyTable) -> ColumnElement[bool]:
     """Whether a live row of the same consumer and subject comes before ``inbox``'s row (see the module).
 
-    The order is (``aggregate_version``, event id), a missing version first; a row without a subject has none
-    before it (``NULL = NULL`` is not true).
+    The order is (``aggregate_version``, event id); a row without a subject has none before it
+    (``NULL = NULL`` is not true). One probe of ``inbox_head`` per row asked about: for a replay, not claims.
     """
     older = inbox.alias("older")
     return exists().where(
         older.c.consumer == inbox.c.consumer,
         older.c.subject == inbox.c.subject,
-        tuple_(func.coalesce(older.c.aggregate_version, -1), older.c.event_id)
-        < tuple_(func.coalesce(inbox.c.aggregate_version, -1), inbox.c.event_id),
+        tuple_(older.c.aggregate_version, older.c.event_id)
+        < tuple_(inbox.c.aggregate_version, inbox.c.event_id),
         older.c.status != "dead",
     )
+
+
+def claimable(inbox: AnyTable, consumer: Consumer) -> ColumnElement[bool]:
+    """The rows a claim of ``consumer`` may take (see the module).
+
+    Due ``ready`` rows of its types; for an ordered consumer only those without a subject or at its head.
+    """
+    due = and_(
+        inbox.c.consumer == consumer.name,
+        inbox.c.type.in_(sorted(consumer.types)),
+        inbox.c.status == "ready",
+        inbox.c.next_attempt_at <= func.now(),
+    )
+    if not consumer.ordered:
+        return due
+    live = inbox.alias("live")
+    heads = (
+        select(live.c.event_id)
+        .where(live.c.consumer == consumer.name, live.c.status != "dead", live.c.subject.is_not(None))
+        .order_by(live.c.subject, live.c.aggregate_version, live.c.event_id)
+        .ext(distinct_on(live.c.subject))
+    )
+    return and_(due, or_(inbox.c.subject.is_(None), inbox.c.event_id.in_(heads)))
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class _Failure:
+    """How a failed handling is recorded."""
+
+    code: str
+    dead: bool
+    error: str
+    """The error's type (never its message)."""
 
 
 def _fence(deleted: object) -> None:
@@ -157,7 +203,17 @@ def _fence(deleted: object) -> None:
 class InboxRunner:
     """See the module."""
 
-    __slots__ = ("_backoff", "_batch", "_consumer", "_database", "_handled", "_lease", "_tracing", "_waiting")
+    __slots__ = (
+        "_backoff",
+        "_batch",
+        "_consumer",
+        "_database",
+        "_handled",
+        "_lease",
+        "_recovered",
+        "_tracing",
+        "_waiting",
+    )
 
     def __init__(
         self, *, database: BoundDatabase, consumer: Consumer, **options: Unpack[RunnerOptions]
@@ -177,6 +233,13 @@ class InboxRunner:
         )
         for outcome in OUTCOMES:
             self._handled.labels(consumer=consumer.name, outcome=outcome)  # exported at zero
+        self._recovered = counter(
+            registry,
+            "ledger_inbox_worker_recovered",
+            "Inbox rows whose lease ran out (their worker died), made ready again after the backoff.",
+            ["consumer"],
+        )
+        self._recovered.labels(consumer=consumer.name)  # exported at zero
         self._waiting = gauge(
             registry,
             "ledger_inbox_unhandled_oldest_seconds",
@@ -184,23 +247,12 @@ class InboxRunner:
             ["consumer"],
         )
 
-    def _due(self) -> ColumnElement[bool]:
-        inbox = self._database.tables.inbox
-        now = func.now()
-        due = and_(
-            inbox.c.consumer == self._consumer.name,
-            inbox.c.type.in_(sorted(self._consumer.types)),
-            inbox.c.status == "ready",
-            inbox.c.next_attempt_at <= now,
-        )
-        return and_(due, ~_earlier_live(inbox)) if self._consumer.ordered else due
-
     async def claim_now(self) -> Sequence[ClaimedEvent]:
         """Claim the due rows (see the module), oldest first; ``run_once`` handles them (a test seam too)."""
         inbox = self._database.tables.inbox
         keys = ("consumer", "event_id")
         async with self._database.unit(None) as unit:
-            lost = await recover(
+            recovered = await recover(
                 unit.connection,
                 inbox,
                 keys=keys,
@@ -213,14 +265,18 @@ class InboxRunner:
                 unit.connection,
                 inbox,
                 keys=keys,
-                due=self._due(),
+                due=claimable(inbox, self._consumer),
                 order_by=(inbox.c.next_attempt_at,),
                 limit=self._batch,
                 lease=self._lease,
             )
-        if lost:
-            _logger.warning("inbox_worker_lost", consumer=self._consumer.name, rows=lost)
-            self._handled.labels(consumer=self._consumer.name, outcome="dead").inc(lost)
+        name = self._consumer.name
+        if recovered.dead:
+            _logger.warning("inbox_worker_lost", consumer=name, rows=recovered.dead)
+            self._handled.labels(consumer=name, outcome="dead").inc(recovered.dead)
+        if recovered.ready:
+            _logger.warning("inbox_worker_recovered", consumer=name, rows=recovered.ready)
+            self._recovered.labels(consumer=name).inc(recovered.ready)
         return sorted((_claimed(row) for row in rows), key=lambda row: (row.next_attempt_at, row.event.id))
 
     def _fenced(self, row: ClaimedEvent) -> tuple[ColumnElement[bool], ...]:
@@ -231,13 +287,16 @@ class InboxRunner:
             inbox.c.lease_token == row.lease_token,
         )
 
-    @contextlib.contextmanager
-    def _span(self, event: RawEvent) -> Generator[None]:
-        if self._tracing is None:
-            yield
-            return
-        with self._tracing.consuming(self._consumer.name, event.traceparent):
-            yield
+    def _span(self, event: RawEvent) -> AbstractContextManager[Span | None]:
+        tracing = self._tracing
+        if tracing is None:
+            return contextlib.nullcontext()
+        return tracing.consuming(self._consumer.name, event.traceparent)
+
+    def _failure(self, row: ClaimedEvent, error: Exception) -> _Failure:
+        code = error.code if isinstance(error, LedgerError) else "internal"
+        invalid = isinstance(error, LedgerError) and error.kind is ErrorKind.INVALID
+        return _Failure(code, invalid or row.attempts >= self._consumer.max_attempts, error_type(error))
 
     async def handle(self, row: ClaimedEvent) -> None:
         """Handle one claimed row in its own unit (see the module); a handler's failure is recorded.
@@ -247,9 +306,9 @@ class InboxRunner:
         """
         name, event = self._consumer.name, row.event
         inbox = self._database.tables.inbox
+        failure: _Failure | None = None
         try:
-            # The error leaves the span before it is handled here: a failed handling shows in the trace.
-            with self._span(event), acting_as(Actor(f"system:consumer:{name}", str(event.id))):
+            with self._span(event) as span, acting_as(Actor(f"system:consumer:{name}", str(event.id))):
                 async with self._database.unit(event.scope) as unit:
                     extended = (
                         update(inbox)
@@ -258,55 +317,59 @@ class InboxRunner:
                         .returning(inbox.c.event_id)
                     )
                     _fence((await unit.connection.execute(extended)).first())
-                    await self._consumer.handler(event, unit)
-                    deleted = delete(inbox).where(*self._fenced(row)).returning(inbox.c.event_id)
-                    _fence((await unit.connection.execute(deleted)).first())
+                    failure = await self._attempt(row, unit)
+                    if failure is not None:
+                        if span is not None:  # the type only: a message can hold data, and spans leave
+                            span.set_status(Status(StatusCode.ERROR))
+                            span.add_event("exception", {"exception.type": failure.error})
+                        await unit.connection.execute(self._recorded(row, failure))
         except _LeaseLostError:
             self._lost(row)
+            return
+        outcome = "done" if failure is None else "dead" if failure.dead else "retry"
+        self._handled.labels(consumer=name, outcome=outcome).inc()
+
+    async def _attempt(self, row: ClaimedEvent, unit: UnitOfWork) -> _Failure | None:
+        """The handler, then the row's deletion, in a savepoint; if it failed, undone and how to record it."""
+        try:
+            async with unit.savepoint():
+                await self._consumer.handler(row.event, unit)
+                inbox = self._database.tables.inbox
+                await unit.connection.execute(delete(inbox).where(*self._fenced(row)))
         except Exception as error:  # a handler may raise anything; a cancellation is no Exception
             reraise_when_stopping(error)
-            dead = (isinstance(error, LedgerError) and error.kind is ErrorKind.INVALID) or (
-                row.attempts >= self._consumer.max_attempts
-            )
+            failure = self._failure(row, error)
             _logger.exception(
                 "inbox.handler_failed",
-                consumer=name,
-                event_id=str(event.id),
-                event_type=event.type,
+                consumer=self._consumer.name,
+                event_id=str(row.event.id),
+                event_type=row.event.type,
                 attempts=row.attempts,
-                dead=dead,
+                dead=failure.dead,
             )
-            await self._failed(row, error.code if isinstance(error, LedgerError) else "internal", dead=dead)
-        else:
-            self._handled.labels(consumer=name, outcome="done").inc()
+            return failure
+        return None
 
     def _lost(self, row: ClaimedEvent) -> None:
         _logger.warning("inbox_lease_lost", consumer=self._consumer.name, event_id=str(row.event.id))
         self._handled.labels(consumer=self._consumer.name, outcome="lease_lost").inc()
 
-    async def _failed(self, row: ClaimedEvent, code: str, *, dead: bool) -> None:
-        """Record the failure, fenced: ``dead`` and kept, or ready again after the backoff."""
+    def _recorded(self, row: ClaimedEvent, failure: _Failure) -> Update:
+        """The failure's record: ``dead`` and kept, or ready after the backoff (the row is still ours)."""
         inbox = self._database.tables.inbox
         outcome = (
             {"status": "dead"}
-            if dead
+            if failure.dead
             else {
                 "status": "ready",
                 "next_attempt_at": func.statement_timestamp() + self._backoff.after(row.attempts),
             }
         )
-        recorded = (
+        return (
             update(inbox)
             .where(*self._fenced(row))
-            .values(**outcome, lease_until=None, lease_token=None, last_error_code=code)
-            .returning(inbox.c.event_id)
+            .values(**outcome, lease_until=None, lease_token=None, last_error_code=failure.code)
         )
-        async with self._database.unit(None) as unit:
-            found = (await unit.connection.execute(recorded)).first()
-        if found is None:
-            self._lost(row)
-            return
-        self._handled.labels(consumer=self._consumer.name, outcome="dead" if dead else "retry").inc()
 
     async def replay(self, event_id: UUID) -> bool:
         """Make the consumer's dead row of ``event_id`` ready now with fresh attempts; whether there was one.

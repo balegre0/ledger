@@ -310,10 +310,10 @@ def test_defaults_are_the_specs(connection: psycopg.Connection) -> None:
         connection.execute(INBOX_DEFAULTS)
         connection.execute(JOB, ("ready",))
         inbox = connection.execute(
-            "SELECT status, attempts, next_attempt_at <= now() FROM probe.inbox"
+            "SELECT status, attempts, next_attempt_at <= now(), aggregate_version FROM probe.inbox"
         ).fetchone()
         jobs = connection.execute("SELECT attempts, payload FROM probe.jobs").fetchone()
-    assert inbox == ("ready", 0, True)
+    assert inbox == ("ready", 0, True, 0)
     assert jobs == (0, {})
 
 

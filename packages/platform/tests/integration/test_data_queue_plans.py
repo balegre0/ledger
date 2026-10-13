@@ -17,6 +17,10 @@ lazy from sqlalchemy import Update
 
 from ledger_platform.data.queue import DEFAULT_BACKOFF, claim_statement, recovery_statement
 from ledger_platform.data.tables import chassis_tables
+from ledger_platform.events.consumers import Consumer
+from ledger_platform.events.inbox import claimable
+lazy from ledger_platform.data.unit_of_work import UnitOfWork
+lazy from ledger_platform.events.consumers import RawEvent
 lazy from ledger_testing.postgres import WorkerDatabase
 
 FILL: Final = (
@@ -63,9 +67,12 @@ def nodes(node: dict[str, JsonValue]) -> Iterator[dict[str, JsonValue]]:
         yield from nodes(child)
 
 
-async def plan(connection: psycopg.AsyncConnection, statement: Update) -> list[dict[str, JsonValue]]:
+async def plan(
+    connection: psycopg.AsyncConnection, statement: Update, *, analyze: bool = False
+) -> list[dict[str, JsonValue]]:
     compiled = statement.compile(dialect=_DIALECT, compile_kwargs={"render_postcompile": True})
-    cursor = await connection.execute(f"EXPLAIN (FORMAT JSON) {compiled.string}".encode(), compiled.params)
+    options = "ANALYZE, FORMAT JSON" if analyze else "FORMAT JSON"
+    cursor = await connection.execute(f"EXPLAIN ({options}) {compiled.string}".encode(), compiled.params)
     ((found,),) = _EXPLAINED.validate_python(await cursor.fetchall())
     (top,) = _PLAN.validate_python(found)
     root = top["Plan"]
@@ -130,3 +137,54 @@ async def test_the_inbox_claim_and_recovery_read_their_partial_indexes(
         backoff=DEFAULT_BACKOFF,
     )
     assert_reads_the_index_under_a_limit(await plan(filled, recovered), "inbox_expired")
+
+
+HOT_SUBJECT: Final = (
+    """
+    INSERT INTO other.inbox (consumer, event_id, type, version, source, subject, aggregate_version,
+                             occurred_at, payload, status, next_attempt_at)
+    SELECT 'other.ordered', gen_random_uuid(), 'probe.thing.renamed', 1, 'probe',
+           '019a0000-0000-7000-8000-000000000000', n, now(), '{}', 'ready', now() - interval '1 hour'
+    FROM generate_series(1, 100000) AS n
+    """,
+    "ANALYZE other.inbox",
+)
+
+
+async def test_an_ordered_claim_on_a_hot_subject_reads_its_heads_once(
+    filled: psycopg.AsyncConnection,
+) -> None:
+    """100 000 waiting events of one subject: the heads come from one pass over ``inbox_head`` (sorted once at
+    most), never from a look back per row (which would be quadratic)."""
+    for statement in HOT_SUBJECT:
+        await filled.execute(statement.encode())
+    inbox = chassis_tables("other").inbox
+    ordered = Consumer(
+        name="other.ordered",
+        types=frozenset({"probe.thing.renamed"}),
+        max_attempts=10,
+        ordered=True,
+        handler=never_called,
+    )
+    claimed = claim_statement(
+        inbox,
+        keys=("consumer", "event_id"),
+        due=claimable(inbox, ordered),
+        order_by=(inbox.c.next_attempt_at,),
+        limit=20,
+        lease=timedelta(minutes=1),
+    )
+    async with filled.transaction(force_rollback=True):  # ANALYZE runs the claim: it is undone
+        found = await plan(filled, claimed, analyze=True)
+    kinds = [node["Node Type"] for node in found]
+    assert "Seq Scan" not in kinds
+    (due,) = [node for node in found if node.get("Index Name") == "inbox_due"]
+    assert "hashed SubPlan" in str(due.get("Filter"))  # the heads, computed once and looked up per row
+    (heads,) = [node for node in found if node.get("Index Name") == "inbox_head"]
+    assert heads["Actual Loops"] == 1  # one pass over the subject's live rows, whatever their number
+    claimed_rows = [node for node in found if node["Node Type"] == "ModifyTable"]
+    assert [node["Actual Rows"] for node in claimed_rows] == [1]  # the subject's head, and only it
+
+
+async def never_called(event: RawEvent, unit: UnitOfWork) -> None:
+    raise AssertionError((event, unit))

@@ -8,10 +8,13 @@ at a time (a transaction-level advisory lock; a dispatcher that finds it held sk
 a schema's events reach the inboxes in the order of their ids.
 
 A pass whose batch fails is done again one row at a time, each in a savepoint of the pass (which keeps the
-schema's lock): the good rows go, and a row that still fails has its ``attempts`` counted, rolled back to
-before it (``outbox.fan_out_failed``, ``ledger_outbox_failed_total``, after the commit); at
-``MAX_FAN_OUT_ATTEMPTS`` it is set aside, kept and alerted, until an operator resets its attempts. One poison
-row never holds back the rest.
+schema's lock): the good rows go. A row that still fails is blamed (its ``attempts`` counted,
+``outbox.fan_out_failed``, ``ledger_outbox_failed_total``) when the error is its own (it could not be read,
+broke a constraint, or a trigger refused it) or when another row of the pass went through; otherwise every row
+failed alike (a revoked grant, a lost connection), none is blamed, and the pass is rolled back and its error
+raised for the supervisor to back off. At ``MAX_FAN_OUT_ATTEMPTS`` a row is set aside, kept and alerted, until
+an operator resets its attempts. One poison row never holds back the rest, and a failure is never progress: a
+drain ends when nothing more goes through.
 
 The routing table is cached and reloaded when ``platform.routing.version`` moves (one read per pass, in a
 short transaction of its own); every load makes the unrouted rows of the types it routes due again, so a row
@@ -30,10 +33,11 @@ lazy from collections.abc import Iterator, Sequence
 lazy from datetime import datetime
 
 import structlog
+from psycopg.errors import RaiseException
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DataError, DBAPIError, IntegrityError, SQLAlchemyError
 lazy from prometheus_client import CollectorRegistry
 lazy from sqlalchemy import ColumnElement
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
@@ -99,7 +103,7 @@ class _OutboxRow:
     company_id: UUID | None
     mode: str | None
     subject: UUID | None
-    aggregate_version: int | None
+    aggregate_version: int
     occurred_at: datetime
     traceparent: str | None
     payload: dict[str, JsonValue]
@@ -145,6 +149,17 @@ class _Failure:
     event_type: str
     attempts: int
     error: str
+
+
+def _row_specific(error: Exception) -> bool:
+    """Whether ``error`` is the row's own fault.
+
+    It could not be read, broke a constraint or a value's type, or a trigger refused it. Any other error (a
+    privilege, the connection) would fail every row alike.
+    """
+    return isinstance(error, (ValidationError, IntegrityError, DataError)) or (
+        isinstance(error, DBAPIError) and isinstance(error.orig, RaiseException)
+    )
 
 
 def reraise_when_stopping(error: Exception) -> None:
@@ -292,7 +307,7 @@ class Dispatcher:
                 reraise_when_stopping(error)
                 moved = await self._one_by_one(connection, outbox, routing, failures)
         self._committed(schema, moved, failures)
-        return moved.taken + len(failures)
+        return moved.taken
 
     async def _one_by_one(
         self, connection: AsyncConnection, outbox: AnyTable, routing: Routing, failures: list[_Failure]
@@ -300,28 +315,34 @@ class Dispatcher:
         chosen = select(outbox.c.id).where(*_due(outbox)).order_by(outbox.c.id).limit(self._batch)
         ids = _IDS.validate_python((await connection.execute(chosen)).scalars().all())
         taken = routed = unrouted = 0
+        failed: list[tuple[UUID, Exception]] = []
         for event_id in ids:
             try:
                 async with connection.begin_nested():
                     moved = await self._deliver(connection, outbox, routing, outbox.c.id == event_id, 1)
             except _FAILURES as error:
                 reraise_when_stopping(error)
-                counted = (
-                    update(outbox)
-                    .where(outbox.c.id == event_id)
-                    .values(attempts=outbox.c.attempts + 1)
-                    .returning(outbox.c.attempts, outbox.c.type)
-                )
-                attempts, event_type = _SET_ASIDE.validate_python(
-                    tuple((await connection.execute(counted)).one())
-                )
-                failures.append(_Failure(event_id, event_type, attempts, error_type(error)))
+                failed.append((event_id, error))
                 continue
             taken, routed, unrouted = taken + moved.taken, routed + moved.routed, unrouted + moved.unrouted
+        systemic = [cause for _, cause in failed if not _row_specific(cause)]
+        if systemic and not taken:  # every row failed, and not for a reason of its own: blame none
+            raise systemic[0]
+        for event_id, cause in failed:
+            counted = (
+                update(outbox)
+                .where(outbox.c.id == event_id)
+                .values(attempts=outbox.c.attempts + 1)
+                .returning(outbox.c.attempts, outbox.c.type)
+            )
+            attempts, event_type = _SET_ASIDE.validate_python(
+                tuple((await connection.execute(counted)).one())
+            )
+            failures.append(_Failure(event_id, event_type, attempts, error_type(cause)))
         return _Moved(taken, routed, unrouted)
 
     async def run_once(self) -> int:
-        """One pass over every schema; how many outbox rows it took (fanned out, marked, or failed)."""
+        """One pass over every schema; how many outbox rows went out or were marked (a failure is none)."""
         routing = await self._current()
         taken = 0
         for schema in self._schemas:

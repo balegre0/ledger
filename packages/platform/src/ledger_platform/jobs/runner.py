@@ -158,7 +158,17 @@ def _outcome(job: Job, outcome: JobOutcome, now: datetime) -> tuple[_Values, str
 class JobRunner:
     """Runs one module's job kinds (see the module)."""
 
-    __slots__ = ("_backoff", "_batch", "_database", "_finished", "_kinds", "_lease_lost", "_poll", "_tracing")
+    __slots__ = (
+        "_backoff",
+        "_batch",
+        "_database",
+        "_finished",
+        "_kinds",
+        "_lease_lost",
+        "_poll",
+        "_recovered",
+        "_tracing",
+    )
 
     def __init__(
         self,
@@ -177,6 +187,12 @@ class JobRunner:
         self._lease_lost = Counter(
             "ledger_job_lease_lost",
             "Job runs stopped or not recorded: the job was taken over, or its lease could not be renewed.",
+            ["kind"],
+            registry=registry,
+        )
+        self._recovered = Counter(
+            "ledger_job_worker_recovered",
+            "Jobs whose lease ran out (their worker died), made ready again after the backoff.",
             ["kind"],
             registry=registry,
         )
@@ -327,7 +343,7 @@ class JobRunner:
             passed = len(
                 _CODES.validate_python((await unit.connection.execute(_bury(jobs, kind))).scalars().all())
             )
-            lost = await recover(
+            recovered = await recover(
                 unit.connection,
                 jobs,
                 keys=keys,
@@ -347,10 +363,13 @@ class JobRunner:
                 lease=decl.lease,
                 extra={"updated_at": func.now()},
             )
-        for count, event in ((lost, "job_worker_lost"), (passed, "job_deadline_passed")):
+        for count, event in ((recovered.dead, "job_worker_lost"), (passed, "job_deadline_passed")):
             if count:
                 _logger.warning(event, kind=kind, jobs=count)
                 self._finished.labels(kind=kind, outcome="dead").inc(count)
+        if recovered.ready:
+            _logger.warning("job_worker_recovered", kind=kind, jobs=recovered.ready)
+            self._recovered.labels(kind=kind).inc(recovered.ready)
         return [_job_of(row) for row in rows]
 
     def _span(self, job: Job) -> AbstractContextManager[object]:

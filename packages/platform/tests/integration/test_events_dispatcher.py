@@ -65,6 +65,16 @@ COPY_TO_OTHER: Final = """
            aggregate_version, occurred_at, traceparent, payload
     FROM probe.outbox
 """
+PERMISSION_TRIGGER: Final = """
+    CREATE OR REPLACE FUNCTION other.refuse_poison() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+        IF NEW.payload ->> 'name' = 'poison' THEN
+            RAISE insufficient_privilege USING MESSAGE = 'refused like a permission';
+        END IF;
+        RETURN NEW;
+    END $$
+"""
+"""A row-specific failure dressed as a systemic one: only the row beside it tells them apart."""
 HOLD_PROBE: Final = "SELECT pg_advisory_xact_lock(hashtext('ledger.fan_out'), hashtext('probe'))"
 _ROWS: Final = TypeAdapter(list[tuple[object, ...]])
 _COUNT: Final = TypeAdapter(int)
@@ -298,9 +308,9 @@ async def test_a_row_that_cannot_be_fanned_out_is_set_aside_and_the_others_go(
     await bench.publish_named("a", "poison", "b")
     ((poison,),) = await bench.rows("SELECT id FROM probe.outbox WHERE payload ->> 'name' = 'poison'")
     with capture_logs() as logs:
-        assert (
-            await bench.dispatcher.run_until_idle() == 3 + 9
-        )  # the batch, then the poison alone 9 more times
+        assert await bench.dispatcher.run_until_idle() == 2  # the good rows; a failure is no progress
+        for _ in range(9):  # later passes (the poll's): the poison row fails alone, attempt after attempt
+            assert await bench.dispatcher.run_once() == 0
     assert await bench.rows("SELECT payload ->> 'name' FROM other.inbox ORDER BY 1") == [("a",), ("b",)]
     assert await bench.rows("SELECT id, attempts, unrouted_since FROM probe.outbox") == [(poison, 10, None)]
     assert failed(registry, "probe") == 10
@@ -349,3 +359,28 @@ def test_fan_out_inserts_stay_under_postgresqls_parameter_limit() -> None:
     assert [len(chunk) for chunk in chunked(rows, ROWS_PER_INSERT)] == [ROWS_PER_INSERT, ROWS_PER_INSERT, 1]
     assert [item for chunk in chunked(rows, ROWS_PER_INSERT) for item in chunk] == rows
     assert list(chunked(list[int](), ROWS_PER_INSERT)) == []
+
+
+async def test_a_failure_of_every_row_alike_counts_against_none_and_is_raised(bench: Bench) -> None:
+    """The relay may not insert into the inbox (a broken grant): no row is to blame, none is set aside."""
+    bench.subscribe("other", RENAMES)
+    await bench.publish(2)
+    await bench.superuser.execute("REVOKE INSERT ON other.inbox FROM ledger_relay")
+    try:
+        with pytest.raises(ProgrammingError, match="permission denied"):
+            await bench.dispatcher.run_until_idle()  # the supervisor backs off and starts it again
+        assert await bench.rows("SELECT attempts FROM probe.outbox") == [(0,), (0,)]
+    finally:
+        await bench.superuser.execute("GRANT INSERT ON other.inbox TO ledger_relay")
+    assert await bench.dispatcher.run_until_idle() == 2
+    assert await bench.count("other", "inbox") == 2
+
+
+async def test_a_failure_beside_a_delivered_row_counts_against_its_row(bench: Bench, poisoned: None) -> None:
+    """Another row of the same pass went through: the failing one is to blame, whatever the error."""
+    del poisoned
+    bench.subscribe("other", RENAMES)
+    await bench.publish_named("poison", "fine")
+    await bench.superuser.execute(PERMISSION_TRIGGER)
+    assert await bench.dispatcher.run_once() == 1
+    assert await bench.rows("SELECT payload ->> 'name', attempts FROM probe.outbox") == [("poison", 1)]

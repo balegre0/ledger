@@ -369,9 +369,10 @@ async def test_a_runner_whose_lease_ran_out_but_was_not_taken_keeps_its_row(benc
     assert (bench.handled("done"), bench.handled("lease_lost")) == (1, 0)
 
 
-async def test_a_failure_recorded_after_the_row_was_taken_over_changes_nothing(
+async def test_a_failure_is_recorded_before_the_row_is_released(
     bench: Bench, takeover: psycopg.AsyncConnection
 ) -> None:
+    """A worker queued for the row while the handler failed gets it only after the failure is recorded."""
     (event,) = await bench.deliver(renamed())
     (claimed,) = await bench.runner().claim_now()
     waiting: list[asyncio.Task[object]] = []
@@ -391,9 +392,9 @@ async def test_a_failure_recorded_after_the_row_was_taken_over_changes_nothing(
     with capture_logs() as logs:
         await bench.runner().handle(claimed)
     await waiting[0]
-    assert [entry["event"] for entry in logs] == ["inbox.handler_failed", "inbox_lease_lost"]
-    assert await bench.state(event) == ("running", 1, None)  # the takeover's, not a recorded retry
-    assert (bench.handled("lease_lost"), bench.handled("retry")) == (1, 0)
+    assert [entry["event"] for entry in logs] == ["inbox.handler_failed"]
+    assert await bench.state(event) == ("ready", 1, "test_unreachable")  # the real code, then the takeover's
+    assert (bench.handled("lease_lost"), bench.handled("retry")) == (0, 1)
 
 
 async def test_an_ordered_consumer_handles_a_subjects_events_in_order(bench: Bench) -> None:
@@ -541,7 +542,12 @@ async def test_an_expired_lease_waits_out_the_backoff_and_a_spent_one_is_dead(be
     runner = bench.runner(max_attempts=2)
     await runner.claim_now()
     await bench.superuser.execute(JUST_EXPIRED)
-    assert await runner.claim_now() == []
+    with capture_logs() as recovered:
+        assert await runner.claim_now() == []
+    assert recovered == [
+        {"event": "inbox_worker_recovered", "consumer": NAME, "rows": 1, "log_level": "warning"}
+    ]
+    assert bench.registry.get_sample_value("ledger_inbox_worker_recovered_total", {"consumer": NAME}) == 1
     assert await bench.state(event) == ("ready", 1, "worker_lost")
     await bench.make_due()
     (again,) = await runner.claim_now()
