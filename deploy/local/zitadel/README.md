@@ -10,7 +10,9 @@ docker compose -f deploy/local/compose.yaml --profile zitadel up -d --wait --bui
 sh deploy/local/zitadel/bootstrap.sh                                                  # again whenever you like
 docker compose -f deploy/local/compose.yaml up -d identity                            # identity takes the new audience
 TOKEN=$(sh deploy/local/zitadel/token.sh)
-curl -X POST "http://127.0.0.1:${LEDGER_IDENTITY_PORT:-8100}/v1/companies"   -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: $(date +%s%N)" -H 'Content-Type: application/json'   -d '{"tax_id": "101850043", "legal_name": "Mi Empresa, S.R.L."}'
+curl -X POST "http://127.0.0.1:${LEDGER_IDENTITY_PORT:-8100}/v1/companies" \
+  -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: $(date +%s%N)" -H 'Content-Type: application/json' \
+  -d '{"tax_id": "101850043", "legal_name": "Mi Empresa, S.R.L."}'
 ```
 
 `tilt up` does not start Zitadel: run the first command (compose's profile `zitadel`) beside it.
