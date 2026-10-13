@@ -44,16 +44,27 @@ jobs:
         run: uv run poe check
       - name: Local infrastructure configuration
         run: docker compose -f deploy/local/compose.yaml config --quiet
+      - uses: docker/setup-buildx-action@v4
+      - name: Identity's production image
+        # Built once, with its layers cached in GitHub Actions' cache (the dependencies' layer changes only with the
+        # lockfile or a manifest), and loaded into Docker under the tag compose runs.
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: services/identity/Dockerfile
+          tags: ledger-identity:local
+          load: true
+          cache-from: type=gha,scope=identity
+          cache-to: type=gha,scope=identity,mode=max
       - name: Local stack starts healthy, identity from its production image
-        # Builds the image, runs the migrations (one-shot service), starts identity and waits for its health check
-        # (/readyz: PostgreSQL, NATS, workers, the chassis's tables, identity's migrations); then checks that the
-        # API refuses an anonymous caller, that gRPC is not published to the host (Decision 14), that the image
-        # runs as nonroot and that migrating again changes nothing. Torn down on any exit.
+        # From the image just built: runs the migrations (one-shot service), starts identity and waits for its
+        # health check (/readyz: PostgreSQL, NATS, workers, the chassis's tables, identity's migrations); then
+        # checks that the API refuses an anonymous caller, that gRPC is not published to the host (Decision 14),
+        # that the image runs as nonroot and that migrating again changes nothing. Torn down on any exit.
         run: |
           compose='docker compose -p ledger-ci -f deploy/local/compose.yaml'
           trap '$compose down -v' EXIT
-          $compose build identity-migrate
-          $compose up -d --wait || { $compose logs; exit 1; }
+          $compose up -d --wait --no-build || { $compose logs; exit 1; }
           curl --fail --silent --show-error http://127.0.0.1:8000/readyz
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8000/v1/companies)" = 401
           test -z "$($compose port identity 50051 2>/dev/null)"

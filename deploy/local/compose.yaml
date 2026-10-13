@@ -83,6 +83,9 @@ services:
     tmpfs: [/tmp]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    # Granian drains HTTP, then the chassis stops within its budget (25 s), and Granian kills a worker still
+    # running after 30 s: Docker's default of 10 s before its SIGKILL would cut that short.
+    stop_grace_period: 40s
     depends_on:
       identity-migrate: {condition: service_completed_successfully}
       nats: {condition: service_healthy}
