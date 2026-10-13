@@ -693,7 +693,7 @@ async def stalls(request: httpx.Request) -> httpx.Response:
 async def test_every_attempt_has_a_time_limit(
     signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
 ) -> None:
-    quick = DgiiTimeouts(connect=0.05, total=0.05)
+    quick = DgiiTimeouts(connect=0.5, total=0.5)
     async with client_over(httpx.MockTransport(stalls), signer, clock, sleeps, quick).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="result: broken"):
             await dgii.result(T, "a")

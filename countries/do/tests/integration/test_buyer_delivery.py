@@ -409,7 +409,7 @@ async def test_a_buyer_that_stalls_is_given_up_on(party: Party) -> None:
         await asyncio.sleep(5)
         return httpx.Response(200, stream=httpx.ByteStream(b""))
 
-    timeouts = DgiiTimeouts(connect=0.05, total=0.1, call=1.0)
+    timeouts = DgiiTimeouts(connect=0.5, total=0.5, call=5.0)
     transport = httpx.MockTransport(stalls)
     async with over(party, listed(SIMULATOR), transport, timeouts=timeouts).opened() as client:
         with pytest.raises(BuyerUnavailableError, match="its reception"):
@@ -418,12 +418,14 @@ async def test_a_buyer_that_stalls_is_given_up_on(party: Party) -> None:
 
 async def test_a_delivery_has_an_overall_deadline(party: Party) -> None:
     async def slow(request: httpx.Request) -> httpx.Response:
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(0.5)
         if request.url.path.endswith("/semilla"):
             return httpx.Response(200, stream=httpx.ByteStream(SEED))
         return httpx.Response(200, stream=httpx.ByteStream(TOKEN))
 
-    timeouts = DgiiTimeouts(connect=0.1, total=0.2, call=0.25)
+    # The seed answers at 0.5 s, well within an attempt (1 s) and the deadline (0.8 s); the authentication
+    # would answer at 1 s, past the deadline: each margin is 0.3 s or more, whatever the machine's load.
+    timeouts = DgiiTimeouts(connect=1.0, total=1.0, call=0.8)
     transport = httpx.MockTransport(slow)
     async with over(party, simulator, transport, timeouts=timeouts).opened() as client:
         with pytest.raises(BuyerUnavailableError, match="its authentication"):
