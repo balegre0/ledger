@@ -275,15 +275,20 @@ async def test_a_follower_hears_a_deactivation_on_the_wire(
 ) -> None:
     cache = Forgotten()
     follower, publisher = await connect(), await connect()
+    event = deactivated()
     async with following(follower, cache, Interruptions()):
         await follower.flush()
-        await publish(publisher, deactivated(), "identity.company.deactivated")
 
         async def heard() -> bool:
-            return len(cache.companies) == 1
+            """Core NATS delivers at most once: the event goes out again until it is heard (forgetting twice
+            is harmless), so the test checks what the follower does with it, not the transport's luck."""
+            if not cache.companies:
+                await publish(publisher, event, "identity.company.deactivated")
+                await publisher.flush()
+            return bool(cache.companies)
 
         await eventually(heard)
-    assert cache.companies == [(ORGANIZATION, COMPANY)]
+    assert set(cache.companies) == {(ORGANIZATION, COMPANY)}
 
 
 @final

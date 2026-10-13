@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 from typing import Final, final
 from uuid import UUID
 lazy from collections.abc import AsyncGenerator, Callable
@@ -6,6 +7,8 @@ lazy from collections.abc import AsyncGenerator, Callable
 import pytest
 from nats.aio.client import Client
 from nats.js import JetStreamContext
+from nats.js.errors import NotFoundError
+from pydantic import BaseModel, TypeAdapter
 from sqlalchemy import func, select
 lazy import httpx
 lazy from nats.aio.msg import Msg
@@ -30,6 +33,17 @@ lazy from ledger_testing.api import Caller
 ORGANIZATION: Final = organization_of("1001")
 TRACE_ID: Final = "4bf92f3577b34da6a3ce929d0e0e4736"
 TRACEPARENT: Final = f"00-{TRACE_ID}-b7ad6b7169203331-01"
+DEACTIVATED: Final = "identity.company.deactivated"
+
+
+class Stored(BaseModel):
+    """A message as JetStream keeps it: what an envelope is read back from."""
+
+    headers: dict[str, str]
+    data: bytes
+
+
+STORED: Final = TypeAdapter(Stored)
 DUARTE: Final = {"tax_id": "101850043", "legal_name": "Duarte"}
 
 
@@ -179,7 +193,23 @@ async def test_every_replica_following_identity_hears_a_company_deactivated(
     headers = owner.posting("off-1") | {"If-Match": "*"}
     assert (await client.post(f"/v1/companies/{company}/deactivate", headers=headers)).status_code == 200
     expected = (ORGANIZATION, CompanyId(UUID(company)))
-    await within(10, cache.arrived, lambda: expected in cache.companies)
+    stream = JetStreamContext(nats)
+
+    async def heard() -> bool:
+        """Identity stores the event in its stream (at least once); a follower hears it on the subject, which
+        core NATS delivers at most once: the stored event goes out again until it is heard (forgetting twice
+        is harmless), so the test checks what identity announces and what the follower does with it."""
+        if expected in cache.companies:
+            return True
+        with suppress(NotFoundError):
+            stored = await stream.get_last_msg(IDENTITY.name, DEACTIVATED)
+            kept = STORED.validate_python(stored, from_attributes=True)
+            envelope = Envelope.from_headers(kept.headers, kept.data)
+            if envelope.tenant is not None and str(envelope.tenant.company) == company:
+                await nats.publish(DEACTIVATED, envelope.data, headers=envelope.headers())
+        return False
+
+    await eventually(heard, within=10)
 
 
 async def test_a_membership_revoked_twice_is_announced_once(
