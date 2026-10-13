@@ -42,7 +42,7 @@
 ## Review Focus
 
 1. **Hostile or odd XML from outside** (DGII's seed, a buyer's ARECF, any document the fake receives): a DOCTYPE, an entity, an external DTD, a document over 4 MiB, a malformed one, a second `Signature`, a signature that is not last, algorithms outside DGII's profile — each is refused before or while it is read, and no error quotes the document. Tests in Tasks 3, 6 and 13.
-2. **A submission whose connection breaks after the request may have left** is never resent blindly: the client reports the outcome unknown, the use case asks DGII for the e-NCF's track ids first and resends only when DGII has none. Tests in Tasks 11 and 12.
+2. **A submission whose connection breaks after the request may have left** is never resent: the client reports the outcome unknown; the use case waits a settle delay, asks DGII for the e-NCF's track ids and adopts only one DGII received from the moment of signing on (less a small tolerance); anything else parks the document as outcome unknown. The spike never sends a document twice. Tests in Tasks 11 and 12.
 3. **DGII's codes as DGII defines them**: Aceptado Condicional (4) is valid (messages kept as warnings, nothing re-issued); a rejection with `secuenciaUtilizada = false` releases the number, `true` or absent burns it; En Proceso (3) and No encontrado (0) are not final; a code DGII never documented is an error, never a guess. Tests in Tasks 8 and 12.
 4. **The RD$250,000 line and the RFCE**: a type 32 whose total is below the threshold goes as an RFCE to the `fc` host, synchronously and without a track id, carrying the security code of the full signed e-CF; exactly RD$250,000.00 or more goes in full to `recepcion`. Tests in Tasks 4 and 12.
 5. **Secrets and the live environment**: the CLI never prints a token, password, key or certificate, refuses the `ecf` environment, refuses an e-NCF it already used, and reads secrets only from files under the git-ignored `.dgii/`; the client refuses a non-DGII host for `ecf`. Tests in Tasks 11 and 14.
@@ -7809,7 +7809,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: everything above: `XmlSigner`, `Authority`, `Received`, `Refused`, `Answer`, `OutcomeUnknownError` (Tasks 6, 11); `compute_totals`, `route`, `Route`, `decide`, `DgiiCode`, `Outcome`, `security_code`, `qr_url`, `rfce_qr_url`, `QrHosts`, `OFFICIAL_QR` (Tasks 4, 7, 8); `ecf.render`, `ecf.FORMAT_OF`, `rfce.render`, `schemas.checked`, `verify_enveloped` (Tasks 3, 5, 6).
-- Produces: `application.ports.EcfFormat` (`ecf(draft, totals, *, signed_at) -> bytes`, `rfce(draft, totals, *, security_code) -> bytes`, `signed(draft, signed, *, rfce) -> str` returning the signature value). `adapters.xml.documents.DgiiXml` (implements it). `application.emission`: `POLL_SCHEDULE`, `type Clock`, `type Sleep`, `Emitted(draft, totals, route, signed_at, signed_ecf, signed_rfce, security_code, qr, track_id, outcome)` with `pending`, `Emitter(*, xml, signer, authority, environment, clock, sleep, schedule=POLL_SCHEDULE, qr_hosts=OFFICIAL_QR, regime=REGIME)` with `emit(draft) -> Emitted`.
+- Produces: `application.ports.EcfFormat` (`ecf(draft, totals, *, signed_at) -> bytes`, `rfce(draft, totals, *, security_code) -> bytes`, `signed(draft, signed, *, rfce) -> str` returning the signature value), `CertificateValidity`, `XmlSigner.certificate_validity()`, `TrackId(track_id, received_at)`, `Authority.require_ready(environment)`, `Answer.rnc`/`Answer.encf`. `adapters.xml.documents.DgiiXml` (implements it). `application.emission`: `POLL_SCHEDULE`, `MAX_SIGNING_SKEW`, `SETTLE_DELAY`, `RECEIPT_TOLERANCE`, `SEND_BUDGET`, `type Clock`, `type Sleep`, `Signed(draft, totals, route, signed_at, signed_ecf, signed_rfce, security_code, qr)`, `Unknown(code, failure, sent)`, `Emitted(signed, track_id, outcome, unknown)` with `pending`, `Emitter(*, xml, signer, authority, **options)` (`EmitterOptions`: `environment`, `clock`, `sleep` required; `schedule`, `settle`, `budget`, `qr_hosts`, `regime`) with `sign(draft) -> Signed`, `send(signed) -> Emitted`, `emit(draft) -> Emitted`.
+
+> **Revised by Task 12's reviews (binding; the committed code is the reference, the code blocks below are the first draft).**
+> - **No automatic resend.** After `OutcomeUnknownError` the e-CF is never sent again: wait `SETTLE_DELAY` (more than the client's per-attempt time), ask `track_ids` (`TrackId(track_id, received_at)`), adopt the newest received no earlier than `signed_at - RECEIPT_TOLERANCE`; otherwise park it. An RFCE whose outcome is unknown is parked too (`consultarfce` recovery is v2-M3's).
+> - **Two steps.** `sign(draft) -> Signed` (signed e-CF and RFCE, FechaHoraFirma, security code, QR) so a caller persists it before the first submission; `send(signed) -> Emitted` never raises a pack error: anything that stops it parks the document with `Unknown(code, failure, sent)` (`sent`: `False` certainly never left, `True` DGII answered about it, `None` it may be at DGII).
+> - **Fail fast before signing.** `Authority.require_ready(environment)` when the emitter is built and before each signing (live host refused, client not open). The certificate must cover `signed_at` and `signed_at + MAX_SIGNING_SKEW`; a signature that comes back more than `MAX_SIGNING_SKEW` from `signed_at` is refused (`SigningSkewError`).
+> - **Bounds and identity.** `SEND_BUDGET` bounds a send (calls, settle delay, polls). An answer naming another RNC or e-NCF than ours parks the document (`do_ecf_dgii_answer_mismatch`). The client sends no document with less than one attempt's time left before its call deadline.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -8124,7 +8130,8 @@ class DgiiXml(EcfFormat):
    security code is the first six characters of its signature value.
 3. RFCE route: the summary written with that code, signed, checked, sent to the ``fc`` host and decided at once.
    The full signed e-CF is kept by the caller (IT §9.1).
-4. Reception route: sent once. If the connection broke after sending, DGII is asked for the e-NCF's track ids:
+4. Reception route: sent once (superseded by the review: never sent again; see the note under Interfaces).
+   If the connection broke after sending, DGII is asked for the e-NCF's track ids:
    the newest is polled; with none the document is sent again (DGII never recorded it); where DGII cannot say
    (CerteCF) the outcome stays unknown for a person (``OutcomeUnknownError``). Then polled on the schedule
    (1, 2, 5, 10, 30, 60 s) until a final code; after it, the document is still pending (v2-M3's job continues).
@@ -8331,6 +8338,20 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ---
 
 ### Task 13: Delivery to an electronic buyer: directory, the buyer's seed authentication, a verified ARECF
+
+> **Revised by Task 13's reviews (binding; the committed code is the reference, the code blocks below are the
+> first draft).** `BuyerClient(signer, directory, *, trust, timeouts, transport, resolve, clock, audit)`.
+> Directory URLs are attacker-controlled: `adapters/buyers/endpoints.py` checks them (https, public host name,
+> no userinfo or IP literal), resolves them, refuses any non-public address (IPv6 global unicast only, no
+> 6to4/NAT64), and sends to the checked addresses in turn with the name kept for TLS and `Host`. The ARECF is
+> schema-checked, verified (`INBOUND`), matched, refused when received with a reason, and its certificate must
+> pass `adapters/signing/trust.CounterpartyTrust` (configured roots, validity at `FechaHoraAcuseRecibo` and at
+> receipt, usage, EKU, identity: `serialNumber` bare/`IDCDO-`/`TINDO-`/`PNODO-`, `organizationIdentifier`
+> `VATDO-`/`NTRDO-`). A 200 answer whose receipt fails is invalid (not retried). Every buyer seed signed is
+> audited (`SeedSigned`). Rulings for later: the TesteCF simulator's identity (step 7 below); a duplicate
+> ARECF (reason 3) means "already received" only after an earlier unknown-outcome delivery of the same e-CF,
+> else a conflict (v2-M4); revocation blocks production delivery (v2-M4); buyer authentication is a
+> per-company switch, off unless a buyer requires it (v2-M4); production needs an egress firewall.
 
 **Files:**
 - Create: `countries/do/src/ledger_country_do/channels/ecf_v1/adapters/buyers/{__init__, client}.py`
@@ -9049,30 +9070,33 @@ def _write(path: Path, data: bytes) -> Path:
 
 
 def _report(emitted: Emitted, settings: SpikeSettings, out: TextIO) -> None:
-    stem = f"{settings.issuer.rnc}{emitted.draft.encf}"
-    print(f"e-NCF: {emitted.draft.encf}  route: {emitted.route.value}  track id: {emitted.track_id}", file=out)
+    signed = emitted.signed
+    stem = f"{settings.issuer.rnc}{signed.draft.encf}"
+    print(f"e-NCF: {signed.draft.encf}  route: {signed.route.value}  track id: {emitted.track_id}", file=out)
     outcome = emitted.outcome
-    if outcome is None or not outcome.final:
+    if emitted.unknown is not None:
+        sent = {True: "DGII answered about it", False: "it never left", None: "it may be at DGII"}
+        print(f"parked: {emitted.unknown.code} ({sent[emitted.unknown.sent]}); never resend this e-NCF", file=out)
+    elif outcome is None or not outcome.final:
         print("DGII: still pending after the polling schedule; ask consultaresultado for the track id later", file=out)
     else:
         number = "" if outcome.number is None else f" (number {outcome.number.value})"
         print(f"DGII: codigo {outcome.code.value} {DOCUMENTED[outcome.code.value]} -> {outcome.status.value}{number}", file=out)
         for message in outcome.messages:
             print(f"  {message.code}: {message.text}", file=out)
-    print(f"security code: {emitted.security_code}", file=out)
-    print(f"QR: {emitted.qr}", file=out)
-    written = [_write(settings.out / f"{stem}.xml", emitted.signed_ecf)]
-    if emitted.signed_rfce is not None:
-        written.append(_write(settings.out / f"{stem}.rfce.xml", emitted.signed_rfce))
+    print(f"security code: {signed.security_code}", file=out)
+    print(f"QR: {signed.qr}", file=out)
+    written: list[Path] = []
     summary = {
-        "encf": str(emitted.draft.encf),
-        "route": emitted.route.value,
+        "encf": str(signed.draft.encf),
+        "route": signed.route.value,
         "track_id": emitted.track_id,
+        "parked": None if emitted.unknown is None else emitted.unknown.code,
         "codigo": None if outcome is None else outcome.code.value,
         "status": None if outcome is None else outcome.status.value,
         "messages": [] if outcome is None else [[message.code, message.text] for message in outcome.messages],
-        "security_code": emitted.security_code,
-        "qr": emitted.qr,
+        "security_code": signed.security_code,
+        "qr": signed.qr,
     }
     written.append(_write(settings.out / f"{stem}.json", json.dumps(summary, indent=2).encode()))
     for path in written:
@@ -9119,13 +9143,18 @@ async def _emit(
         sleep=sleep,
         qr_hosts=QrHosts(ecf=settings.hosts.ecf, fc=settings.hosts.fc),
     )
-    emitted = await emitter.emit(draft)
+    signed = await emitter.sign(draft)
+    stem = f"{settings.issuer.rnc}{draft.encf}"
+    _write(settings.out / f"{stem}.xml", signed.signed_ecf)
+    if signed.signed_rfce is not None:
+        _write(settings.out / f"{stem}.rfce.xml", signed.signed_rfce)
+    emitted = await emitter.send(signed)
     _report(emitted, settings, out)
     if emitted.outcome is None or emitted.outcome.status not in _ACCEPTED:
         return _NOT_ACCEPTED
     if options.deliver:
         async with BuyerClient(signer, dgii.directory, transport=transport).opened() as buyers:
-            delivery = await buyers.deliver(settings.environment, draft, emitted.signed_ecf)
+            delivery = await buyers.deliver(settings.environment, draft, signed.signed_ecf)
         if isinstance(delivery, Delivered):
             path = _write(settings.out / f"{settings.issuer.rnc}{draft.encf}.arecf.xml", delivery.arecf)
             state = "received" if delivery.received else f"not received (reason {delivery.reason})"
@@ -9267,6 +9296,10 @@ F11); the 32 goes `route: rfce` and is answered at once. Its answer settles F1 (
 `fc`: any 401 there means it does not) and F2 (the code DGII returns), and F12 (a 1,180.00 invoice goes as an
 RFCE).
 
+If a run prints `parked:`, its outcome is unknown or it was stopped after signing: **never run that sequence
+again**. The signed documents are already in `.dgii/out`; ask DGII by hand (`consultatrackids` for a 31,
+`consultarfce` for an RFCE, with its security code) and record what DGII says. The spike never resends.
+
 ## 6. TesteCF: an anonymous consumer invoice and the QR codes (F4, F8)
 
 The 32 of step 5 is anonymous (`<Comprador />`): its acceptance settles F4 (an empty required element is
@@ -9283,6 +9316,19 @@ uv run ledger-dgii-spike emit --type 31 --sequence 2 --deliver
 Expected: `buyer: received, receipt signed by ...` (TesteCF's directory names DGII's emisor-receptor
 simulator). A 404 at reception settles F5 the other way (the directory's URLs are full endpoints); a 401 at
 `consultadirectorio` would contradict F6's reading.
+
+Expect, too, that the receipt may be **refused** with `do_ecf_counterparty_certificate_refused` ("not the
+buyer's"): if DGII's simulator signs its ARECFs with DGII's own certificate rather than one naming the buyer,
+the identity check refuses it (and "does not chain to a trusted authority" if DGII's authority is not among
+the configured roots). Record which (F15) and the subject's identity attributes (`serialNumber`,
+`organizationIdentifier`: their prefixes, never the certificate). If it is DGII's own certificate, the fix is
+an explicit stand-in identity limited to TesteCF/CerteCF (refused in production, the chain still required),
+not a looser check.
+
+Ask DGII (F14): a buyer's seed has DGII's own `SemillaModel` format, so a hostile buyer endpoint could relay
+DGII's seed for our RNC, have us sign it, and obtain a DGII token as us. Does DGII bind its seeds to their
+audience, or recommend issuers refuse to sign a buyer seed that also validates at DGII? Every buyer seed the
+spike signs is audit-logged (`ledger_country_do.audit.buyer_seeds`: issuer, buyer, endpoint host, time).
 
 ## 8. TesteCF: a large consumer invoice, in full
 
@@ -9324,6 +9370,20 @@ TesteCF run; never paste a token, a password, a certificate or a whole document.
 | F11 | Conditional-acceptance codes and messages | Kept verbatim | | |
 | F12 | `MontoTotal` (ITBIS included) is compared with RD$250,000 | Yes | | |
 | F13 | A refusal at the door (HTTP 400) burns the number | Burned (never reuse what DGII may have recorded) | | |
+| F14 | Can a buyer relay DGII's seed for the issuer to sign (a signing oracle)? Does DGII bind seeds to their audience? | Not bound: every buyer seed signed is audit-logged; buyer authentication off unless a buyer requires it (v2-M4) | | |
+| F15 | Whose certificate signs the TesteCF simulator's ARECFs, and which identity attributes it carries | The buyer's (`serialNumber`/`organizationIdentifier` naming its RNC); DGII's own would be refused | | |
+
+## Known gaps before production (not settled by TesteCF)
+
+- **Egress firewall.** The buyer client refuses non-public addresses after DNS and pins the checked address,
+  but a NAT64 gateway with an operator-chosen prefix makes an internal IPv4 address look like a public IPv6
+  one, undetectably. The process that delivers needs an egress firewall blocking internal ranges.
+- **Revocation.** A buyer's certificate is never checked against CRL or OCSP; production delivery is blocked
+  until it is (v2-M4).
+- **Buyer authentication** (signing a buyer's seed) is a per-company switch, off unless a buyer requires it
+  (v2-M4), because of F14.
+- **Duplicate receipts.** An ARECF "not received, duplicate" (reason 3) means "already received" only when the
+  same e-CF had an earlier delivery whose outcome is unknown; otherwise it is a conflict (v2-M4).
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
