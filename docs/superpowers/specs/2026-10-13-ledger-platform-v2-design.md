@@ -732,7 +732,7 @@ enqueues = "do_ecf.range_watch"
 | Job kind / schedule | `<module or channel>.<verb_or_noun>` | `do_ecf.advance` |
 | Public id prefix | 2-5 lowercase letters, unique, declared in a manifest | `inv_01jc5...` |
 | Regime key / channel key | `<cc>` or `<cc>-<sub>` / `<cc>-<format>-v<N>` | `do`, `do-ecf-v1` |
-| Tax-id scheme | `<cc>.<scheme>` | `do.rnc`, `mx.rfc`, `eu.vat` |
+| Tax-id scheme | `<cc>.<scheme>`, `<cc>` one assigned ISO 3166-1 country, never a group (EU VAT ids are per member state) | `do.rnc`, `mx.rfc`, `es.nif`, `fr.tva` |
 | Country field (wire) | `fiscal.<regime>.<field>` (regime law-level fields and channel format fields share the regime namespace) | `fiscal.do.income_type` |
 | Error code | `<thing>_<problem>`, snake_case, unique across the repo | `range_exhausted` |
 | Env var | `LEDGER_<SETTING>`; module or channel settings `LEDGER_<MODULE>_<SETTING>` | `LEDGER_DO_ECF_DGII_TIMEOUT_SECONDS` |
@@ -1073,7 +1073,9 @@ name `party: pty_…`.
 ### 7.3 Qualified tax identifiers
 
 - `TaxId(scheme, value)`; scheme keys `<cc>.<name>` declared by regimes as `TaxIdSchemeDef(key, country, labels,
-  normalize, check, check_digit_enforced, peppol_icd)` (ADR 0006).
+  normalize, check, check_digit_enforced, peppol_icd)` (ADR 0006). `<cc>` is one assigned ISO 3166-1 country:
+  no multi-country scheme groups. A VAT id is issued by one EU member state, so each state's is its own scheme
+  (`es.nif`, `fr.tva`, …) declared by that country's regime; `eu.vat` is not a scheme.
 - Validation through the regime registry: `invalid_format` refuses; `checksum_mismatch` refuses only where the
   scheme enforces check digits (not `do.rnc`/`do.cedula`, [01] A7) and is otherwise a warning on the response.
 - **Global registry** (`identity.tax_registrations`): unique `(scheme, normalized_value)` among active
