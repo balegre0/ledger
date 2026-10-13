@@ -1,11 +1,16 @@
+import socket
 import threading
-from typing import Final
+from typing import Final, cast
+lazy from pathlib import Path
 
 import pytest
+from lxml import etree
 
+from ledger_country_do.channels.ecf_v1.adapters.xml import parsing
 from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import (
     MAX_DOCUMENT,
     UnreadableDocumentError,
+    parser,
     require_readable,
     texts,
 )
@@ -18,6 +23,8 @@ from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import (
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 
 SEED: Final = b"<SemillaModel><valor>abc</valor><fecha>2026-10-12T09:00:00-04:00</fecha></SemillaModel>"
+_ENTITY: Final = '<!DOCTYPE a [<!ENTITY b "c">]><a>&b;</a>'
+_UTF16_DECLARED: Final = f'<?xml version="1.0" encoding="UTF-16"?>{_ENTITY}'
 SIGNED_SEED: Final = SEED.replace(
     b"</SemillaModel>", b'<Signature xmlns="http://www.w3.org/2000/09/xmldsig#"/></SemillaModel>'
 )
@@ -54,8 +61,31 @@ def test_checked_returns_the_document_or_refuses_it_with_its_violations() -> Non
         (b"<!doctype a><a/>", "do_ecf_document_doctype_refused"),
         (b'<a/><!DOCTYPE a SYSTEM "http://169.254.169.254/">', "do_ecf_document_doctype_refused"),
         (b"<a>", "do_ecf_document_malformed"),
+        (_UTF16_DECLARED.encode("utf-16"), "do_ecf_document_encoding_refused"),
+        (_ENTITY.encode("utf-16"), "do_ecf_document_encoding_refused"),
+        (_ENTITY.encode("utf-16-le"), "do_ecf_document_encoding_refused"),
+        (_ENTITY.encode("utf-16-be"), "do_ecf_document_encoding_refused"),
+        (_ENTITY.encode("utf-32"), "do_ecf_document_encoding_refused"),
+        (
+            '<?xml version="1.0" encoding="ISO-8859-1"?><a>é</a>'.encode("latin-1"),
+            "do_ecf_document_encoding_refused",
+        ),
+        (b"<?xml version='1.0' encoding='UTF-16'?><a/>", "do_ecf_document_encoding_refused"),
     ],
-    ids=["too-large", "entity", "doctype-lowercase", "doctype-anywhere", "malformed"],
+    ids=[
+        "too-large",
+        "entity",
+        "doctype-lowercase",
+        "doctype-anywhere",
+        "malformed",
+        "utf-16-bom-declared",
+        "utf-16-bom",
+        "utf-16-le",
+        "utf-16-be",
+        "utf-32-bom",
+        "latin-1-declared",
+        "utf-16-declared-ascii",
+    ],
 )
 def test_what_cannot_be_read_safely_is_refused_unread(document: bytes, code: str) -> None:
     with pytest.raises(UnreadableDocumentError) as caught:
@@ -88,3 +118,65 @@ def test_a_malformed_document_is_refused_before_it_is_validated() -> None:
     with pytest.raises(UnreadableDocumentError) as caught:
         violations(Format.SEED, b"<SemillaModel>")
     assert caught.value.code == "do_ecf_document_malformed"
+
+
+def test_utf_8_is_read_with_or_without_its_bom_or_declaration() -> None:
+    assert texts(b"\xef\xbb\xbf<a><b>\xc3\xa9</b></a>", "b") == ("\u00e9",)
+    assert texts(b'<?xml version="1.0" encoding="utf-8"?><a><b>x</b></a>', "b") == ("x",)
+
+
+@pytest.mark.parametrize(
+    ("document", "code"),
+    [
+        (_UTF16_DECLARED.encode("utf-16"), "do_ecf_document_doctype_refused"),
+        (b'<?xml version="1.0" encoding="ISO-8859-1"?><a/>', "do_ecf_document_encoding_refused"),
+    ],
+    ids=["doctype", "encoding"],
+)
+def test_what_got_past_the_byte_checks_is_refused_once_parsed(
+    monkeypatch: pytest.MonkeyPatch, document: bytes, code: str
+) -> None:
+    def skipped(document: bytes, *, limit: int = MAX_DOCUMENT) -> None:
+        del document, limit
+
+    monkeypatch.setattr(parsing, "require_readable", skipped)
+    with pytest.raises(UnreadableDocumentError) as caught:
+        texts(document, "b")
+    assert caught.value.code == code
+
+
+def test_the_parser_refuses_exponential_entities() -> None:
+    laughs = "".join(f'<!ENTITY l{n} "{f"&l{n - 1};" * 10}">' for n in range(1, 10))
+    payload = f'<!DOCTYPE a [<!ENTITY l0 "lol">{laughs}]><a>&l9;</a>'.encode()
+    with pytest.raises(etree.XMLSyntaxError, match="amplification"):
+        etree.fromstring(payload, parser())
+
+
+def test_the_parser_resolves_no_external_entity(tmp_path: Path) -> None:
+    secret = tmp_path / "secret.txt"
+    secret.write_text("LOCAL-FILE-MARKER", encoding="utf-8")
+    root = etree.fromstring(
+        f'<!DOCTYPE a [<!ENTITY x SYSTEM "{secret.as_uri()}">]><a>&x;</a>'.encode(), parser()
+    )
+    assert b"LOCAL-FILE-MARKER" not in etree.tostring(root)
+
+
+def test_the_parser_loads_no_external_dtd(tmp_path: Path) -> None:
+    dtd = tmp_path / "defaults.dtd"
+    dtd.write_text('<!ATTLIST a marker CDATA "LOCAL-FILE-MARKER">', encoding="utf-8")
+    root = etree.fromstring(f'<!DOCTYPE a SYSTEM "{dtd.as_uri()}"><a/>'.encode(), parser())
+    assert root.get("marker") is None
+
+
+def test_the_parser_reaches_no_network() -> None:
+    with socket.create_server(("127.0.0.1", 0)) as listening:
+        listening.settimeout(0)
+        _, port = cast("tuple[str, int]", listening.getsockname())
+        etree.fromstring(f'<!DOCTYPE a SYSTEM "http://127.0.0.1:{port}/a.dtd"><a/>'.encode(), parser())
+        with pytest.raises(BlockingIOError):
+            listening.accept()
+
+
+def test_the_parser_keeps_libxml2_s_depth_limit() -> None:
+    with pytest.raises(etree.XMLSyntaxError, match="depth"):
+        etree.fromstring(b"<a>" * 300 + b"</a>" * 300, parser())

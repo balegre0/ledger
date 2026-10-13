@@ -21,6 +21,7 @@ from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import (
     SIGNATURE,
     MalformedDocumentError,
     parser,
+    require_plain,
     require_readable,
 )
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import CORRECTIONS, PUBLISHED
@@ -122,6 +123,7 @@ def violations(format_: Format, document: bytes, *, unsigned: bool = False) -> t
         root = etree.fromstring(document, parser())
     except etree.XMLSyntaxError as error:
         raise MalformedDocumentError from error
+    require_plain(root.getroottree().docinfo)
     if unsigned:
         etree.SubElement(root, SIGNATURE)
     checking = schema(format_)

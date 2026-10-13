@@ -1,12 +1,16 @@
 """Reading XML that comes from outside, hardened (spec §8.4 ``xml``, §10).
 
-A document is checked before it is parsed: at most ``MAX_DOCUMENT`` bytes, and no ``<!DOCTYPE`` anywhere in it
-(a DTD, internal or external, is never read: no entity expansion, no external fetch). The parser then resolves
-no entity, loads no DTD, reaches no network and keeps libxml2's own limits on depth and text (``huge_tree``
-off). lxml parsers keep per-object state, so each thread makes its own.
+A document is checked before it is parsed: at most ``MAX_DOCUMENT`` bytes, UTF-8 (DGII's documents are; any
+other encoding, by byte order mark, by declaration or by its bytes, is refused, so no ``<!DOCTYPE`` can hide
+in UTF-16), and no ``<!DOCTYPE`` anywhere in it (a DTD, internal or external, is never read: no entity
+expansion, no external fetch). The parser then resolves no entity, loads no DTD, reaches no network and keeps
+libxml2's own limits on depth and entity amplification (``huge_tree`` off). Once parsed, ``require_plain``
+checks again what the parser saw: no DTD, and UTF-8. lxml parsers keep per-object state, so each thread makes
+its own.
 
 Nothing here returns an lxml element (their class is private to the type checkers): callers parse with
-``parser()`` after ``require_readable``, or ask ``texts`` for the values they need.
+``parser()`` after ``require_readable`` and check the tree's ``docinfo`` with ``require_plain``, or ask
+``texts`` for the values they need.
 """
 
 import re
@@ -22,6 +26,9 @@ SIGNATURE: Final = f"{{{DSIG}}}Signature"
 MAX_DOCUMENT: Final = 4 * 1024 * 1024
 """The largest document read: a type-32 e-CF of 1,000 lines is a few hundred kilobytes."""
 _DOCTYPE: Final = re.compile(rb"<!DOCTYPE", re.IGNORECASE)
+_UTF8_BOM: Final = b"\xef\xbb\xbf"
+_DECLARED_ENCODING: Final = re.compile(rb"""<\?xml[^>]*?\sencoding\s*=\s*["']([^"']*)["']""")
+_UTF8: Final = "utf-8"
 
 
 class UnreadableDocumentError(EcfInvalidError):
@@ -46,6 +53,15 @@ class DoctypeRefusedError(UnreadableDocumentError):
 
     def __init__(self) -> None:
         super().__init__("a document that declares a DOCTYPE is refused")
+
+
+class EncodingRefusedError(UnreadableDocumentError):
+    """A document that is not UTF-8: by its byte order mark, its declaration or its bytes."""
+
+    code: ClassVar[str] = "do_ecf_document_encoding_refused"
+
+    def __init__(self) -> None:
+        super().__init__("a document is read only in UTF-8")
 
 
 class MalformedDocumentError(UnreadableDocumentError):
@@ -76,11 +92,27 @@ def parser() -> etree.XMLParser:
 
 
 def require_readable(document: bytes, *, limit: int = MAX_DOCUMENT) -> None:
-    """Refuse, unread, a document over ``limit`` bytes or one that declares a DOCTYPE."""
+    """Refuse, unread, a document over ``limit`` bytes, not in UTF-8, or that declares a DOCTYPE."""
     if len(document) > limit:
         raise DocumentTooLargeError(limit)
-    if _DOCTYPE.search(document) is not None:
+    body = document.removeprefix(_UTF8_BOM)
+    try:
+        body.decode(_UTF8)
+    except UnicodeDecodeError as error:
+        raise EncodingRefusedError from error
+    declared = _DECLARED_ENCODING.match(body)
+    if b"\x00" in body or (declared is not None and declared[1].decode().lower() != _UTF8):
+        raise EncodingRefusedError
+    if _DOCTYPE.search(body) is not None:
         raise DoctypeRefusedError
+
+
+def require_plain(info: etree.DocInfo) -> None:
+    """Refuse, once parsed, a document the parser saw with a DTD or in an encoding other than UTF-8."""
+    if info.doctype or info.internalDTD is not None or info.externalDTD is not None:
+        raise DoctypeRefusedError
+    if info.encoding.lower() != _UTF8:
+        raise EncodingRefusedError
 
 
 def texts(document: bytes, *paths: str) -> tuple[str | None, ...]:
@@ -90,4 +122,5 @@ def texts(document: bytes, *paths: str) -> tuple[str | None, ...]:
         root = etree.fromstring(document, parser())
     except etree.XMLSyntaxError as error:
         raise MalformedDocumentError from error
+    require_plain(root.getroottree().docinfo)
     return tuple(root.findtext(path) for path in paths)

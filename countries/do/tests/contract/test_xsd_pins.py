@@ -87,4 +87,6 @@ def _required(format_: Format, name: str) -> bool:
 @pytest.mark.parametrize("kind", REGIME.document_types, ids=[kind.code for kind in REGIME.document_types])
 def test_the_regime_requires_a_buyer_tax_id_where_dgii_s_schema_does(kind: DocumentTypeDef) -> None:
     format_ = Format(f"ecf-{kind.code}.xsd")
-    assert kind.requires_buyer_tax_id is _required(format_, "RNCComprador")
+    assert kind.requires_buyer_tax_id is (
+        _required(format_, "Comprador") and _required(format_, "RNCComprador")
+    )
