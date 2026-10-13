@@ -1,5 +1,8 @@
 # Ledger platform: base platform + Dominican Republic e-CF API
 
+> **Superseded** by [`2026-10-13-ledger-platform-v2-design.md`](2026-10-13-ledger-platform-v2-design.md)
+> (modular monolith, PostgreSQL eventing, regime/channel country packs). Kept as history.
+
 | | |
 |---|---|
 | Status | Draft for review |
