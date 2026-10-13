@@ -59,7 +59,7 @@ def _ski(certificate: x509.Certificate) -> str:
     return base64.b64encode(digest).decode()
 
 
-def _issuer_serial(issuer: str, serial: int) -> str:
+def _issuer_serial(issuer: str, serial: int | str) -> str:
     return (
         f"<X509IssuerSerial><X509IssuerName>{issuer}</X509IssuerName>"
         f"<X509SerialNumber>{serial}</X509SerialNumber></X509IssuerSerial>"
@@ -145,6 +145,65 @@ def test_whitespace_between_elements_is_tolerated_by_both(counterparty: Signer) 
     assert verify_enveloped(signed, STRICT).certificate == verify_enveloped(signed, INBOUND).certificate
 
 
+def _text(value: str | bytes) -> str:
+    assert isinstance(value, str)
+    return value
+
+
+def _dotnet(name: x509.Name) -> str:
+    """``name`` as .NET writes it: most specific first, ", " between parts, OID. where it has no label."""
+    labels = {"2.5.4.3": "CN", "2.5.4.6": "C", "2.5.4.10": "O", "2.5.4.5": "SERIALNUMBER"}
+    return ", ".join(
+        f"{labels.get(oid, 'OID.' + oid)}={_text(attribute.value)}"
+        for attribute in reversed(list(name))
+        if (oid := attribute.oid.dotted_string)
+    )
+
+
+def _java(name: x509.Name) -> str:
+    """``name`` as Java writes it: OID.x.y.z for every type, no space after commas."""
+    return ",".join(
+        f"OID.{attribute.oid.dotted_string}={_text(attribute.value)}" for attribute in reversed(list(name))
+    )
+
+
+@pytest.mark.parametrize("style", ["dotnet", "java"])
+def test_names_written_by_dotnet_or_java_name_the_certificate(counterparty: Signer, style: str) -> None:
+    write = _dotnet if style == "dotnet" else _java
+    certificate = counterparty.certificate
+
+    def edit(text: str) -> str:
+        claims = _issuer_serial(write(certificate.issuer), certificate.serial_number) + (
+            f"<X509SubjectName>{write(certificate.subject)}</X509SubjectName>"
+        )
+        return text.replace("</X509Data>", claims + "</X509Data>", 1)
+
+    signed = forge(ECF, counterparty.key, certificate, edit=edit)
+    assert verify_enveloped(signed, INBOUND).certificate == certificate
+
+
+def test_a_name_that_cannot_be_read_is_informational_only(counterparty: Signer) -> None:
+    certificate = counterparty.certificate
+
+    def edit(text: str) -> str:
+        claims = (
+            _issuer_serial("not a name", certificate.serial_number) + "<X509SubjectName>?</X509SubjectName>"
+        )
+        return text.replace("</X509Data>", claims + "</X509Data>", 1)
+
+    assert (
+        verify_enveloped(forge(ECF, counterparty.key, certificate, edit=edit), INBOUND).certificate
+        == certificate
+    )
+
+
+def test_a_readable_name_with_another_serial_is_refused(counterparty: Signer) -> None:
+    certificate = counterparty.certificate
+    edit = _in_x509_data(lambda _: _issuer_serial(_dotnet(certificate.issuer), certificate.serial_number + 1))
+    with pytest.raises(SignatureInvalidError, match="names another certificate or key"):
+        verify_enveloped(forge(ECF, counterparty.key, certificate, edit=edit(counterparty)), INBOUND)
+
+
 def test_everything_tolerated_at_once(counterparty: Signer) -> None:
     signed = forge(ECF, counterparty.key, counterparty.certificate, edit=_all(counterparty))
     assert verify_enveloped(signed, INBOUND).intermediates == (counterparty.intermediate,)
@@ -198,8 +257,8 @@ REFUSED: Final[dict[str, tuple[Edit, str]]] = {
         _in_x509_data(lambda signer: _issuer_serial("CN=SOMEONE ELSE", signer.certificate.serial_number)),
         "names another certificate or key",
     ),
-    "unreadable-issuer": (
-        _in_x509_data(lambda signer: _issuer_serial("not a name", signer.certificate.serial_number)),
+    "serial-not-a-number": (
+        _in_x509_data(lambda signer: _issuer_serial(signer.certificate.issuer.rfc4514_string(), "12a")),
         "names another certificate or key",
     ),
     "other-subject": (

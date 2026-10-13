@@ -4,7 +4,7 @@ import pytest
 
 from ledger_country_do.channels.ecf_v1.domain.notation import NaiveMomentError
 from ledger_country_do_testing.pki import Authority, pem
-from ledger_country_do_testing.xmlsec import CONTEXT, XMLSEC_IMAGE, Xmlsec
+from ledger_country_do_testing.xmlsec import CONTEXT, XMLSEC_IMAGE, Xmlsec, XmlsecCommandError
 
 
 def test_xmlsec1_refuses_a_document_without_a_signature_and_a_naive_moment() -> None:
@@ -15,6 +15,14 @@ def test_xmlsec1_refuses_a_document_without_a_signature_and_a_naive_moment() -> 
             xmlsec.verify(b"<a/>", trusted=b"", untrusted=b"", at=datetime.now(UTC).replace(tzinfo=None))
     assert not verdict.verified
     assert "ignature" in verdict.output
+
+
+def test_a_failing_command_in_the_container_is_an_error_with_its_output() -> None:
+    with Xmlsec.started() as xmlsec:
+        assert xmlsec.run("sh", "-c", "printf ready") == "ready"
+        with pytest.raises(XmlsecCommandError, match="exited with 3: no room") as caught:
+            xmlsec.run("sh", "-c", "printf 'no room'; exit 3")
+    assert (caught.value.exit_code, caught.value.output) == (3, "no room")
 
 
 def test_the_image_is_ours_and_pinned() -> None:

@@ -45,6 +45,15 @@ _CLEAN: Final = "rm -f /verify/*"
 _TIME: Final = "%Y-%m-%d %H:%M:%S"
 
 
+class XmlsecCommandError(RuntimeError):
+    """A command that prepares a verification failed in the container: its exit code and xmlsec's output."""
+
+    def __init__(self, exit_code: int | None, output: str) -> None:
+        super().__init__(f"a command in the xmlsec1 container exited with {exit_code}: {output}")
+        self.exit_code: int | None = exit_code
+        self.output: str = output
+
+
 @final
 @dataclass(frozen=True, slots=True)
 class Verdict:
@@ -81,6 +90,14 @@ class Xmlsec:
             with container:
                 yield cls(container)
 
+    def run(self, *command: str) -> str:
+        """``command``'s output in the container; ``XmlsecCommandError`` unless it exits with 0."""
+        result = self._container.exec(list(command))
+        output = result.output.decode("utf-8", "replace")
+        if result.exit_code != 0:
+            raise XmlsecCommandError(result.exit_code, output)
+        return output
+
     def verify(self, signed: bytes, *, trusted: bytes, untrusted: bytes, at: datetime) -> Verdict:
         """Whether ``signed`` holds an enveloped signature by a certificate chaining to ``trusted`` (PEM).
 
@@ -89,11 +106,11 @@ class Xmlsec:
         """
         if at.utcoffset() is None:
             raise NaiveMomentError
-        self._container.exec(["sh", "-c", _CLEAN])
+        self.run("sh", "-c", _CLEAN)
         for name, data in (("signed.b64", signed), ("trusted.b64", trusted), ("untrusted.b64", untrusted)):
             encoded = _encoded(data)
             for start in range(0, len(encoded), _CHUNK):
-                self._container.exec(["sh", "-c", _APPEND, "append", encoded[start : start + _CHUNK], name])
+                self.run("sh", "-c", _APPEND, "append", encoded[start : start + _CHUNK], name)
         moment = at.astimezone(UTC).strftime(_TIME)
         result = self._container.exec(["sh", "-c", _VERIFY, "verify", moment])
         return Verdict(result.exit_code == 0, result.output.decode("utf-8", "replace"))

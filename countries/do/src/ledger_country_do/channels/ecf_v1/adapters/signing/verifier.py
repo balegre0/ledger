@@ -26,8 +26,9 @@ read, and nothing but DGII's profile is accepted. Two profiles share these rules
 - in ``KeyInfo``: one ``X509Data``, at most one ``KeyValue`` (an ``RSAKeyValue`` that must be the signing
   certificate's key) and at most one ``KeyName`` (ignored); no ``RetrievalMethod`` or other element;
 - in ``X509Data``: one or more ``X509Certificate`` and at most one each of ``X509IssuerSerial``,
-  ``X509SubjectName`` and ``X509SKI``, which must name the signing certificate. The signing certificate is the
-  only one that issued no other in the set; the others are returned as untrusted intermediates;
+  ``X509SubjectName`` and ``X509SKI``, which must name the signing certificate (names as ``names`` reads them,
+  skipped when unreadable; the serial number always). The signing certificate is the only one that issued no
+  other in the set; the others are returned as untrusted intermediates;
 - ``xml:`` attributes on the root, which C14N 1.0 carries onto ``SignedInfo``.
 
 ``SignedInfo`` is canonicalized as a deep copy under an element declaring every namespace in scope where it
@@ -56,6 +57,7 @@ from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 from lxml import etree
 
 from ledger_country_do.channels.ecf_v1.adapters.signing.certificates import signing_problem
+from ledger_country_do.channels.ecf_v1.adapters.signing.names import names_agree
 from ledger_country_do.channels.ecf_v1.adapters.signing.profile import (
     MIN_KEY_BITS,
     PROFILES,
@@ -359,7 +361,10 @@ def _subject_key_identifier(certificate: x509.Certificate) -> bytes | None:
 
 
 def _claims_hold(key_info: _Node, certificate: x509.Certificate, key: RSAPublicKey) -> bool:
-    """Whether what ``KeyInfo`` says beside the certificates names ``certificate`` and its ``key``."""
+    """Whether what ``KeyInfo`` says beside the certificates names ``certificate`` and its ``key``.
+
+    The serial number must be the certificate's; a name that cannot be read is skipped (``names``).
+    """
     issuer_serial = key_info.find("X509Data", "X509IssuerSerial")
     subject = key_info.find("X509Data", "X509SubjectName")
     identifier = key_info.value("X509Data", "X509SKI")
@@ -370,14 +375,11 @@ def _claims_hold(key_info: _Node, certificate: x509.Certificate, key: RSAPublicK
             (
                 issuer_serial is None
                 or (
-                    x509.Name.from_rfc4514_string(issuer_serial.children[0].text.strip())
-                    == certificate.issuer
-                    and int(issuer_serial.children[1].text.strip()) == certificate.serial_number
+                    int(issuer_serial.children[1].text.strip()) == certificate.serial_number
+                    and names_agree(issuer_serial.children[0].text, certificate.issuer)
                 )
             )
-            and (
-                subject is None or x509.Name.from_rfc4514_string(subject.text.strip()) == certificate.subject
-            )
+            and (subject is None or names_agree(subject.text, certificate.subject))
             and (identifier is None or _decoded(identifier) == _subject_key_identifier(certificate))
             and (
                 key_value is None
