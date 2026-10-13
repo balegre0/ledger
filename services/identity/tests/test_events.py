@@ -16,7 +16,7 @@ from ledger_identity.adapters.events import IDENTITY, SOURCE
 from ledger_kernel.access import SubjectId
 from ledger_kernel.ids import CompanyId
 from ledger_platform.authentication import organization_of
-from ledger_platform.identity_client import MembershipChanges
+from ledger_platform.identity_client import PermissionChanges
 from ledger_platform.outbox import OutboxRecord
 from ledger_testing.api import created
 from ledger_testing.caches import Forgotten
@@ -156,14 +156,27 @@ async def test_a_replayed_post_announces_nothing_more(
     assert len(heard.about(company_id)) == 2
 
 
-async def test_every_replica_following_memberships_hears_grants_and_revocations(
+async def test_every_replica_following_identity_hears_grants_and_revocations(
     client: httpx.AsyncClient, owner: Caller, company: str, nats: Client
 ) -> None:
     cache = Forgotten()
-    await MembershipChanges(cache).follow(nats)
+    await PermissionChanges(cache).follow(nats)
     await nats.flush()
     path = f"/v1/companies/{company}/memberships/3001"
     assert (await client.put(path, json={"role": "viewer"}, headers=owner.bearer())).status_code == 201
     assert (await client.delete(path, headers=owner.bearer())).status_code == 204
     expected = (ORGANIZATION, CompanyId(UUID(company)), SubjectId("3001"))
     await within(10, cache.arrived, lambda: cache.forgotten.count(expected) == 2)
+
+
+async def test_every_replica_following_identity_hears_a_company_deactivated(
+    client: httpx.AsyncClient, owner: Caller, company: str, nats: Client
+) -> None:
+    """Its members keep the reading permissions only: every answer kept about the company must go."""
+    cache = Forgotten()
+    await PermissionChanges(cache).follow(nats)
+    await nats.flush()
+    headers = owner.posting("off-1") | {"If-Match": "*"}
+    assert (await client.post(f"/v1/companies/{company}/deactivate", headers=headers)).status_code == 200
+    expected = (ORGANIZATION, CompanyId(UUID(company)))
+    await within(10, cache.arrived, lambda: cache.companies == [expected])

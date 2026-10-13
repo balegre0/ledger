@@ -123,6 +123,11 @@ class _Kept:
         """Drop the answer kept for ``key``, if any."""
         self._answers.pop(key, None)
 
+    def drop_company(self, organization: OrganizationId, company: CompanyId) -> None:
+        """Drop every answer about ``company`` of ``organization``, whoever it was for."""
+        for key in [key for key in self._answers if key[:2] == (organization, company)]:
+            del self._answers[key]
+
     def clear(self) -> None:
         """Drop every answer."""
         self._answers.clear()
@@ -134,9 +139,11 @@ class CachedPermissions(PermissionSource):
 
     The ``capacity`` most recently used answers that grant something are kept, and apart from them the
     ``empty_capacity`` most recently used answers without a role: a caller trying random company ids churns
-    the latter only. ``forget`` drops an answer at once, when identity announces a membership change, and
+    the latter only. ``forget`` drops an answer at once, when identity announces a membership change;
+    ``forget_company`` every answer about a company, when identity announces its deactivation; and
     ``forget_all`` every answer, when such announcements may have been missed (``identity_client``). One
-    fetched before either and arriving after it is handed to its caller but not kept: it may be the old one.
+    fetched before any of them and arriving after it is handed to its caller but not kept: it may be the old
+    one.
     Two requests that miss together ask the source twice; both answers are right.
     """
 
@@ -185,6 +192,15 @@ class CachedPermissions(PermissionSource):
         key = (organization, company, subject)
         self._granting.drop(key)
         self._empty.drop(key)
+
+    def forget_company(self, organization: OrganizationId, company: CompanyId) -> None:
+        """Drop every answer about ``company``, and keep none fetched before this: what it grants changed.
+
+        A scan of the kept answers (at most ``capacity`` plus ``empty_capacity``): deactivations are rare.
+        """
+        self._epoch += 1
+        self._granting.drop_company(organization, company)
+        self._empty.drop_company(organization, company)
 
     def forget_all(self) -> None:
         """Drop every answer, and keep none fetched before this: changes may have gone unannounced."""

@@ -1,9 +1,13 @@
 """The platform's client of the identity service: permissions for the authorization context, kept fresh.
 
 ``RemotePermissions`` asks ``IdentityQueryService.GetPermissions``, with a deadline on every call. A service
-puts it behind a ``CachedPermissions``, and ``MembershipChanges`` drops what a membership event changed.
-Every replica follows the events itself, on a core NATS subscription: a durable consumer would hand each event
-to one replica only. Following is best effort; the cache's TTL bounds what a lost event costs.
+puts it behind a ``CachedPermissions``, and ``PermissionChanges`` drops what identity announces has changed
+what other services may do: a membership granted or revoked (``identity.membership.*``) drops the member's
+answer, a company deactivated (``identity.company.deactivated``, which leaves its members the reading
+permissions only) every answer about the company. The rule for identity's events: every event that changes
+what other services may do must be followed here and drop what it changed. Every replica follows the events
+itself, on core NATS subscriptions: a durable consumer would hand each event to one replica only. Following is
+best effort; the cache's TTL bounds what a lost event costs.
 
 Events published while the connection to NATS is down never reach a core subscription, so the cache forgets
 everything when the connection is lost and again when it is back (``Interruptions``), and once when following
@@ -18,14 +22,15 @@ A service wires it so (the first such service comes in milestone 3)::
 
     def workers(runtime: Runtime[Settings]) -> Mapping[str, Work]:
         cache = runtime.resources(Resources).permissions
-        return {"membership changes": partial(follow_memberships, runtime.nats, cache, runtime.interruptions)}
+        follow = partial(follow_permission_changes, runtime.nats, cache, runtime.interruptions)
+        return {"permission changes": follow}
 
     Service(..., interfaces=Interfaces(resources=resources, ...), events=Events(workers=workers))
 
 The channel is a resource, closed in order at the stop. The follower is a worker, not a resource: the
 resources hook is handed the settings only, before there is a runtime with its NATS connection. As a worker
 it is supervised (a failure to subscribe is tried again) and stopped before NATS drains, leaving with its
-subscription (``following``).
+subscriptions (``following``).
 """
 
 import asyncio
@@ -40,7 +45,7 @@ lazy import grpc
 lazy from nats.aio.msg import Msg
 lazy from nats.aio.subscription import Subscription
 
-from ledger.events.identity.v1.events_pb2 import MembershipGranted, MembershipRevoked
+from ledger.events.identity.v1.events_pb2 import CompanyDeactivated, MembershipGranted, MembershipRevoked
 from ledger.identity.v1.identity_query_pb2 import GetPermissionsRequest
 from ledger.identity.v1.identity_query_pb2_grpc import IdentityQueryServiceStub
 from ledger_contracts.envelope import Envelope
@@ -53,9 +58,11 @@ lazy from ledger_kernel.access import Principal, SubjectId
 lazy from ledger_platform.interruptions import Interruptions
 
 GET_PERMISSIONS: Final = "/ledger.identity.v1.IdentityQueryService/GetPermissions"
-MEMBERSHIP_SUBJECTS: Final = "identity.membership.>"
+PERMISSION_SUBJECTS: Final = ("identity.membership.>", "identity.company.deactivated")
+"""The subjects of the events that change what other services may do (see the module)."""
 _GRANTED: Final = MembershipGranted.DESCRIPTOR.full_name
 _REVOKED: Final = MembershipRevoked.DESCRIPTOR.full_name
+_DEACTIVATED: Final = CompanyDeactivated.DESCRIPTOR.full_name
 _PERMISSIONS: Final[Mapping[str, Permission]] = {permission.value: permission for permission in Permission}
 _logger = structlog.stdlib.get_logger(__name__)
 
@@ -91,11 +98,15 @@ class RemotePermissions(PermissionSource):
 
 
 class PermissionCache(Protocol, metaclass=ABCMeta):
-    """What ``MembershipChanges`` tells: a ``CachedPermissions`` is one."""
+    """What ``PermissionChanges`` tells: a ``CachedPermissions`` is one."""
 
     @abstractmethod
     def forget(self, organization: OrganizationId, company: CompanyId, subject: SubjectId) -> None:
         """Drop what is kept about ``subject`` in ``company``."""
+
+    @abstractmethod
+    def forget_company(self, organization: OrganizationId, company: CompanyId) -> None:
+        """Drop what is kept about anyone in ``company``."""
 
     @abstractmethod
     def forget_all(self) -> None:
@@ -103,7 +114,7 @@ class PermissionCache(Protocol, metaclass=ABCMeta):
 
 
 class Subscriber(Protocol, metaclass=ABCMeta):
-    """What ``MembershipChanges`` asks of a NATS connection: a ``nats.aio.client.Client`` is one.
+    """What ``PermissionChanges`` asks of a NATS connection: a ``nats.aio.client.Client`` is one.
 
     nats-py leaves the type of ``subscribe``'s ``future`` open; seen through this protocol, only the ones
     used here remain.
@@ -118,68 +129,72 @@ def _member(organization: str, company: str, subject: str) -> tuple[Organization
     return OrganizationId(parse_id(organization)), CompanyId(parse_id(company)), parse_subject(subject)
 
 
-def _changed(envelope: Envelope) -> tuple[OrganizationId, CompanyId, SubjectId] | None:
-    """Whose permissions a membership event changed; ``None`` for any other event."""
-    if envelope.type == _GRANTED:
-        grant = envelope.unwrap(MembershipGranted)
-        return _member(grant.organization_id, grant.company_id, grant.subject)
-    if envelope.type == _REVOKED:
-        revocation = envelope.unwrap(MembershipRevoked)
-        return _member(revocation.organization_id, revocation.company_id, revocation.subject)
-    return None
+def _company(organization: str, company: str) -> tuple[OrganizationId, CompanyId]:
+    return OrganizationId(parse_id(organization)), CompanyId(parse_id(company))
 
 
 @final
-class MembershipChanges:
-    """Keeps a permission cache honest: drops what identity announces has changed."""
+class PermissionChanges:
+    """Keeps a permission cache honest: drops what identity announces has changed (see the module)."""
 
     __slots__ = ("_cache",)
 
     def __init__(self, cache: PermissionCache) -> None:
         self._cache = cache
 
-    async def follow(self, nats: Subscriber) -> Subscription:
-        """Follow every membership event on this replica; unsubscribe, or drain the connection, to stop."""
-        return await nats.subscribe(MEMBERSHIP_SUBJECTS, cb=self.handle)
+    async def follow(self, nats: Subscriber) -> tuple[Subscription, ...]:
+        """Follow every such event on this replica; unsubscribe each, or drain the connection, to stop."""
+        return tuple([await nats.subscribe(subject, cb=self.handle) for subject in PERMISSION_SUBJECTS])
 
     async def handle(self, message: Msg) -> None:
-        """Forget the permissions an event changed; one that cannot be read is logged and skipped."""
+        """Forget what an event changed; one that cannot be read is logged and skipped, any other ignored."""
         try:
-            changed = _changed(Envelope.from_headers(message.headers or {}, message.data))
+            self._forget(Envelope.from_headers(message.headers or {}, message.data))
         except InvalidInputError as error:
             _logger.warning(
-                "authorization.membership_event_unreadable", subject=message.subject, code=error.code
+                "authorization.identity_event_unreadable", subject=message.subject, code=error.code
             )
-            return
-        if changed is not None:
-            self._cache.forget(*changed)
+
+    def _forget(self, envelope: Envelope) -> None:
+        if envelope.type == _GRANTED:
+            grant = envelope.unwrap(MembershipGranted)
+            self._cache.forget(*_member(grant.organization_id, grant.company_id, grant.subject))
+        elif envelope.type == _REVOKED:
+            revoked = envelope.unwrap(MembershipRevoked)
+            self._cache.forget(*_member(revoked.organization_id, revoked.company_id, revoked.subject))
+        elif envelope.type == _DEACTIVATED:
+            deactivated = envelope.unwrap(CompanyDeactivated)
+            self._cache.forget_company(*_company(deactivated.organization_id, deactivated.company_id))
 
 
 @asynccontextmanager
 async def following(
     nats: Subscriber, cache: PermissionCache, interruptions: Interruptions
 ) -> AsyncGenerator[None]:
-    """Keep ``cache`` honest while inside: follow the membership events, forget everything on interruptions.
+    """Keep ``cache`` honest while inside: follow identity's events, forget everything on interruptions.
 
     Entering subscribes and forgets everything kept so far; every interruption of the connection to NATS
     forgets everything again. Leaving unsubscribes and stops listening to the interruptions.
     """
     stop_listening = interruptions.listen(cache.forget_all)
     try:
-        subscription = await MembershipChanges(cache).follow(nats)
+        subscriptions = await PermissionChanges(cache).follow(nats)
         cache.forget_all()  # kept while nobody followed: changes may have gone unannounced
         try:
             yield
         finally:
-            # A closed or draining connection ended its subscriptions itself.
-            with suppress(ConnectionClosedError, ConnectionDrainingError):
-                await subscription.unsubscribe()
+            for subscription in subscriptions:
+                # A closed or draining connection ended its subscriptions itself.
+                with suppress(ConnectionClosedError, ConnectionDrainingError):
+                    await subscription.unsubscribe()
     finally:
         stop_listening()
 
 
-async def follow_memberships(nats: Subscriber, cache: PermissionCache, interruptions: Interruptions) -> Never:
-    """Follow the membership events until cancelled (``following``): a service's worker (see the module)."""
+async def follow_permission_changes(
+    nats: Subscriber, cache: PermissionCache, interruptions: Interruptions
+) -> Never:
+    """Follow identity's events until cancelled (``following``): a service's worker (see the module)."""
     async with following(nats, cache, interruptions):
         while True:
             await asyncio.get_running_loop().create_future()

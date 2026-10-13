@@ -100,7 +100,7 @@ Future country services (`fiscal-mx`, `fiscal-co`) consume `invoicing.document.i
 |---|---|---|
 | `kernel` | UUIDv7 ids (a type per entity), exact `Money` and `Currency`, `TaxId` (RNC or cédula; check digit reported, not enforced, because DGII has issued numbers that fail it), clock, the base domain exception hierarchy (a kind and a stable code per error), principals and typed permissions, cursor pagination | stdlib only |
 | `contracts` | `.proto` files for gRPC services and event payloads, generated code and stubs, event envelope | `kernel`, protobuf, grpcio |
-| `platform` | the service chassis: settings, logging, tracing, metrics, PostgreSQL transactions (unit of work, row-level security), outbox relay, inbox and consumers, JetStream stream management, gRPC server, HTTP app factory, health, lifecycle, and the `Service` that assembles them. Built with the first service (milestone 2): bearer-token verification against the identity provider's keys, Alembic migrations run the same way for every service, the authorization context (permissions per company, cached 30 s and dropped on membership events), idempotency keys, cursor pagination, conditional updates, gRPC client helpers | `kernel`, `contracts`, third-party infrastructure libraries |
+| `platform` | the service chassis: settings, logging, tracing, metrics, PostgreSQL transactions (unit of work, row-level security), outbox relay, inbox and consumers, JetStream stream management, gRPC server, HTTP app factory, health, lifecycle, and the `Service` that assembles them. Built with the first service (milestone 2): bearer-token verification against the identity provider's keys, Alembic migrations run the same way for every service, the authorization context (permissions per company, cached 30 s and dropped on membership events and company deactivation), idempotency keys, cursor pagination, conditional updates, gRPC client helpers | `kernel`, `contracts`, third-party infrastructure libraries |
 | `testing` | what the tests of every package share: PostgreSQL and NATS containers, a local OpenID provider, the logging baseline (a dev dependency) | anything; production code never imports it |
 
 A service may depend on `libs/*`, never on another service. import-linter enforces it.
@@ -398,7 +398,10 @@ company can certify while another runs in production.
   ledger id is a UUIDv5 of it, the same in every service.
 - Authorization is decided in the service, per request: `platform` loads the principal's permissions
   for the target company through `IdentityQueryService` (cached 30 s, invalidated by `identity.membership.*`
-  events) and checks a typed permission (`Permission.INVOICE_ISSUE`).
+  and `identity.company.deactivated` events) and checks a typed permission (`Permission.INVOICE_ISSUE`).
+  The rule: every event that changes what other services may do must invalidate their caches (a membership
+  event drops the member's answer, a deactivation every answer about the company); the TTL only bounds what
+  a lost event costs.
 - A caller without any role in a company gets 404 for it, as if it did not exist; a role without the
   permission an operation needs gets 403. A change of roles is decided on the role its actor holds once it
   has the company's lock. A deactivated company grants other services the reading permissions only

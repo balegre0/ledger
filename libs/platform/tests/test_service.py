@@ -46,7 +46,7 @@ from ledger_platform.consumer import ConsumerRefusedError, ConsumerSpec
 from ledger_platform.database import Database, DatabaseLimits
 from ledger_platform.grpc_server import GrpcBindError, serve_grpc
 from ledger_platform.health import DuplicateCheckError
-from ledger_platform.identity_client import PermissionCache, follow_memberships
+from ledger_platform.identity_client import PermissionCache, follow_permission_changes
 from ledger_platform.outbox import DEFAULT_MAX_PAYLOAD, EventTooLargeError, InvalidOutboxOptionError
 from ledger_platform.service import (
     ABANDONED_CLOSES,
@@ -803,6 +803,10 @@ class Watched(PermissionCache):
         self.cache.forget(organization, company, subject)
 
     @override
+    def forget_company(self, organization: OrganizationId, company: CompanyId) -> None:
+        self.cache.forget_company(organization, company)
+
+    @override
     def forget_all(self) -> None:
         self.cleared += 1
         self.cache.forget_all()
@@ -832,8 +836,8 @@ async def test_permissions_kept_before_nats_was_interrupted_are_asked_for_again_
             version="1.0",
             events=Events(
                 workers=lambda runtime: {
-                    "membership changes": partial(
-                        follow_memberships, runtime.nats, watched, runtime.interruptions
+                    "permission changes": partial(
+                        follow_permission_changes, runtime.nats, watched, runtime.interruptions
                     )
                 }
             ),

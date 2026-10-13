@@ -151,6 +151,45 @@ async def test_an_answer_fetched_before_a_change_is_not_kept_after_it() -> None:
     assert source.asked == 2
 
 
+async def test_forgetting_a_company_drops_every_answer_about_it_and_keeps_the_rest() -> None:
+    """A deactivated company: every principal's answer about it goes, with a role or without."""
+    source = Counting()
+    for principal, company in ((ALICE, COMPANY), (ALICE, OTHER_COMPANY), (ALICE_ELSEWHERE, COMPANY)):
+        source.grant(principal, company, MANAGE)
+    cache = CachedPermissions(source)
+    for principal, company in (
+        (ALICE, COMPANY),
+        (BOB, COMPANY),  # no role: kept apart
+        (ALICE, OTHER_COMPANY),
+        (ALICE_ELSEWHERE, COMPANY),  # the same company id under another organization
+    ):
+        await cache.permissions(principal, company)
+    source.grant(ALICE, COMPANY, READ)
+    source.grant(BOB, COMPANY, READ)
+    cache.forget_company(ORGANIZATION, COMPANY)
+    assert (await cache.permissions(ALICE, COMPANY), await cache.permissions(BOB, COMPANY)) == (READ, READ)
+    assert source.asked == 6
+    await cache.permissions(ALICE, OTHER_COMPANY)
+    await cache.permissions(ALICE_ELSEWHERE, COMPANY)
+    assert source.asked == 6
+
+
+async def test_an_answer_fetched_before_its_company_was_forgotten_is_not_kept_after_it() -> None:
+    source = Counting()
+    source.grant(ALICE, COMPANY, MANAGE)
+    source.hold = asyncio.Event()
+    cache = CachedPermissions(source)
+    stale = asyncio.create_task(cache.permissions(ALICE, COMPANY))
+    await source.answering.wait()
+    cache.forget_company(ORGANIZATION, COMPANY)  # the company was deactivated meanwhile
+    source.hold.set()
+    assert await stale == MANAGE  # the caller still gets the answer it asked for
+    source.hold = None
+    source.grant(ALICE, COMPANY, READ)
+    assert await cache.permissions(ALICE, COMPANY) == READ  # but it was not kept
+    assert source.asked == 2
+
+
 async def test_forgetting_everything_drops_every_answer_with_a_role_or_without() -> None:
     source = Counting()
     source.grant(ALICE, COMPANY, MANAGE)

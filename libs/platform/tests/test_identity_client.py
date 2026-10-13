@@ -13,6 +13,7 @@ from ledger.events.identity.v1.events_pb2 import (
     ROLE_ADMIN,
     ROLE_OWNER,
     CompanyCreated,
+    CompanyDeactivated,
     MembershipGranted,
     MembershipRevoked,
 )
@@ -35,10 +36,10 @@ from ledger_platform.grpc_client import MAX_DEADLINE, InvalidGrpcClientOptionErr
 from ledger_platform.grpc_server import serve_grpc
 from ledger_platform.identity_client import (
     GET_PERMISSIONS,
-    MEMBERSHIP_SUBJECTS,
-    MembershipChanges,
+    PERMISSION_SUBJECTS,
+    PermissionChanges,
     RemotePermissions,
-    follow_memberships,
+    follow_permission_changes,
     following,
     known_permissions,
 )
@@ -158,7 +159,7 @@ async def test_a_cache_in_front_of_identity_asks_it_once_per_ttl(
 
 async def test_a_grant_makes_the_cache_forget_the_principal_in_the_company() -> None:
     cache = Forgotten()
-    await MembershipChanges(cache).handle(message(granted()))
+    await PermissionChanges(cache).handle(message(granted()))
     assert cache.forgotten == [(ORGANIZATION, COMPANY, "2001")]
 
 
@@ -167,7 +168,7 @@ async def test_a_revocation_does_too() -> None:
     event = MembershipRevoked(
         company_id=str(COMPANY), organization_id=str(ORGANIZATION), subject="2001", role=ROLE_OWNER, version=3
     )
-    await MembershipChanges(cache).handle(
+    await PermissionChanges(cache).handle(
         message(Envelope.wrap(event, source="identity", tenant=TENANT), "identity.membership.revoked")
     )
     assert cache.forgotten == [(ORGANIZATION, COMPANY, "2001")]
@@ -176,8 +177,19 @@ async def test_a_revocation_does_too() -> None:
 async def test_another_event_on_the_subjects_changes_nothing() -> None:
     cache = Forgotten()
     other = Envelope.wrap(CompanyCreated(company_id=str(COMPANY)), source="identity", tenant=TENANT)
-    await MembershipChanges(cache).handle(message(other))
+    await PermissionChanges(cache).handle(message(other))
     assert cache.forgotten == []
+
+
+def deactivated(organization: str = ORGANIZATION_ID) -> Envelope:
+    event = CompanyDeactivated(company_id=str(COMPANY), organization_id=organization, version=4)
+    return Envelope.wrap(event, source="identity", tenant=TENANT)
+
+
+async def test_a_deactivation_makes_the_cache_forget_the_company() -> None:
+    cache = Forgotten()
+    await PermissionChanges(cache).handle(message(deactivated(), "identity.company.deactivated"))
+    assert (cache.forgotten, cache.companies) == ([], [(ORGANIZATION, COMPANY)])
 
 
 def unreadable(kind: str) -> Msg:
@@ -188,19 +200,23 @@ def unreadable(kind: str) -> Msg:
             return message(granted(organization="not-an-id"))
         case "bad-subject":
             return message(granted(subject="not a subject"))
+        case "bad-company":
+            return message(deactivated(organization="not-an-id"), "identity.company.deactivated")
         case _:
             return Msg(
                 Client(), subject="identity.membership.granted", data=b"\xff\xff", headers=granted().headers()
             )
 
 
-@pytest.mark.parametrize("kind", ["no-envelope", "bad-organization", "bad-subject", "bad-payload"])
+@pytest.mark.parametrize(
+    "kind", ["no-envelope", "bad-organization", "bad-subject", "bad-company", "bad-payload"]
+)
 async def test_an_event_that_cannot_be_read_is_logged_and_skipped(kind: str) -> None:
     cache = Forgotten()
     with capture_logs() as logs:
-        await MembershipChanges(cache).handle(unreadable(kind))
-    assert cache.forgotten == []
-    assert [log["event"] for log in logs] == ["authorization.membership_event_unreadable"]
+        await PermissionChanges(cache).handle(unreadable(kind))
+    assert (cache.forgotten, cache.companies) == ([], [])
+    assert [log["event"] for log in logs] == ["authorization.identity_event_unreadable"]
     assert "not a subject" not in str(logs)
 
 
@@ -210,8 +226,8 @@ async def test_every_replica_following_the_subjects_hears_every_change(
 ) -> None:
     first, second = Forgotten(), Forgotten()
     one, other, publisher = await connect(), await connect(), await connect()
-    await MembershipChanges(first).follow(one)
-    await MembershipChanges(second).follow(other)
+    await PermissionChanges(first).follow(one)
+    await PermissionChanges(second).follow(other)
     await one.flush()
     await other.flush()
     envelope = granted()
@@ -221,7 +237,7 @@ async def test_every_replica_following_the_subjects_hears_every_change(
         return len(first.forgotten) == len(second.forgotten) == 1
 
     await eventually(both_heard)
-    assert MEMBERSHIP_SUBJECTS == "identity.membership.>"
+    assert PERMISSION_SUBJECTS == ("identity.membership.>", "identity.company.deactivated")
 
 
 async def publish(
@@ -247,7 +263,24 @@ async def test_an_unreadable_event_on_the_wire_does_not_stop_the_next_one(
 
             await eventually(heard)
     assert cache.forgotten == [(ORGANIZATION, COMPANY, "2001")]
-    assert [log["event"] for log in logs] == ["authorization.membership_event_unreadable"]
+    assert [log["event"] for log in logs] == ["authorization.identity_event_unreadable"]
+
+
+async def test_a_follower_hears_a_deactivation_on_the_wire(
+    connect: Callable[[], Awaitable[Client]],
+    eventually: Callable[[Callable[[], Awaitable[bool]]], Awaitable[None]],
+) -> None:
+    cache = Forgotten()
+    follower, publisher = await connect(), await connect()
+    async with following(follower, cache, Interruptions()):
+        await follower.flush()
+        await publish(publisher, deactivated(), "identity.company.deactivated")
+
+        async def heard() -> bool:
+            return len(cache.companies) == 1
+
+        await eventually(heard)
+    assert cache.companies == [(ORGANIZATION, COMPANY)]
 
 
 async def test_following_forgets_everything_kept_while_nobody_followed(
@@ -279,7 +312,7 @@ async def test_following_ends_with_its_subscription(
     follower, prober, publisher = await connect(), await connect(), await connect()
     async with following(follower, cache, Interruptions()):
         pass
-    _ = await MembershipChanges(probe).follow(prober)
+    _ = await PermissionChanges(probe).follow(prober)
     await prober.flush()
     await publish(publisher, granted())
 
@@ -318,7 +351,7 @@ async def test_a_follower_worker_follows_until_it_is_stopped(
 ) -> None:
     cache, interruptions = Forgotten(), Interruptions()
     follower, publisher = await connect(), await connect()
-    worker = asyncio.create_task(follow_memberships(follower, cache, interruptions))
+    worker = asyncio.create_task(follow_permission_changes(follower, cache, interruptions))
 
     async def following_now() -> bool:
         return cache.cleared == 1
