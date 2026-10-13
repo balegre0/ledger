@@ -6,8 +6,28 @@ Messages name ids, fields and limits, never text a client typed: a legal name or
 from typing import ClassVar
 lazy from uuid import UUID
 
-from ledger_kernel.errors import ConflictError, ForbiddenError, InvalidInputError, NotFoundError, excerpt
+from ledger_kernel.errors import (
+    ConflictError,
+    ForbiddenError,
+    InvalidInputError,
+    LedgerError,
+    NotFoundError,
+    excerpt,
+)
 lazy from ledger_kernel.access import Permission, SubjectId
+
+
+class InvalidStateError(LedgerError):
+    """A domain value built from parts that do not belong together. A bug in the code that builds it.
+
+    Annotations are not enforced at runtime and the rules that guard roles rest on these values: each is
+    checked once, where it is made. The message names the field, never a value.
+    """
+
+    code: ClassVar[str] = "invalid_state"
+
+    def __init__(self, *, field: str, requirement: str) -> None:
+        super().__init__(f"{field} must be {requirement}")
 
 
 class InvalidNameError(InvalidInputError):

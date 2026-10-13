@@ -12,6 +12,7 @@ from pydantic import TypeAdapter
 
 ROOT: Final = Path(__file__).resolve().parent.parent
 PACKAGE_DIRECTORIES: Final = ("libs", "services")
+SERVICES_CONTRACT: Final = "Libraries never import services"
 BILLING_DEPTRY: Final = "deptry apps/billing/src --config apps/billing/pyproject.toml"
 
 
@@ -32,8 +33,14 @@ class Coverage(TypedDict):
     run: CoverageRun
 
 
+class Contract(TypedDict):
+    name: str
+    forbidden_modules: NotRequired[list[str]]
+
+
 class ImportLinter(TypedDict):
     root_packages: list[str]
+    contracts: list[Contract]
 
 
 class Pytest(TypedDict):
@@ -81,6 +88,18 @@ def unguarded(packages: dict[str, tuple[str, ...]], config: Workspace) -> list[s
                 missing.append(f"{directory}: {module} not in [tool.coverage.run] source_pkgs")
             if module not in tools["importlinter"]["root_packages"]:
                 missing.append(f"{directory}: {module} not in [tool.importlinter] root_packages")
+        if directory.startswith("services/"):
+            shielded = {
+                module
+                for contract in tools["importlinter"]["contracts"]
+                if contract["name"] == SERVICES_CONTRACT
+                for module in contract.get("forbidden_modules", [])
+            }
+            missing.extend(
+                f"{directory}: {module} not in the forbidden modules of '{SERVICES_CONTRACT}'"
+                for module in modules
+                if module not in shielded
+            )
         mypy = {name for name, command in commands.items() if command == f"mypy {directory}"}
         if not mypy & in_sequence["mypy"]:
             missing.append(f"{directory}: no task of the mypy sequence runs 'mypy {directory}'")
@@ -111,4 +130,11 @@ def test_a_package_left_out_of_the_lists_is_named() -> None:
         "apps/billing: no task of the mypy sequence runs 'mypy apps/billing'",
         f"apps/billing: no task of the deps sequence runs '{BILLING_DEPTRY}'",
         "apps/billing: under no [tool.pytest] testpaths",
+    ]
+
+
+def test_a_service_the_libraries_may_import_is_named() -> None:
+    found = packages(ROOT) | {"services/billing": ("ledger_billing",)}
+    assert [line for line in unguarded(found, workspace()) if "Libraries never" in line] == [
+        "services/billing: ledger_billing not in the forbidden modules of 'Libraries never import services'"
     ]

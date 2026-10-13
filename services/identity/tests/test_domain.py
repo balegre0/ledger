@@ -1,4 +1,5 @@
 import unicodedata
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
@@ -18,6 +19,7 @@ from ledger_identity.domain.errors import (
     EmissionPointNotFoundError,
     InvalidCodeError,
     InvalidNameError,
+    InvalidStateError,
     LastOwnerError,
     MembershipNotFoundError,
     OrganizationNotFoundError,
@@ -83,7 +85,7 @@ def deactivated() -> Company:
 
 def member(company: Company, subject: str, role: Role) -> Membership:
     membership, _ = grant(
-        Roster(company, None, owners=1), subject=SubjectId(subject), role=role, actor=OWNER, now=NOW
+        Roster(company, SubjectId(subject), None, owners=1), role=role, actor=OWNER, now=NOW
     )
     return membership
 
@@ -283,13 +285,13 @@ def test_the_founder_of_a_company_is_its_first_owner() -> None:
 def test_an_admin_grants_and_changes_roles_below_owner() -> None:
     company = registered()
     viewer, granted = grant(
-        Roster(company, None, owners=1), subject=SubjectId("3001"), role=Role.VIEWER, actor=ADMIN, now=NOW
+        Roster(company, SubjectId("3001"), None, owners=1), role=Role.VIEWER, actor=ADMIN, now=NOW
     )
     assert (viewer.role, viewer.version, viewer.changed_by) == (Role.VIEWER, 1, "2002")
     assert granted is not None
     assert granted.previous is None
     issuer, changed = grant(
-        Roster(company, viewer, owners=1), subject=viewer.subject, role=Role.ISSUER, actor=ADMIN, now=LATER
+        Roster(company, viewer.subject, viewer, owners=1), role=Role.ISSUER, actor=ADMIN, now=LATER
     )
     assert (issuer.id, issuer.role, issuer.version, issuer.changed_at) == (viewer.id, Role.ISSUER, 2, LATER)
     assert changed == MembershipGranted(
@@ -301,18 +303,18 @@ def test_an_admin_grants_and_changes_roles_below_owner() -> None:
 def test_whoever_may_not_manage_memberships_changes_none(role: Role) -> None:
     company = registered()
     with pytest.raises(ActorNotAllowedError) as caught:
-        grant(Roster(company, None, owners=1), subject=SubjectId("3001"), role=role, actor=VIEWER, now=NOW)
+        grant(Roster(company, SubjectId("3001"), None, owners=1), role=role, actor=VIEWER, now=NOW)
     assert (caught.value.kind, caught.value.code) == (ErrorKind.FORBIDDEN, "permission_denied")
     viewer = member(company, "3001", Role.VIEWER)
     with pytest.raises(ActorNotAllowedError):
-        revoke(Roster(company, viewer, owners=1), subject=viewer.subject, actor=VIEWER, now=NOW)
+        revoke(Roster(company, viewer.subject, viewer, owners=1), actor=VIEWER, now=NOW)
 
 
 def test_granting_the_role_a_principal_holds_changes_nothing() -> None:
     company = registered()
     viewer = member(company, "3001", Role.VIEWER)
     assert grant(
-        Roster(company, viewer, owners=1), subject=viewer.subject, role=Role.VIEWER, actor=ADMIN, now=LATER
+        Roster(company, viewer.subject, viewer, owners=1), role=Role.VIEWER, actor=ADMIN, now=LATER
     ) == (
         viewer,
         None,
@@ -328,7 +330,7 @@ def test_only_an_owner_grants_or_takes_the_owner_role(current: Role | None, role
     company = registered()
     held = None if current is None else member(company, "3001", current)
     with pytest.raises(OwnersOnlyError) as caught:
-        grant(Roster(company, held, owners=2), subject=SubjectId("3001"), role=role, actor=ADMIN, now=LATER)
+        grant(Roster(company, SubjectId("3001"), held, owners=2), role=role, actor=ADMIN, now=LATER)
     assert (caught.value.kind, caught.value.code) == (ErrorKind.FORBIDDEN, "owners_only")
 
 
@@ -336,9 +338,7 @@ def test_the_last_owner_cannot_be_demoted() -> None:
     company = registered()
     owner, _ = found(company, FOUNDER, now=NOW)
     with pytest.raises(LastOwnerError) as caught:
-        grant(
-            Roster(company, owner, owners=1), subject=owner.subject, role=Role.ADMIN, actor=OWNER, now=LATER
-        )
+        grant(Roster(company, owner.subject, owner, owners=1), role=Role.ADMIN, actor=OWNER, now=LATER)
     assert (caught.value.kind, caught.value.code) == (ErrorKind.CONFLICT, "last_owner")
 
 
@@ -346,7 +346,7 @@ def test_one_of_two_owners_can_be_demoted_by_an_owner() -> None:
     company = registered()
     second = member(company, "3001", Role.OWNER)
     demoted, _ = grant(
-        Roster(company, second, owners=2), subject=second.subject, role=Role.ADMIN, actor=OWNER, now=LATER
+        Roster(company, second.subject, second, owners=2), role=Role.ADMIN, actor=OWNER, now=LATER
     )
     assert demoted.role is Role.ADMIN
 
@@ -354,8 +354,7 @@ def test_one_of_two_owners_can_be_demoted_by_an_owner() -> None:
 def test_no_role_is_granted_in_a_deactivated_company() -> None:
     with pytest.raises(CompanyInactiveError):
         grant(
-            Roster(deactivated(), None, owners=1),
-            subject=SubjectId("3001"),
+            Roster(deactivated(), SubjectId("3001"), None, owners=1),
             role=Role.VIEWER,
             actor=OWNER,
             now=LATER,
@@ -365,7 +364,7 @@ def test_no_role_is_granted_in_a_deactivated_company() -> None:
 def test_a_revoked_membership_is_kept_at_a_new_version_and_says_which_role_it_held() -> None:
     company = registered()
     viewer = member(company, "3001", Role.VIEWER)
-    revoked, event = revoke(Roster(company, viewer, owners=1), subject=viewer.subject, actor=ADMIN, now=LATER)
+    revoked, event = revoke(Roster(company, viewer.subject, viewer, owners=1), actor=ADMIN, now=LATER)
     assert event == MembershipRevoked(
         tenant=company.tenant, subject=SubjectId("3001"), role=Role.VIEWER, version=2
     )
@@ -383,9 +382,9 @@ def test_a_revoked_membership_is_kept_at_a_new_version_and_says_which_role_it_he
 def test_a_role_granted_again_continues_the_versions_of_the_revoked_membership() -> None:
     company = registered()
     viewer = member(company, "3001", Role.VIEWER)
-    revoked, _ = revoke(Roster(company, viewer, owners=1), subject=viewer.subject, actor=ADMIN, now=NOW)
+    revoked, _ = revoke(Roster(company, viewer.subject, viewer, owners=1), actor=ADMIN, now=NOW)
     again, granted = grant(
-        Roster(company, revoked, owners=1), subject=viewer.subject, role=Role.VIEWER, actor=ADMIN, now=LATER
+        Roster(company, viewer.subject, revoked, owners=1), role=Role.VIEWER, actor=ADMIN, now=LATER
     )
     assert (again.id, again.status, again.version) == (viewer.id, MembershipStatus.ACTIVE, 3)
     assert granted == MembershipGranted(
@@ -397,7 +396,7 @@ def test_a_role_can_be_revoked_even_in_a_deactivated_company() -> None:
     company = registered()
     viewer = member(company, "3001", Role.VIEWER)
     inactive = company.deactivate(now=LATER)[0]
-    _, revoked = revoke(Roster(inactive, viewer, owners=1), subject=viewer.subject, actor=ADMIN, now=LATER)
+    _, revoked = revoke(Roster(inactive, viewer.subject, viewer, owners=1), actor=ADMIN, now=LATER)
     assert revoked.role is Role.VIEWER
 
 
@@ -405,22 +404,22 @@ def test_only_an_owner_revokes_an_owner_and_never_the_last() -> None:
     company = registered()
     owner, _ = found(company, FOUNDER, now=NOW)
     with pytest.raises(OwnersOnlyError):
-        revoke(Roster(company, owner, owners=2), subject=owner.subject, actor=ADMIN, now=LATER)
+        revoke(Roster(company, owner.subject, owner, owners=2), actor=ADMIN, now=LATER)
     with pytest.raises(LastOwnerError):
-        revoke(Roster(company, owner, owners=1), subject=owner.subject, actor=OWNER, now=LATER)
-    _, revoked = revoke(Roster(company, owner, owners=2), subject=owner.subject, actor=OWNER, now=LATER)
+        revoke(Roster(company, owner.subject, owner, owners=1), actor=OWNER, now=LATER)
+    _, revoked = revoke(Roster(company, owner.subject, owner, owners=2), actor=OWNER, now=LATER)
     assert revoked.role is Role.OWNER
 
 
 def test_revoking_a_role_nobody_holds_is_not_found() -> None:
     with pytest.raises(MembershipNotFoundError, match="'3001' holds no role in the company") as caught:
-        revoke(Roster(registered(), None, owners=1), subject=SubjectId("3001"), actor=OWNER, now=NOW)
+        revoke(Roster(registered(), SubjectId("3001"), None, owners=1), actor=OWNER, now=NOW)
     assert caught.value.code == "membership_not_found"
     company = registered()
     viewer = member(company, "3001", Role.VIEWER)
-    revoked, _ = revoke(Roster(company, viewer, owners=1), subject=viewer.subject, actor=OWNER, now=NOW)
+    revoked, _ = revoke(Roster(company, viewer.subject, viewer, owners=1), actor=OWNER, now=NOW)
     with pytest.raises(MembershipNotFoundError):
-        revoke(Roster(company, revoked, owners=1), subject=viewer.subject, actor=OWNER, now=LATER)
+        revoke(Roster(company, viewer.subject, revoked, owners=1), actor=OWNER, now=LATER)
 
 
 def test_other_services_may_let_a_member_of_a_deactivated_company_read_only() -> None:
@@ -432,8 +431,44 @@ def test_other_services_may_let_a_member_of_a_deactivated_company_read_only() ->
     )
     owner, _ = found(company, FOUNDER, now=NOW)
     assert permissions_in(company.deactivate(now=LATER)[0], owner) == READ_ONLY
-    revoked, _ = revoke(Roster(company, issuer, owners=1), subject=issuer.subject, actor=OWNER, now=NOW)
+    revoked, _ = revoke(Roster(company, issuer.subject, issuer, owners=1), actor=OWNER, now=NOW)
     assert permissions_in(company, revoked) == frozenset()
+
+
+# ── What a membership or a company is built from ──────────────────────────────
+
+OTHER_ORGANIZATION: Final = OrganizationId(new_id())
+
+
+def test_a_roster_holds_only_the_membership_of_its_own_subject_in_its_own_company() -> None:
+    company = registered()
+    viewer = member(company, "3001", Role.VIEWER)
+    assert Roster(company, viewer.subject, viewer, owners=1).current == viewer
+    with pytest.raises(InvalidStateError, match=r"^roster\.current must be the membership of its subject$"):
+        Roster(company, SubjectId("3002"), viewer, owners=1)
+    with pytest.raises(InvalidStateError, match=r"^roster\.current must be the membership of its company$"):
+        Roster(registered(), viewer.subject, viewer, owners=1)
+
+
+def test_the_founder_of_a_company_belongs_to_its_organization_and_founds_an_active_company() -> None:
+    stranger = Principal(
+        subject=SubjectId("2001"), organization=OTHER_ORGANIZATION, provider_organization="9"
+    )
+    with pytest.raises(
+        InvalidStateError, match=r"^founder must be a principal of the company's organization$"
+    ):
+        found(registered(), stranger, now=NOW)
+    with pytest.raises(CompanyInactiveError):
+        found(deactivated(), FOUNDER, now=NOW)
+
+
+def test_a_version_starts_at_one() -> None:
+    company = registered()
+    with pytest.raises(InvalidStateError, match=r"^company\.version must be at least 1$"):
+        replace(company, version=0)
+    viewer = member(company, "3001", Role.VIEWER)
+    with pytest.raises(InvalidStateError, match=r"^membership\.version must be at least 1$"):
+        replace(viewer, version=0)
 
 
 # ── Errors ──────────────────────────────────────────────────────────────────────
@@ -493,6 +528,42 @@ SOME_ID: Final = new_id()
             f"company {SOME_ID} is not at the version the request names",
         ),
         (
+            CompanyInactiveError(SOME_ID),
+            ErrorKind.CONFLICT,
+            "company_inactive",
+            f"company {SOME_ID} is inactive",
+        ),
+        (
+            LastOwnerError(),
+            ErrorKind.CONFLICT,
+            "last_owner",
+            "a company keeps at least one owner",
+        ),
+        (
+            OwnersOnlyError(),
+            ErrorKind.FORBIDDEN,
+            "owners_only",
+            "only an owner grants or takes the owner role",
+        ),
+        (
+            InvalidCodeError(),
+            ErrorKind.INVALID,
+            "invalid_code",
+            "a code is 1 to 10 upper-case letters and digits",
+        ),
+        (
+            MembershipNotFoundError(SubjectId("3001")),
+            ErrorKind.NOT_FOUND,
+            "membership_not_found",
+            "'3001' holds no role in the company",
+        ),
+        (
+            InvalidStateError(field="roster", requirement="whole"),
+            ErrorKind.INTERNAL,
+            "invalid_state",
+            "roster must be whole",
+        ),
+        (
             ActorNotAllowedError(Permission.MEMBERSHIP_MANAGE),
             ErrorKind.FORBIDDEN,
             "permission_denied",
@@ -530,17 +601,22 @@ def test_whatever_is_granted_or_revoked_a_company_keeps_an_owner_and_versions_on
     founder, _ = found(company, FOUNDER, now=NOW)
     held = {founder.subject: founder}
     for revoking, subject, role, actor in steps:
+        before = held.get(subject)
         roster = Roster(
-            company, held.get(subject), owners=sum(m.active and m.role is Role.OWNER for m in held.values())
+            company, subject, before, owners=sum(m.active and m.role is Role.OWNER for m in held.values())
         )
+        changed: Membership
+        event: MembershipGranted | MembershipRevoked | None
         try:
             if revoking:
-                changed, _ = revoke(roster, subject=subject, actor=actor, now=LATER)
+                changed, event = revoke(roster, actor=actor, now=LATER)
             else:
-                changed, _ = grant(roster, subject=subject, role=role, actor=actor, now=LATER)
+                changed, event = grant(roster, role=role, actor=actor, now=LATER)
         except LedgerError:
             continue
-        before = held.get(subject)
-        assert before is None or changed.version >= before.version
+        if event is None:
+            assert changed == before
+        else:
+            assert changed.version == (1 if before is None else before.version + 1) == event.version
         held[subject] = changed
         assert any(m.active and m.role is Role.OWNER for m in held.values())

@@ -18,6 +18,7 @@ lazy from datetime import datetime
 from ledger_identity.domain.company import CompanyStatus
 from ledger_identity.domain.errors import (
     ActorNotAllowedError,
+    InvalidStateError,
     LastOwnerError,
     MembershipNotFoundError,
     OwnersOnlyError,
@@ -42,7 +43,7 @@ class MembershipStatus(StrEnum):
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Membership:
-    """A principal's role in a company (or the one it held until revoked), its version and its last change."""
+    """A principal's role in a company (or the one held until revoked), its version and its last change."""
 
     id: MembershipId
     tenant: Tenant
@@ -54,6 +55,10 @@ class Membership:
     """When the membership last changed: the grant of its role, or its revocation."""
     changed_by: SubjectId
     """Who made that change."""
+
+    def __post_init__(self) -> None:
+        if self.version < 1:
+            raise InvalidStateError(field="membership.version", requirement="at least 1")
 
     @property
     def active(self) -> bool:
@@ -88,17 +93,32 @@ class Actor:
 @final
 @dataclass(frozen=True, slots=True)
 class Roster:
-    """What a change of a principal's role is decided on: the company, its membership, its owners."""
+    """What a change of one principal's role is decided on: company, principal, its membership, owners.
+
+    Built from rows read for the same ``subject`` and ``company``: a ``current`` of anyone else, or of another
+    company, would move one principal's role to another, so it is refused where the roster is made.
+    """
 
     company: Company
+    subject: SubjectId
     current: Membership | None
     """The principal's membership, active or revoked; ``None`` if it never held a role there."""
     owners: int
     """How many owners the company has now."""
 
+    def __post_init__(self) -> None:
+        current = self.current
+        if current is not None and current.subject != self.subject:
+            raise InvalidStateError(field="roster.current", requirement="the membership of its subject")
+        if current is not None and current.tenant != self.company.tenant:
+            raise InvalidStateError(field="roster.current", requirement="the membership of its company")
+
 
 def found(company: Company, founder: Principal, *, now: datetime) -> tuple[Membership, MembershipGranted]:
-    """The membership of a company's founder: its first owner."""
+    """The membership of a company's founder, a principal of its organization: its first owner."""
+    company.require_active()
+    if founder.organization != company.organization:
+        raise InvalidStateError(field="founder", requirement="a principal of the company's organization")
     owner = Membership(
         id=MembershipId(new_id()),
         tenant=company.tenant,
@@ -126,9 +146,9 @@ def _require_ownership(actor: Actor) -> None:
 
 
 def grant(
-    roster: Roster, *, subject: SubjectId, role: Role, actor: Actor, now: datetime
+    roster: Roster, *, role: Role, actor: Actor, now: datetime
 ) -> tuple[Membership, MembershipGranted | None]:
-    """``subject``'s membership with ``role``; unchanged, and no event, when it holds that role already."""
+    """The roster subject's membership with ``role``; unchanged, and no event, when it holds it already."""
     roster.company.require_active()
     _require_managing(actor)
     held = roster.current
@@ -142,7 +162,7 @@ def grant(
     membership = Membership(
         id=MembershipId(new_id()) if held is None else held.id,
         tenant=roster.company.tenant,
-        subject=subject,
+        subject=roster.subject,
         role=role,
         status=MembershipStatus.ACTIVE,
         version=1 if held is None else held.version + 1,
@@ -151,7 +171,7 @@ def grant(
     )
     granted = MembershipGranted(
         tenant=membership.tenant,
-        subject=subject,
+        subject=roster.subject,
         role=role,
         previous=None if current is None else current.role,
         version=membership.version,
@@ -159,14 +179,12 @@ def grant(
     return membership, granted
 
 
-def revoke(
-    roster: Roster, *, subject: SubjectId, actor: Actor, now: datetime
-) -> tuple[Membership, MembershipRevoked]:
-    """Take ``subject``'s role in the company away: its membership, revoked, and the event that says so."""
+def revoke(roster: Roster, *, actor: Actor, now: datetime) -> tuple[Membership, MembershipRevoked]:
+    """Take the roster subject's role away: its membership, revoked, and the event that says so."""
     _require_managing(actor)
     current = roster.current
     if current is None or not current.active:
-        raise MembershipNotFoundError(subject)
+        raise MembershipNotFoundError(roster.subject)
     if current.role is Role.OWNER:
         _require_ownership(actor)
         if roster.owners <= 1:

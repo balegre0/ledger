@@ -9,7 +9,7 @@ from enum import StrEnum
 from typing import final
 lazy from datetime import datetime
 
-from ledger_identity.domain.errors import CompanyInactiveError
+from ledger_identity.domain.errors import CompanyInactiveError, InvalidStateError
 from ledger_identity.domain.events import CompanyCreated, CompanyDeactivated, CompanyUpdated
 from ledger_kernel.ids import CompanyId, Tenant, new_id
 lazy from ledger_identity.domain.text import LegalName
@@ -37,6 +37,10 @@ class Company:
     version: int
     created_at: datetime
     updated_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.version < 1:
+            raise InvalidStateError(field="company.version", requirement="at least 1")
 
     @property
     def tenant(self) -> Tenant:

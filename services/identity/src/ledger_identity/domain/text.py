@@ -22,6 +22,7 @@ MAX_LEGAL_NAME: Final = 150
 """As long as an e-CF's ``RazonSocialEmisor`` may be."""
 MAX_NAME: Final = 100
 MAX_CODE: Final = 10
+"""The message of ``InvalidCodeError`` spells this limit as a literal: its test pins the two together."""
 _CODE: Final = re.compile(rf"[A-Z0-9]{{1,{MAX_CODE}}}", re.ASCII)
 _INVISIBLE: Final = "C"
 """Unicode's "other" categories: controls, formats (zero-width joiners), surrogates, unassigned."""

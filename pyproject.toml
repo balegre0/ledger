@@ -285,6 +285,10 @@ name = "Identity's domain is the standard library and the kernel"
 type = "forbidden"
 source_modules = ["ledger_identity.domain"]
 forbidden_modules = [
-    "ledger_contracts", "ledger_platform", "pydantic", "sqlalchemy", "fastapi", "starlette", "grpc", "nats",
-    "structlog", "google", "psycopg",
+    "ledger_contracts", "ledger_platform",
+    # the kernel contract's list ...
+    "pydantic", "pydantic_settings", "sqlalchemy", "nats", "fastapi", "starlette", "structlog", "google", "grpc",
+    "opentelemetry", "prometheus_client", "psycopg",
+    # ... and every other dependency the services of this repository bring in
+    "httpx", "joserfc", "cryptography", "alembic", "granian",
 ]
