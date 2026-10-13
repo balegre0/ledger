@@ -1,0 +1,12 @@
+# Hand-written for the DGII spike (v2-M1b). The restructure's `ledger-devtools sync` generates this file from
+# countries/do/manifest.toml (spec §4.3); until then this file is the source of truth.
+[project]
+name = "ledger-country-do"
+version = "0.1.0"
+description = "Dominican Republic: regime 'do' (DGII's tax law as data) and channel 'do-ecf-v1' (e-CF)."
+requires-python = ">=3.15"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
