@@ -1,9 +1,10 @@
-"""Revision 0001, from nothing: identity's first schema.
+"""Revision 0001 of schema ``identity``: the chassis's tables, then identity's, under row-level security.
 
-The chassis's tables, then organizations, companies, memberships, branches and emission points, every table
-that holds a tenant's data under row-level security. Every type, length, word and policy is spelled out rather
-than read from the models or from ``ledger_platform``'s DDL helpers: a revision records what was done and must
-not change when they do. The tests keep the two equal, so a change is noticed and becomes a new revision.
+v1's two revisions squashed into one (nothing was in production, §6.5): one active company per tax id in every
+organization is the index ``ux_companies_active_tax_id`` from the start. Every type, length, word and
+constraint is spelled out (a revision records what was done and must not move with the models); the tests
+keep the models equal to it. The chassis's tables and the row-level security policies come from their
+versioned builders, whose output never changes (``chassis_schema_v1``, ``rls.policy``).
 """
 
 from typing import Final
@@ -12,131 +13,70 @@ lazy from datetime import datetime
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects.postgresql import JSONB
+
+from ledger_platform.data.chassis_schema import chassis_schema_v1
+from ledger_platform.data.rls import RlsScope, policy
 
 revision: str = "0001"
 down_revision: str | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-_NEWEST_FIRST: Final = (
-    "emission_points",
-    "branches",
-    "memberships",
-    "companies",
-    "organizations",
-    "idempotency_keys",
-    "inbox",
-    "outbox",
-)
-"""Every table this revision creates, each before the tables it refers to."""
-
-
-def _matches(column: str, setting: str) -> str:
-    return f"{column} = NULLIF(current_setting('ledger.{setting}', true), '')::uuid"
-
-
-def _isolated(table: str, policy: str, rule: str) -> tuple[str, ...]:
-    """The DDL of ``ledger_platform``'s ``tenant_isolation`` and ``organization_isolation`` as they ran."""
-    return (
-        f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY",
-        f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY",
-        f"DROP POLICY IF EXISTS {policy} ON {table}",
-        f"CREATE POLICY {policy} ON {table} USING ({rule}) WITH CHECK ({rule})",
-    )
-
-
-_ORGANIZATION: Final = _matches("organization_id", "organization_id")
-_TENANT: Final = f"{_ORGANIZATION} AND {_matches('company_id', 'company_id')}"
+S: Final = "identity"
 ISOLATION: Final = (
-    _isolated("idempotency_keys", "organization_isolation", _ORGANIZATION),
-    _isolated("organizations", "organization_isolation", _matches("id", "organization_id")),
-    _isolated("companies", "organization_isolation", _ORGANIZATION),
-    _isolated("memberships", "organization_isolation", _ORGANIZATION),
-    _isolated("branches", "tenant_isolation", _TENANT),
-    _isolated("emission_points", "tenant_isolation", _TENANT),
+    ("organizations", RlsScope.ORGANIZATION, "id"),
+    ("companies", RlsScope.ORGANIZATION, "organization_id"),
+    ("memberships", RlsScope.ORGANIZATION, "organization_id"),
+    ("branches", RlsScope.COMPANY, "organization_id"),
+    ("emission_points", RlsScope.COMPANY, "organization_id"),
 )
-"""Row-level security, in the order it runs: the chassis's ``idempotency_keys`` (``CHASSIS_POLICIES``), then
-identity's tables. Organizations are their own organization (column ``id``)."""
+"""Whose rows each table holds, and the column naming the organization (an organization is its own)."""
 
 
 def _moment(name: str) -> sa.Column[datetime]:
     return sa.Column(name, sa.DateTime(timezone=True), nullable=False)
 
 
-def _now(name: str) -> sa.Column[datetime]:
-    """A moment the database stamps itself when the row is written without it."""
-    return sa.Column(name, sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False)
-
-
 def _of_company(table: str) -> sa.ForeignKeyConstraint:
     return sa.ForeignKeyConstraint(
         ["organization_id", "company_id"],
-        ["companies.organization_id", "companies.id"],
+        [f"{S}.companies.organization_id", f"{S}.companies.id"],
         name=f"fk_{table}_company",
     )
 
 
-def _chassis() -> None:
-    """The platform's tables, as ``ledger_platform`` declares them."""
-    op.create_table(
-        "outbox",
-        sa.Column("id", sa.Uuid(), primary_key=True),
-        sa.Column("subject", sa.String(), nullable=False),
-        sa.Column("headers", JSONB(), nullable=False),
-        sa.Column("data", sa.LargeBinary(), nullable=False),
-        _moment("created_at"),
-        _now("stored_at"),
-        sa.Column("attempts", sa.Integer(), server_default=sa.text("0"), nullable=False),
-        _now("next_attempt_at"),
-    )
-    op.create_index(
-        "ix_outbox_due", "outbox", [sa.text("(attempts > 0)"), "created_at", "id", "next_attempt_at"]
-    )
-    op.create_index("ix_outbox_stored_at", "outbox", ["stored_at"])
-    op.create_table(
-        "inbox",
-        sa.Column("consumer", sa.String(), primary_key=True),
-        sa.Column("event_id", sa.Uuid(), primary_key=True),
-        _moment("processed_at"),
-    )
-    op.create_table(
-        "idempotency_keys",
-        sa.Column("organization_id", sa.Uuid(), primary_key=True),
-        sa.Column("subject", sa.String(), primary_key=True),
-        sa.Column("key", sa.String(), primary_key=True),
-        sa.Column("fingerprint", sa.LargeBinary(), nullable=False),
-        sa.Column("status", sa.Integer(), nullable=True),
-        sa.Column("headers", JSONB(), nullable=True),
-        sa.Column("body", sa.LargeBinary(), nullable=True),
-        _moment("expires_at"),
-    )
-    op.create_index("ix_idempotency_keys_expiry", "idempotency_keys", ["organization_id", "expires_at"])
-
-
 def upgrade() -> None:
-    """Create the chassis's tables and identity's, then put every tenant's data under row-level security."""
-    _chassis()
+    """The chassis's tables, identity's, their policies, and one active company per tax id everywhere."""
+    chassis_schema_v1(op, S)
     op.create_table(
         "organizations",
         sa.Column("id", sa.Uuid(), primary_key=True),
         sa.Column("provider_id", sa.String(128), nullable=False),
         _moment("created_at"),
+        schema=S,
     )
     op.create_table(
         "companies",
         sa.Column("id", sa.Uuid(), primary_key=True),
-        sa.Column("organization_id", sa.Uuid(), sa.ForeignKey("organizations.id"), nullable=False),
+        sa.Column("organization_id", sa.Uuid(), sa.ForeignKey(f"{S}.organizations.id"), nullable=False),
         sa.Column("tax_id", sa.String(11), nullable=False),
         sa.Column("legal_name", sa.String(150), nullable=False),
         sa.Column("status", sa.String(16), nullable=False),
         sa.Column("version", sa.BigInteger(), nullable=False),
         _moment("created_at"),
         _moment("updated_at"),
-        sa.UniqueConstraint("organization_id", "tax_id", name="uq_companies_tax_id"),
         sa.UniqueConstraint("organization_id", "id", name="uq_companies_organization"),
         sa.CheckConstraint("status IN ('active', 'inactive')", name="ck_companies_status"),
         sa.CheckConstraint("version > 0", name="ck_companies_version"),
+        schema=S,
+    )
+    op.create_index(
+        "ux_companies_active_tax_id",
+        "companies",
+        ["tax_id"],
+        unique=True,
+        postgresql_where=sa.text("status = 'active'"),
+        schema=S,
     )
     op.create_table(
         "memberships",
@@ -156,9 +96,10 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("status IN ('active', 'revoked')", name="ck_memberships_status"),
         sa.CheckConstraint("version > 0", name="ck_memberships_version"),
+        schema=S,
     )
-    op.create_index("ix_memberships_subject", "memberships", ["organization_id", "subject"])
-    op.create_index("ix_memberships_company", "memberships", ["company_id", "id"])
+    op.create_index("ix_memberships_subject", "memberships", ["organization_id", "subject"], schema=S)
+    op.create_index("ix_memberships_company", "memberships", ["company_id", "id"], schema=S)
     op.create_table(
         "branches",
         sa.Column("id", sa.Uuid(), primary_key=True),
@@ -170,6 +111,7 @@ def upgrade() -> None:
         sa.UniqueConstraint("company_id", "code", name="uq_branches_code"),
         sa.UniqueConstraint("company_id", "id", name="uq_branches_company"),
         _of_company("branches"),
+        schema=S,
     )
     op.create_table(
         "emission_points",
@@ -184,17 +126,16 @@ def upgrade() -> None:
         _of_company("emission_points"),
         sa.ForeignKeyConstraint(
             ["company_id", "branch_id"],
-            ["branches.company_id", "branches.id"],
+            [f"{S}.branches.company_id", f"{S}.branches.id"],
             name="fk_emission_points_branch",
         ),
+        schema=S,
     )
-    op.create_index("ix_emission_points_branch", "emission_points", ["branch_id", "id"])
-    for statements in ISOLATION:
-        for statement in statements:
+    op.create_index("ix_emission_points_branch", "emission_points", ["branch_id", "id"], schema=S)
+    for table, scope, column in ISOLATION:
+        for statement in policy(f"{S}.{table}", scope, organization_column=column):
             op.execute(statement)
 
 
 def downgrade() -> None:
-    """Drop every table this revision created; their indexes and policies go with them."""
-    for table in _NEWEST_FIRST:
-        op.drop_table(table)
+    """Expand-only (§6.5): a schema goes back only by restoring a backup."""

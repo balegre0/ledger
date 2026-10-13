@@ -60,10 +60,10 @@ NATS's streams and Zitadel's bootstrap token. To start Zitadel alone over, `depl
 |---|---|---|
 | PostgreSQL 18.6 | `127.0.0.1:5432` | Database `ledger`, role `ledger_app` with password `ledger_app`. The role owns the database and is **not** a superuser and has no `BYPASSRLS`, so row-level security applies as it does in production |
 | NATS 2.12.15 | `nats://127.0.0.1:4222` | JetStream on. Monitoring at `http://127.0.0.1:8222` (`/healthz?js-enabled-only=true`, `/jsz`) |
-| identity | `http://127.0.0.1:8100` | `LEDGER_IDENTITY_PORT` moves it (8100 by default, clear of the many tools that take 8000). Its production image, migrated first by the one-shot `identity-migrate`; API documentation at `/docs`, `/readyz` checks the schema too. Database `identity`, role `identity` (password `identity`), on the same terms as `ledger_app`. Its gRPC port, 50051, is reachable inside the compose network only: `IdentityQueryService` authenticates no caller until the service mesh does |
+| identity | — | A module of the v2 `api` app now (schema `identity`): the stack runs it again with the `api`, `worker` and `migrate` apps, from one image. Until then it runs in its tests |
 
 The infrastructure's containers have health checks that prove they are usable (a login as `ledger_app`; JetStream
-enabled), and identity's is its `/readyz`, so `--wait` returns once a service could connect and identity is ready.
+enabled), so `--wait` returns once a service could connect.
 To call identity with a real token, run the local Zitadel, which neither `up` without `--profile zitadel` nor
 `tilt up` starts: [deploy/local/zitadel/README.md](deploy/local/zitadel/README.md).
 A service running on the host is configured with:

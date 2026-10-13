@@ -64,8 +64,8 @@ async def create_company(
         raise TaxIdTakenError
     owner, granted = found(registered, founder, now=unit.now)
     await unit.memberships.put(owner)
-    await unit.events.publish(created)
-    await unit.events.publish(granted)
+    unit.events.publish(created)
+    unit.events.publish(granted)
     return registered
 
 
@@ -94,7 +94,7 @@ async def rename_company(
     renamed, updated = current.rename(legal_name, now=unit.now)
     if updated is not None:
         await _replace(unit, current, renamed)
-        await unit.events.publish(updated)
+        unit.events.publish(updated)
     return renamed
 
 
@@ -105,7 +105,7 @@ async def deactivate_company(
     current = await _admitted(unit, company_id, admits, actor)
     inactive, deactivated = current.deactivate(now=unit.now)
     await _replace(unit, current, inactive)
-    await unit.events.publish(deactivated)
+    unit.events.publish(deactivated)
     return inactive
 
 
@@ -175,7 +175,7 @@ async def grant_role(
     membership, granted = grant(roster, role=role, actor=acting, now=unit.now)
     if granted is not None:
         await unit.memberships.put(membership)
-        await unit.events.publish(granted)
+        unit.events.publish(granted)
     current = roster.current
     return Granted(membership, created=current is None or not current.active)
 
@@ -192,4 +192,4 @@ async def revoke_role(
     revoked, event = revoke(roster, actor=acting, now=unit.now)
     if event is not None:
         await unit.memberships.put(revoked)
-        await unit.events.publish(event)
+        unit.events.publish(event)

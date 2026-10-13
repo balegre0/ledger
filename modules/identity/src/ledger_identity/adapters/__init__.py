@@ -1,1 +1,1 @@
-"""How identity reaches the world it depends on: PostgreSQL, the outbox, the permission source."""
+"""identity's adapters: PostgreSQL (its schema, its units), its permission source, and its REST API."""

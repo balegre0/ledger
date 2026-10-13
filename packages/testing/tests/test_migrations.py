@@ -64,3 +64,35 @@ def test_a_model_the_schema_lacks_is_a_pending_change(postgres: PostgresServer) 
     first, second = models()
     url = migrated(postgres, first)
     assert "tags" in (pending_changes(url, combined(first, second)) or "")
+
+
+def test_the_readers_read_the_schema_they_are_told(postgres: PostgresServer) -> None:
+    """A v2 module's tables live in a schema of its own: the same readers look there, and only there."""
+    models = MetaData(schema="books")
+    Table(
+        "shelves",
+        models,
+        Column("id", Uuid(), primary_key=True),
+        Column("size", Integer, nullable=False),
+        CheckConstraint("size > 0", name="ck_shelves_size"),
+    )
+    name = f"schema_{new_id().hex[16:]}"
+    url = postgres.database(name, role=name, password="schema-password")
+    engine = create_engine(url, poolclass=NullPool)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("CREATE SCHEMA books"))
+            models.create_all(connection)
+            connection.execute(text("ALTER TABLE books.shelves ENABLE ROW LEVEL SECURITY"))
+            connection.execute(text("CREATE POLICY mine ON books.shelves USING (true)"))
+    finally:
+        engine.dispose()
+    assert tables_of(url, schema="books") == {"shelves"}
+    assert check_constraints(url, schema="books") == {"ck_shelves_size": "CHECK ((size > 0))"}
+    assert primary_keys(url, schema="books") == {"shelves": ["id"]}
+    assert indexes_of(url, "shelves", schema="books") == {
+        "shelves_pkey": "CREATE UNIQUE INDEX shelves_pkey ON books.shelves USING btree (id)"
+    }
+    assert policies(url, schema="books") == [("shelves", "mine")]
+    assert row_security(url, schema="books") == {"shelves": (True, False)}
+    assert (tables_of(url), policies(url)) == (set(), [])  # nothing of it in public

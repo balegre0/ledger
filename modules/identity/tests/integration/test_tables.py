@@ -7,9 +7,9 @@ from typing import Final, final
 lazy from uuid import UUID
 
 import pytest
-from psycopg.errors import ForeignKeyViolation
-from sqlalchemy import func, insert, select
-from sqlalchemy.exc import IntegrityError
+from psycopg.errors import ForeignKeyViolation, InsufficientPrivilege
+from sqlalchemy import func, insert, select, text
+from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 from ledger_identity.adapters.postgres.tables import (
     BranchRecord,
@@ -22,7 +22,7 @@ from ledger_identity.adapters.postgres.tables import (
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.tenancy import OrganizationScope, Tenant
 lazy from ledger_kernel.tenancy import Scope
-lazy from ledger_platform.data.database import Database
+lazy from ledger_platform.data.bound import BoundDatabase
 
 NOW: Final = datetime(2026, 10, 12, 12, tzinfo=UTC)
 SUBJECT: Final = "312345678901234567"
@@ -76,12 +76,12 @@ def point_of(tenant: Tenant, branch: UUID, code: str = "001") -> dict[str, objec
     }
 
 
-async def seeded(database: Database, organization: OrganizationId | None = None) -> Seeded:
+async def seeded(identity_db: BoundDatabase, organization: OrganizationId | None = None) -> Seeded:
     """A company (of a new organization unless ``organization`` is given) with one branch and one owner."""
     tenant = Tenant(
         organization=organization or OrganizationId(new_id()), company=CompanyId(new_id()), mode=None
     )
-    async with database.transaction(OrganizationScope(tenant.organization, None)) as unit:
+    async with identity_db.unit(OrganizationScope(tenant.organization, None)) as unit:
         if organization is None:
             await unit.connection.execute(
                 insert(OrganizationRecord).values(
@@ -102,18 +102,18 @@ async def seeded(database: Database, organization: OrganizationId | None = None)
         )
         await unit.connection.execute(insert(MembershipRecord).values(membership_of(tenant)))
     branch = new_id()
-    async with database.transaction(tenant) as unit:
+    async with identity_db.unit(tenant) as unit:
         await unit.connection.execute(insert(BranchRecord).values(branch_of(tenant, branch)))
         await unit.connection.execute(insert(EmissionPointRecord).values(point_of(tenant, branch)))
     return Seeded(tenant=tenant, branch=branch)
 
 
-async def counts(database: Database, scope: Scope | None) -> dict[str, int]:
+async def counts(identity_db: BoundDatabase, scope: Scope | None) -> dict[str, int]:
     """How many rows of each of identity's tables ``scope`` sees."""
-    async with database.transaction(scope) as unit:
+    async with identity_db.unit(scope) as unit:
         return {
-            name: (await unit.connection.execute(select(func.count()).select_from(table))).scalar_one()
-            for name, table in IdentityTable.metadata.tables.items()
+            table.name: (await unit.connection.execute(select(func.count()).select_from(table))).scalar_one()
+            for table in IdentityTable.metadata.tables.values()
         }
 
 
@@ -124,63 +124,83 @@ def violated_key(caught: pytest.ExceptionInfo[IntegrityError]) -> str | None:
 
 
 async def test_row_level_security_shows_a_scope_what_it_owns_and_nothing_without_one(
-    database: Database,
+    identity_db: BoundDatabase,
 ) -> None:
-    first = await seeded(database)
-    sibling = await seeded(database, first.tenant.organization)  # another company of the same organization
-    other = await seeded(database)
+    first = await seeded(identity_db)
+    sibling = await seeded(identity_db, first.tenant.organization)  # another company of the same organization
+    other = await seeded(identity_db)
     everything = {"organizations": 1, "companies": 2, "memberships": 2, "branches": 1, "emission_points": 1}
-    assert await counts(database, first.tenant) == everything
-    assert await counts(database, sibling.tenant) == everything
-    assert await counts(database, OrganizationScope(first.tenant.organization, None)) == {
+    assert await counts(identity_db, first.tenant) == everything
+    assert await counts(identity_db, sibling.tenant) == everything
+    assert await counts(identity_db, OrganizationScope(first.tenant.organization, None)) == {
         **everything,
         "branches": 0,
         "emission_points": 0,
     }
-    assert await counts(database, other.tenant) == {**everything, "companies": 1, "memberships": 1}
-    assert await counts(database, None) == dict.fromkeys(IdentityTable.metadata.tables, 0)
+    assert await counts(identity_db, other.tenant) == {**everything, "companies": 1, "memberships": 1}
+    assert await counts(identity_db, None) == dict.fromkeys(everything, 0)
 
 
-async def test_a_membership_cannot_point_at_another_organizations_company(database: Database) -> None:
-    victim = await seeded(database)
-    attacker = await seeded(database)
+async def test_a_membership_cannot_point_at_another_organizations_company(identity_db: BoundDatabase) -> None:
+    victim = await seeded(identity_db)
+    attacker = await seeded(identity_db)
     across = Tenant(organization=attacker.tenant.organization, company=victim.tenant.company, mode=None)
     with pytest.raises(IntegrityError) as caught:
-        async with database.transaction(
+        async with identity_db.unit(
             OrganizationScope(attacker.tenant.organization, None)
         ) as unit:  # the policy lets the row in
             await unit.connection.execute(insert(MembershipRecord).values(membership_of(across, INTRUDER)))
     assert violated_key(caught) == "fk_memberships_company"
 
 
-async def test_a_branch_cannot_point_at_another_organizations_company(database: Database) -> None:
-    victim = await seeded(database)
-    attacker = await seeded(database)
+async def test_a_branch_cannot_point_at_another_organizations_company(identity_db: BoundDatabase) -> None:
+    victim = await seeded(identity_db)
+    attacker = await seeded(identity_db)
     across = Tenant(organization=attacker.tenant.organization, company=victim.tenant.company, mode=None)
     with pytest.raises(IntegrityError) as caught:
-        async with database.transaction(across) as unit:
+        async with identity_db.unit(across) as unit:
             await unit.connection.execute(insert(BranchRecord).values(branch_of(across, new_id(), "999")))
     assert violated_key(caught) == "fk_branches_company"
 
 
-async def test_an_emission_point_cannot_point_at_the_branch_of_another_company(database: Database) -> None:
-    victim = await seeded(database)
-    attacker = await seeded(database, victim.tenant.organization)  # the same organization, another company
+async def test_an_emission_point_cannot_point_at_the_branch_of_another_company(
+    identity_db: BoundDatabase,
+) -> None:
+    victim = await seeded(identity_db)
+    attacker = await seeded(identity_db, victim.tenant.organization)  # the same organization, another company
     with pytest.raises(IntegrityError) as caught:
-        async with database.transaction(attacker.tenant) as unit:
+        async with identity_db.unit(attacker.tenant) as unit:
             await unit.connection.execute(
                 insert(EmissionPointRecord).values(point_of(attacker.tenant, victim.branch, "999"))
             )
     assert violated_key(caught) == "fk_emission_points_branch"
 
 
-async def test_an_emission_point_cannot_point_at_another_organizations_company(database: Database) -> None:
-    victim = await seeded(database)
-    attacker = await seeded(database)
+async def test_an_emission_point_cannot_point_at_another_organizations_company(
+    identity_db: BoundDatabase,
+) -> None:
+    victim = await seeded(identity_db)
+    attacker = await seeded(identity_db)
     across = Tenant(organization=attacker.tenant.organization, company=victim.tenant.company, mode=None)
     with pytest.raises(IntegrityError) as caught:
-        async with database.transaction(across) as unit:
+        async with identity_db.unit(across) as unit:
             await unit.connection.execute(
                 insert(EmissionPointRecord).values(point_of(across, victim.branch, "999"))
             )
     assert violated_key(caught) == "fk_emission_points_company"
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "SELECT count(*) FROM platform.jobs",
+        "SELECT version FROM platform.routing",
+        "DELETE FROM platform.idempotency_keys",
+    ],
+)
+async def test_identity_s_role_reaches_no_other_schema(identity_db: BoundDatabase, statement: str) -> None:
+    """A statement naming another schema's table fails, even in a valid unit (Review Focus 5)."""
+    with pytest.raises(ProgrammingError) as caught:
+        async with identity_db.unit(OrganizationScope(OrganizationId(new_id()), None)) as unit:
+            await unit.connection.execute(text(statement))
+    assert isinstance(caught.value.orig, InsufficientPrivilege)

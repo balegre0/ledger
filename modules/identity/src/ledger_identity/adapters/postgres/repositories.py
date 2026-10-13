@@ -9,7 +9,8 @@ CONFLICT DO NOTHING`` against the constraint or unique index that would refuse i
 ``RETURNING``: a taken tax id or code is an answer, not an exception to parse. The index decides even where
 row-level security hides the row that holds the value (an active company of another organization). A row of
 another organization handed to a repository to keep is refused before any statement (``ForeignTenantError``):
-a defect of the caller, which row-level security would refuse as well.
+a defect of the caller, which row-level security would refuse as well. A list is read in the direction of
+its page (``ledger_platform.data.paging``): backwards for a page that ends before a cursor.
 """
 
 from typing import ClassVar, final, override
@@ -43,6 +44,7 @@ from ledger_kernel.errors import LedgerError
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.pagination import page_of
 from ledger_kernel.tenancy import Tenant
+from ledger_platform.data.paging import paged
 lazy from ledger_kernel.pagination import Page, PageRequest
 
 
@@ -117,14 +119,6 @@ _MEMBERSHIP = select(
     MembershipRecord.changed_by,
 )
 _ACTIVE = MembershipRecord.status == MembershipStatus.ACTIVE.value
-
-
-def _paged[*Columns](
-    statement: Select[*Columns], key: InstrumentedAttribute[UUID], request: PageRequest
-) -> Select[*Columns]:
-    """``statement`` in ``key`` order, after the request's cursor, one row more than the page holds."""
-    after = statement if request.after is None else statement.where(key > request.after)
-    return after.order_by(key).limit(request.size + 1)
 
 
 def _organization(row: Row[UUID, str, datetime]) -> Organization:
@@ -282,7 +276,7 @@ class PgCompanies(Companies):
         statement = _COMPANY.join(MembershipRecord, membership).where(
             CompanyRecord.organization_id == self._organization, MembershipRecord.subject == subject, _ACTIVE
         )
-        rows = (await self._connection.execute(_paged(statement, CompanyRecord.id, request))).all()
+        rows = (await self._connection.execute(paged(statement, CompanyRecord.id, request))).all()
         return page_of([_company(row) for row in rows], request, key=lambda company: company.id)
 
     def _one(self, company: CompanyId) -> Select[UUID, UUID, str, str, str, int, datetime, datetime]:
@@ -329,7 +323,7 @@ class PgBranches(Branches):
 
     @override
     async def page(self, company: CompanyId, request: PageRequest) -> Page[Branch]:
-        rows = (await self._connection.execute(_paged(self._of(company), BranchRecord.id, request))).all()
+        rows = (await self._connection.execute(paged(self._of(company), BranchRecord.id, request))).all()
         return page_of([_branch(row) for row in rows], request, key=lambda branch: branch.id)
 
     def _of(self, company: CompanyId) -> Select[UUID, UUID, UUID, str, str, datetime]:
@@ -381,7 +375,7 @@ class PgEmissionPoints(EmissionPoints):
     @override
     async def page(self, company: CompanyId, branch: BranchId, request: PageRequest) -> Page[EmissionPoint]:
         mine = self._of(company).where(EmissionPointRecord.branch_id == branch)
-        rows = (await self._connection.execute(_paged(mine, EmissionPointRecord.id, request))).all()
+        rows = (await self._connection.execute(paged(mine, EmissionPointRecord.id, request))).all()
         return page_of([_point(row) for row in rows], request, key=lambda point: point.id)
 
     def _of(self, company: CompanyId) -> Select[UUID, UUID, UUID, UUID, str, str, datetime]:
@@ -450,7 +444,7 @@ class PgMemberships(Memberships):
 
     @override
     async def page(self, company: CompanyId, request: PageRequest) -> Page[Membership]:
-        statement = _paged(self._of(company).where(_ACTIVE), MembershipRecord.id, request)
+        statement = paged(self._of(company).where(_ACTIVE), MembershipRecord.id, request)
         rows = (await self._connection.execute(statement)).all()
         return page_of([_membership(row) for row in rows], request, key=lambda membership: membership.id)
 

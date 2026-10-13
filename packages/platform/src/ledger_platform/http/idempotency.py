@@ -213,7 +213,9 @@ class Target:
     def of(cls, path: str, parameters: Iterable[tuple[str, str]] = ()) -> Target:
         """``path`` with the query ``parameters`` sorted, then percent-encoded.
 
-        The same parameters sent in another order are the same request; a repeated name keeps all its values.
+        The same parameters sent in another order are the same request; a repeated name keeps all its values,
+        in any order too: a route that reads a repeated parameter as an ordered list must not take a key
+        (spec §9.5).
         """
         return cls(path, urlencode(sorted(parameters)))
 

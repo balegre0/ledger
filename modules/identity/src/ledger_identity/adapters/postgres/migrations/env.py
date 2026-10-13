@@ -1,6 +1,5 @@
-"""Alembic's entry point for identity: the platform's runner, with identity's tables beside the chassis's."""
+"""Alembic's entry point for identity's schema."""
 
-from ledger_identity.adapters.postgres.tables import IdentityTable
-from ledger_platform.migrations import run_migrations
+from ledger_platform.data.migrations import run_schema_migrations
 
-run_migrations(IdentityTable.metadata)
+run_schema_migrations()

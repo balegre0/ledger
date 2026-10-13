@@ -16,10 +16,9 @@
 # re-pushed (a rebuild on a newer base image keeps it): Zitadel's is pinned by digest too, and pinning the others'
 # digests is a later hardening step.
 #
-# Services: identity runs from its production image (modules/identity/Dockerfile), read-only, as nonroot, with
-# its migrations applied first by the one-shot identity-migrate. Its database and role come from
-# postgres/init.sql; a data volume made before that file listed them needs `docker compose down -v`. The profile
-# `zitadel` adds a local identity provider (zitadel/README.md).
+# Apps: none yet. identity is a module of the v2 apps now (api, worker, migrate), which this file runs again from
+# the one image (deploy/docker/ledger.Dockerfile) once they exist; until then identity runs in the tests only.
+# The profile `zitadel` adds a local identity provider (zitadel/README.md).
 name: ledger
 
 services:
@@ -55,43 +54,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
-
-  identity-migrate:
-    # Brings identity's database to the image's schema, then exits; identity starts only once it has succeeded.
-    image: ledger-identity:local
-    build:
-      context: ../..
-      dockerfile: modules/identity/Dockerfile
-    entrypoint: ["/app/.venv/bin/ledger-identity-migrate"]
-    env_file: [identity.env]
-    read_only: true
-    tmpfs: [/tmp]
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    restart: "no"
-    depends_on:
-      postgres: {condition: service_healthy}
-
-  identity:
-    image: ledger-identity:local
-    env_file:
-      - identity.env
-      - path: zitadel/.local/identity.env
-        required: false
-    # HTTP only, on LEDGER_IDENTITY_PORT (8100 by default, so that it does not collide with the many tools that
-    # take 8000). The gRPC port (50051) stays inside this network: IdentityQueryService authenticates no caller
-    # until the mesh does, so nothing outside the services may reach it.
-    ports: ["127.0.0.1:${LEDGER_IDENTITY_PORT:-8100}:8000"]
-    read_only: true
-    tmpfs: [/tmp]
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    # Granian drains HTTP, then the chassis stops within its budget (25 s), and Granian kills a worker still
-    # running after 30 s: Docker's default of 10 s before its SIGKILL would cut that short.
-    stop_grace_period: 40s
-    depends_on:
-      identity-migrate: {condition: service_completed_successfully}
-      nats: {condition: service_healthy}
 
   zitadel:
     # The identity provider of the local stack, optional: `docker compose --profile zitadel up -d --wait`. It

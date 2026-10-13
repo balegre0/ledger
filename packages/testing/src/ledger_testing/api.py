@@ -1,7 +1,8 @@
 """Calling a service's public API in a test: a caller's headers, its answers as JSON, what a POST made.
 
-Every service's API takes a bearer token, an ``Idempotency-Key`` on each ``POST``, and answers pages as
-``{"items": [...], "next_cursor": ...}``: these helpers speak that, with tokens of ``LocalIssuer``.
+Every module's API takes a bearer token, an ``Idempotency-Key`` and a ``Ledger-Mode`` on each ``POST``, and
+answers pages as ``{"items": [...], "has_more": ..., "next_cursor": ..., "previous_cursor": ...}`` (§9.7):
+these helpers speak that, with tokens of ``LocalIssuer``.
 """
 
 from dataclasses import dataclass
@@ -20,10 +21,12 @@ _SHOWN: Final = 500
 
 
 class Page(TypedDict):
-    """A page of a list: its items and the cursor of the next page (``None`` on the last)."""
+    """A page of a list: its items, whether more follow, and the cursors of the pages on either side."""
 
     items: list[dict[str, object]]
+    has_more: bool
     next_cursor: str | None
+    previous_cursor: str | None
 
 
 _DOCUMENT: Final = TypeAdapter(dict[str, object])
@@ -63,9 +66,9 @@ class Caller:
         token = self.issuer.token(subject=self.subject, organization=self.organization, roles=self.roles)
         return {"Authorization": f"Bearer {token}"}
 
-    def posting(self, key: str) -> dict[str, str]:
-        """The headers of a ``POST``: the caller's token, and ``key`` as its ``Idempotency-Key``."""
-        return self.bearer() | {"Idempotency-Key": key}
+    def posting(self, key: str, mode: str = "test") -> dict[str, str]:
+        """The headers of a ``POST``: the caller's token, ``key`` as its ``Idempotency-Key`` and its mode."""
+        return self.bearer() | {"Idempotency-Key": key, "Ledger-Mode": mode}
 
 
 async def created(

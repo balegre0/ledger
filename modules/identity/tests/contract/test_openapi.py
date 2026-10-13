@@ -1,17 +1,37 @@
+"""identity's OpenAPI document (3.1), as published in ``modules/identity/openapi.json`` (§10): a snapshot.
+
+The document is made from the code: the ``api`` app is built with placeholder settings (nothing connects) and
+asked for its schema, restricted to identity's paths. With ``UPDATE_SNAPSHOTS=1`` the test writes the
+file instead and fails, for the diff to be reviewed (``uv run poe openapi``).
+"""
+
+import json
+import os
 from pathlib import Path
 from typing import Final, TypedDict
 
+import pytest
 from fastapi.routing import APIRoute, iter_route_contexts
-from pydantic import TypeAdapter
-lazy import pytest
+from pydantic import SecretStr, TypeAdapter
+lazy from fastapi import FastAPI
 lazy from fastapi.dependencies.models import Dependant
 
-from ledger_identity import openapi
-from ledger_identity.main import VERSION, create_app
-from ledger_identity.openapi import app, document
+from ledger_identity._manifest import MANIFEST
+from ledger_platform.config.settings import Settings
 from ledger_platform.http.deps import if_match, unguarded_routes
+from ledger_platform.runtime.app import App
 
-PUBLISHED: Final = Path(__file__).parents[1] / "openapi.json"
+PUBLISHED: Final = Path(__file__).parents[2] / "openapi.json"
+UPDATE: Final = "UPDATE_SNAPSHOTS"
+PLACEHOLDERS: Final = Settings(
+    environment="test",
+    database_url=SecretStr("postgresql+psycopg://openapi@localhost/openapi"),
+    token_issuer="https://issuer.invalid",
+    token_audience="ledger",
+    token_jwks_url="https://issuer.invalid/oauth/v2/keys",
+)
+"""The document does not depend on whom the app trusts or where its database is: nothing connects."""
+PREFIXES: Final = MANIFEST.http.prefixes if MANIFEST.http is not None else ()
 Parameter = TypedDict("Parameter", {"name": str, "in": str, "required": bool})
 
 
@@ -32,19 +52,58 @@ class Document(TypedDict):
 
 
 DOCUMENT: Final = TypeAdapter(Document)
+ANY_DOCUMENT: Final = TypeAdapter(dict[str, object])
+PATHS: Final = TypeAdapter(dict[str, object])
+
+
+def app() -> FastAPI:
+    """The ``api`` app on placeholder settings: what the document is made from."""
+    return App("api", settings=PLACEHOLDERS).asgi()
+
+
+def document() -> str:
+    """identity's paths of the ``api`` app's document, as JSON with sorted keys."""
+    whole = ANY_DOCUMENT.validate_python(app().openapi())
+    paths = PATHS.validate_python(whole["paths"])
+    whole["paths"] = {path: item for path, item in paths.items() if path.startswith(PREFIXES)}
+    return json.dumps(whole, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
 
 def test_the_published_document_is_the_one_the_code_makes() -> None:
-    assert PUBLISHED.read_text(encoding="utf-8") == document(), "regenerate it: uv run poe openapi"
+    made = document()
+    if os.environ.get(UPDATE) == "1":
+        PUBLISHED.write_text(made, encoding="utf-8", newline="\n")
+        pytest.fail("snapshot updated")
+    assert PUBLISHED.read_text(encoding="utf-8") == made, "regenerate it: uv run poe openapi"
 
 
-def test_the_document_is_openapi_3_1_and_every_post_takes_an_idempotency_key() -> None:
+def test_the_snapshot_switch_writes_the_document_and_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "openapi.json"
+    monkeypatch.setattr(f"{__name__}.PUBLISHED", target)
+    monkeypatch.setenv(UPDATE, "1")
+    with pytest.raises(pytest.fail.Exception, match="snapshot updated"):
+        test_the_published_document_is_the_one_the_code_makes()
+    assert target.read_text(encoding="utf-8") == document()
+
+
+def test_the_document_is_openapi_3_1_and_every_post_takes_an_idempotency_key_in_a_mode() -> None:
     parsed = DOCUMENT.validate_json(document())
     assert parsed["openapi"].startswith("3.1.")
     posts = [operations["post"] for operations in parsed["paths"].values() if "post" in operations]
-    assert posts
+    assert len(posts) == 4
     for post in posts:
+        parameters = [(parameter["name"], parameter["in"]) for parameter in post.get("parameters", [])]
         assert {"name": "Idempotency-Key", "in": "header", "required": True} in post.get("parameters", [])
+        assert ("Ledger-Mode", "header") in parameters  # optional in the schema: missing is 400, not 422
+        assert "400" in post.get("responses", {})
+
+
+def test_the_document_holds_identity_s_paths_only() -> None:
+    paths = DOCUMENT.validate_json(document())["paths"]
+    assert paths
+    assert all(path.startswith(("/v1/organization", "/v1/companies")) for path in paths)
 
 
 def operations() -> list[Operation]:
@@ -161,30 +220,3 @@ def test_every_error_an_operation_documents_is_a_problem_document() -> None:
     assert errors
     for answer in errors:
         assert list(answer.get("content", {})) == ["application/problem+json"]
-
-
-def test_the_command_line_writes_the_document(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    target = tmp_path / "openapi.json"
-    monkeypatch.setattr("sys.argv", ["ledger-identity-openapi", str(target)])
-    assert openapi.main() == 0
-    assert target.read_text(encoding="utf-8") == document()
-
-
-def test_the_command_line_needs_a_path(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setattr("sys.argv", ["ledger-identity-openapi"])
-    assert openapi.main() == 2
-    assert capsys.readouterr().err == "usage: ledger-identity-openapi PATH\n"
-
-
-def test_granians_factory_builds_the_app_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name, value in {
-        "LEDGER_DATABASE_URL": "postgresql+psycopg://identity:secret@localhost/identity",
-        "LEDGER_TOKEN_ISSUER": "https://issuer.example",
-        "LEDGER_TOKEN_AUDIENCE": "ledger",
-        "LEDGER_TOKEN_JWKS_URL": "https://issuer.example/oauth/v2/keys",
-    }.items():
-        monkeypatch.setenv(name, value)
-    app = create_app()
-    assert (app.title, app.version) == ("identity", VERSION)

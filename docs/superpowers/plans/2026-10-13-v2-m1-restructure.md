@@ -5002,6 +5002,8 @@ Spec §5.3, §3.4 (rule 13 guard), §3.5 (publish, NOTIFY), §3.6 (enqueue, wake
   predicates use `func.now()`. Injectable clocks stay only where the database is not involved.
 - `publish` refuses an event outside the unit's scope (`EventScopeMismatchError`, `event_scope_mismatch`): same
   organization; the company and the mode too where the unit names them; an unscoped unit publishes for anyone.
+  (Task 15 relaxed the mode: compared only where the event names one too. A mode-less event is about data both
+  modes share, which a moded unit changes when an idempotent route acts on a company: Decision 4.)
 - Job keys are unique per kind across tenants, so a key embeds a globally unique id. Enqueue restarts a done or
   dead job only when the existing row's scope columns are the enqueuer's (`IS NOT DISTINCT FROM`); `wake` and
   `wake_all` touch only jobs inside the unit's scope (organization, and company and mode where named).

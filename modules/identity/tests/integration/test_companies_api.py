@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import contextvars
 import json
 from functools import partial
 from http import HTTPStatus
@@ -18,10 +19,11 @@ from ledger_kernel.ids import CompanyId, new_id
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_testing.api import Caller, created, document, page
+from ledger_testing.database import app_url
 from ledger_testing.issuer import LocalIssuer
 from ledger_testing.waiting import eventually, waits_for_a_lock
-lazy from ledger_identity.settings import IdentitySettings
-lazy from ledger_platform.service import Service
+lazy from ledger_platform.data.bound import BoundDatabase
+lazy from ledger_testing.postgres import WorkerDatabase
 
 DUARTE: Final = {"tax_id": "101-85004-3", "legal_name": "Ferretería Duarte, S.R.L."}
 """The same taxpayer as the ``company`` fixture's, as a client may type it."""
@@ -29,13 +31,12 @@ FAR_FUTURE: Final = 4_102_444_800
 """2100-01-01, as a JWT's ``exp``."""
 
 
-async def grant(service: Service[IdentitySettings], company: str, subject: str, role: Role) -> None:
+async def grant(identity_db: BoundDatabase, company: str, subject: str, role: Role) -> None:
     """Give ``subject`` a role directly, as the owner (``2001``) would through the memberships API."""
-    runtime = service.runtime()
     tenant = Tenant(organization_of("1001"), CompanyId(UUID(company)), None)
-    async with runtime.database.transaction(tenant) as transaction:
+    async with identity_db.unit(tenant) as unit:
         await commands.grant_role(
-            bind(transaction, runtime.outbox),
+            bind(unit),
             tenant.company,
             subject=SubjectId(subject),
             role=role,
@@ -97,8 +98,33 @@ async def test_every_route_needs_a_bearer_token(client: httpx.AsyncClient, metho
 
 
 async def test_a_post_without_an_idempotency_key_is_refused(client: httpx.AsyncClient, owner: Caller) -> None:
-    response = await client.post("/v1/companies", json=DUARTE, headers=owner.bearer())
+    headers = owner.bearer() | {"Ledger-Mode": "test"}
+    response = await client.post("/v1/companies", json=DUARTE, headers=headers)
     assert (response.status_code, document(response)["code"]) == (422, "invalid_request")
+
+
+@pytest.mark.parametrize(
+    ("mode", "code"), [(None, "mode_required"), ("TEST", "mode_invalid")], ids=["missing", "not-a-mode"]
+)
+async def test_a_post_acts_in_the_mode_it_names(
+    client: httpx.AsyncClient, owner: Caller, mode: str | None, code: str
+) -> None:
+    """An idempotent route is a moded route (Decision 4): its key is kept per mode."""
+    headers = owner.bearer() | {"Idempotency-Key": "k-1"} | ({} if mode is None else {"Ledger-Mode": mode})
+    response = await client.post("/v1/companies", json=DUARTE, headers=headers)
+    assert (response.status_code, document(response)["code"]) == (400, code)
+    assert page(await client.get("/v1/companies", headers=owner.bearer()))["items"] == []
+
+
+async def test_a_key_is_kept_per_mode(client: httpx.AsyncClient, owner: Caller) -> None:
+    """The same key and body in live mode are a new request there: it runs, and finds the taxpayer taken
+    (one active company per tax id, whatever the mode); in test mode the key replays."""
+    registered = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("k-1"))
+    live = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("k-1", mode="live"))
+    assert (live.status_code, document(live)["code"]) == (409, "tax_id_taken")
+    assert "idempotent-replayed" not in live.headers
+    again = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("k-1"))
+    assert (again.content, again.headers["idempotent-replayed"]) == (registered.content, "true")
 
 
 async def test_a_retried_post_creates_once_and_answers_the_same(
@@ -340,12 +366,23 @@ async def test_a_caller_pages_through_the_companies_it_holds_a_role_in(
         await created(client, "/v1/companies", payload, owner.posting(f"k-{number}"))
     first = page(await client.get("/v1/companies", params={"limit": 2}, headers=owner.bearer()))
     assert len(first["items"]) == 2
+    assert (first["has_more"], first["previous_cursor"]) == (True, None)
     rest = page(
         await client.get(
-            "/v1/companies", params={"limit": 2, "cursor": first["next_cursor"]}, headers=owner.bearer()
+            "/v1/companies",
+            params={"limit": 2, "starting_after": first["next_cursor"]},
+            headers=owner.bearer(),
         )
     )
-    assert (len(rest["items"]), rest["next_cursor"]) == (1, None)
+    assert (len(rest["items"]), rest["has_more"], rest["next_cursor"]) == (1, False, None)
+    back = page(
+        await client.get(
+            "/v1/companies",
+            params={"limit": 2, "ending_before": rest["previous_cursor"]},
+            headers=owner.bearer(),
+        )
+    )
+    assert (back["items"], back["has_more"], back["previous_cursor"]) == (first["items"], False, None)
     partner = page(await client.get("/v1/companies", headers=Caller(local_issuer, subject="2002").bearer()))
     stranger = page(
         await client.get("/v1/companies", headers=Caller(local_issuer, organization="1002").bearer())
@@ -358,9 +395,14 @@ async def test_a_caller_pages_through_the_companies_it_holds_a_role_in(
     [
         ({"limit": 0}, "invalid_request"),
         ({"limit": 101}, "invalid_request"),
-        ({"cursor": "nope"}, "invalid_cursor"),
+        ({"starting_after": "nope"}, "invalid_cursor"),
+        ({"ending_before": "nope"}, "invalid_cursor"),
+        (
+            {"starting_after": "AQGJAAAAAHAAgAAAAAAAAAE", "ending_before": "AQGJAAAAAHAAgAAAAAAAAAE"},
+            "page_cursors_conflict",
+        ),
     ],
-    ids=["no-items", "too-many", "foreign-cursor"],
+    ids=["no-items", "too-many", "foreign-cursor", "foreign-cursor-backwards", "both-cursors"],
 )
 async def test_a_page_that_cannot_be_asked_for_is_refused(
     client: httpx.AsyncClient, owner: Caller, params: dict[str, str | int], code: str
@@ -408,9 +450,9 @@ async def test_a_company_is_not_found_by_whoever_holds_no_role_in_it(
 
 
 async def test_a_viewer_reads_but_does_not_change(
-    client: httpx.AsyncClient, local_issuer: LocalIssuer, service: Service[IdentitySettings], company: str
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, identity_db: BoundDatabase, company: str
 ) -> None:
-    await grant(service, company, "3001", Role.VIEWER)
+    await grant(identity_db, company, "3001", Role.VIEWER)
     viewer = Caller(local_issuer, subject="3001")
     assert (await client.get(f"/v1/companies/{company}", headers=viewer.bearer())).status_code == 200
     listed = page(await client.get("/v1/companies", headers=viewer.bearer()))
@@ -426,9 +468,9 @@ async def test_a_viewer_reads_but_does_not_change(
 
 
 async def test_a_caller_without_the_permission_is_refused_before_its_preconditions_are_read(
-    client: httpx.AsyncClient, local_issuer: LocalIssuer, service: Service[IdentitySettings], company: str
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, identity_db: BoundDatabase, company: str
 ) -> None:
-    await grant(service, company, "3001", Role.VIEWER)
+    await grant(identity_db, company, "3001", Role.VIEWER)
     viewer = Caller(local_issuer, subject="3001")
     unconditional = await client.patch(
         f"/v1/companies/{company}", json={"legal_name": "X"}, headers=viewer.bearer()
@@ -441,24 +483,26 @@ async def test_a_caller_without_the_permission_is_refused_before_its_preconditio
 async def test_an_admin_demoted_while_its_deactivation_waits_for_the_company_cannot_deactivate(
     client: httpx.AsyncClient,
     local_issuer: LocalIssuer,
-    service: Service[IdentitySettings],
-    database_url: str,
+    identity_db: BoundDatabase,
+    migrated: WorkerDatabase,
     company: str,
 ) -> None:
-    await grant(service, company, "2002", Role.ADMIN)
-    runtime = service.runtime()
+    await grant(identity_db, company, "2002", Role.ADMIN)
     tenant = Tenant(organization_of("1001"), CompanyId(UUID(company)), None)
     headers = Caller(local_issuer, subject="2002").posting("k-off") | {"If-Match": '"1"'}
-    async with runtime.database.transaction(tenant) as transaction:  # holds the company's lock
+    outside = contextvars.copy_context()  # the request is another client's: it holds no unit of the test's
+    async with identity_db.unit(tenant) as unit:  # holds the company's lock
         await commands.grant_role(
-            bind(transaction, runtime.outbox),
+            bind(unit),
             tenant.company,
             subject=SubjectId("2002"),
             role=Role.VIEWER,
             actor=SubjectId("2001"),
         )
-        waiting = asyncio.create_task(client.post(f"/v1/companies/{company}/deactivate", headers=headers))
-        await eventually(partial(waits_for_a_lock, database_url))
+        waiting = asyncio.create_task(
+            client.post(f"/v1/companies/{company}/deactivate", headers=headers), context=outside
+        )
+        await eventually(partial(waits_for_a_lock, app_url(migrated)))
     refused = await waiting
     assert (refused.status_code, document(refused)["code"]) == (403, "permission_denied")
     read = await client.get(f"/v1/companies/{company}", headers=Caller(local_issuer).bearer())
@@ -557,8 +601,10 @@ async def test_a_deactivation_needs_a_key_and_a_version(
     client: httpx.AsyncClient, owner: Caller, company: str
 ) -> None:
     path = f"/v1/companies/{company}/deactivate"
-    keyless = await client.post(path, headers=owner.bearer() | {"If-Match": '"1"'})
+    keyless = await client.post(path, headers=owner.bearer() | {"If-Match": '"1"', "Ledger-Mode": "test"})
     assert (keyless.status_code, document(keyless)["code"]) == (422, "invalid_request")
+    modeless = await client.post(path, headers=owner.bearer() | {"If-Match": '"1"', "Idempotency-Key": "k"})
+    assert (modeless.status_code, document(modeless)["code"]) == (400, "mode_required")
     unconditional = await client.post(path, headers=owner.posting("k-off"))
     assert (unconditional.status_code, document(unconditional)["code"]) == (428, "precondition_required")
 

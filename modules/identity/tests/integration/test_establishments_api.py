@@ -81,9 +81,15 @@ async def test_branches_are_listed_page_by_page(
     path = f"/v1/companies/{company}/branches"
     first = page(await client.get(path, params={"limit": 1}, headers=owner.bearer()))
     rest = page(
-        await client.get(path, params={"limit": 1, "cursor": first["next_cursor"]}, headers=owner.bearer())
+        await client.get(
+            path, params={"limit": 1, "starting_after": first["next_cursor"]}, headers=owner.bearer()
+        )
     )
     assert (len(first["items"]), len(rest["items"]), rest["next_cursor"]) == (1, 1, None)
+    back = page(
+        await client.get(path, params={"ending_before": rest["previous_cursor"]}, headers=owner.bearer())
+    )
+    assert (back["items"], back["has_more"]) == (first["items"], False)
 
 
 async def test_a_branch_is_found_under_its_own_company_only(

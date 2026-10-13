@@ -149,10 +149,12 @@ def _scope_columns(scope: Scope | None) -> dict[str, object]:
 
 
 def _within(unit: Scope | None, event: Scope | None) -> bool:
-    """Whether ``event`` is inside ``unit``: same organization, and company and mode where ``unit`` has them.
+    """Whether ``event`` is inside ``unit``: its organization, its company and its mode, where it has them.
 
-    A unit without a scope (the platform's own) may publish for anyone; an organization's unit for any of its
-    companies.
+    The mode is compared only where the event has one too: a mode-less event is about data both modes share
+    (a company, its memberships: §7.1), which a moded unit may change as well (an idempotent route is moded,
+    Decision 4). A unit without a scope (the platform's own) may publish for anyone; an organization's unit
+    for any of its companies.
     """
     if unit is None:
         return True
@@ -160,7 +162,7 @@ def _within(unit: Scope | None, event: Scope | None) -> bool:
         return False
     if unit.company is not None and event.company != unit.company:
         return False
-    return unit.mode is None or event.mode == unit.mode
+    return unit.mode is None or event.mode is None or event.mode == unit.mode
 
 
 def _in_scope(jobs: AnyTable, scope: Scope | None) -> tuple[ColumnElement[bool], ...]:
@@ -405,10 +407,12 @@ class UnitOfWork:
         """Write ``event`` to the module's outbox when the unit commits (rule 3).
 
         The event must lie inside the unit's scope (``EventScopeMismatchError`` otherwise): in its
-        organization, and in its company and mode where the unit names them. So a moded unit cannot publish a
-        mode-less event (the event would lack the unit's mode), and a company's unit cannot publish an
-        organization-wide event (it would speak for every company). An organization's unit may publish for any
-        of its companies, and a unit without a scope (the platform's own) for anyone.
+        organization, in its company where the unit names one, and in its mode where both name one. So a
+        company's unit cannot publish an organization-wide event (it would speak for every company), and a
+        moded unit cannot publish an event of the other mode; it may publish a mode-less one, about data both
+        modes share (a company and its memberships, which an idempotent route changes in a moded unit). An
+        organization's unit may publish for any of its companies, and a unit without a scope (the platform's
+        own) for anyone.
         """
         self.require_open()
         if event.TYPE not in self._binding.publishes:

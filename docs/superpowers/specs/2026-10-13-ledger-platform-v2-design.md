@@ -1554,6 +1554,14 @@ cannot be probed by type. Internal UUIDs never appear in the API.
   principal, **route**), stored **7 days** with the response in the owning module's `idempotency_keys` table in the
   same transaction as the work (v1 semantics: a failed request keeps nothing; a concurrent twin waits and replays
   with `Idempotent-Replayed: true`; same key with another body → 422 `idempotency_key_reused`).
+- What "the same request" is: the route, the concrete path, the canonical query and the canonical body, each
+  length-prefixed. The canonical query is the `(name, value)` pairs **sorted**, so parameters sent in another
+  order are the same request, and so are the values of a repeated name sent in another order (`?tag=a&tag=b`
+  equals `?tag=b&tag=a`): a route that reads a repeated parameter as an *ordered* list must not take an
+  `Idempotency-Key` (none does today; `POST`s carry their data in the body), or must put the order in its body.
+  The canonical body is the validated model's JSON, keys sorted, defaults included.
+- A route that takes `Idempotency-Key` requires `Ledger-Mode` (400 `mode_required` without it): the key is kept
+  per mode (Decision 4 of the v2-M1 plan).
 - Routes that forward to the signer (`POST /v1/certificates`) pass the key through `ImportCertificate`; the signer
   stores it in `signer.idempotency_keys`, in the transaction that installs the certificate.
 - `external_reference` (§7.5) is the permanent business key for documents.

@@ -5,7 +5,7 @@ branches and emission points (``organization_id`` and ``company_id``). The migra
 isolation of its owner. A row refers to another through a foreign key that carries the tenant
 (``(organization_id, company_id)`` to a company, ``(company_id, branch_id)`` to a branch): PostgreSQL's
 referential checks bypass row-level security, so a single-column key would let a row of one organization
-point at another's company.
+point at another's company. Every table is in schema ``identity`` (§6.2): identity's role reaches no other.
 """
 
 from datetime import datetime
@@ -34,6 +34,8 @@ from ledger_identity.domain.roles import Role
 from ledger_identity.domain.text import MAX_CODE, MAX_LEGAL_NAME, MAX_NAME
 from ledger_kernel.access import MAX_PROVIDER_ORGANIZATION_LENGTH, MAX_SUBJECT_LENGTH
 
+SCHEMA: Final = "identity"
+"""identity's schema: its tables and the chassis's (``chassis_schema_v1``), under its roles."""
 TAX_ID_LENGTH: Final = 11
 """A cédula's eleven digits; an RNC has nine."""
 ACTIVE_TAX_ID: Final = "ux_companies_active_tax_id"
@@ -56,15 +58,15 @@ def _of_company(table: str) -> ForeignKeyConstraint:
     """The key from ``table``'s ``(organization_id, company_id)`` to its company: the tenant is part of it."""
     return ForeignKeyConstraint(
         ["organization_id", "company_id"],
-        ["companies.organization_id", "companies.id"],
+        [f"{SCHEMA}.companies.organization_id", f"{SCHEMA}.companies.id"],
         name=f"fk_{table}_company",
     )
 
 
 class IdentityTable(DeclarativeBase):
-    """identity's own tables; the chassis's are ``PlatformTable``'s."""
+    """identity's own tables, in its schema; the chassis's are ``chassis_tables("identity")``."""
 
-    metadata: ClassVar[MetaData] = MetaData()
+    metadata: ClassVar[MetaData] = MetaData(schema=SCHEMA)
 
 
 class OrganizationRecord(IdentityTable):
@@ -94,7 +96,7 @@ class CompanyRecord(IdentityTable):
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True)
-    organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"))
+    organization_id: Mapped[UUID] = mapped_column(ForeignKey(f"{SCHEMA}.organizations.id"))
     tax_id: Mapped[str] = mapped_column(String(TAX_ID_LENGTH))
     legal_name: Mapped[str] = mapped_column(String(MAX_LEGAL_NAME))
     status: Mapped[str] = mapped_column(String(WORD_LENGTH))
@@ -156,7 +158,7 @@ class EmissionPointRecord(IdentityTable):
         _of_company("emission_points"),
         ForeignKeyConstraint(
             ["company_id", "branch_id"],
-            ["branches.company_id", "branches.id"],
+            [f"{SCHEMA}.branches.company_id", f"{SCHEMA}.branches.id"],
             name="fk_emission_points_branch",
         ),
     )

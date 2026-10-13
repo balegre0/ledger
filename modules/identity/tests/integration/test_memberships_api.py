@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 from dataclasses import dataclass
 from functools import partial
 from typing import final
@@ -15,10 +16,11 @@ from ledger_kernel.ids import CompanyId
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_testing.api import Caller, document, page
+from ledger_testing.database import app_url
 from ledger_testing.waiting import eventually, waits_for_a_lock
-lazy from ledger_identity.settings import IdentitySettings
-lazy from ledger_platform.service import Service
+lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_testing.issuer import LocalIssuer
+lazy from ledger_testing.postgres import WorkerDatabase
 
 
 @final
@@ -161,21 +163,21 @@ async def test_memberships_of_another_organization_are_out_of_reach(
 
 
 async def test_an_owner_demoted_while_its_grant_of_ownership_waits_for_the_company_is_refused(
-    service: Service[IdentitySettings], database_url: str, members: Members
+    identity_db: BoundDatabase, migrated: WorkerDatabase, members: Members
 ) -> None:
     await members.assign("2002", "owner")
-    runtime = service.runtime()
     tenant = Tenant(organization_of("1001"), CompanyId(UUID(members.company)), None)
-    async with runtime.database.transaction(tenant) as transaction:  # holds the company's lock
+    outside = contextvars.copy_context()  # the request is another client's: it holds no unit of the test's
+    async with identity_db.unit(tenant) as unit:  # holds the company's lock
         await commands.grant_role(
-            bind(transaction, runtime.outbox),
+            bind(unit),
             tenant.company,
             subject=SubjectId("2001"),
             role=Role.ADMIN,
             actor=SubjectId("2002"),
         )
-        waiting = asyncio.create_task(members.assign("3001", "owner", by="2001"))
-        await eventually(partial(waits_for_a_lock, database_url))
+        waiting = asyncio.create_task(members.assign("3001", "owner", by="2001"), context=outside)
+        await eventually(partial(waits_for_a_lock, app_url(migrated)))
     refused = await waiting
     assert (refused.status_code, document(refused)["code"]) == (403, "owners_only")
     gone = await members.revoke("3001")
@@ -205,5 +207,9 @@ async def test_memberships_are_listed_page_by_page(client: httpx.AsyncClient, me
     path = f"/v1/companies/{members.company}/memberships"
     owner = Caller(members.issuer).bearer()
     first = page(await client.get(path, params={"limit": 1}, headers=owner))
-    rest = page(await client.get(path, params={"limit": 1, "cursor": first["next_cursor"]}, headers=owner))
+    rest = page(
+        await client.get(path, params={"limit": 1, "starting_after": first["next_cursor"]}, headers=owner)
+    )
     assert (len(first["items"]), len(rest["items"]), rest["next_cursor"]) == (1, 1, None)
+    back = page(await client.get(path, params={"ending_before": rest["previous_cursor"]}, headers=owner))
+    assert (back["items"], back["has_more"]) == (first["items"], False)

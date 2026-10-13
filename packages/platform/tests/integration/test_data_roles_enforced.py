@@ -26,6 +26,7 @@ lazy from ledger_testing.postgres import WorkerDatabase
 A, B = uuid.uuid7(), uuid.uuid7()
 _COUNT: Final = TypeAdapter(tuple[int])
 _WORDS: Final = TypeAdapter(list[tuple[str]])
+GRANTS: Final = TypeAdapter(list[tuple[str, str]])
 HOSTILE = "p$$w'o\\rd$$; DROP ROLE ledger_app; --"
 """A password with dollar quotes, a quote and a backslash."""
 _ROLES: Final = TypeAdapter(list[tuple[str, bool, bool, bool, bool, bool, bool]])
@@ -393,7 +394,10 @@ def test_the_relays_grants_were_made_by_each_schemas_owner(chassis: WorkerDataba
                WHERE grantee = 'ledger_relay'
                ORDER BY 1"""
         ).fetchall()
-    assert rows == [("other", "other_owner"), ("platform", "platform_owner"), ("probe", "probe_owner")]
+    # Other packages' tests migrate their schemas into the same template (identity's): each its owner's too.
+    grants = GRANTS.validate_python([tuple(row) for row in rows])
+    assert all(grantor == f"{schema}_owner" for schema, grantor in grants)
+    assert {("other", "other_owner"), ("platform", "platform_owner"), ("probe", "probe_owner")} <= set(grants)
 
 
 def test_the_version_table_is_read_only_for_the_rw_role(chassis: WorkerDatabase) -> None:

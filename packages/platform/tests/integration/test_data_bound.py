@@ -462,14 +462,14 @@ async def test_publish_writes_the_envelope_with_the_units_time_and_signals_after
     [
         (
             tenant(A, A1),
-            [tenant(A, A1)],
+            [tenant(A, A1), tenant(A, A1, None)],
             [
                 tenant(A, A2),
                 tenant(A, A1, Mode.LIVE),
-                tenant(A, A1, None),
                 tenant(B, B1),
                 None,
                 OrganizationScope(A, Mode.TEST),
+                OrganizationScope(A, None),
             ],
         ),
         (
@@ -489,8 +489,13 @@ async def test_publish_writes_the_envelope_with_the_units_time_and_signals_after
         ),
         (
             OrganizationScope(A, Mode.LIVE),
-            [tenant(A, A1, Mode.LIVE), OrganizationScope(A, Mode.LIVE)],
-            [tenant(A, A1), OrganizationScope(A, None), OrganizationScope(B, Mode.LIVE)],
+            [
+                tenant(A, A1, Mode.LIVE),
+                OrganizationScope(A, Mode.LIVE),
+                tenant(A, A1, None),
+                OrganizationScope(A, None),
+            ],
+            [tenant(A, A1), OrganizationScope(B, Mode.LIVE), OrganizationScope(B, None)],
         ),
         (None, [tenant(A, A1), OrganizationScope(B, None), None], []),
     ],
@@ -502,7 +507,11 @@ async def test_an_event_is_published_only_inside_the_units_scope(
     allowed: list[Scope | None],
     refused: list[Scope | None],
 ) -> None:
-    """I1: same organization; the company and the mode too when the unit names them."""
+    """I1: same organization, and the company when the unit names one; the mode when both name one.
+
+    A mode-less event is about data both modes share (a company, its memberships: §7.1), which a moded unit
+    may change (Decision 4: an idempotent route is moded); an event of the other mode is refused.
+    """
     async with probe.unit(unit_scope) as uow:
         for scope in refused:
             with pytest.raises(EventScopeMismatchError, match="outside the unit's scope") as raised:

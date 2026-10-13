@@ -86,7 +86,7 @@ spell = { cmd = "typos", help = "Spell check" }
 proto = { cmd = "python -m grpc_tools.protoc --proto_path=${POE_ROOT}/contracts/proto --python_out=contracts/src --mypy_out=contracts/src --grpc_python_out=contracts/src --mypy_grpc_out=contracts/src contracts/proto/ledger/**/*.proto", help = "Regenerate the code of every .proto" }
 proto-lint = { cmd = "docker run --rm --volume ${POE_ROOT}/contracts:/workspace --workdir /workspace bufbuild/buf:1.73.0@sha256:75d8f756f0919dcded71e67968a91adfe55fe4dd62c4900c57bbfcd7fe625608 lint", help = "buf lint" }
 test = { cmd = "pytest -n auto", help = "Tests with coverage, in parallel" }
-openapi = { cmd = "ledger-identity-openapi modules/identity/openapi.json", help = "Regenerate the published OpenAPI documents" }
+openapi = { cmd = "pytest modules/identity/tests/contract --no-cov -q -p no:randomly", env = { UPDATE_SNAPSHOTS = "1" }, help = "Rewrite the published OpenAPI documents (the snapshot test writes them, then fails: review the diff)" }
 check = { sequence = ["format-check", "lint", "suppressions", "types", "arch", "deps", "spell", "proto-lint", "test"], help = "Everything CI runs" }
 
 # Zero suppressions: no Python file outside the generated protobuf code may switch a check off.
@@ -329,39 +329,27 @@ type = "forbidden"
 source_modules = ["ledger_kernel", "ledger_contracts", "ledger_platform", "ledger_testing"]
 forbidden_modules = ["ledger_identity"]
 
+# Inside identity (§4.1): the assembly over the adapters (its REST API may use its PostgreSQL adapter), over the
+# use cases (application), over the domain, over its events, over its generated manifest. Exhaustive: a module
+# without a layer is an error.
 [[tool.importlinter.contracts]]
-name = "Identity's domain is the standard library and the kernel"
-type = "forbidden"
-source_modules = ["ledger_identity.domain"]
-forbidden_modules = [
-    "ledger_contracts", "ledger_platform",
-    # the kernel contract's list ...
-    "pydantic", "pydantic_settings", "sqlalchemy", "nats", "fastapi", "starlette", "structlog", "google", "grpc",
-    "opentelemetry", "prometheus_client", "psycopg",
-    # ... and every other dependency the services of this repository bring in
-    "httpx", "joserfc", "cryptography", "alembic", "granian",
-]
-
-# Inside identity: the adapters (PostgreSQL, ...) over the settings, over the use cases (application), over the
-# domain; the API sits beside the adapters (it never imports them), and `main` wires both; `openapi` writes
-# the document `main`'s app makes. Exhaustive: a module without a layer is an error.
-[[tool.importlinter.contracts]]
-name = "Identity is hexagonal"
+name = "identity layers"
 type = "layers"
 containers = ["ledger_identity"]
 exhaustive = true
-layers = ["openapi", "main", "api | adapters", "settings", "application", "domain"]
+layers = ["assembly", "adapters", "application", "domain", "events", "_manifest"]
 
+# The application's ports are its own: it knows no platform type either.
 [[tool.importlinter.contracts]]
-name = "Identity's use cases know ports, not adapters or frameworks"
+name = "identity domain, events and use cases are pure"
 type = "forbidden"
-source_modules = ["ledger_identity.application"]
+source_modules = ["ledger_identity.domain", "ledger_identity.events", "ledger_identity.application"]
 forbidden_modules = [
     "ledger_contracts", "ledger_platform",
     # the kernel contract's list ...
     "pydantic", "pydantic_settings", "sqlalchemy", "nats", "fastapi", "starlette", "structlog", "google", "grpc",
     "opentelemetry", "prometheus_client", "psycopg",
-    # ... and every other dependency the services of this repository bring in
+    # ... and every other dependency the packages of this repository bring in
     "httpx", "joserfc", "cryptography", "alembic", "granian",
 ]
 

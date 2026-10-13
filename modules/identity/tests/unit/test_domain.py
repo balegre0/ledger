@@ -8,6 +8,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from ledger_identity._manifest import MANIFEST
 from ledger_identity.domain.branches import Branch, EmissionPoint
 from ledger_identity.domain.company import Company, CompanyStatus
 from ledger_identity.domain.errors import (
@@ -27,13 +28,6 @@ from ledger_identity.domain.errors import (
     OwnersOnlyError,
     StaleVersionError,
     TaxIdTakenError,
-)
-from ledger_identity.domain.events import (
-    CompanyCreated,
-    CompanyDeactivated,
-    CompanyUpdated,
-    MembershipGranted,
-    MembershipRevoked,
 )
 from ledger_identity.domain.membership import (
     Actor,
@@ -55,11 +49,19 @@ from ledger_identity.domain.text import (
     parse_legal_name,
     parse_name,
 )
+from ledger_identity.events import (
+    CompanyDeactivated,
+    CompanyRegistered,
+    CompanyUpdated,
+    MembershipGranted,
+    MembershipRevoked,
+)
 from ledger_kernel.access import Permission, Principal, SubjectId
 from ledger_kernel.countries.do import TaxId
 from ledger_kernel.errors import ErrorKind
 from ledger_kernel.ids import OrganizationId, new_id
 from ledger_kernel.tenancy import Tenant
+from ledger_platform.data.codec import payload_of
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_kernel.errors import LedgerError
 
@@ -194,8 +196,17 @@ def test_a_registered_company_is_active_at_its_first_version_and_says_so() -> No
     )
     assert company.tenant == Tenant(ORGANIZATION, company.id, None)
     assert company.id.version == 7
-    assert created == CompanyCreated(
-        tenant=company.tenant, tax_id=RNC, legal_name=LegalName("Duarte"), version=1
+    assert created == CompanyRegistered(
+        scope=company.tenant,
+        subject=company.id,
+        aggregate_version=1,
+        tax_id=RNC,
+        legal_name=LegalName("Duarte"),
+    )
+    assert (created.TYPE, created.VERSION, created.scope) == (
+        "identity.company.registered",
+        1,
+        company.tenant,
     )
 
 
@@ -209,7 +220,11 @@ def test_renaming_a_company_makes_a_new_version() -> None:
         NOW,
     )
     assert updated == CompanyUpdated(
-        tenant=company.tenant, tax_id=RNC, legal_name=LegalName("Duarte Hermanos"), version=2
+        scope=company.tenant,
+        subject=company.id,
+        aggregate_version=2,
+        tax_id=RNC,
+        legal_name=LegalName("Duarte Hermanos"),
     )
 
 
@@ -222,7 +237,7 @@ def test_a_deactivated_company_says_so_and_changes_no_more() -> None:
     company = registered()
     inactive, event = company.deactivate(now=LATER)
     assert (inactive.status, inactive.version) == (CompanyStatus.INACTIVE, 2)
-    assert event == CompanyDeactivated(tenant=company.tenant, version=2)
+    assert event == CompanyDeactivated(scope=company.tenant, subject=company.id, aggregate_version=2)
     with pytest.raises(CompanyInactiveError) as caught:
         inactive.rename(parse_legal_name("Other"), now=LATER)
     assert (caught.value.kind, caught.value.code) == (ErrorKind.CONFLICT, "company_inactive")
@@ -280,7 +295,12 @@ def test_the_founder_of_a_company_is_its_first_owner() -> None:
     assert owner.active
     assert owner.permissions == frozenset(Permission)
     assert granted == MembershipGranted(
-        tenant=company.tenant, subject=SubjectId("2001"), role=Role.OWNER, previous=None, version=1
+        scope=company.tenant,
+        subject=owner.id,
+        aggregate_version=1,
+        member=SubjectId("2001"),
+        role="owner",
+        previous=None,
     )
 
 
@@ -297,7 +317,12 @@ def test_an_admin_grants_and_changes_roles_below_owner() -> None:
     )
     assert (issuer.id, issuer.role, issuer.version, issuer.changed_at) == (viewer.id, Role.ISSUER, 2, LATER)
     assert changed == MembershipGranted(
-        tenant=company.tenant, subject=SubjectId("3001"), role=Role.ISSUER, previous=Role.VIEWER, version=2
+        scope=company.tenant,
+        subject=viewer.id,
+        aggregate_version=2,
+        member=SubjectId("3001"),
+        role="issuer",
+        previous="viewer",
     )
 
 
@@ -368,7 +393,7 @@ def test_a_revoked_membership_is_kept_at_a_new_version_and_says_which_role_it_he
     viewer = member(company, "3001", Role.VIEWER)
     revoked, event = revoke(Roster(company, viewer.subject, viewer, owners=1), actor=ADMIN, now=LATER)
     assert event == MembershipRevoked(
-        tenant=company.tenant, subject=SubjectId("3001"), role=Role.VIEWER, version=2
+        scope=company.tenant, subject=viewer.id, aggregate_version=2, member=SubjectId("3001"), role="viewer"
     )
     assert (revoked.id, revoked.status, revoked.version, revoked.changed_at, revoked.changed_by) == (
         viewer.id,
@@ -390,7 +415,12 @@ def test_a_role_granted_again_continues_the_versions_of_the_revoked_membership()
     )
     assert (again.id, again.status, again.version) == (viewer.id, MembershipStatus.ACTIVE, 3)
     assert granted == MembershipGranted(
-        tenant=company.tenant, subject=SubjectId("3001"), role=Role.VIEWER, previous=None, version=3
+        scope=company.tenant,
+        subject=viewer.id,
+        aggregate_version=3,
+        member=SubjectId("3001"),
+        role="viewer",
+        previous=None,
     )
 
 
@@ -400,7 +430,7 @@ def test_a_role_can_be_revoked_even_in_a_deactivated_company() -> None:
     inactive = company.deactivate(now=LATER)[0]
     _, revoked = revoke(Roster(inactive, viewer.subject, viewer, owners=1), actor=ADMIN, now=LATER)
     assert revoked is not None
-    assert revoked.role is Role.VIEWER
+    assert revoked.role == Role.VIEWER
 
 
 def test_only_an_owner_revokes_an_owner_and_never_the_last() -> None:
@@ -412,7 +442,7 @@ def test_only_an_owner_revokes_an_owner_and_never_the_last() -> None:
         revoke(Roster(company, owner.subject, owner, owners=1), actor=OWNER, now=LATER)
     _, revoked = revoke(Roster(company, owner.subject, owner, owners=2), actor=OWNER, now=LATER)
     assert revoked is not None
-    assert revoked.role is Role.OWNER
+    assert revoked.role == Role.OWNER
 
 
 def test_revoking_a_role_nobody_holds_is_not_found() -> None:
@@ -643,6 +673,25 @@ def test_whatever_is_granted_or_revoked_a_company_keeps_an_owner_and_versions_on
         if event is None:
             assert changed == before
         else:
-            assert changed.version == (1 if before is None else before.version + 1) == event.version
+            assert changed.version == (1 if before is None else before.version + 1) == event.aggregate_version
+            assert event.subject == changed.id
         held[subject] = changed
         assert any(m.active and m.role is Role.OWNER for m in held.values())
+
+
+# ── Events ──────────────────────────────────────────────────────────────────────
+
+
+def test_every_event_identity_announces_is_declared_in_its_manifest_and_nothing_else() -> None:
+    every = (CompanyRegistered, CompanyUpdated, CompanyDeactivated, MembershipGranted, MembershipRevoked)
+    announced = {(event.TYPE, event.VERSION) for event in every}
+    declared = {(event.type, event.version) for event in MANIFEST.events.publishes}
+    assert announced == declared
+
+
+def test_an_event_s_payload_is_its_own_fields_as_json() -> None:
+    company = registered()
+    _, event = company.deactivate(now=LATER)
+    _, granted = found(company, FOUNDER, now=NOW)
+    assert payload_of(event) == {}
+    assert payload_of(granted) == {"member": "2001", "role": "owner", "previous": None}

@@ -27,10 +27,12 @@ async def test_a_post_that_made_nothing_says_what_came_back() -> None:
             await created(client, "/v1/things", {"name": "thing"}, {})
 
 
-def test_a_caller_s_headers_carry_a_token_and_the_key_of_its_post() -> None:
-    headers = Caller(LocalIssuer(), subject="3001", organization="1002").posting("k-1")
-    assert headers["Idempotency-Key"] == "k-1"
+def test_a_caller_s_headers_carry_a_token_the_key_of_its_post_and_its_mode() -> None:
+    caller = Caller(LocalIssuer(), subject="3001", organization="1002")
+    headers = caller.posting("k-1")
+    assert (headers["Idempotency-Key"], headers["Ledger-Mode"]) == ("k-1", "test")
     assert headers["Authorization"].startswith("Bearer ey")
+    assert caller.posting("k-2", mode="live")["Ledger-Mode"] == "live"
 
 
 def test_a_caller_s_token_carries_the_project_roles_it_was_given() -> None:
@@ -48,6 +50,7 @@ def test_a_caller_s_token_carries_the_project_roles_it_was_given() -> None:
 
 
 def test_pages_and_documents_are_read_as_json() -> None:
-    response = httpx.Response(200, json={"items": [{"id": "a"}], "next_cursor": None})
-    assert page(response) == {"items": [{"id": "a"}], "next_cursor": None}
+    answered = {"items": [{"id": "a"}], "has_more": False, "next_cursor": None, "previous_cursor": None}
+    response = httpx.Response(200, json=answered)
+    assert page(response) == answered
     assert document(response)["next_cursor"] is None

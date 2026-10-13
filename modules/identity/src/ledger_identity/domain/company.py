@@ -10,7 +10,7 @@ from typing import final
 lazy from datetime import datetime
 
 from ledger_identity.domain.errors import CompanyInactiveError, InvalidStateError
-from ledger_identity.domain.events import CompanyCreated, CompanyDeactivated, CompanyUpdated
+from ledger_identity.events import CompanyDeactivated, CompanyRegistered, CompanyUpdated
 from ledger_kernel.ids import CompanyId, new_id
 from ledger_kernel.tenancy import Tenant
 lazy from ledger_identity.domain.text import LegalName
@@ -51,7 +51,7 @@ class Company:
     @classmethod
     def register(
         cls, *, organization: OrganizationId, tax_id: TaxId, legal_name: LegalName, now: datetime
-    ) -> tuple[Company, CompanyCreated]:
+    ) -> tuple[Company, CompanyRegistered]:
         """A new company of ``organization``, active, at version 1."""
         company = cls(
             id=CompanyId(new_id()),
@@ -63,8 +63,14 @@ class Company:
             created_at=now,
             updated_at=now,
         )
-        created = CompanyCreated(tenant=company.tenant, tax_id=tax_id, legal_name=legal_name, version=1)
-        return company, created
+        registered = CompanyRegistered(
+            scope=company.tenant,
+            subject=company.id,
+            aggregate_version=1,
+            tax_id=tax_id,
+            legal_name=legal_name,
+        )
+        return company, registered
 
     def require_active(self) -> None:
         """Refuse any change of a deactivated company."""
@@ -78,7 +84,11 @@ class Company:
             return self, None
         renamed = replace(self, legal_name=legal_name, version=self.version + 1, updated_at=now)
         updated = CompanyUpdated(
-            tenant=self.tenant, tax_id=self.tax_id, legal_name=legal_name, version=renamed.version
+            scope=self.tenant,
+            subject=self.id,
+            aggregate_version=renamed.version,
+            tax_id=self.tax_id,
+            legal_name=legal_name,
         )
         return renamed, updated
 
@@ -86,4 +96,6 @@ class Company:
         """The company deactivated: it changes no more."""
         self.require_active()
         inactive = replace(self, status=CompanyStatus.INACTIVE, version=self.version + 1, updated_at=now)
-        return inactive, CompanyDeactivated(tenant=self.tenant, version=inactive.version)
+        return inactive, CompanyDeactivated(
+            scope=self.tenant, subject=self.id, aggregate_version=inactive.version
+        )

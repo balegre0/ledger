@@ -1,6 +1,7 @@
 """The shapes of identity's public API: what clients send (unknown fields refused) and what they receive.
 
-Ids are UUID strings, times ISO 8601 with their offset (UTC), enumerations their lowercase words.
+Ids are UUID strings, times ISO 8601 with their offset (UTC), enumerations their lowercase words. A list
+answers a ``Page`` of its views (``ledger_platform.http.models.Page``, §9.7).
 """
 
 from datetime import datetime
@@ -71,13 +72,6 @@ class CompanyView(_Shape):
         )
 
 
-class CompanyPage(_Shape):
-    """Companies in id order, and the cursor of the next page (``null`` on the last)."""
-
-    items: list[CompanyView]
-    next_cursor: str | None
-
-
 class OrganizationView(_Shape):
     """The caller's organization."""
 
@@ -123,13 +117,6 @@ class BranchView(_Shape):
         )
 
 
-class BranchPage(_Shape):
-    """Branches in id order, and the cursor of the next page."""
-
-    items: list[BranchView]
-    next_cursor: str | None
-
-
 class NewEmissionPoint(_Shape):
     """An emission point to open."""
 
@@ -162,13 +149,6 @@ class EmissionPointView(_Shape):
         )
 
 
-class EmissionPointPage(_Shape):
-    """Emission points in id order, and the cursor of the next page."""
-
-    items: list[EmissionPointView]
-    next_cursor: str | None
-
-
 class RoleAssignment(_Shape):
     """The role to hold in a company."""
 
@@ -198,10 +178,3 @@ class MembershipView(_Shape):
             granted_at=membership.changed_at,
             granted_by=membership.changed_by,
         )
-
-
-class MembershipPage(_Shape):
-    """Memberships in id order, and the cursor of the next page."""
-
-    items: list[MembershipView]
-    next_cursor: str | None

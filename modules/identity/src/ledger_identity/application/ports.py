@@ -13,10 +13,10 @@ lazy from datetime import datetime
 
 lazy from ledger_identity.domain.branches import Branch, EmissionPoint
 lazy from ledger_identity.domain.company import Company
-lazy from ledger_identity.domain.events import IdentityEvent
 lazy from ledger_identity.domain.ids import BranchId, EmissionPointId
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_identity.domain.organization import Organization
+lazy from ledger_identity.events import IdentityEvent
 lazy from ledger_kernel.access import SubjectId
 lazy from ledger_kernel.ids import CompanyId, OrganizationId
 lazy from ledger_kernel.pagination import Page, PageRequest
@@ -118,8 +118,8 @@ class Events(Protocol, metaclass=ABCMeta):
     """What the unit announces once it commits."""
 
     @abstractmethod
-    async def publish(self, event: IdentityEvent) -> None:
-        """Announce ``event`` when, and only if, the unit commits (the outbox)."""
+    def publish(self, event: IdentityEvent) -> None:
+        """Announce ``event`` when, and only if, the unit commits (the outbox, written with the unit)."""
 
 
 @final

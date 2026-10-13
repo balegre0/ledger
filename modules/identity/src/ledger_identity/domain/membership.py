@@ -23,9 +23,9 @@ from ledger_identity.domain.errors import (
     MembershipNotFoundError,
     OwnersOnlyError,
 )
-from ledger_identity.domain.events import MembershipGranted, MembershipRevoked
 from ledger_identity.domain.ids import MembershipId
 from ledger_identity.domain.roles import READ_ONLY, Role, permissions_of
+from ledger_identity.events import MembershipGranted, MembershipRevoked
 from ledger_kernel.access import Permission
 from ledger_kernel.ids import new_id
 lazy from ledger_identity.domain.company import Company
@@ -130,7 +130,12 @@ def found(company: Company, founder: Principal, *, now: datetime) -> tuple[Membe
         changed_by=founder.subject,
     )
     granted = MembershipGranted(
-        tenant=company.tenant, subject=founder.subject, role=Role.OWNER, previous=None, version=1
+        scope=company.tenant,
+        subject=owner.id,
+        aggregate_version=1,
+        member=founder.subject,
+        role=Role.OWNER.value,
+        previous=None,
     )
     return owner, granted
 
@@ -169,11 +174,12 @@ def grant(
         changed_by=actor.subject,
     )
     granted = MembershipGranted(
-        tenant=membership.tenant,
-        subject=roster.subject,
-        role=role,
-        previous=None if current is None else current.role,
-        version=membership.version,
+        scope=membership.tenant,
+        subject=membership.id,
+        aggregate_version=membership.version,
+        member=roster.subject,
+        role=role.value,
+        previous=None if current is None else current.role.value,
     )
     return membership, granted
 
@@ -202,7 +208,11 @@ def revoke(roster: Roster, *, actor: Actor, now: datetime) -> tuple[Membership, 
         changed_by=actor.subject,
     )
     event = MembershipRevoked(
-        tenant=current.tenant, subject=current.subject, role=current.role, version=revoked.version
+        scope=current.tenant,
+        subject=current.id,
+        aggregate_version=revoked.version,
+        member=current.subject,
+        role=current.role.value,
     )
     return revoked, event
 

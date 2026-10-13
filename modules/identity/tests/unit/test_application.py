@@ -35,17 +35,17 @@ from ledger_identity.domain.errors import (
     StaleVersionError,
     TaxIdTakenError,
 )
-from ledger_identity.domain.events import (
-    CompanyCreated,
-    CompanyDeactivated,
-    CompanyUpdated,
-    MembershipGranted,
-    MembershipRevoked,
-)
 from ledger_identity.domain.ids import BranchId, EmissionPointId
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN, Organization
 from ledger_identity.domain.roles import READ_ONLY, Role
 from ledger_identity.domain.text import parse_code, parse_legal_name, parse_name
+from ledger_identity.events import (
+    CompanyDeactivated,
+    CompanyRegistered,
+    CompanyUpdated,
+    MembershipGranted,
+    MembershipRevoked,
+)
 from ledger_kernel.access import Permission, Principal, SubjectId
 from ledger_kernel.countries.do import TaxId
 from ledger_kernel.errors import ErrorKind
@@ -54,8 +54,8 @@ from ledger_kernel.pagination import PageRequest, page_of
 from ledger_kernel.tenancy import Tenant
 lazy from ledger_identity.domain.branches import Branch, EmissionPoint
 lazy from ledger_identity.domain.company import Company
-lazy from ledger_identity.domain.events import IdentityEvent
 lazy from ledger_identity.domain.membership import Membership
+lazy from ledger_identity.events import IdentityEvent
 lazy from ledger_kernel.pagination import Page
 
 NOW: Final = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
@@ -293,7 +293,7 @@ class MemoryEvents(Events):
         self._state = state
 
     @override
-    async def publish(self, event: IdentityEvent) -> None:
+    def publish(self, event: IdentityEvent) -> None:
         self._state.events.append(event)
 
 
@@ -327,7 +327,7 @@ async def test_a_new_company_has_its_founder_as_owner_and_both_are_announced(sta
     assert state.companies == {company.id: company}
     owner = state.memberships[company.id, OWNER]
     assert owner.role is Role.OWNER
-    assert [type(event) for event in state.events] == [CompanyCreated, MembershipGranted]
+    assert [type(event) for event in state.events] == [CompanyRegistered, MembershipGranted]
 
 
 @pytest.mark.parametrize(
@@ -550,10 +550,10 @@ async def test_granting_a_role_creates_a_membership_or_changes_it(state: State) 
     assert (again.membership, changed.membership.role) == (first.membership, Role.ISSUER)
     grants = [event for event in state.events if isinstance(event, MembershipGranted)]
     assert [(event.role, event.previous) for event in grants] == [
-        (Role.OWNER, None),
-        (Role.ADMIN, None),
-        (Role.VIEWER, None),
-        (Role.ISSUER, Role.VIEWER),
+        ("owner", None),
+        ("admin", None),
+        ("viewer", None),
+        ("issuer", "viewer"),
     ]
 
 
@@ -596,9 +596,9 @@ async def test_a_role_granted_again_continues_the_membership_s_versions(state: S
     )
     assert (again.created, again.membership.version) == (True, 3)
     versions = [
-        event.version
+        event.aggregate_version
         for event in state.events
-        if isinstance(event, MembershipGranted | MembershipRevoked) and event.subject == VIEWER
+        if isinstance(event, MembershipGranted | MembershipRevoked) and event.member == VIEWER
     ]
     assert versions == [1, 2, 3]
 
