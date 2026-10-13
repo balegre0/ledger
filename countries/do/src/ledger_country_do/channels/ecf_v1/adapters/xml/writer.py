@@ -8,13 +8,33 @@ public and typed.
 """
 
 from io import BytesIO
-from typing import final
+from typing import ClassVar, final
 from xml.etree.ElementTree import Element, ElementTree, SubElement
 lazy from decimal import Decimal
 
 from ledger_country_do.channels.ecf_v1.adapters.xml.names import element
+from ledger_country_do.channels.ecf_v1.domain.drafts import writable
+from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 from ledger_country_do.channels.ecf_v1.domain.notation import dgii_amount, dgii_number
 lazy from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
+
+
+class EmptyTextError(EcfError):
+    """A builder gave an element an empty text, which DGII forbids: a defect of the builder."""
+
+    code: ClassVar[str] = "do_ecf_xml_empty_text"
+
+    def __init__(self, tag: str) -> None:
+        super().__init__(f"{tag} would be written empty (DGII forbids empty elements)")
+
+
+class UnwritableTextError(EcfError):
+    """A text XML 1.0 cannot hold, or holding a control character: a defect of whatever checked it before."""
+
+    code: ClassVar[str] = "do_ecf_xml_unwritable_text"
+
+    def __init__(self, tag: str) -> None:
+        super().__init__(f"{tag} would hold a control character or one XML 1.0 cannot hold")
 
 
 @final
@@ -37,9 +57,19 @@ class Node:
         return Node(self.format, SubElement(self.element, element(self.format, name)))
 
     def text(self, name: str, value: str | None) -> None:
-        """A child with ``value`` as its text; nothing when there is no value."""
-        if value is not None:
-            SubElement(self.element, element(self.format, name)).text = value
+        """A child with ``value`` as its text; nothing when there is no value.
+
+        ``EmptyTextError`` for an empty text, ``UnwritableTextError`` for a character XML 1.0 cannot hold or a
+        control character: the writer is safe on its own, whatever checked the value before.
+        """
+        if value is None:
+            return
+        tag = element(self.format, name)
+        if not value:
+            raise EmptyTextError(tag)
+        if not writable(value):
+            raise UnwritableTextError(tag)
+        SubElement(self.element, tag).text = value
 
     def amount(self, name: str, value: Decimal | None) -> None:
         """A child with an amount (two decimals); nothing when there is none."""

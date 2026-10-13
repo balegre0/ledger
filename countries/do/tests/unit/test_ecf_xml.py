@@ -1,3 +1,4 @@
+import unicodedata
 from dataclasses import replace
 from decimal import Decimal
 
@@ -9,13 +10,14 @@ from hypothesis import strategies as st
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf, rfce
 from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import texts
 from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import corrected, violations
-from ledger_country_do.channels.ecf_v1.adapters.xml.writer import Node
+from ledger_country_do.channels.ecf_v1.adapters.xml.writer import EmptyTextError, Node, UnwritableTextError
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
-from ledger_country_do.channels.ecf_v1.domain.drafts import BillingIndicator, Buyer, Line
+from ledger_country_do.channels.ecf_v1.domain.drafts import BillingIndicator, Buyer, DraftInvalidError, Line
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.samples import SIGNED_AT, consumer_invoice, credit_invoice
 
 D = Decimal
+_NAME_LIMIT = 80
 
 
 def test_the_credit_invoice_carries_its_range_s_expiry_and_its_rates() -> None:
@@ -74,6 +76,43 @@ def test_the_writer_leaves_out_a_field_without_a_value_and_writes_numbers_as_the
     )
     assert found == ("1.50", "4")
     assert b"<Item><CantidadItem>" in root.document()
+
+
+def test_the_writer_never_writes_an_empty_element_by_accident() -> None:
+    item = Node.root(Format.ECF_32, "ecf").child("detallesitems").child("item")
+    with pytest.raises(EmptyTextError, match="NombreItem"):
+        item.text("nombreitem", "")
+
+
+@pytest.mark.parametrize("character", ["\x00", "\x0b", "\x1f", "\t", "\n", "\r", "\x7f", "\ud800", "￿"])
+def test_the_writer_writes_no_text_xml_cannot_hold(character: str) -> None:
+    item = Node.root(Format.ECF_32, "ecf").child("detallesitems").child("item")
+    with pytest.raises(UnwritableTextError, match="NombreItem") as caught:
+        item.text("nombreitem", f"CEMENTO{character}")
+    assert "CEMENTO" not in str(caught.value)
+
+
+def _xml_can_hold(text: str) -> bool:
+    """XML 1.0's ``Char`` production less every control character: an oracle written apart from the code."""
+    allowed = ((0x20, 0xD7FF), (0xE000, 0xFFFD), (0x10000, 0x10FFFF))
+    return all(
+        unicodedata.category(character) != "Cc"
+        and any(low <= ord(character) <= high for low, high in allowed)
+        for character in text
+    )
+
+
+@settings(max_examples=300)
+@given(name=st.text(alphabet=st.characters(exclude_categories=()), max_size=90))
+def test_every_accepted_name_renders_well_formed_and_reads_back_as_it_was(name: str) -> None:
+    try:
+        line = Line(name=name, quantity=D(1), unit_price=D("10.00"), billing=BillingIndicator.ITBIS_1)
+    except DraftInvalidError:
+        assert not name.strip() or len(name) > _NAME_LIMIT or not _xml_can_hold(name)
+        return
+    draft = replace(consumer_invoice(), lines=(line,))
+    document = ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT)
+    assert texts(document, "DetallesItems/Item/NombreItem") == (name,)
 
 
 def test_only_a_consumer_invoice_is_summarized() -> None:

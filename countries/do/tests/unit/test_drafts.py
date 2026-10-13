@@ -103,6 +103,31 @@ def test_each_field_is_checked_and_named_without_its_value(field: str, build: Ca
     assert "10185004" not in str(caught.value)
 
 
+_UNWRITABLE = ["\x00", "\x0b", "\x1f", "\t", "\n", "\r", "\x7f", "\x85", "\ud800", "￾", "￿"]
+_TEXT_FIELDS: list[tuple[str, Callable[[str], object]]] = [
+    ("issuer.legal_name", lambda text: replace(ISSUER, legal_name=text)),
+    ("issuer.address", lambda text: replace(ISSUER, address=text)),
+    ("buyer.name", lambda text: Buyer(name=text)),
+    ("line.name", lambda text: replace(LINE, name=text)),
+]
+
+
+@pytest.mark.parametrize("character", _UNWRITABLE)
+@pytest.mark.parametrize(("field", "build"), _TEXT_FIELDS)
+def test_a_text_holds_no_control_character_and_nothing_xml_cannot_hold(
+    character: str, field: str, build: Callable[[str], object]
+) -> None:
+    with refused(field) as caught:
+        build(f"CEMENTO{character}GRIS")
+    assert caught.value.field == field
+    assert "CEMENTO" not in str(caught.value)
+
+
+@pytest.mark.parametrize("text", ["CAFÉ AÑEJO", "TUBO 1/2”", "퟿�\U0001f527\U0010ffff"])
+def test_a_text_holds_any_character_xml_can_hold(text: str) -> None:
+    assert replace(LINE, name=text).name == text
+
+
 def test_a_cedula_is_taken_wherever_an_rnc_is() -> None:
     assert Issuer(rnc="00113918205", legal_name="JUAN PEREZ", address="CALLE 1").rnc == "00113918205"
 

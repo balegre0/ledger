@@ -5,6 +5,7 @@ here is one of DGII's e-CF schemas (lengths, decimals, line counts) or of DGII's
 (a type 31 names its buyer; dated ranges). An error names the field and the rule, never the value.
 """
 
+import unicodedata
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import IntEnum, StrEnum
@@ -30,6 +31,8 @@ INTEGER_DIGITS: Final = 16
 """DGII's schemas give quantities, unit prices and amounts at most 16 integer digits (``[0-9]{1,16}``)."""
 AMOUNT_LIMIT: Final = Decimal(10) ** INTEGER_DIGITS
 """The least value of 17 integer digits: every quantity, unit price and amount is below it."""
+_XML_CHARACTERS: Final = ((0x20, 0xD7FF), (0xE000, 0xFFFD), (0x10000, 0x10FFFF))
+"""XML 1.0's ``Char`` production less tab, line feed and carriage return."""
 
 
 class BillingIndicator(IntEnum):
@@ -143,9 +146,26 @@ class _UnnamedCreditBuyerError(DraftInvalidError):
         super().__init__("buyer", "names its RNC or cédula and its legal name on a type 31")
 
 
+def _xml_character(character: str) -> bool:
+    code = ord(character)
+    return unicodedata.category(character) != "Cc" and any(
+        low <= code <= high for low, high in _XML_CHARACTERS
+    )
+
+
+def writable(text: str) -> bool:
+    """Whether every character of ``text`` is one XML 1.0 can hold (``Char``) and none is a control character.
+
+    Tabs and line breaks are control characters: DGII's texts are single lines.
+    """
+    return all(_xml_character(character) for character in text)
+
+
 def _text(field_name: str, value: str, limit: int) -> None:
     if not value.strip() or len(value) > limit:
         raise DraftInvalidError(field_name, f"holds 1 to {limit} characters, not only spaces")
+    if not writable(value):
+        raise DraftInvalidError(field_name, "holds no control character and nothing XML 1.0 cannot hold")
 
 
 def _tax_id(field_name: str, value: str) -> None:
