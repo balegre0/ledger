@@ -200,6 +200,17 @@ def test_scripts_cannot_be_changed_after_reading() -> None:
     assert isinstance(load_manifest(APP_HEAD + APP_SECTION).package.scripts, MappingProxyType)
 
 
+def test_a_script_name_has_at_most_forty_characters() -> None:
+    longest = "ledger-" + "x" * 33
+    assert (
+        longest
+        in load_manifest(APP_HEAD + f'scripts = {{ "{longest}" = "a:b" }}\n' + APP_SECTION).package.scripts
+    )
+    with pytest.raises(InvalidManifestError) as caught:
+        load_manifest(APP_HEAD + f'scripts = {{ "{longest}x" = "a:b" }}\n' + APP_SECTION)
+    assert caught.value.problems[0].startswith("package.scripts.")
+
+
 @pytest.mark.parametrize(("text", "seconds"), [("60s", 60), ("10m", 600), ("1h", 3600), ("15d", 1_296_000)])
 def test_durations_read_in_four_units(text: str, seconds: int) -> None:
     assert parse_duration(text) == timedelta(seconds=seconds)

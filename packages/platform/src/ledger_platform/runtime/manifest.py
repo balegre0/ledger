@@ -56,7 +56,8 @@ type Requirement = Annotated[
 ]
 """A third-party distribution with a floor: ``fastapi>=0.143``, ``psycopg[binary]>=3.3.6``."""
 type ObjectPath = Annotated[str, Field(pattern=r"^[a-z_][a-z0-9_.]*(:[A-Za-z_][A-Za-z0-9_]*)?$")]
-type Script = Annotated[str, Field(pattern=r"^ledger-[a-z][a-z0-9-]*$")]
+type Script = Annotated[str, Field(pattern=r"^ledger-[a-z][a-z0-9-]{0,32}$")]
+"""A console script: at most 40 characters, so a generated line that names one fits."""
 
 
 class _DurationFormatError(ValueError):
