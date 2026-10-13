@@ -1,5 +1,6 @@
 from dataclasses import replace
-from decimal import Decimal
+from datetime import date
+from decimal import ROUND_DOWN, Decimal
 lazy import random
 
 import pytest
@@ -7,9 +8,11 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from ledger_country_do.channels.ecf_v1.domain.drafts import BillingIndicator, DraftInvalidError, Line
+from ledger_country_do.channels.ecf_v1.domain.errors import EcfError, RegimeNotInForceError
+from ledger_country_do.channels.ecf_v1.domain.routing import route
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do.regime import REGIME
-from ledger_country_do.regime.definitions import RegimeDataError
+from ledger_country_do.regime.rounding import ROUNDING
 from ledger_country_do.regime.taxes import STANDARD
 from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
 
@@ -61,8 +64,34 @@ def test_the_zero_rate_is_a_taxed_group_with_no_itbis() -> None:
 
 def test_a_taxed_category_without_a_rate_is_a_defect_of_the_regime() -> None:
     broken = replace(REGIME, tax_categories=(replace(STANDARD, rates=None), *REGIME.tax_categories[1:]))
-    with pytest.raises(RegimeDataError, match=r"do.itbis.standard has no rate"):
+    with pytest.raises(EcfError, match=r"do.itbis.standard has no rate") as caught:
         compute_totals(consumer_invoice(), broken)
+    assert (caught.value.kind, caught.value.code) == ("internal", "do_ecf_regime_defect")
+
+
+def test_a_draft_dated_before_the_regime_is_a_clean_refusal() -> None:
+    early = replace(credit_invoice(), issued_on=date(2018, 12, 31))
+    with pytest.raises(RegimeNotInForceError, match="2018-12-31") as caught:
+        compute_totals(early)
+    assert (caught.value.kind, caught.value.code) == ("invalid", "do_ecf_regime_not_in_force")
+    small = replace(consumer_invoice(), issued_on=date(2018, 12, 31))
+    with pytest.raises(RegimeNotInForceError):
+        route(small, compute_totals(consumer_invoice()))
+
+
+def test_an_entry_the_regime_does_not_declare_is_a_defect_of_the_pack() -> None:
+    missing = replace(REGIME, parameters={})
+    with pytest.raises(EcfError) as caught:
+        route(consumer_invoice(), compute_totals(consumer_invoice()), missing)
+    assert (caught.value.kind, caught.value.code) == ("internal", "do_ecf_regime_defect")
+
+
+def test_amounts_round_by_the_regime_s_own_rule() -> None:
+    down = replace(REGIME, rounding=replace(ROUNDING, mode=ROUND_DOWN))
+    line = Line(name="ITEM", quantity=D(1), unit_price=D("10.0099"), billing=BillingIndicator.EXEMPT)
+    draft = replace(consumer_invoice(), lines=(line,))
+    assert compute_totals(draft).line_amounts == (D("10.01"),)
+    assert compute_totals(draft, down).line_amounts == (D("10.00"),)
 
 
 _LINES = st.lists(

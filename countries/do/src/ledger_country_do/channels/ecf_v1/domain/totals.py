@@ -19,9 +19,9 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     BillingIndicator,
     DraftInvalidError,
 )
+from ledger_country_do.channels.ecf_v1.domain.errors import RegimeDefectError, from_regime
 from ledger_country_do.regime import REGIME
-from ledger_country_do.regime.definitions import RegimeDataError
-from ledger_country_do.regime.rounding import round_amount
+from ledger_country_do.regime.rounding import round_with
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
 lazy from ledger_country_do.regime.definitions import RegimeDef
 
@@ -71,25 +71,28 @@ class _TotalTooLargeError(DraftInvalidError):
         super().__init__("total", f"(MontoTotal) has at most {INTEGER_DIGITS} integer digits")
 
 
-class _RatelessCategoryError(RegimeDataError):
+class _RatelessCategoryError(RegimeDefectError):
     def __init__(self, key: str) -> None:
         super().__init__(f"{key} has no rate, yet lines are taxed at it")
 
 
 def _percent(regime: RegimeDef, indicator: BillingIndicator, day: date) -> Decimal:
     key = CATEGORY_OF[indicator]
-    rate = regime.category(key).rate_at(day)
+    rate = from_regime(lambda: regime.category(key).rate_at(day))
     if rate is None:
         raise _RatelessCategoryError(key)
     return rate
 
 
 def compute_totals(draft: EcfDraft, regime: RegimeDef = REGIME) -> Totals:
-    """``draft``'s totals under ``regime``'s rates in force on its issue date.
+    """``draft``'s totals under ``regime``'s rates in force on its issue date, rounded by ``regime``'s rule.
 
-    ``DraftInvalidError`` (field ``total``) when the total has more integer digits than DGII's schemas allow.
+    ``DraftInvalidError`` (field ``total``) when the total has more integer digits than DGII's schemas allow;
+    ``RegimeNotInForceError`` for a draft dated before the regime's rates; ``RegimeDefectError`` for a regime
+    lacking what it needs.
     """
-    amounts = tuple(round_amount(line.quantity * line.unit_price) for line in draft.lines)
+    rule = regime.rounding
+    amounts = tuple(round_with(rule, line.quantity * line.unit_price) for line in draft.lines)
     groups: list[RateGroup] = []
     for indicator in TAXED:
         billed = [
@@ -98,7 +101,7 @@ def compute_totals(draft: EcfDraft, regime: RegimeDef = REGIME) -> Totals:
         if billed:
             base = sum(billed, _ZERO)
             percent = _percent(regime, indicator, draft.issued_on)
-            groups.append(RateGroup(indicator, base, percent, round_amount(base * percent / _HUNDRED)))
+            groups.append(RateGroup(indicator, base, percent, round_with(rule, base * percent / _HUNDRED)))
     exempt_lines = [
         amount
         for line, amount in zip(draft.lines, amounts, strict=True)

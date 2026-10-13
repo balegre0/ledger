@@ -1,6 +1,7 @@
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from decimal import ROUND_DOWN, Decimal
 from typing import Final, final, override
 
 import pytest
@@ -29,10 +30,13 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
     TrackId,
     XmlSigner,
 )
+from ledger_country_do.channels.ecf_v1.domain.drafts import BillingIndicator, Line
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfConflictError, EcfError
 from ledger_country_do.channels.ecf_v1.domain.routing import Route
 from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage, EcfState, NumberFate
+from ledger_country_do.regime import REGIME
+from ledger_country_do.regime.rounding import ROUNDING
 from ledger_country_do_testing.clock import ManualClock
 from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
 lazy from ledger_country_do.channels.ecf_v1.application.emission import Signed
@@ -475,3 +479,25 @@ def test_the_settle_delay_is_at_least_the_longest_attempt_at_sending(signer: Key
     assert raised.value.kind == "internal"
     built(attempt=SETTLE_DELAY, settle=SETTLE_DELAY)
     built(attempt=5.0, settle=5.0)
+
+
+async def test_the_emitter_totals_and_rounds_with_the_regime_it_was_given(signer: KeyPairSigner) -> None:
+    async def sleep(seconds: float) -> None:
+        del seconds
+
+    down = replace(REGIME, rounding=replace(ROUNDING, mode=ROUND_DOWN))
+    line = Line(
+        name="ITEM", quantity=Decimal(1), unit_price=Decimal("10.0099"), billing=BillingIndicator.EXEMPT
+    )
+    draft = replace(consumer_invoice(), lines=(line,))
+    built = Emitter(
+        xml=DgiiXml(),
+        signer=signer,
+        authority=ScriptedAuthority(),
+        environment=Environment.TESTECF,
+        clock=lambda: NOW,
+        sleep=sleep,
+        regime=down,
+    )
+    signed = await built.sign(draft)
+    assert (signed.totals.line_amounts, signed.totals.total) == ((Decimal("10.00"),), Decimal("10.00"))

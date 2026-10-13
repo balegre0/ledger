@@ -22,9 +22,14 @@ ROUNDING: Final = RoundingRule(
 CENT: Final = Decimal("0.01")
 
 
+def round_with(rule: RoundingRule, value: Decimal) -> Decimal:
+    """``value`` to ``rule``'s places, in ``rule``'s mode."""
+    return value.quantize(Decimal(1).scaleb(-rule.places), rounding=rule.mode)
+
+
 def round_amount(value: Decimal) -> Decimal:
-    """``value`` to two places, half up."""
-    return value.quantize(CENT, rounding=ROUNDING.mode)
+    """``value`` to two places, half up: ``round_with(ROUNDING, value)``."""
+    return round_with(ROUNDING, value)
 
 
 def within_line_tolerance(declared: Decimal, *, quantity: Decimal, unit_price: Decimal) -> bool:

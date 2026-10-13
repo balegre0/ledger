@@ -9,6 +9,7 @@ from enum import StrEnum
 
 from ledger_country_do.channels.ecf_v1.domain.drafts import DraftInvalidError
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
+from ledger_country_do.channels.ecf_v1.domain.errors import from_regime
 from ledger_country_do.regime import REGIME
 from ledger_country_do.regime.parameters import RFCE_THRESHOLD
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
@@ -35,7 +36,7 @@ def route(draft: EcfDraft, totals: Totals, regime: RegimeDef = REGIME) -> Route:
     """
     if draft.ecf_type is not EcfType.CONSUMER_INVOICE:
         return Route.RECEPTION
-    if totals.total < regime.parameter(RFCE_THRESHOLD, draft.issued_on):
+    if totals.total < from_regime(lambda: regime.parameter(RFCE_THRESHOLD, draft.issued_on)):
         return Route.RFCE
     if draft.buyer.rnc is None:
         raise _UnnamedLargeBuyerError
