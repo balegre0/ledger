@@ -164,14 +164,14 @@ class Measure:
 
 
 def full_template(scope: Mapping[str, object]) -> str | None:
-    """The full template of the route that took the request, as the app mounted it; ``None`` if it has none.
+    """The full template of the route that took the request, as the app mounted it; ``None`` if unknown.
 
-    From the app's ``RouteLabels`` when ``Measure`` runs (a chassis app), else the template the route declares
-    (an app of its own). ``None`` for a request no route took, or a route added after the app was built.
+    From the app's ``RouteLabels``, which ``Measure`` leaves in the scope (an app ``create_app`` made).
+    Unknown, so ``None``, without them (the template a route declares lacks the prefix it was mounted
+    under), for a request no route took, and for a route added after the app was built: never guessed.
     """
     labels = scope.get(LABELS_KEY)
-    if isinstance(labels, RouteLabels):
-        template = labels.of_scope(scope)
-        return None if template in {UNMATCHED, _UNREGISTERED} else template
-    route = scope.get("route")
-    return route.path_format if isinstance(route, APIRoute) else None
+    if not isinstance(labels, RouteLabels):
+        return None
+    template = labels.of_scope(scope)
+    return None if template in {UNMATCHED, _UNREGISTERED} else template

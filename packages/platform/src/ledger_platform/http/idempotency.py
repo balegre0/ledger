@@ -28,7 +28,8 @@ from dataclasses import dataclass
 from datetime import timedelta
 from types import MappingProxyType
 from typing import Annotated, ClassVar, Final, NewType, final
-lazy from collections.abc import Awaitable, Callable, Mapping
+from urllib.parse import urlencode
+lazy from collections.abc import Awaitable, Callable, Iterable, Mapping
 
 import psycopg
 from fastapi import Header, Response
@@ -201,6 +202,23 @@ def canonical_body(request: BaseModel | None) -> CanonicalBody:
 
 
 @final
+@dataclass(frozen=True, slots=True)
+class Target:
+    """The resource a request is for: its path and its query, as the request is fingerprinted by them."""
+
+    path: str
+    query: str
+
+    @classmethod
+    def of(cls, path: str, parameters: Iterable[tuple[str, str]] = ()) -> Target:
+        """``path`` with the query ``parameters`` sorted, then percent-encoded.
+
+        The same parameters sent in another order are the same request; a repeated name keeps all its values.
+        """
+        return cls(path, urlencode(sorted(parameters)))
+
+
+@final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Attempt:
     """One use of a key: by whom, on which route, which key, and the hash of the request it came with."""
@@ -211,12 +229,18 @@ class Attempt:
     request_hash: bytes
 
     @classmethod
-    def of(cls, principal: Principal, key: str, *, route: str, body: CanonicalBody) -> Attempt:
-        """``principal``'s use of ``key`` on ``route`` (``METHOD /template``) with ``body``."""
+    def of(
+        cls, principal: Principal, key: str, *, route: str, target: Target, body: CanonicalBody
+    ) -> Attempt:
+        """``principal``'s use of ``key`` on ``route`` (``METHOD /template``), for ``target`` with ``body``.
+
+        The key is scoped to the route; the request is the route, the target's path and query, and the body,
+        each length-prefixed: the same key on another resource of the route is another request (422).
+        """
         if _KEY.fullmatch(key) is None:
             raise InvalidIdempotencyKeyError
         digest = hashlib.sha256()
-        for part in (route.encode(), body):
+        for part in (route.encode(), target.path.encode(), target.query.encode(), body):
             digest.update(len(part).to_bytes(_LENGTH_BYTES, "big"))  # no part can run into the next
             digest.update(part)
         return cls(principal=f"user:{principal.subject}", route=route, key=key, request_hash=digest.digest())
@@ -341,12 +365,19 @@ async def idempotency_key(
 def attempt_of(request: Request, principal: Principal, key: str, body: BaseModel | None = None) -> Attempt:
     """``principal``'s use of ``key`` for ``request``: its route's full template, and its canonical body.
 
-    ``UnlabelledRouteError`` when the route has no full template (it was added after the app was built).
+    ``UnlabelledRouteError`` when the route has no full template: an app ``create_app`` did not make, or a
+    route added after the app was built.
     """
     template = full_template(request.scope)
     if template is None:
         raise UnlabelledRouteError
-    return Attempt.of(principal, key, route=f"{request.method} {template}", body=canonical_body(body))
+    return Attempt.of(
+        principal,
+        key,
+        route=f"{request.method} {template}",
+        target=Target.of(request.url.path, request.query_params.multi_items()),
+        body=canonical_body(body),
+    )
 
 
 def json_response(status: int, body: BaseModel, headers: Mapping[str, str] = _NO_HEADERS) -> StoredResponse:

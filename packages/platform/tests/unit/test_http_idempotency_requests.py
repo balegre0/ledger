@@ -23,6 +23,7 @@ from ledger_platform.http.idempotency import (
     CanonicalBody,
     InvalidIdempotencyKeyError,
     Outcome,
+    Target,
     UnlabelledRouteError,
     answer,
     attempt_of,
@@ -119,8 +120,19 @@ async def test_a_key_is_scoped_to_the_full_template_of_its_route() -> None:
     other_item = await seen(app, "/v1/a/2", {"text": "x"})
     assert (first.route, second.route) == ("POST /v1/a/{item_id}", "POST /v1/b/{item_id}")
     assert first.request_hash != second.request_hash
-    assert other_item == first  # the template, not the path: one route, one scope
+    assert other_item.route == first.route  # one route, one scope for its keys
+    assert other_item.request_hash != first.request_hash  # but another resource is another request
     assert (first.key, first.principal) == ("k-1", "user:2001")
+
+
+async def test_the_query_counts_in_its_canonical_order() -> None:
+    app = mounted(("/v1", keyed()))
+    sorted_query = await seen(app, "/v1/1?a=1&b=2&a=0", {"text": "x"})
+    shuffled = await seen(app, "/v1/1?b=2&a=0&a=1", {"text": "x"})
+    other_value = await seen(app, "/v1/1?a=1&b=3&a=0", {"text": "x"})
+    without = await seen(app, "/v1/1", {"text": "x"})
+    assert sorted_query.request_hash == shuffled.request_hash
+    assert len({sorted_query.request_hash, other_value.request_hash, without.request_hash}) == 3
 
 
 async def test_the_same_body_in_another_order_or_spacing_is_the_same_request() -> None:
@@ -135,11 +147,16 @@ async def test_the_same_body_in_another_order_or_spacing_is_the_same_request() -
     assert len(hashes) == 1
 
 
-async def test_a_bare_app_scopes_a_key_to_the_template_its_route_declares() -> None:
+async def test_an_app_without_the_chassis_s_route_labels_has_no_key_scope() -> None:
+    """Without ``create_app``'s labels the full template is unknown: refused rather than guessed."""
     app = FastAPI()
     install_problem_handlers(app)
     app.include_router(keyed("/v1/notes"))
-    assert (await seen(app, "/v1/notes/1", {"text": "x"})).route == "POST /v1/notes/{item_id}"
+    async with client_of(app) as client:
+        with capture_logs() as logs:
+            response = await client.post("/v1/notes/1", json={"text": "x"}, headers=KEYED)
+    assert (response.status_code, response.json()["code"]) == (500, "internal")
+    assert [entry["code"] for entry in logs] == ["idempotency_route_unlabelled"]
 
 
 async def test_a_route_added_after_the_app_was_built_has_no_key_scope() -> None:
@@ -179,16 +196,20 @@ async def test_a_post_without_a_usable_key_is_refused_without_repeating_it(heade
 @pytest.mark.parametrize("key", ["", "a b", "é", "k" * (MAX_KEY_LENGTH + 1)])
 def test_an_attempt_refuses_a_key_no_header_could_carry_and_never_repeats_it(key: str) -> None:
     with pytest.raises(InvalidIdempotencyKeyError) as caught:
-        Attempt.of(CALLER, key, route="POST /v1/x", body=canonical_body(None))
+        Attempt.of(CALLER, key, route="POST /v1/x", target=Target.of("/v1/x"), body=canonical_body(None))
     assert caught.value.code == "invalid_idempotency_key"
     assert key not in str(caught.value) or not key
 
 
 def test_route_and_body_cannot_run_into_each_other() -> None:
-    def hashed(route: str, body: bytes) -> bytes:
-        return Attempt.of(CALLER, "k", route=route, body=CanonicalBody(body)).request_hash
+    def hashed(route: str, path: str, query: str, body: bytes) -> bytes:
+        return Attempt.of(
+            CALLER, "k", route=route, target=Target(path, query), body=CanonicalBody(body)
+        ).request_hash
 
-    assert hashed("POST /a", b"b") != hashed("POST /ab", b"")
+    assert hashed("POST /a", "/a", "", b"b") != hashed("POST /a", "/a", "b", b"")
+    assert hashed("POST /a", "/a", "b", b"") != hashed("POST /a", "/ab", "", b"")
+    assert hashed("POST /a", "/a", "", b"") != hashed("POST /a/", "", "", b"")
 
 
 def test_a_replay_is_answered_byte_for_byte_and_marked() -> None:

@@ -33,6 +33,7 @@ from ledger_platform.http.idempotency import (
     OversizedStoredResponseError,
     ServerFailureResponseError,
     StoredResponse,
+    Target,
     UnansweredIdempotencyKeyError,
     UnmodedIdempotencyScopeError,
     canonical_body,
@@ -119,11 +120,19 @@ async def count(admin: psycopg.AsyncConnection, query: LiteralString) -> int:
     return _COUNT.validate_python(None if row is None else row[0])
 
 
-def attempt(*, subject: str = "2001", route: str = CREATE, key: str = KEY, name: str = "first") -> Attempt:
+def attempt(
+    *,
+    subject: str = "2001",
+    route: str = CREATE,
+    path: str = "/v1/things",
+    key: str = KEY,
+    name: str = "first",
+) -> Attempt:
     caller = Principal(
         subject=SubjectId(subject), organization=ORGANIZATION, provider_organization=PROVIDER_ORGANIZATION
     )
-    return Attempt.of(caller, key, route=route, body=canonical_body(NewThing(name=name)))
+    body = canonical_body(NewThing(name=name))
+    return Attempt.of(caller, key, route=route, target=Target.of(path), body=body)
 
 
 def moded(mode: Mode = Mode.TEST) -> OrganizationScope:
@@ -177,6 +186,16 @@ async def test_another_body_under_the_same_key_is_refused(probe: BoundDatabase) 
     with pytest.raises(IdempotencyKeyReusedError) as caught:
         await run_once(probe, attempt(name="second"), runs)
     assert caught.value.code == "idempotency_key_reused"
+    assert runs.count == 1
+
+
+async def test_the_same_key_on_another_resource_of_the_route_is_refused(probe: BoundDatabase) -> None:
+    runs = Runs()
+    on_first = attempt(route="POST /v1/things/{thing_id}/notes", path="/v1/things/1/notes")
+    on_second = attempt(route="POST /v1/things/{thing_id}/notes", path="/v1/things/2/notes")
+    await run_once(probe, on_first, runs)
+    with pytest.raises(IdempotencyKeyReusedError):
+        await run_once(probe, on_second, runs)
     assert runs.count == 1
 
 
