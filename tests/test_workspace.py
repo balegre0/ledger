@@ -27,6 +27,7 @@ class Poe(TypedDict):
 
 class CoverageRun(TypedDict):
     source_pkgs: list[str]
+    source: NotRequired[list[str]]
 
 
 class Coverage(TypedDict):
@@ -111,6 +112,25 @@ def unguarded(packages: dict[str, tuple[str, ...]], config: Workspace) -> list[s
     return missing
 
 
+def unmeasured_migrations(root: Path, config: Workspace) -> list[str]:
+    """Every migrations directory of a service that coverage is not told of by path.
+
+    Alembic runs a migration environment and its scripts as modules named after their files, outside the
+    service's package: coverage, which picks ``source_pkgs`` by module name, measures them only through a
+    ``source`` entry, which it matches by path.
+    """
+    measured = set(config["tool"]["coverage"]["run"].get("source", []))
+    return [
+        f"{directory}: not in [tool.coverage.run] source"
+        for directory in sorted(
+            found.relative_to(root).as_posix()
+            for found in (root / "services").glob("*/src/**/migrations")
+            if found.is_dir()
+        )
+        if directory not in measured
+    ]
+
+
 def workspace() -> Workspace:
     return WORKSPACE.validate_python(tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8")))
 
@@ -137,4 +157,16 @@ def test_a_service_the_libraries_may_import_is_named() -> None:
     found = packages(ROOT) | {"services/billing": ("ledger_billing",)}
     assert [line for line in unguarded(found, workspace()) if "Libraries never" in line] == [
         "services/billing: ledger_billing not in the forbidden modules of 'Libraries never import services'"
+    ]
+
+
+def test_every_services_migrations_are_measured_by_coverage() -> None:
+    assert unmeasured_migrations(ROOT, workspace()) == []
+
+
+def test_migrations_coverage_is_not_told_of_are_named(tmp_path: Path) -> None:
+    (tmp_path / "services/billing/src/ledger_billing/adapters/migrations").mkdir(parents=True)
+    (tmp_path / "services/billing/src/ledger_billing/migrations.py").touch()  # a module, not a directory
+    assert unmeasured_migrations(tmp_path, workspace()) == [
+        "services/billing/src/ledger_billing/adapters/migrations: not in [tool.coverage.run] source"
     ]

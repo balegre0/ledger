@@ -11,7 +11,7 @@ from typing import ClassVar, Final
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import String, column, select, table
+from sqlalchemy import String, column, func, select, table
 
 from ledger_identity.settings import IdentitySettings
 from ledger_kernel.errors import LedgerError, UnavailableError
@@ -21,8 +21,11 @@ SCRIPTS: Final = "ledger_identity.adapters.postgres:migrations"
 """Where the migration scripts are, as a package resource: they ship inside the wheel and the image."""
 HEAD: Final = "head"
 BASE: Final = "base"
-_VERSION: Final = select(column("version_num", String)).select_from(table("alembic_version"))
-"""The revision Alembic recorded: one row at a revision, none at the base, no table before any migration."""
+_VERSION_TABLE: Final = "public.alembic_version"
+_RECORDED: Final = select(func.to_regclass(_VERSION_TABLE).is_not(None))
+"""Whether Alembic's table exists: a database no migration ever ran on has none."""
+_VERSION: Final = select(column("version_num", String)).select_from(table("alembic_version", schema="public"))
+"""The revision Alembic recorded: one row at a revision, none at the base."""
 
 
 class OfflineMigrationsError(LedgerError):
@@ -84,12 +87,13 @@ def head() -> str:
 async def require_head(database: Database, expected: str) -> None:
     """Return when the database is at revision ``expected``, else raise ``SchemaNotCurrentError``.
 
-    A database no migration ever ran on has no ``alembic_version`` table, and the query fails instead: the
-    check fails either way.
+    A database no migration ever ran on has no ``alembic_version`` table: it is not current either.
     """
+    found: list[str] = []
     async with database.transaction(None) as unit:
-        found = (await unit.connection.execute(_VERSION)).scalars().all()
-    if list(found) != [expected]:
+        if (await unit.connection.execute(_RECORDED)).scalar_one():
+            found = list((await unit.connection.execute(_VERSION)).scalars())
+    if found != [expected]:
         raise SchemaNotCurrentError(expected)
 
 

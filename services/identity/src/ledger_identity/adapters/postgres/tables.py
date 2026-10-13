@@ -106,6 +106,7 @@ class MembershipRecord(IdentityTable):
         _one_of("status", MembershipStatus, name="ck_memberships_status"),
         _positive_version("memberships"),
         Index("ix_memberships_subject", "organization_id", "subject"),
+        Index("ix_memberships_company", "company_id", "id"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True)
@@ -143,6 +144,7 @@ class EmissionPointRecord(IdentityTable):
     __tablename__: str = "emission_points"
     __table_args__: tuple[SchemaItem, ...] = (
         UniqueConstraint("branch_id", "code", name="uq_emission_points_code"),
+        Index("ix_emission_points_branch", "branch_id", "id"),
         _of_company("emission_points"),
         ForeignKeyConstraint(
             ["company_id", "branch_id"],

@@ -1,9 +1,9 @@
 """Revision 0001, from nothing: identity's first schema.
 
 The chassis's tables, then organizations, companies, memberships, branches and emission points, every table
-that holds a tenant's data under row-level security. Every type, length and word is spelled out rather than
-read from the models: a revision records what was done and must not change when a model does (the tests keep
-the two equal).
+that holds a tenant's data under row-level security. Every type, length, word and policy is spelled out rather
+than read from the models or from ``ledger_platform``'s DDL helpers: a revision records what was done and must
+not change when they do. The tests keep the two equal, so a change is noticed and becomes a new revision.
 """
 
 from typing import Final
@@ -13,9 +13,6 @@ lazy from datetime import datetime
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
-
-from ledger_platform.database import organization_isolation, tenant_isolation
-from ledger_platform.schema import CHASSIS_POLICIES
 
 revision: str = "0001"
 down_revision: str | None = None
@@ -35,9 +32,32 @@ _NEWEST_FIRST: Final = (
 """Every table this revision creates, each before the tables it refers to."""
 
 
-def _apply(statements: tuple[str, ...]) -> None:
-    for statement in statements:
-        op.execute(statement)
+def _matches(column: str, setting: str) -> str:
+    return f"{column} = NULLIF(current_setting('ledger.{setting}', true), '')::uuid"
+
+
+def _isolated(table: str, policy: str, rule: str) -> tuple[str, ...]:
+    """The DDL of ``ledger_platform``'s ``tenant_isolation`` and ``organization_isolation`` as they ran."""
+    return (
+        f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY",
+        f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY",
+        f"DROP POLICY IF EXISTS {policy} ON {table}",
+        f"CREATE POLICY {policy} ON {table} USING ({rule}) WITH CHECK ({rule})",
+    )
+
+
+_ORGANIZATION: Final = _matches("organization_id", "organization_id")
+_TENANT: Final = f"{_ORGANIZATION} AND {_matches('company_id', 'company_id')}"
+ISOLATION: Final = (
+    _isolated("idempotency_keys", "organization_isolation", _ORGANIZATION),
+    _isolated("organizations", "organization_isolation", _matches("id", "organization_id")),
+    _isolated("companies", "organization_isolation", _ORGANIZATION),
+    _isolated("memberships", "organization_isolation", _ORGANIZATION),
+    _isolated("branches", "tenant_isolation", _TENANT),
+    _isolated("emission_points", "tenant_isolation", _TENANT),
+)
+"""Row-level security, in the order it runs: the chassis's ``idempotency_keys`` (``CHASSIS_POLICIES``), then
+identity's tables. Organizations are their own organization (column ``id``)."""
 
 
 def _moment(name: str) -> sa.Column[datetime]:
@@ -58,7 +78,7 @@ def _of_company(table: str) -> sa.ForeignKeyConstraint:
 
 
 def _chassis() -> None:
-    """The platform's tables, as ``ledger_platform`` declares them, and their row-level security."""
+    """The platform's tables, as ``ledger_platform`` declares them."""
     op.create_table(
         "outbox",
         sa.Column("id", sa.Uuid(), primary_key=True),
@@ -92,19 +112,18 @@ def _chassis() -> None:
         _moment("expires_at"),
     )
     op.create_index("ix_idempotency_keys_expiry", "idempotency_keys", ["organization_id", "expires_at"])
-    _apply(CHASSIS_POLICIES)
 
 
 def upgrade() -> None:
-    """Create the chassis's tables and identity's, and put every tenant's data under row-level security."""
+    """Create the chassis's tables and identity's, then put every tenant's data under row-level security."""
     _chassis()
-    organizations = op.create_table(
+    op.create_table(
         "organizations",
         sa.Column("id", sa.Uuid(), primary_key=True),
         sa.Column("provider_id", sa.String(128), nullable=False),
         _moment("created_at"),
     )
-    companies = op.create_table(
+    op.create_table(
         "companies",
         sa.Column("id", sa.Uuid(), primary_key=True),
         sa.Column("organization_id", sa.Uuid(), sa.ForeignKey("organizations.id"), nullable=False),
@@ -119,7 +138,7 @@ def upgrade() -> None:
         sa.CheckConstraint("status IN ('active', 'inactive')", name="ck_companies_status"),
         sa.CheckConstraint("version > 0", name="ck_companies_version"),
     )
-    memberships = op.create_table(
+    op.create_table(
         "memberships",
         sa.Column("id", sa.Uuid(), primary_key=True),
         sa.Column("organization_id", sa.Uuid(), nullable=False),
@@ -139,7 +158,8 @@ def upgrade() -> None:
         sa.CheckConstraint("version > 0", name="ck_memberships_version"),
     )
     op.create_index("ix_memberships_subject", "memberships", ["organization_id", "subject"])
-    branches = op.create_table(
+    op.create_index("ix_memberships_company", "memberships", ["company_id", "id"])
+    op.create_table(
         "branches",
         sa.Column("id", sa.Uuid(), primary_key=True),
         sa.Column("organization_id", sa.Uuid(), nullable=False),
@@ -151,7 +171,7 @@ def upgrade() -> None:
         sa.UniqueConstraint("company_id", "id", name="uq_branches_company"),
         _of_company("branches"),
     )
-    emission_points = op.create_table(
+    op.create_table(
         "emission_points",
         sa.Column("id", sa.Uuid(), primary_key=True),
         sa.Column("organization_id", sa.Uuid(), nullable=False),
@@ -168,11 +188,10 @@ def upgrade() -> None:
             name="fk_emission_points_branch",
         ),
     )
-    _apply(organization_isolation(organizations, column="id"))
-    _apply(organization_isolation(companies))
-    _apply(organization_isolation(memberships))
-    _apply(tenant_isolation(branches))
-    _apply(tenant_isolation(emission_points))
+    op.create_index("ix_emission_points_branch", "emission_points", ["branch_id", "id"])
+    for statements in ISOLATION:
+        for statement in statements:
+            op.execute(statement)
 
 
 def downgrade() -> None:

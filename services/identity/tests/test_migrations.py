@@ -1,6 +1,8 @@
 """identity's migrations: from nothing to this version's schema and back, equal to the models, under RLS."""
 
 import re
+import subprocess
+import sys
 from typing import Final
 
 import pytest
@@ -23,13 +25,14 @@ from ledger_identity.adapters.postgres.migrate import (
     require_head,
     upgrade,
 )
+from ledger_identity.adapters.postgres.migrations.versions import r0001_identity
 from ledger_identity.adapters.postgres.tables import IdentityTable
 from ledger_identity.domain.company import CompanyStatus
 from ledger_identity.domain.membership import MembershipStatus
 from ledger_identity.domain.roles import Role
 from ledger_kernel.errors import ErrorKind
-from ledger_platform.database import Database
-from ledger_platform.schema import CHASSIS_METADATA
+from ledger_platform.database import Database, organization_isolation, tenant_isolation
+from ledger_platform.schema import CHASSIS_METADATA, CHASSIS_POLICIES
 
 IDENTITY_TABLES: Final = frozenset(
     {"organizations", "companies", "memberships", "branches", "emission_points"}
@@ -50,6 +53,10 @@ SECURITY_SQL: Final = text(
     WHERE relkind = 'r' AND relnamespace = 'public'::regnamespace
     """
 )
+MIGRATE: Final = (
+    "import sys; from ledger_identity.adapters.postgres.migrate import upgrade; upgrade(sys.argv[1])"
+)
+"""A migration in a process of its own, of the database its first argument names."""
 QUOTED: Final = re.compile(r"'([^']*)'")
 """A literal in a constraint's definition as PostgreSQL prints it back: ``'owner'::character varying``."""
 
@@ -176,10 +183,63 @@ def test_every_table_of_a_tenants_data_is_under_its_policy_forced_on_its_owner(d
         ("memberships", "organization_isolation"),
         ("organizations", "organization_isolation"),
     ]
-    forced = {name for name, enabled, force in security if enabled and force}
-    assert forced == IDENTITY_TABLES | {
-        "idempotency_keys"
-    }  # the outbox and the inbox stay outside on purpose
+    on: Final = (True, True)
+    off: Final = (False, False)
+    assert {name: (enabled, forced) for name, enabled, forced in security} == {
+        **dict.fromkeys(IDENTITY_TABLES, on),
+        "idempotency_keys": on,
+        "outbox": off,  # the outbox and the inbox stay outside on purpose
+        "inbox": off,
+        "alembic_version": off,
+    }
+
+
+def test_the_revision_runs_the_isolation_the_platform_writes_today() -> None:
+    """The revision keeps the policies' DDL as it ran; a platform that now writes another is noticed here."""
+    tables = models().tables
+    written_today = (
+        CHASSIS_POLICIES,
+        organization_isolation(tables["organizations"], column="id"),
+        organization_isolation(tables["companies"]),
+        organization_isolation(tables["memberships"]),
+        tenant_isolation(tables["branches"]),
+        tenant_isolation(tables["emission_points"]),
+    )
+    assert written_today == r0001_identity.ISOLATION
+
+
+def test_every_primary_key_is_the_models_column_for_column(database_url: str) -> None:
+    """Alembic does not compare primary keys: their columns, in order, are compared here."""
+    engine = create_engine(database_url, poolclass=NullPool)
+    try:
+        with engine.connect() as connection:
+            schema = inspect(connection)
+            migrated = {
+                name: list(schema.get_pk_constraint(name)["constrained_columns"])
+                for name in schema.get_table_names()
+            }
+    finally:
+        engine.dispose()
+    assert migrated == {
+        "alembic_version": ["version_num"],
+        **{
+            name: [column.name for column in table.primary_key.columns]
+            for name, table in models().tables.items()
+        },
+    }
+
+
+def test_two_migrations_started_at_once_both_succeed(fresh_database_url: str) -> None:
+    """Two replicas that migrate as they start: one waits for the other's lock, then finds nothing to do."""
+    started = [
+        subprocess.Popen(  # another process each: Alembic's context is process-wide state
+            [sys.executable, "-c", MIGRATE, fresh_database_url], stderr=subprocess.PIPE, text=True
+        )
+        for _ in range(2)
+    ]
+    errors = [process.communicate(timeout=120)[1] for process in started]
+    assert ([process.returncode for process in started], errors) == ([0, 0], ["", ""])
+    assert tables_of(fresh_database_url) == {*IDENTITY_TABLES, *CHASSIS_TABLES, "alembic_version"}
 
 
 async def test_the_readiness_check_passes_on_a_database_at_this_version_only(
@@ -187,6 +247,9 @@ async def test_the_readiness_check_passes_on_a_database_at_this_version_only(
 ) -> None:
     assert head() == "0001"
     await require_head(database, head())
+    async with Database.open(fresh_database_url, pool_size=1) as never_migrated:
+        with pytest.raises(SchemaNotCurrentError):
+            await require_head(never_migrated, head())
     upgrade(fresh_database_url)
     downgrade(fresh_database_url)  # alembic_version is left, empty
     async with Database.open(fresh_database_url, pool_size=1) as behind:
