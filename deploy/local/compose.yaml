@@ -13,9 +13,8 @@
 # Zitadel's role and database. They run only when the volume is first created: after a change,
 # `docker compose down -v` starts over.
 #
-# Every image is pinned to an exact version tag, not to a floating one. A version tag can still be
-# re-pushed (a rebuild on a newer base image keeps it): Zitadel's is pinned by digest too, and pinning the others'
-# digests is a later hardening step.
+# Every image is pinned to an exact version tag and its digest (the tag's multi-platform index), as
+# deploy/local/images.toml pins it: a re-pushed tag cannot change what runs.
 #
 # Apps, from the one image (deploy/docker/ledger.Dockerfile), each configured by ledger.env (one Settings class for
 # every app) plus what is its own: `migrate` runs once, as the migrator login over a direct connection, and the
@@ -42,7 +41,7 @@ x-ledger: &ledger
 services:
   postgres:
     # The tag the platform's tests run on: a service meets locally the PostgreSQL it will be tested against.
-    image: postgres:18.6
+    image: postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres

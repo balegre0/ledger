@@ -1,4 +1,4 @@
-"""What ``check`` asks of the repository around the manifests: the root's lists and the image pins.
+"""What ``check`` asks of the repository around the manifests: root lists, image pins, the build context.
 
 The root ``pyproject.toml`` is written by hand (the generator cannot own the file that configures it), so the
 lists in it that name packages are compared with the workspace. ``sync`` writes neither, so a problem here
@@ -12,7 +12,8 @@ lazy from collections.abc import Iterator
 from pydantic import BaseModel, ConfigDict, Field
 
 from ledger_devtools.checks import Problem
-from ledger_devtools.images import image_problems, pinned_images
+from ledger_devtools.context import context_problems
+from ledger_devtools.images import image_problems, pin_problems, pinned_images
 from ledger_devtools.names import distribution_of
 lazy from ledger_devtools.workspace import Workspace
 
@@ -106,9 +107,11 @@ def _members_without_manifests(workspace: Workspace) -> Iterator[Problem]:
 
 
 def repository_problems(workspace: Workspace) -> tuple[Problem, ...]:
-    """The root lists that differ from the workspace, members without a manifest, images not pinned."""
+    """Root lists unlike the workspace, members without manifests, unpinned images, an unsafe context."""
     return (
         *_root_lists(workspace),
         *_members_without_manifests(workspace),
+        *pin_problems(workspace.root),
         *image_problems(workspace.root, pinned_images(workspace.root)),
+        *context_problems(workspace.root),
     )

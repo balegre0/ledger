@@ -2,23 +2,24 @@ from typing import Final
 lazy from pathlib import Path
 
 from ledger_devtools.checks import Problem
-from ledger_devtools.images import image_problems, pinned_images
+from ledger_devtools.images import image_problems, pin_problems, pinned_images
 
-UV: Final = "ghcr.io/astral-sh/uv:0.13.0-trixie-slim@sha256:11bee95ce279"
-DISTROLESS: Final = "gcr.io/distroless/cc-debian13:nonroot@sha256:e792ab3d241a"
+UV: Final = f"ghcr.io/astral-sh/uv:0.13.0-trixie-slim@sha256:{'1' * 64}"
+DISTROLESS: Final = f"gcr.io/distroless/cc-debian13:nonroot@sha256:{'e' * 64}"
+POSTGRES: Final = f"postgres:18.6@sha256:{'7' * 64}"
 PINS: Final = f"""
 # The pins.
 [images]
-postgres = "postgres:18.6"
+postgres = "{POSTGRES}"
 uv = "{UV}"
 distroless = "{DISTROLESS}"
 """
-COMPOSE: Final = """
+COMPOSE: Final = f"""
 x-app: &app
   image: ledger:local
 services:
   postgres:
-    image: postgres:18.6
+    image: {POSTGRES}
   api:
     <<: *app
     image: "ledger:dev"
@@ -43,7 +44,7 @@ def deploy(root: Path, *, compose: str = COMPOSE, dockerfile: str = DOCKERFILE) 
 
 
 def test_images_toml_is_read_as_the_set_of_pins(tmp_path: Path) -> None:
-    assert pinned_images(deploy(tmp_path)) == frozenset({"postgres:18.6", UV, DISTROLESS})
+    assert pinned_images(deploy(tmp_path)) == frozenset({POSTGRES, UV, DISTROLESS})
 
 
 def test_a_tree_without_images_toml_pins_nothing(tmp_path: Path) -> None:
@@ -58,7 +59,7 @@ def test_images_named_by_compose_and_dockerfiles_are_pinned(tmp_path: Path) -> N
 def test_an_image_that_is_not_a_pin_is_named_where_it_is(tmp_path: Path) -> None:
     root = deploy(
         tmp_path,
-        compose=COMPOSE.replace("postgres:18.6", "postgres:18.7"),
+        compose=COMPOSE.replace(POSTGRES, "postgres:18.7"),
         dockerfile=DOCKERFILE.replace(f"FROM {DISTROLESS}", "FROM gcr.io/distroless/cc-debian13:latest"),
     )
     assert image_problems(root, pinned_images(root)) == (
@@ -90,3 +91,34 @@ def test_every_dockerfile_of_the_repository_is_checked_wherever_it_is(tmp_path: 
             "image 'debian:trixie-slim' is not pinned in deploy/local/images.toml",
         ),
     )
+
+
+def test_every_pin_carries_a_digest(tmp_path: Path) -> None:
+    assert pin_problems(deploy(tmp_path)) == ()
+
+
+def test_a_pin_without_a_full_digest_is_named(tmp_path: Path) -> None:
+    root = deploy(tmp_path)
+    pins = root / "deploy/local/images.toml"
+    pins.write_text(
+        pins.read_text(encoding="utf-8")
+        .replace(POSTGRES, "postgres:18.6")
+        .replace(UV, UV[:-1])
+        .replace(DISTROLESS, DISTROLESS.replace("sha256", "sha512")),
+        encoding="utf-8",
+    )
+    assert pin_problems(root) == tuple(
+        Problem(
+            "deploy/local/images.toml",
+            f"image '{name}' ({image}) is not pinned by digest: append @sha256:<the tag's index digest>",
+        )
+        for name, image in (
+            ("distroless", DISTROLESS.replace("sha256", "sha512")),
+            ("postgres", "postgres:18.6"),
+            ("uv", UV[:-1]),
+        )
+    )
+
+
+def test_a_tree_without_images_toml_has_no_pin_problem(tmp_path: Path) -> None:
+    assert pin_problems(tmp_path) == ()

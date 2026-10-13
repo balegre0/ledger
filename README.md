@@ -42,7 +42,8 @@ module's `openapi.json`.
 
 `uv run poe check`: ruff format and ruff with every rule, no suppression comment anywhere, basedpyright (`all`)
 and mypy `--strict`, import-linter, deptry, typos, buf, `ledger-devtools check` (manifests valid, generated files
-current, image pins equal to `deploy/local/images.toml`), vulture, and each package's tests with 100 % branch
+current, image pins equal to `deploy/local/images.toml` and carrying digests, `.dockerignore` keeping
+secrets out of the build context), vulture, and each package's tests with 100 % branch
 coverage and warnings as errors. CI (`.github/workflows/ci.yml`) runs the same, then builds the image and starts
 the local stack from it.
 

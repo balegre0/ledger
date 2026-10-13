@@ -20,3 +20,14 @@ deploy
 # pyproject.toml stays in the context.
 tools/**
 !tools/*/pyproject.toml
+# Secrets never enter the build context (`ledger-devtools check` asks for each pattern): env files, the DGII
+# certificate and its password, PKCS #12 key stores.
+.env
+**/.env
+**/.env.*
+.dgii
+**/.dgii
+*.p12
+**/*.p12
+*.pfx
+**/*.pfx
