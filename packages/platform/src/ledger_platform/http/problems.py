@@ -13,7 +13,7 @@ layer refuses before reading its body (a missing ``Ledger-Mode``, say) answers 4
 ``INVALID``.
 
 A problem names its request (``request_id``, and the ``Request-Id`` header): the id of the trace the request
-is part of, the caller's when it sent a ``traceparent``. A request outside any trace has none.
+is part of (``current_request_id``). A request outside any trace has none.
 
 A failure's log line names the route (``route_of``, the app's route labels) and the caller and its company
 when the route's dependencies learned them (``request_fields``).
@@ -203,7 +203,11 @@ def _problem(
 
 
 def current_request_id() -> str | None:
-    """The id of the request being answered: the id of its trace (the caller's, when it sent one), if any."""
+    """The id of the request being answered: the id of its trace, if it is traced.
+
+    The request's own trace, linked to the caller's; the caller's trace itself only where the app adopts it
+    (``Observability.caller_trace``).
+    """
     context = trace.get_current_span().get_span_context()
     return trace.format_trace_id(context.trace_id) if context.is_valid else None
 

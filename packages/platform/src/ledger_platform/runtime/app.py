@@ -15,23 +15,30 @@ channels, with the ports modules provide; then merge what they handed back and c
   of every schema and the routing version in one transaction.
 - ``signer``, ``receiver``: refused until their modules exist (v2-M2, v2-M4).
 
-Connections. Units go through ``LEDGER_DATABASE_URL``, which may be a transaction pooler's (§6.7): when a
-direct URL is set apart from it, the pooled URL is taken to go through a pooler and psycopg prepares no
-statement on it. The after-commit NOTIFYs have a pool of their own (one connection, short waits), so a busy
-pool never delays them and they never take a unit's connection. The worker's LISTEN connection and
-``ledger-migrate`` connect directly (``LEDGER_DATABASE_DIRECT_URL``); the URLs are secrets and never logged.
+Connections. Units go through ``LEDGER_DATABASE_URL``, which may be a transaction pooler's (§6.7): with
+``LEDGER_DATABASE_POOLED`` psycopg prepares no statement on it. The after-commit NOTIFYs have a pool of their
+own (one connection, short waits), so a busy pool never delays them and they never take a unit's connection.
+The worker's LISTEN connection and ``ledger-migrate`` connect directly (``LEDGER_DATABASE_DIRECT_URL``, which
+the worker requires when it is made); the URLs are secrets and never logged. ``migrate`` exports no spans.
 
-Stop, in the order v1's service stopped (without NATS): the workers (within a grace), the resources, the
-pending NOTIFYs, the pools, then the spans still pending.
+An app starts once (``AppAlreadyStartedError`` for a second lifespan). It stops within ``STOP_BUDGET``
+seconds, step by step, each step held to its share (``STOP``): the worker's runners are asked to stop (claim
+nothing more, finish what they run, give back what they hold) and given ``drain`` seconds, then every worker
+is cancelled (the runners give back what they still hold); then the resources, the pending NOTIFYs, the pools
+and the spans still pending. A step that runs out of time is left behind and logged
+(``app.stop_step_timed_out``), one that fails is logged (``app.stop_step_failed``): neither holds the rest.
 """
 
 import asyncio
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import timedelta
 from functools import partial
 from typing import ClassVar, Final, final
-lazy from collections.abc import AsyncGenerator, Mapping
+lazy from collections.abc import AsyncGenerator, Awaitable, Mapping, Sequence
+lazy from contextlib import AbstractAsyncContextManager
 
+import structlog
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from prometheus_client import CollectorRegistry, GCCollector, PlatformCollector, ProcessCollector
 from sqlalchemy import create_engine, text
@@ -74,8 +81,35 @@ NOTIFY_LIMITS: Final = DatabaseLimits(
     pool_timeout=timedelta(seconds=1),
 )
 """The NOTIFYs' pool waits little: a NOTIFY that cannot go is dropped, and the one-second poll covers it."""
-WORKER_STOP_GRACE: Final = 10.0
-"""Seconds the workers are given, all together, to end when the app stops."""
+STOP_BUDGET: Final = 25.0
+"""Seconds an app takes to stop at most: inside an orchestrator's usual 30-second grace."""
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StopTimes:
+    """Each stop step's share of ``STOP_BUDGET``, in seconds."""
+
+    drain: float = 8.0
+    """The runners finish what they run, having been asked to stop."""
+    workers: float = 4.0
+    """Every worker cancelled, the runners giving back what they hold."""
+    resources: float = 5.0
+    """The modules' resources and the identity provider's keys client, shared out among them."""
+    notifications: float = 1.0
+    pools: float = 3.0
+    spans: float = 4.0
+
+    @property
+    def total(self) -> float:
+        """The whole stop, at most."""
+        return self.drain + self.workers + self.resources + self.notifications + self.pools + self.spans
+
+
+STOP: Final = StopTimes()
+_ABANDONED: Final[set[asyncio.Future[object]]] = set()
+"""Stop steps left behind: kept until they end, so that they are not collected while they run."""
+_logger = structlog.stdlib.get_logger(__name__)
 _NOT_BUILT: Final = frozenset({"signer", "receiver"})
 _PERMANENT: Final = (InvalidOptionError,)
 """Failures of a worker that no restart can fix."""
@@ -101,12 +135,21 @@ class RoleMismatchError(LedgerError):
 
 
 class DirectUrlMissingError(LedgerError):
-    """``ledger-migrate`` without ``LEDGER_DATABASE_DIRECT_URL``: migrations hold session locks."""
+    """A worker or ``ledger-migrate`` without ``LEDGER_DATABASE_DIRECT_URL`` (LISTEN, session locks)."""
 
     code: ClassVar[str] = "direct_url_missing"
 
+    def __init__(self, role: str) -> None:
+        super().__init__(f"the {role} app connects directly to PostgreSQL: set LEDGER_DATABASE_DIRECT_URL")
+
+
+class AppAlreadyStartedError(LedgerError):
+    """A second lifespan of one app: its workers, pools and resources start once."""
+
+    code: ClassVar[str] = "app_already_started"
+
     def __init__(self) -> None:
-        super().__init__("migrations connect directly to PostgreSQL: set LEDGER_DATABASE_DIRECT_URL")
+        super().__init__("an app starts once: make another App for another lifespan")
 
 
 class SchemaUnknownError(LedgerError):
@@ -145,6 +188,27 @@ def _registry() -> CollectorRegistry:
     return registry
 
 
+def _forget(step: asyncio.Future[object]) -> None:
+    """A step left behind has ended: let it go, its outcome taken (it was logged as timed out)."""
+    _ABANDONED.discard(step)
+    _ = step.cancelled() or step.exception()
+
+
+async def _within(step: str, seconds: float, work: Awaitable[object]) -> None:
+    """Run ``work`` for at most ``seconds``; past that it is cancelled and left behind. Nothing is raised."""
+    running = asyncio.ensure_future(work)
+    done, _ = await asyncio.wait({running}, timeout=seconds)
+    if not done:
+        running.cancel()
+        _ABANDONED.add(running)
+        running.add_done_callback(_forget)
+        _logger.error("app.stop_step_timed_out", step=step, timeout=seconds)
+        return
+    error = running.exception()
+    if error is not None:
+        _logger.error("app.stop_step_failed", step=step, exc_info=error)
+
+
 def _route(url: str, declared: Mapping[str, Mapping[str, frozenset[str]]]) -> None:
     """One transaction as ``ledger_migrator``: each schema's subscriptions as its owner, then the routing.
 
@@ -156,9 +220,9 @@ def _route(url: str, declared: Mapping[str, Mapping[str, frozenset[str]]]) -> No
         with engine.begin() as connection:
             wait = f"{MIGRATION_LOCK_WAIT // timedelta(milliseconds=1)}ms"
             connection.execute(_SET_LOCK_TIMEOUT, {"wait": wait})
-            for schema, consumers in declared.items():
+            for schema in sorted(declared):  # one order for every migrator: their row locks never cross
                 _become_owner(connection, schema)
-                sync_subscriptions(connection, schema, consumers)
+                sync_subscriptions(connection, schema, declared[schema])
             _become_owner(connection, PLATFORM)
             bump_routing(connection)
     finally:
@@ -180,10 +244,12 @@ class App:
         "_notifications",
         "_registry",
         "_role",
+        "_runners",
         "_running",
         "_served",
         "_settings",
         "_signals",
+        "_started",
         "_supervisor",
         "_tracing",
         "_version",
@@ -201,13 +267,15 @@ class App:
     ) -> None:
         if role in _NOT_BUILT:
             raise RoleNotBuiltError(role)
+        if role == "worker" and settings.database_direct_url is None:
+            raise DirectUrlMissingError(role)
         self._role = role
         self._settings = settings
         self._version = version
         self._registry = _registry()
         self._authentication = Authentication.of(settings, self._registry, required=role == "api")
         configure_logging(settings, service=f"ledger-{role}")
-        endpoint = settings.otlp_endpoint
+        endpoint = None if role == "migrate" else settings.otlp_endpoint  # a one-shot job: no spans
         exporter = (
             None
             if endpoint is None
@@ -215,8 +283,7 @@ class App:
         )
         self._tracing = Tracing.create(service_name=f"ledger-{role}", exporter=exporter)
         url = settings.database_url.get_secret_value()
-        direct = settings.database_direct_url
-        prepared = direct is None or direct.get_secret_value() == url
+        prepared = not settings.database_pooled
         name = f"ledger-{role}"
         self._database = Database.create(url, application_name=name, prepared_statements=prepared)
         self._notifications = Database.create(
@@ -240,6 +307,8 @@ class App:
         self._assembled = assemble(shared, discover)
         self._supervisor = Supervisor(registry=self._registry, permanent=_PERMANENT)
         self._wakeups: Wakeups | None = None
+        self._runners: list[InboxRunner | JobRunner] = []
+        self._started = False
         self._running = False
         self._served: FastAPI | None = None
 
@@ -277,7 +346,7 @@ class App:
             raise RoleMismatchError(self._role, "migrate")
         direct = self._settings.database_direct_url
         if direct is None:
-            raise DirectUrlMissingError
+            raise DirectUrlMissingError(self._role)
         url = direct.get_secret_value()
         members = self._assembled.members
         for member in members:
@@ -318,21 +387,44 @@ class App:
     @asynccontextmanager
     async def _lifespan(self, app: FastAPI) -> AsyncGenerator[None]:
         del app
-        async with AsyncExitStack() as stack:
-            stack.push_async_callback(self._flush_spans)  # the last: spans end until everything stopped
-            self._tracing.register_globally()
-            stack.push_async_callback(self._database.aclose)
-            stack.push_async_callback(self._notifications.aclose)
-            stack.push_async_callback(self._signals.aclose)
-            for member in self._assembled.members:
-                for resource in member.resources:
-                    await stack.enter_async_context(resource)
-            for resource in self._authentication.resources():
-                await stack.enter_async_context(resource)
+        if self._started:
+            raise AppAlreadyStartedError
+        self._started = True
+        self._tracing.register_globally()
+        opened: list[AbstractAsyncContextManager[object]] = []
+        try:
+            resources = [resource for member in self._assembled.members for resource in member.resources]
+            for resource in (*resources, *self._authentication.resources()):
+                await resource.__aenter__()
+                opened.append(resource)
             if self._role == "worker":
-                stack.push_async_callback(self._stop_workers)
                 self._start_workers()
             yield
+        finally:
+            await self._stop(opened)
+
+    async def _stop(self, opened: Sequence[AbstractAsyncContextManager[object]]) -> None:
+        """Stop within the budget, step by step (see the module); nothing here raises."""
+        stop = STOP
+        if self._running:
+            self._running = False
+            for runner in self._runners:
+                runner.stop()
+            drained = asyncio.gather(*(runner.drained.wait() for runner in self._runners))
+            await _within("drain", stop.drain, drained)
+            await _within("workers", stop.workers, self._supervisor.stop(stop.workers))
+        share = stop.resources / max(len(opened), 1)
+        for resource in reversed(opened):
+            await _within("resource", share, resource.__aexit__(None, None, None))
+        await _within("notifications", stop.notifications, self._signals.aclose())
+        await _within("pools", stop.pools, self._close_pools())
+        await _within("spans", stop.spans, asyncio.to_thread(self._tracing.shutdown, stop.spans * 0.9))
+
+    async def _close_pools(self) -> None:
+        try:
+            await self._notifications.aclose()
+        finally:
+            await self._database.aclose()
 
     def _start_workers(self) -> None:
         settings, supervisor, members = self._settings, self._supervisor, self._assembled.members
@@ -351,19 +443,14 @@ class App:
                 runner = InboxRunner(
                     database=database, consumer=consumer, tracing=self._tracing, registry=self._registry
                 )
+                self._runners.append(runner)
                 _ = supervisor.start(f"inbox {consumer.name}", partial(runner.run, wakeups))
             if member.kinds:
                 jobs = JobRunner(
                     database=database, kinds=member.kinds, tracing=self._tracing, registry=self._registry
                 )
+                self._runners.append(jobs)
                 _ = supervisor.start(f"jobs {member.schema}", jobs.run)
         scheduler = Scheduler(platform=self._assembled.bound[PLATFORM], schedules=self._assembled.schedules)
         _ = supervisor.start("scheduler", scheduler.run)
         self._running = True
-
-    async def _stop_workers(self) -> None:
-        self._running = False
-        await self._supervisor.stop(WORKER_STOP_GRACE)
-
-    async def _flush_spans(self) -> None:
-        await asyncio.to_thread(self._tracing.shutdown, DEFAULT_SHUTDOWN_TIMEOUT)

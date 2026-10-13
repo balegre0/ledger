@@ -36,6 +36,13 @@ def test_settings_need_only_the_database_and_the_environment(monkeypatch: pytest
     assert (settings.token_algorithms, settings.token_leeway_seconds) == (frozenset({"RS256"}), 60)
 
 
+def test_a_pooled_database_url_is_said_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    environment(monkeypatch, {**REQUIRED, "LEDGER_DATABASE_POOLED": "true"})
+    assert Settings().database_pooled
+    environment(monkeypatch, {**REQUIRED, "LEDGER_DATABASE_POOLED": "false"})
+    assert not Settings().database_pooled
+
+
 def test_without_a_database_or_an_environment_the_start_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LEDGER_DATABASE_URL", raising=False)
     monkeypatch.delenv("LEDGER_ENVIRONMENT", raising=False)

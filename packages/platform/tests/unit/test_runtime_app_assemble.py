@@ -1,13 +1,18 @@
 """``App``'s assembly (§3.10): modules in dependency order, then channels; what they hand back is checked."""
 
+import asyncio
+import contextlib
+import time
+from contextlib import asynccontextmanager
 from datetime import date
 from decimal import Decimal
 from functools import partial
 from typing import Final, Protocol, TypeIs, final, runtime_checkable
-lazy from collections.abc import Callable, Mapping, Sequence
+lazy from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 
 import pytest
 from pydantic import SecretStr
+from structlog.testing import capture_logs
 
 from ledger_kernel.dated import Since, Timeline
 from ledger_kernel.jurisdiction import CountryCode, Jurisdiction
@@ -18,12 +23,17 @@ from ledger_platform.config.settings import Settings
 from ledger_platform.data.migrations import SchemaMigrations
 from ledger_platform.events.consumers import ConsumerSpec
 from ledger_platform.jobs.outcomes import Done, JobSpec
+from ledger_platform.runtime import app as runtime_app
 from ledger_platform.runtime.app import (
+    STOP,
+    STOP_BUDGET,
     App,
+    AppAlreadyStartedError,
     DirectUrlMissingError,
     RoleMismatchError,
     RoleNotBuiltError,
     SchemaUnknownError,
+    StopTimes,
 )
 from ledger_platform.runtime.assembly import (
     ConsumerNotProvidedError,
@@ -58,8 +68,12 @@ lazy from ledger_platform.runtime.registries import Discover
 
 URL: Final = "postgresql+psycopg://ledger_app:app@db.invalid:5432/ledger"
 DIRECT: Final = "postgresql+psycopg://ledger_migrator:migrator@db.invalid:5432/ledger"
-SETTINGS: Final = Settings(environment="test", database_url=SecretStr(URL))
+SETTINGS: Final = Settings(
+    environment="test", database_url=SecretStr(URL), database_direct_url=SecretStr(DIRECT)
+)
 """No token settings: enough for every role but ``api``."""
+BARE: Final = SETTINGS.model_copy(update={"database_direct_url": None})
+"""No direct URL either: the worker and migrate refuse it."""
 TOKENS: Final = SETTINGS.model_copy(
     update={
         "token_issuer": "https://issuer.invalid",
@@ -504,10 +518,76 @@ def test_each_role_runs_only_what_it_is_for() -> None:
         App("worker", settings=SETTINGS, discover=discovering()).migrate()
     with pytest.raises(RoleMismatchError, match="serve HTTP"):
         App("migrate", settings=SETTINGS, discover=discovering()).asgi()
-    with pytest.raises(DirectUrlMissingError):
-        App("migrate", settings=SETTINGS, discover=discovering()).migrate()
-    migrator = SETTINGS.model_copy(update={"database_direct_url": SecretStr(DIRECT)})
-    assert App("migrate", settings=migrator, discover=discovering()).modules == ()
+    with pytest.raises(DirectUrlMissingError, match="migrate"):
+        App("migrate", settings=BARE, discover=discovering()).migrate()
+    assert App("migrate", settings=SETTINGS, discover=discovering()).modules == ()
+
+
+def test_the_worker_needs_a_direct_url_when_it_is_made() -> None:
+    """Its LISTEN connection never goes through a pooler (§6.7): refused at the start, not at a wait."""
+    with pytest.raises(DirectUrlMissingError, match="worker"):
+        App("worker", settings=BARE, discover=discovering())
+
+
+def test_the_stop_steps_fit_the_stop_budget() -> None:
+    assert STOP.total <= STOP_BUDGET
+    assert STOP.total == sum(
+        (STOP.drain, STOP.workers, STOP.resources, STOP.notifications, STOP.pools, STOP.spans)
+    )
+
+
+class CloseFailedError(Exception):
+    def __init__(self) -> None:
+        super().__init__("the resource failed to close")
+
+
+@asynccontextmanager
+async def recorded(log: list[str], name: str) -> AsyncGenerator[None]:
+    log.append(f"opened {name}")
+    yield
+    log.append(f"closed {name}")
+
+
+@asynccontextmanager
+async def hanging(free: asyncio.Event) -> AsyncGenerator[None]:
+    """Its close waits for ``free``, through the stop's cancellation: the stop must leave it behind."""
+    yield
+    while not free.is_set():
+        with contextlib.suppress(asyncio.CancelledError):
+            await free.wait()
+
+
+@asynccontextmanager
+async def failing() -> AsyncGenerator[None]:
+    yield
+    raise CloseFailedError
+
+
+async def test_a_stop_step_that_hangs_or_fails_never_holds_the_rest(monkeypatch: pytest.MonkeyPatch) -> None:
+    quick = StopTimes(drain=0.1, workers=0.1, resources=0.4, notifications=0.1, pools=0.5, spans=0.5)
+    monkeypatch.setattr(runtime_app, "STOP", quick)
+    log: list[str] = []
+    free = asyncio.Event()
+
+    def alpha(context: ModuleContext) -> ModuleParts:
+        resources = (recorded(log, "first"), hanging(free), failing(), recorded(log, "last"))
+        return ModuleParts(resources=resources, migrations=migrations(context.database.schema))
+
+    served = App("api", settings=TOKENS, discover=discovering(module("alpha", alpha))).asgi()
+    began = time.monotonic()
+    with capture_logs() as logs:
+        async with served.router.lifespan_context(served):
+            assert log == ["opened first", "opened last"]
+    assert time.monotonic() - began < quick.total
+    assert log == ["opened first", "opened last", "closed last", "closed first"]
+    events = {entry["event"] for entry in logs}
+    assert {"app.stop_step_timed_out", "app.stop_step_failed"} <= events
+    free.set()
+    for _ in range(3):  # the close left behind ends now
+        await asyncio.sleep(0)
+    with pytest.raises(AppAlreadyStartedError):
+        async with served.router.lifespan_context(served):
+            pass
 
 
 def test_spans_are_exported_to_the_collector_the_settings_name() -> None:

@@ -1064,7 +1064,9 @@ operator acts.
 Application traffic may go through a transaction-mode pooler (PgBouncer or the managed equivalent): every unit
 uses only transaction-scoped state (`SET LOCAL ROLE`, `set_config(…, true)`), and schedules use lease rows, not
 session advisory locks. Two things connect **directly** to PostgreSQL (`LEDGER_DATABASE_DIRECT_URL`): each
-worker's `LISTEN` connection, and `ledger-migrate` (session advisory locks, DDL).
+worker's `LISTEN` connection, and `ledger-migrate` (session advisory locks, DDL). `LEDGER_DATABASE_POOLED=true` says
+`LEDGER_DATABASE_URL` goes through a transaction pooler: psycopg then prepares no statement on it. The worker
+refuses to start without the direct URL.
 
 ### 6.8 Legal archive and backups
 

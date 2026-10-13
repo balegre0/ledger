@@ -30,7 +30,7 @@ from opentelemetry import trace
 from opentelemetry.trace import SpanContext
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from prometheus_client import Histogram
-from pydantic import TypeAdapter
+from starlette.datastructures import Headers, MutableHeaders
 lazy from fastapi import APIRouter
 lazy from fastapi.telemetry import TelemetryConfig
 lazy from opentelemetry.trace import TracerProvider
@@ -52,15 +52,13 @@ lazy from ledger_platform.observability.health import Health
 type CallerTrace = Literal["adopt", "link"]
 """What a request does with its caller's ``traceparent``: continue that trace, or start one linked to it."""
 
-_TRACE_HEADERS: Final = frozenset({b"traceparent", b"tracestate"})
 _TRACEPARENT: Final = "traceparent"
+_TRACESTATE: Final = "tracestate"
 _MAX_TRACEPARENT_LENGTH: Final = 55
 """A version 00 ``traceparent``; a longer value is never handed to the propagator (its pattern backtracks)."""
 _CALLER_SPAN: Final = "ledger.caller_span"
 """Where the caller's span waits in the request's scope, for the request's own span to link to it."""
-_REQUEST_ID: Final = REQUEST_ID_HEADER.lower().encode("ascii")
 _PROPAGATOR: Final = TraceContextTextMapPropagator()
-_HEADERS: Final = TypeAdapter(list[tuple[bytes, bytes]])
 _logger = structlog.stdlib.get_logger(__name__)
 
 
@@ -121,20 +119,21 @@ class _Contained:
             )
 
 
-def _caller_span(traceparent: bytes) -> SpanContext | None:
+def _caller_span(traceparent: str) -> SpanContext | None:
     """The span a caller's ``traceparent`` names, if it names one."""
     if len(traceparent) > _MAX_TRACEPARENT_LENGTH:
         return None
-    context = _PROPAGATOR.extract({_TRACEPARENT: traceparent.decode("latin-1")})
+    context = _PROPAGATOR.extract({_TRACEPARENT: traceparent})
     span = trace.get_current_span(context).get_span_context()
     return span if span.is_valid else None
 
 
 def _without_the_caller_s_trace(scope: AsgiScope) -> None:
     """Take the caller's trace headers off the request, keeping the span they name for a link."""
-    headers = _HEADERS.validate_python(scope.get("headers", []))
-    caller = next((value for name, value in headers if name.lower() == b"traceparent"), None)
-    scope["headers"] = [(name, value) for name, value in headers if name.lower() not in _TRACE_HEADERS]
+    headers = MutableHeaders(scope=scope)
+    caller = headers.get(_TRACEPARENT)
+    del headers[_TRACEPARENT]
+    del headers[_TRACESTATE]
     span = None if caller is None else _caller_span(caller)
     if span is not None:
         scope[_CALLER_SPAN] = span
@@ -166,9 +165,9 @@ class _Named:
 
         async def named(message: AsgiMessage) -> None:
             if request_id is not None and message["type"] == "http.response.start":
-                headers = _HEADERS.validate_python(message.get("headers", []))
-                if all(name.lower() != _REQUEST_ID for name, _ in headers):
-                    message["headers"] = [*headers, (_REQUEST_ID, request_id.encode("ascii"))]
+                headers = MutableHeaders(scope=message)
+                if REQUEST_ID_HEADER not in Headers(raw=headers.raw):
+                    headers.append(REQUEST_ID_HEADER, request_id)
             await send(message)
 
         await self._app(scope, receive, named)

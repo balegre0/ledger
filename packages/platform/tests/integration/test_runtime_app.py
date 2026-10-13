@@ -223,7 +223,9 @@ class Fresh:
         with self.admin() as connection:
             return [tuple(row) for row in connection.execute(query).fetchall()]
 
-    def settings(self, *, direct: str | None = None, issuer: LocalIssuer | None = None) -> Settings:
+    def settings(
+        self, *, direct: str | None = None, issuer: LocalIssuer | None = None, pooled: bool = False
+    ) -> Settings:
         """An app's settings on this database as ``ledger_app``; ``direct`` for LISTEN or migrate."""
         return Settings(
             environment="test",
@@ -232,6 +234,7 @@ class Fresh:
             token_issuer=None if issuer is None else issuer.issuer,
             token_audience=None if issuer is None else issuer.audience,
             token_jwks_url=None if issuer is None else issuer.keys_url,
+            database_pooled=pooled,
         )
 
     def migrate(self, probe: ProbeModule) -> None:
@@ -329,9 +332,11 @@ async def prepared_statements(app: App) -> int:
 async def test_a_pool_reached_through_a_pooler_prepares_no_statement(
     fresh: Fresh, probe: ProbeModule
 ) -> None:
-    """A direct URL apart from the database URL means the latter goes through a transaction pooler (§6.7)."""
-    direct = App("worker", settings=fresh.settings(), discover=probe.discover())
-    pooled = App("worker", settings=fresh.settings(direct=fresh.migrator_url), discover=probe.discover())
+    """``LEDGER_DATABASE_POOLED``: the database URL goes through a transaction pooler (§6.7)."""
+    direct = App("worker", settings=fresh.settings(direct=fresh.app_url), discover=probe.discover())
+    pooled = App(
+        "worker", settings=fresh.settings(direct=fresh.app_url, pooled=True), discover=probe.discover()
+    )
     try:
         assert await prepared_statements(direct) > 0
         assert await prepared_statements(pooled) == 0
@@ -386,6 +391,8 @@ async def test_the_worker_fans_out_handles_events_runs_jobs_and_fires_schedules(
     assert live.status_code == HTTPStatus.OK
     assert PATHS.validate_python(document.json()["paths"]) == {}  # the worker mounts no module's routes
     assert asyncio.all_tasks() - before == set()  # every worker stopped with the app
+    assert fresh.rows("SELECT count(*) FROM probe.jobs WHERE status = 'running'") == [(0,)]
+    assert fresh.rows("SELECT count(*) FROM probe.inbox WHERE status = 'running'") == [(0,)]
 
 
 async def test_the_worker_is_not_ready_until_it_listens(fresh: Fresh, probe: ProbeModule) -> None:

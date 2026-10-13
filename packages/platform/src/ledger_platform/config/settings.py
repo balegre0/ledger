@@ -225,7 +225,12 @@ class Settings(BaseSettings):
     database_url: SecretStr = Field(default=...)
     """Where units run, through a pooler if any: ``postgresql+psycopg://ledger_app:...@pooler/ledger``."""
     database_direct_url: SecretStr | None = None
-    """Direct to PostgreSQL (§6.7): the worker's LISTEN connection, and ``ledger-migrate``'s."""
+    """Direct to PostgreSQL (§6.7): the worker's LISTEN connection and ``ledger-migrate``, which need it."""
+    database_pooled: bool = False
+    """``database_url`` goes through a transaction pooler (PgBouncer or the managed equivalent, §6.7).
+
+    psycopg then prepares no statement on it: the pooler hands the next transaction another session.
+    """
     http_port: Annotated[int, Field(ge=1, le=65535)] = 8000
     otlp_endpoint: str | None = None
     """OTLP/gRPC collector, e.g. ``http://otel-collector:4317``; traces are not exported without it."""
