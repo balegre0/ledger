@@ -94,7 +94,7 @@ if [ -z "$user" ]; then
   require "the machine user's id" "$user"
 fi
 
-# The machine user's grant on the project: found by user and project, set to the role, made if missing.
+# The machine user's grant on the project: found by user and project, made if missing, given the role it lacks.
 grants=$(printf '{"queries":[{"userIdQuery":{"userId":"%s"}},{"projectIdQuery":{"projectId":"%s"}}]}' \
   "$user" "$project")
 answer=$(call POST /management/v1/users/grants/_search --data "$grants") ||
@@ -105,7 +105,7 @@ if [ -z "$grant" ]; then
     --data "{\"projectId\":\"$project\",\"roleKeys\":[\"$ROLE\"]}") ||
     fail "granting the machine user $ROLE failed: $answer"
   require "the grant's id" "$(printf '%s' "$answer" | field userGrantId)"
-else
+elif ! printf '%s' "$answer" | grep -q "\"$ROLE\""; then # Zitadel refuses a change that changes nothing
   answer=$(call PUT "/management/v1/users/$user/grants/$grant" --data "{\"roleKeys\":[\"$ROLE\"]}") ||
     fail "granting the machine user $ROLE failed: $answer"
 fi
