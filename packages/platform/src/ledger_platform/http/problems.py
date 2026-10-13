@@ -196,13 +196,13 @@ def _problem(
     if extra is not None:
         body.update(extra)
     answered = dict(headers or {})
-    request_id = _request_id()
+    request_id = current_request_id()
     if request_id is not None:
         body["request_id"] = answered[REQUEST_ID_HEADER] = request_id
     return JSONResponse(body, status_code=status, headers=answered, media_type=PROBLEM_JSON)
 
 
-def _request_id() -> str | None:
+def current_request_id() -> str | None:
     """The id of the request being answered: the id of its trace (the caller's, when it sent one), if any."""
     context = trace.get_current_span().get_span_context()
     return trace.format_trace_id(context.trace_id) if context.is_valid else None

@@ -29,11 +29,12 @@ for the rest of the request, and unbind it when the request ends. They also leav
 (``request_fields``), for the log line of a failure the chassis reports once they have ended.
 """
 
+from abc import ABCMeta, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass
 from http import HTTPStatus
 from types import MappingProxyType
-from typing import Annotated, ClassVar, Final, final
+from typing import Annotated, ClassVar, Final, Protocol, final
 from weakref import WeakSet
 lazy from collections.abc import AsyncGenerator, Callable, Coroutine, Generator, Iterator, Mapping, Sequence
 
@@ -57,7 +58,6 @@ from ledger_platform.http.request_fields import remember
 from ledger_platform.idempotency import MAX_KEY_LENGTH, Attempt, StoredResponse, canonical_body
 lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_platform.auth.access import PermissionSource
-lazy from ledger_platform.auth.tokens import TokenVerifier
 lazy from ledger_platform.idempotency import Outcome
 
 COMPANY_HEADER: Final = "Ledger-Company-Id"
@@ -76,6 +76,15 @@ _BEARER: Final = HTTPBearer(
     bearerFormat="JWT",
     description="An OAuth 2.0 access token (JWT) of the organization's identity provider.",
 )
+
+
+class Verifier(Protocol, metaclass=ABCMeta):
+    """What proves a bearer token: ``TokenVerifier``, or what an app without token settings has instead."""
+
+    @abstractmethod
+    async def verify(self, token: str) -> Principal:
+        """The principal ``token`` proves, else an ``UnauthenticatedError``."""
+
 
 type Caller = Callable[[Request, HTTPAuthorizationCredentials | None], AsyncGenerator[Principal]]
 """The dependency ``authenticated`` makes: a route declares ``Annotated[Principal, Depends(caller)]``."""
@@ -132,7 +141,7 @@ def _bound(request: Request, **fields: str) -> Generator[None]:
         yield
 
 
-def authenticated(verifier: TokenVerifier) -> Caller:
+def authenticated(verifier: Verifier) -> Caller:
     """The dependency that gives a route its caller, proven by the request's bearer token."""
 
     async def caller(

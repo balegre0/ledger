@@ -31,6 +31,16 @@ async def test_a_facade_called_while_a_purge_is_open_is_refused(probe: BoundData
             await Greeting().hello("x")
 
 
+async def test_a_facade_called_outside_a_unit_and_awaited_inside_one_is_refused_when_it_starts(
+    probe: BoundDatabase,
+) -> None:
+    """The check runs again when the coroutine first runs: a call made before a unit is not run inside it."""
+    early = Greeting().hello("x")
+    async with probe.unit(None):
+        with pytest.raises(UnitOpenError, match=r"Greeting\.hello"):
+            await early
+
+
 async def test_a_task_started_inside_a_unit_may_call_after_it_closed(probe: BoundDatabase) -> None:
     gate = asyncio.Event()
 

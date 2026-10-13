@@ -26,6 +26,7 @@ lazy from ledger_platform.config.settings import Settings
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.migrations import SchemaMigrations
 lazy from ledger_platform.events.consumers import ConsumerSpec
+lazy from ledger_platform.http.authentication import Authentication
 lazy from ledger_platform.jobs.outcomes import JobSpec
 lazy from ledger_platform.observability.health import Check
 lazy from ledger_platform.observability.tracing import Tracing
@@ -157,6 +158,8 @@ class ModuleContext:
     """Implementations of the extension points the module declares, bound by the app."""
     telemetry: Telemetry
     """Logger, tracer and metrics scoped to the module."""
+    auth: Authentication
+    """The app's request authentication: its routers declare ``Depends(context.auth.caller)``."""
 
 
 @final
@@ -205,8 +208,8 @@ def bind_parts(
 
     Its API only under its own name; extension point implementations only under the qualified names it
     declares (``[extension_points] implements``, as ``<declaring module>.<Protocol>``); ports only under the
-    names it declares (``provides``). What other modules call (an API, an extension point implementation)
-    must have every public coroutine method a ``@facade``.
+    names it declares (``provides``). What other packages call (an API, an extension point implementation,
+    a port) must have every public coroutine method a ``@facade``.
     """
     name = manifest.package.name
     if parts.api is not None:
@@ -218,6 +221,7 @@ def bind_parts(
         extensions.add(binding, by=name, declared=implements)
     provides = frozenset(manifest.extension_points.provides)
     for binding in parts.provides:
+        require_facades(binding.value)
         ports.add(binding, by=name, declared=provides)
 
 

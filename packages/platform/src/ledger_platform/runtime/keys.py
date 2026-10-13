@@ -8,6 +8,10 @@ Authority runs both ways. A package binds only the names its manifest declares (
 a module's API under its own name, extension point implementations under ``<declaring module>.<Protocol>``,
 ports under the port's name. A package reads only the names it declares (``view(allowed)``): reading anything
 else fails at that read, whenever it happens (at assembly, or at call time for what a module reads later).
+
+A name is bound once: one implementation per extension point, one provider per port
+(``DuplicateBindingError``). A point that needs several implementations (a chain of policies) will be a
+directory of its own, keyed by implementer, when one needs it.
 """
 
 from dataclasses import dataclass

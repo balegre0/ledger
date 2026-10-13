@@ -13,8 +13,11 @@ batch's worth of rows a broken target refuses. Such a pass looks at ``SCAN_BATCH
 most, and a pass that skipped rows through no fault of theirs leaves a mark in memory: the schema's next
 row-by-row pass resumes after the last row it looked at, so a broken target's backlog costs each pass a
 bounded scan, never the whole backlog again. The mark is dropped by the first pass that skips none (the one
-after it starts over from the oldest row) and by every new routing version. ``ledger_outbox_skipped{schema}``
-is how many rows the schema's last pass skipped so. A row that still fails is blamed (its ``attempts``
+after it starts over from the oldest row) and by every new routing version. A row below the mark that becomes
+due only later (an older id committed late by a long transaction or another process, or a row whose
+``attempts`` an operator reset) waits for that wrap-around: a bounded delay, at most the passes it takes to
+walk the rest of the backlog. ``ledger_outbox_skipped{schema}`` is how many rows the schema's last pass
+skipped so. A row that still fails is blamed (its ``attempts``
 counted, ``outbox.fan_out_failed``, ``ledger_outbox_failed_total``) only when the error is its own: it could
 not be read, broke a constraint, or a trigger refused it. Any other error (a revoked grant on one target
 inbox, a lost connection) is no row's fault: such a row is skipped uncounted, whatever the rows beside it did,
@@ -55,8 +58,8 @@ lazy from sqlalchemy.ext.asyncio import AsyncConnection
 from ledger_kernel.errors import LedgerError, error_type
 from ledger_platform.data.notifier import INBOX, OUTBOX
 from ledger_platform.data.tables import chassis_tables
-from ledger_platform.events.metrics import counter, gauge
 from ledger_platform.events.routing import load_routing, routing_version
+from ledger_platform.observability.metrics import counter, gauge
 from ledger_platform.runtime.supervision import being_cancelled
 lazy from ledger_platform.data.codec import JsonValue
 lazy from ledger_platform.data.database import AnyTable, Database

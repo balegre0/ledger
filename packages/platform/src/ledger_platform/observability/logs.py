@@ -28,9 +28,10 @@ import io
 import logging
 import re
 import sys
+from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
 from time import monotonic
-from typing import Final, TypedDict, final
+from typing import Final, Protocol, TypedDict, final
 lazy from collections.abc import Iterator, Sequence
 lazy from typing import TextIO
 
@@ -46,7 +47,6 @@ lazy from structlog.typing import EventDict, ExcInfo, Processor
 from ledger_kernel.errors import error_type, truncate
 from ledger_platform.config.settings import LogFormat
 lazy from ledger_kernel.clock import MonotonicClock
-lazy from ledger_platform.config.settings import ServiceSettings
 
 WITHHELD: Final = "(message withheld: it can quote values)"
 """What a log says in place of the message of an error of the database."""
@@ -295,7 +295,26 @@ def _trace_fields(logger: object, method_name: str, event_dict: EventDict) -> Ev
     return event_dict
 
 
-def _shared_processors(settings: ServiceSettings) -> list[Processor]:
+class LogSettings(Protocol, metaclass=ABCMeta):
+    """What logging reads of an app's settings (v2's ``Settings``, v1's ``ServiceSettings``)."""
+
+    @property
+    @abstractmethod
+    def environment(self) -> str:
+        """Where the process runs: stamped on every record."""
+
+    @property
+    @abstractmethod
+    def log_level(self) -> str:
+        """The lowest level written."""
+
+    @property
+    @abstractmethod
+    def log_format(self) -> LogFormat:
+        """JSON or a terminal's text."""
+
+
+def _shared_processors(settings: LogSettings, service: str) -> list[Processor]:
     """What both structlog records and standard-library records go through, in this order."""
     return [
         structlog.contextvars.merge_contextvars,
@@ -303,7 +322,7 @@ def _shared_processors(settings: ServiceSettings) -> list[Processor]:
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
-        _ProcessFields(settings.service_name, settings.environment),
+        _ProcessFields(service, settings.environment),
     ]
 
 
@@ -326,12 +345,14 @@ def _rendering_processors(log_format: LogFormat) -> list[Processor]:
     return rendering
 
 
-def configure_logging(settings: ServiceSettings) -> None:
+def configure_logging(settings: LogSettings, *, service: str) -> None:
     """Route structlog and every standard-library logger to stdout in ``settings.log_format``.
+
+    ``service`` names the process on every record (``ledger-api``, ``ledger-worker``).
 
     The caller's context variables are left alone: they carry request-scoped values, merged into each record.
     """
-    shared = _shared_processors(settings)
+    shared = _shared_processors(settings, service)
     structlog.configure(
         processors=[
             structlog.stdlib.filter_by_level,

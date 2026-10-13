@@ -36,7 +36,6 @@ lazy from contextlib import AbstractContextManager
 lazy from datetime import datetime
 
 import structlog
-from prometheus_client import Counter
 from pydantic import AwareDatetime, BaseModel, ConfigDict, TypeAdapter
 from sqlalchemy import and_, func, or_, select, update
 lazy from prometheus_client import CollectorRegistry
@@ -48,6 +47,7 @@ from ledger_platform.data.codec import JsonValue
 from ledger_platform.data.queue import DEFAULT_BACKOFF, claim, recover
 from ledger_platform.data.scopes import scope_of
 from ledger_platform.jobs.outcomes import Done, Job, Park, RunAgain
+from ledger_platform.observability.metrics import counter
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.database import AnyTable
 lazy from ledger_platform.data.queue import Backoff
@@ -184,23 +184,23 @@ class JobRunner:
         self._backoff = options.get("backoff", DEFAULT_BACKOFF)
         self._tracing = options.get("tracing")
         self._poll = options.get("poll", POLL)
-        self._lease_lost = Counter(
+        self._lease_lost = counter(
+            registry,
             "ledger_job_lease_lost",
             "Job runs stopped or not recorded: the job was taken over, or its lease could not be renewed.",
             ["kind"],
-            registry=registry,
         )
-        self._recovered = Counter(
+        self._recovered = counter(
+            registry,
             "ledger_job_worker_recovered",
             "Jobs whose lease ran out (their worker died), made ready again after the backoff.",
             ["kind"],
-            registry=registry,
         )
-        self._finished = Counter(
+        self._finished = counter(
+            registry,
             "ledger_jobs_finished",
             "Job runs recorded, by outcome (done, run_again, parked, retry, dead).",
             ["kind", "outcome"],
-            registry=registry,
         )
 
     async def claim_now(self) -> Sequence[Job]:

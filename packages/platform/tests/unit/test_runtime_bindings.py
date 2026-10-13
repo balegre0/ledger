@@ -2,7 +2,7 @@
 
 import inspect
 from typing import Protocol, TypeIs, final, runtime_checkable
-lazy from collections.abc import Coroutine
+lazy from collections.abc import AsyncIterator, Coroutine
 
 import pytest
 
@@ -71,6 +71,7 @@ class Approving:
 
 
 class Signer:
+    @facade
     async def sign(self, payload: bytes) -> bytes:
         return payload
 
@@ -238,3 +239,53 @@ async def test_a_facade_is_a_coroutine_function_that_checks_when_called() -> Non
     guarded = facade(greeting)
     assert inspect.iscoroutinefunction(guarded)
     assert await guarded() == "hello"
+
+
+@final
+class Attributes:
+    """Coroutine functions held as instance attributes: callable like methods, invisible on the class."""
+
+    def __init__(self) -> None:
+        self.company = greeting
+
+
+@final
+class Slotted:
+    __slots__ = ("company",)
+
+    def __init__(self) -> None:
+        self.company = greeting
+
+
+@final
+class Generating:
+    async def companies(self) -> AsyncIterator[str]:
+        yield "acme"
+
+
+@final
+class GuardedAttributes:
+    def __init__(self) -> None:
+        self.company = facade(greeting)
+        self.name = "plain data"
+
+
+@pytest.mark.parametrize(
+    "implementation",
+    [Attributes(), Slotted(), Generating()],
+    ids=["instance-attribute", "slot", "async-generator"],
+)
+def test_coroutines_held_by_the_instance_and_async_generators_must_be_guarded_too(
+    implementation: object,
+) -> None:
+    with pytest.raises(UnguardedFacadeError, match=r"\.compan"):
+        require_facades(implementation)
+    require_facades(GuardedAttributes())
+
+
+def test_a_port_whose_public_coroutines_are_not_facades_is_refused() -> None:
+    with pytest.raises(UnguardedFacadeError, match="Unguarded"):
+        Bench().bind(
+            manifest("signer", provides=["SignerPort"]),
+            ModuleParts(provides=(Key[object]("SignerPort", is_anything).bind(Unguarded()),)),
+        )

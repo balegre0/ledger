@@ -57,7 +57,7 @@ from ledger_platform.data.notifier import INBOX
 from ledger_platform.data.queue import DEFAULT_BACKOFF, claim, recover
 from ledger_platform.events.consumers import raw_event_of
 from ledger_platform.events.dispatcher import POLL, reraise_when_stopping
-from ledger_platform.events.metrics import counter, gauge
+from ledger_platform.observability.metrics import counter, gauge
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.database import AnyTable
 lazy from ledger_platform.data.queue import Backoff

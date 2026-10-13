@@ -526,6 +526,14 @@ class ChannelParts:
 `ledger-devtools` treats each `[[channels]]` entry like a module for schemas, roles, grants, id prefixes,
 permissions, subscriptions and job kinds.
 
+Assembly fails the start, never a later call, when: two packages claim one schema (or a module claims
+`platform`); a module or channel has no schema or no migrations, or hands over migrations of another schema;
+a consumer or job kind is declared without a handler or handed over undeclared; a declared extension point
+has no implementation or a declared port no provider after every module assembled (a channel reads its ports
+while it assembles, so a missing one fails there); an API, extension point implementation or port has a public
+coroutine that is not a `@facade`. A name is bound once: **one implementation per extension point** and one
+provider per port; a point that needs several (a chain of policies) gets a directory of its own when one does.
+
 ---
 
 ## 4. Repository layout and tooling
@@ -1656,7 +1664,10 @@ v1 §9 holds except where noted.
 
 - **Traces**: OpenTelemetry; HTTP, gRPC (signer), SQL, DGII and buyer calls, jobs and consumers. The trace crosses
   the outbox and the job queue: rows store the `traceparent` of the span that wrote them; a consumer or job span
-  continues it (links when one job serves many events). Exporters drop exception messages, stack traces, status
+  continues it (links when one job serves many events). At the public edge a caller's `traceparent` is
+  **linked, never adopted**: each request starts a trace of its own (its id is the `Request-Id` every traced
+  response carries, so a client cannot choose it or share it between requests) with a link to the caller's;
+  an app behind a trusted edge may adopt it instead. Exporters drop exception messages, stack traces, status
   descriptions and raw paths (v1 kept).
 - **Metrics** (Prometheus, `ledger_` prefix, no tenant labels): HTTP and gRPC RED by route template;
   `ledger_outbox_pending{schema}`, `ledger_outbox_oldest_seconds{schema}`, `ledger_outbox_unrouted{schema}`;

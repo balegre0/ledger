@@ -523,7 +523,7 @@ class Service[S: ServiceSettings]:
         events: Events[S] | None = None,
         limits: ServiceLimits = _DEFAULT_LIMITS,
     ) -> None:
-        configure_logging(settings)
+        configure_logging(settings, service=settings.service_name)
         self._settings = settings
         self._interfaces: Interfaces[S] = Interfaces() if interfaces is None else interfaces
         self._events: Events[S] = Events() if events is None else events
@@ -551,8 +551,11 @@ class Service[S: ServiceSettings]:
         health.add_liveness("workers", self._workers_live)
         self._app = create_app(
             info=ApiInfo(title=settings.service_name, version=version),
-            observability=Observability(
-                health=health, registry=self._registry, tracer_provider=self._tracing.provider
+            observability=Observability(  # v1 continues its callers' traces until Task 15 retires it
+                health=health,
+                registry=self._registry,
+                tracer_provider=self._tracing.provider,
+                caller_trace="adopt",
             ),
             lifespan=self._lifespan,
             routers=self._interfaces.http(self._current_runtime),

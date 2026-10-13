@@ -63,7 +63,7 @@ def only_exception(line: dict[str, JsonValue]) -> dict[str, JsonValue]:
 
 
 def test_json_logs_carry_the_service_level_and_time(capsys: pytest.CaptureFixture[str]) -> None:
-    configure_logging(settings(LogFormat.JSON))
+    configure_logging(settings(LogFormat.JSON), service="invoicing")
     structlog.stdlib.get_logger("ledger.test").info("invoice.issued", number=7)
     (line,) = lines(capsys.readouterr().out)
     assert line["event"] == "invoice.issued"
@@ -73,7 +73,7 @@ def test_json_logs_carry_the_service_level_and_time(capsys: pytest.CaptureFixtur
 
 
 def test_standard_library_loggers_are_json_too(capsys: pytest.CaptureFixture[str]) -> None:
-    configure_logging(settings(LogFormat.JSON))
+    configure_logging(settings(LogFormat.JSON), service="invoicing")
     logging.getLogger("sqlalchemy.engine").warning("pool exhausted")
     (line,) = lines(capsys.readouterr().out)
     assert (line["event"], line["level"], line["logger"]) == (
@@ -91,7 +91,7 @@ def test_standard_library_loggers_are_json_too(capsys: pytest.CaptureFixture[str
 def test_exceptions_are_structured_and_never_carry_locals(
     capsys: pytest.CaptureFixture[str], logger: structlog.stdlib.BoundLogger | logging.Logger
 ) -> None:
-    configure_logging(settings(LogFormat.JSON))
+    configure_logging(settings(LogFormat.JSON), service="invoicing")
     logged_exception(logger)
     output = capsys.readouterr().out
     (line,) = lines(output)
@@ -106,7 +106,7 @@ def test_exceptions_are_structured_and_never_carry_locals(
 
 
 def test_lower_levels_are_dropped(capsys: pytest.CaptureFixture[str]) -> None:
-    configure_logging(settings(LogFormat.JSON, "WARNING"))
+    configure_logging(settings(LogFormat.JSON, "WARNING"), service="invoicing")
     structlog.stdlib.get_logger().info("noise")
     logging.getLogger("lib").info("noise")
     assert capsys.readouterr().out == ""
@@ -121,7 +121,7 @@ def test_dropped_records_are_not_processed(monkeypatch: pytest.MonkeyPatch) -> N
         return event_dict
 
     monkeypatch.setattr(structlog.stdlib, "add_log_level", spy)
-    configure_logging(settings(LogFormat.JSON, "WARNING"))
+    configure_logging(settings(LogFormat.JSON, "WARNING"), service="invoicing")
     logger = structlog.stdlib.get_logger()
     logger.info("noise")
     logger.warning("signal")
@@ -129,7 +129,7 @@ def test_dropped_records_are_not_processed(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_console_logs_are_readable(capsys: pytest.CaptureFixture[str]) -> None:
-    configure_logging(settings(LogFormat.CONSOLE))
+    configure_logging(settings(LogFormat.CONSOLE), service="invoicing")
     structlog.stdlib.get_logger().info("invoice.issued", number=7)
     output = capsys.readouterr().out
     assert "invoice.issued" in output
@@ -137,7 +137,7 @@ def test_console_logs_are_readable(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_console_exceptions_are_plain_text_without_locals(capsys: pytest.CaptureFixture[str]) -> None:
-    configure_logging(settings(LogFormat.CONSOLE))
+    configure_logging(settings(LogFormat.CONSOLE), service="invoicing")
     logged_exception(structlog.stdlib.get_logger())
     output = capsys.readouterr().out
     assert f"RuntimeError: {FAILURE}: db/ledger" in output
@@ -147,17 +147,17 @@ def test_console_exceptions_are_plain_text_without_locals(capsys: pytest.Capture
 
 def test_configuring_again_replaces_the_previous_output(capsys: pytest.CaptureFixture[str]) -> None:
     logger = structlog.stdlib.get_logger("ledger.test")
-    configure_logging(settings(LogFormat.CONSOLE))
+    configure_logging(settings(LogFormat.CONSOLE), service="invoicing")
     logger.info("first")
     capsys.readouterr()
-    configure_logging(settings(LogFormat.JSON))
+    configure_logging(settings(LogFormat.JSON), service="invoicing")
     logger.info("second")
     (line,) = lines(capsys.readouterr().out)
     assert line["event"] == "second"
 
 
 def test_every_thread_logs_the_service_and_environment(capsys: pytest.CaptureFixture[str]) -> None:
-    configure_logging(settings(LogFormat.JSON))
+    configure_logging(settings(LogFormat.JSON), service="invoicing")
 
     def work() -> None:
         structlog.stdlib.get_logger("ledger.worker").info("from.structlog")
@@ -175,7 +175,7 @@ def test_request_scoped_values_are_merged_and_the_callers_context_is_left_alone(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     structlog.contextvars.bind_contextvars(request_id="r-1")
-    configure_logging(settings(LogFormat.JSON))
+    configure_logging(settings(LogFormat.JSON), service="invoicing")
     structlog.stdlib.get_logger("ledger.test").info("invoice.issued")
     (line,) = lines(capsys.readouterr().out)
     assert line["request_id"] == "r-1"
@@ -185,7 +185,7 @@ def test_request_scoped_values_are_merged_and_the_callers_context_is_left_alone(
 def test_a_record_written_inside_a_span_carries_its_trace_and_span(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    configure_logging(settings(LogFormat.JSON))
+    configure_logging(settings(LogFormat.JSON), service="invoicing")
     tracer = TracerProvider().get_tracer("test")
     with tracer.start_as_current_span("work") as span:
         structlog.stdlib.get_logger("ledger.test").info("inside")
@@ -201,7 +201,7 @@ def test_a_record_written_inside_a_span_carries_its_trace_and_span(
 
 
 def test_a_record_written_outside_any_span_carries_no_trace(capsys: pytest.CaptureFixture[str]) -> None:
-    configure_logging(settings(LogFormat.JSON))
+    configure_logging(settings(LogFormat.JSON), service="invoicing")
     structlog.stdlib.get_logger("ledger.test").info("outside")
     (line,) = lines(capsys.readouterr().out)
     assert "trace_id" not in line
@@ -247,7 +247,7 @@ async def unique_violation(database: Database) -> IntegrityError:
 
 
 def logged(error: BaseException, log_format: LogFormat, capsys: pytest.CaptureFixture[str]) -> str:
-    configure_logging(settings(log_format))
+    configure_logging(settings(log_format), service="invoicing")
     structlog.stdlib.get_logger("ledger.test").error("work.failed", exc_info=error)
     return capsys.readouterr().out
 

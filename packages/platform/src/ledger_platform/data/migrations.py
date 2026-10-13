@@ -197,5 +197,10 @@ class SchemaMigrations:
         self._ready = True
 
 
-PLATFORM_MIGRATIONS: Final = SchemaMigrations(schema=PLATFORM, scripts="ledger_platform.data:revisions")
-"""The platform schema's revisions, run first by ``ledger-migrate``."""
+def platform_migrations() -> SchemaMigrations:
+    """The platform schema's revisions, run first by ``ledger-migrate``: each app checks its own readiness."""
+    return SchemaMigrations(schema=PLATFORM, scripts="ledger_platform.data:revisions")
+
+
+PLATFORM_MIGRATIONS: Final = platform_migrations()
+"""The platform schema's revisions (one shared instance, for tests and tools)."""

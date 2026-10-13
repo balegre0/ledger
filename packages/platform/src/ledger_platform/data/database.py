@@ -505,6 +505,7 @@ class Database:
         pool_size: int = DEFAULT_POOL_SIZE,
         application_name: str = "ledger",
         limits: DatabaseLimits = DEFAULT_LIMITS,
+        prepared_statements: bool = True,
     ) -> Database:
         """A connection pool to ``url`` (``postgresql+psycopg://``), not yet connected; ``aclose`` closes it.
 
@@ -512,6 +513,10 @@ class Database:
         connections (``pg_stat_activity``, its logs): the service passes its own name. Beyond ``pool_size``
         the pool opens as many again, for bursts. The URL must not carry ``application_name``,
         ``connect_timeout`` or ``options``: the chassis sets them from its arguments.
+
+        ``prepared_statements=False`` for a URL that goes through a transaction pooler (§6.7): psycopg
+        prepares a statement it runs often on the session, and the pooler hands the next transaction another
+        session.
 
         SQLAlchemy does not echo the values bound to a statement (tenant ids, payloads) in the text of a SQL
         error (``hide_parameters``): that text reaches logs. PostgreSQL's own message can still carry
@@ -522,11 +527,13 @@ class Database:
         parsed = make_url(url)
         _require_psycopg(parsed)
         _leave_the_owned_parameters_out(parsed)
-        connect_args = {
+        connect_args: dict[str, object] = {
             "application_name": application_name,
             "connect_timeout": ceil(limits.connect_timeout / _SECOND),
             "options": _server_options(limits),
         }
+        if not prepared_statements:
+            connect_args["prepare_threshold"] = None
         engine = create_async_engine(
             url,
             pool_size=pool_size,

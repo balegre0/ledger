@@ -51,7 +51,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictStr, StringConstraints,
 lazy from joserfc.jwk import Key
 
 from ledger_kernel.access import InvalidSubjectError, Principal, parse_subject
-from ledger_kernel.errors import UnauthenticatedError
+from ledger_kernel.errors import LedgerError, UnauthenticatedError
 from ledger_platform.auth.keys import PublishedKeys
 from ledger_platform.auth.providers.zitadel import (
     ACCESS_TOKEN_CLAIMS,
@@ -64,7 +64,7 @@ from ledger_platform.auth.providers.zitadel import (
 )
 from ledger_platform.config.options import InvalidOptionError, require_seconds
 from ledger_platform.config.settings import TokenAlgorithm
-lazy from ledger_platform.config.settings import ApiSettings
+lazy from ledger_platform.config.settings import ApiSettings, Settings
 
 ASYMMETRIC_ALGORITHMS: Final = frozenset[str](get_args(TokenAlgorithm))
 """Every algorithm a token may be verified with: the ones the settings offer, all of them asymmetric."""
@@ -121,6 +121,15 @@ class InvalidTokenOptionError(InvalidOptionError):
 
     code: ClassVar[str] = "invalid_token_option"
     label: ClassVar[str] = "token option"
+
+
+class TokenSettingsMissingError(LedgerError):
+    """Token settings an app needs are unset: a defect of the deployment, found at the start."""
+
+    code: ClassVar[str] = "token_settings_missing"
+
+    def __init__(self, missing: tuple[str, ...]) -> None:
+        super().__init__(f"the token settings {', '.join(missing)} are not set")
 
 
 def _refuse(problem: TokenProblem) -> Never:
@@ -193,6 +202,24 @@ class TokenPolicy:
             issuer=settings.token_issuer,
             audience=settings.token_audience,
             keys_url=settings.token_jwks_url,
+            algorithms=frozenset(settings.token_algorithms),
+            leeway=settings.token_leeway_seconds,
+        )
+
+    @classmethod
+    def of_settings(cls, settings: Settings) -> TokenPolicy:
+        """The policy an app's settings describe (Decision 14).
+
+        ``TokenSettingsMissingError`` names the token settings that are unset.
+        """
+        issuer, audience, keys_url = settings.token_issuer, settings.token_audience, settings.token_jwks_url
+        if issuer is None or audience is None or keys_url is None:
+            given = {"token_issuer": issuer, "token_audience": audience, "token_jwks_url": keys_url}
+            raise TokenSettingsMissingError(tuple(name for name, value in given.items() if value is None))
+        return cls(
+            issuer=issuer,
+            audience=audience,
+            keys_url=keys_url,
             algorithms=frozenset(settings.token_algorithms),
             leeway=settings.token_leeway_seconds,
         )

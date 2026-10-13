@@ -1,8 +1,8 @@
-"""The eventing metrics (§3.5): one instrument per name and registry, shared by every runner on it.
+"""Metrics shared by many runners of one app (§3.5, §3.6, §11): one instrument per name and registry.
 
-A registry refuses a second instrument of one name, and a worker runs a dispatcher and one inbox runner per
-consumer on one registry, so each instrument is made once per registry. Without a registry (tests) an
-instrument is made and exported nowhere. Labels never name a tenant.
+A registry refuses a second instrument of one name, and a worker runs a dispatcher, an inbox runner per
+consumer and a job runner per schema on one registry, so each instrument is made once per registry. Without a
+registry (tests) an instrument is made and exported nowhere. Labels never name a tenant.
 """
 
 import weakref

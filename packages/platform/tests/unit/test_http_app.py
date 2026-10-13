@@ -349,8 +349,13 @@ def health() -> Health:
 
 @pytest.fixture
 def observability(health: Health, registry: CollectorRegistry, tracing: Tracing) -> Observability:
-    """The test's own health checks, metrics and spans (``exporter`` holds the finished ones)."""
-    return Observability(health=health, registry=registry, tracer_provider=tracing.provider)
+    """The test's own health checks, metrics and spans (``exporter`` holds the finished ones).
+
+    It trusts the caller's ``traceparent``, as an app behind a trusted edge may; ``linking`` is the default.
+    """
+    return Observability(
+        health=health, registry=registry, tracer_provider=tracing.provider, caller_trace="adopt"
+    )
 
 
 def build(observability: Observability, *routers: APIRouter) -> FastAPI:
@@ -719,7 +724,8 @@ async def test_a_response_that_breaks_its_model_is_logged_without_what_it_held(
             service_name="web-test",
             database_url=SecretStr("postgresql+psycopg://x"),
             log_format=LogFormat.JSON,
-        )
+        ),
+        service="web-test",
     )
     response = await client.get("/profile")
     assert (response.status_code, PROBLEM.validate_json(response.content)["code"]) == (500, "internal")
@@ -1133,3 +1139,61 @@ async def test_a_request_without_a_caller_s_trace_is_named_by_its_own(client: ht
     assert response.headers["Request-Id"] == request_id
     assert len(request_id) == 32
     assert request_id != "0" * 32
+
+
+@pytest.fixture
+async def linking(
+    health: Health, registry: CollectorRegistry, tracing: Tracing
+) -> AsyncGenerator[httpx.AsyncClient]:
+    """A client of an app with the default: a caller's ``traceparent`` is linked to, never adopted."""
+    app = build(Observability(health=health, registry=registry, tracer_provider=tracing.provider), router)
+    async with serving(app) as client:
+        yield client
+
+
+async def test_an_untrusted_caller_s_trace_is_linked_not_continued(
+    linking: httpx.AsyncClient, exporter: InMemorySpanExporter
+) -> None:
+    """A public caller cannot choose the request's id: its trace starts anew, linked to the caller's."""
+    response = await linking.get("/items/7", headers={"traceparent": TRACEPARENT, "tracestate": "k=v"})
+    span = server_span(exporter)
+    assert span.context is not None
+    assert span.parent is None
+    own = format_trace_id(span.context.trace_id)
+    assert own != TRACE_ID
+    assert response.headers["Request-Id"] == own
+    assert [
+        (format_trace_id(link.context.trace_id), format_span_id(link.context.span_id)) for link in span.links
+    ] == [(TRACE_ID, CALLER_SPAN_ID)]
+
+
+async def test_a_caller_s_trace_that_is_no_trace_is_not_linked(
+    linking: httpx.AsyncClient, exporter: InMemorySpanExporter
+) -> None:
+    response = await linking.get("/items/7", headers={"traceparent": "00-not-a-trace"})
+    span = server_span(exporter)
+    assert span.links == ()
+    assert len(response.headers["Request-Id"]) == 32
+
+
+async def test_a_caller_s_trace_longer_than_any_is_not_read(
+    linking: httpx.AsyncClient, exporter: InMemorySpanExporter
+) -> None:
+    await linking.get("/items/7", headers={"traceparent": TRACEPARENT + " " * 1000})
+    assert server_span(exporter).links == ()
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [({"traceparent": TRACEPARENT}, TRACE_ID), ({}, None)],
+    ids=["adopted", "own"],
+)
+async def test_every_traced_response_names_its_request(
+    client: httpx.AsyncClient, headers: dict[str, str], expected: str | None
+) -> None:
+    """``Request-Id`` (§9.6) on answers that are not problems too: the trace id support asks for."""
+    response = await client.get("/items/7", headers=headers)
+    assert response.status_code == HTTPStatus.OK
+    request_id = response.headers["Request-Id"]
+    assert len(request_id) == 32
+    assert expected is None or request_id == expected
