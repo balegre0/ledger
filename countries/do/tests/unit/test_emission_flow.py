@@ -10,6 +10,7 @@ from ledger_country_do.channels.ecf_v1.application.emission import (
     CertificateNotValidError,
     Emitter,
     SigningSkewError,
+    Unknown,
 )
 from ledger_country_do.channels.ecf_v1.application.ports import (
     Answer,
@@ -23,6 +24,7 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
     XmlSigner,
 )
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
+from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 from ledger_country_do.channels.ecf_v1.domain.routing import Route
 from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage, EcfState, NumberFate
 from ledger_country_do_testing.clock import ManualClock
@@ -38,8 +40,8 @@ INSTANT: Final = timedelta(0)
 @final
 @dataclass
 class ScriptedAuthority(Authority):
-    submissions: list[Reception | OutcomeUnknownError] = field(default_factory=list)
-    summaries: list[Answer | Refused | OutcomeUnknownError] = field(
+    submissions: list[Reception | EcfError] = field(default_factory=list)
+    summaries: list[Answer | Refused | EcfError] = field(
         default_factory=lambda: [Refused((DgiiMessage("400", "Tipo de archivo no válido"),))]
     )
     answers: list[Answer | AuthorityUnavailableError] = field(default_factory=list)
@@ -53,7 +55,7 @@ class ScriptedAuthority(Authority):
     ) -> Reception:
         self.sent += 1
         found = self.submissions.pop(0)
-        if isinstance(found, OutcomeUnknownError):
+        if isinstance(found, EcfError):
             raise found
         return found
 
@@ -63,7 +65,7 @@ class ScriptedAuthority(Authority):
     ) -> Answer | Refused:
         self.summaries_sent += 1
         found = self.summaries.pop(0)
-        if isinstance(found, OutcomeUnknownError):
+        if isinstance(found, EcfError):
             raise found
         return found
 
@@ -87,7 +89,7 @@ class ScriptedAuthority(Authority):
 class WatchedSigner(XmlSigner):
     """A real signer whose signing is counted, may take (clock) time, and whose validity may be scripted."""
 
-    __slots__ = ("_clock", "_inner", "_takes", "_validity", "signed")
+    __slots__ = ("_clock", "_inner", "_late_from", "_takes", "_validity", "signed")
 
     def __init__(
         self,
@@ -95,11 +97,13 @@ class WatchedSigner(XmlSigner):
         clock: ManualClock,
         *,
         takes: timedelta = INSTANT,
+        late_from: int = 1,
         validity: CertificateValidity | None = None,
     ) -> None:
         self._inner = inner
         self._clock = clock
         self._takes = takes
+        self._late_from = late_from
         self._validity = validity
         self.signed = 0
 
@@ -110,7 +114,8 @@ class WatchedSigner(XmlSigner):
     @override
     async def sign_document(self, document: bytes) -> bytes:
         self.signed += 1
-        self._clock.advance(self._takes)
+        if self.signed >= self._late_from:
+            self._clock.advance(self._takes)
         return await self._inner.sign_document(document)
 
     @override
@@ -155,11 +160,20 @@ async def test_an_unknown_outcome_dgii_never_recorded_is_sent_again(signer: KeyP
     assert (authority.sent, emitted.track_id) == (2, "t3")
 
 
-async def test_an_unknown_outcome_where_dgii_cannot_say_is_left_to_a_person(signer: KeyPairSigner) -> None:
+async def test_an_unknown_outcome_where_dgii_cannot_say_is_parked_with_the_signed_e_cf(
+    signer: KeyPairSigner,
+) -> None:
     authority = ScriptedAuthority(submissions=[BROKEN], known=None)
-    with pytest.raises(OutcomeUnknownError):
-        await emitter(authority, signer).emit(credit_invoice())
+    emitted = await emitter(authority, signer).emit(credit_invoice())
     assert authority.sent == 1
+    assert (emitted.unknown, emitted.track_id, emitted.outcome, emitted.pending) == (
+        Unknown("do_ecf_dgii_outcome_unknown", Failure.BROKEN),
+        None,
+        None,
+        True,
+    )
+    assert emitted.signed_ecf.startswith(b"<?xml")
+    assert len(emitted.security_code) == 6
 
 
 async def test_track_ids_that_cannot_be_read_leave_the_outcome_unknown_never_an_outage(
@@ -167,11 +181,8 @@ async def test_track_ids_that_cannot_be_read_leave_the_outcome_unknown_never_an_
 ) -> None:
     outage = AuthorityUnavailableError(Failure.SERVER_ERROR, "track_ids")
     authority = ScriptedAuthority(submissions=[BROKEN], known=outage)
-    with pytest.raises(OutcomeUnknownError) as raised:
-        await emitter(authority, signer).emit(credit_invoice())
-    assert raised.value is BROKEN
-    assert raised.value.__cause__ is outage
-    assert authority.sent == 1
+    emitted = await emitter(authority, signer).emit(credit_invoice())
+    assert (emitted.unknown, authority.sent) == (Unknown("do_ecf_dgii_outcome_unknown", Failure.BROKEN), 1)
 
 
 async def test_a_second_unknown_outcome_after_resending_is_not_sent_a_third_time(
@@ -179,9 +190,8 @@ async def test_a_second_unknown_outcome_after_resending_is_not_sent_a_third_time
 ) -> None:
     again = OutcomeUnknownError("reception", Failure.TIMED_OUT)
     authority = ScriptedAuthority(submissions=[BROKEN, again])
-    with pytest.raises(OutcomeUnknownError) as raised:
-        await emitter(authority, signer).emit(credit_invoice())
-    assert (raised.value, authority.sent) == (again, 2)
+    emitted = await emitter(authority, signer).emit(credit_invoice())
+    assert (emitted.unknown, authority.sent) == (Unknown("do_ecf_dgii_outcome_unknown", Failure.TIMED_OUT), 2)
 
 
 async def test_after_the_schedule_a_document_still_in_process_is_pending(signer: KeyPairSigner) -> None:
@@ -202,7 +212,11 @@ async def test_an_outage_while_polling_leaves_the_received_document_pending_with
     outage = AuthorityUnavailableError(Failure.UNREACHABLE, "result")
     authority = ScriptedAuthority(submissions=[Received("t")], answers=[IN_PROCESS, outage])
     emitted = await emitter(authority, signer).emit(credit_invoice())
-    assert (emitted.track_id, emitted.pending, emitted.interrupted) == ("t", True, "do_ecf_dgii_unavailable")
+    assert (emitted.track_id, emitted.pending, emitted.unknown) == (
+        "t",
+        True,
+        Unknown("do_ecf_dgii_unavailable", Failure.UNREACHABLE),
+    )
     assert emitted.outcome is not None
     assert emitted.outcome.state is EcfState.IN_PROCESS
 
@@ -212,7 +226,11 @@ async def test_a_code_dgii_never_documented_while_polling_is_not_guessed_and_kee
 ) -> None:
     authority = ScriptedAuthority(submissions=[Received("t")], answers=[Answer(9, (), None)])
     emitted = await emitter(authority, signer).emit(credit_invoice())
-    assert (emitted.track_id, emitted.outcome, emitted.interrupted) == ("t", None, "do_ecf_dgii_code_unknown")
+    assert (emitted.track_id, emitted.outcome, emitted.unknown) == (
+        "t",
+        None,
+        Unknown("do_ecf_dgii_code_unknown", None),
+    )
     assert emitted.pending
 
 
@@ -235,7 +253,7 @@ async def test_an_rfce_whose_outcome_is_unknown_is_parked_never_sent_again(signe
     emitted = await emitter(authority, signer).emit(consumer_invoice())
     assert (emitted.route, authority.summaries_sent, authority.sent) == (Route.RFCE, 1, 0)
     assert (emitted.unknown, emitted.outcome, emitted.pending, emitted.track_id) == (
-        Failure.BROKEN,
+        Unknown("do_ecf_dgii_outcome_unknown", Failure.BROKEN),
         None,
         True,
         None,
@@ -290,3 +308,42 @@ async def test_a_clock_that_runs_back_while_signing_is_refused_too(signer: KeyPa
     back = WatchedSigner(signer, clock, takes=-(MAX_SIGNING_SKEW + timedelta(seconds=1)))
     with pytest.raises(SigningSkewError):
         await emitter(ScriptedAuthority(), back, clock=clock).emit(credit_invoice())
+
+
+async def test_an_rfce_answered_with_a_code_dgii_never_documented_is_parked(signer: KeyPairSigner) -> None:
+    authority = ScriptedAuthority(summaries=[Answer(code=3, messages=(), sequence_used=None)])
+    emitted = await emitter(authority, signer).emit(consumer_invoice())
+    assert (emitted.unknown, emitted.outcome, emitted.pending, authority.summaries_sent) == (
+        Unknown("do_ecf_dgii_code_unknown", None),
+        None,
+        True,
+        1,
+    )
+    assert emitted.signed_rfce is not None
+
+
+async def test_an_e_cf_dgii_did_not_take_is_parked_too(signer: KeyPairSigner) -> None:
+    throttled = AuthorityUnavailableError(Failure.THROTTLED, "reception")
+    authority = ScriptedAuthority(submissions=[throttled])
+    emitted = await emitter(authority, signer).emit(credit_invoice())
+    assert (emitted.unknown, emitted.track_id, authority.sent) == (
+        Unknown("do_ecf_dgii_unavailable", Failure.THROTTLED),
+        None,
+        1,
+    )
+
+
+async def test_an_rfce_whose_signature_comes_back_late_is_parked_unsent_with_the_signed_e_cf(
+    signer: KeyPairSigner,
+) -> None:
+    clock = ManualClock(NOW)
+    late = WatchedSigner(signer, clock, takes=MAX_SIGNING_SKEW + timedelta(seconds=1), late_from=2)
+    authority = ScriptedAuthority()
+    emitted = await emitter(authority, late, clock=clock).emit(consumer_invoice())
+    assert (emitted.unknown, emitted.signed_rfce, authority.summaries_sent, late.signed) == (
+        Unknown("do_ecf_signing_skew", None),
+        None,
+        0,
+        2,
+    )
+    assert len(emitted.security_code) == 6

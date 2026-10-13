@@ -7,7 +7,7 @@ from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import verify_enveloped
 from ledger_country_do.channels.ecf_v1.adapters.xml.documents import DgiiXml
 from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import texts
-from ledger_country_do.channels.ecf_v1.application.emission import Emitter
+from ledger_country_do.channels.ecf_v1.application.emission import Emitter, Unknown
 from ledger_country_do.channels.ecf_v1.application.ports import Failure
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 from ledger_country_do.channels.ecf_v1.domain.printed import QrHosts
@@ -18,7 +18,6 @@ from ledger_country_do.channels.ecf_v1.domain.status_map import (
     FiscalStatus,
     NumberFate,
     Severity,
-    UnknownDgiiCodeError,
 )
 from ledger_country_do_testing.fake_dgii.state import Scripted, Status
 from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
@@ -145,10 +144,17 @@ async def test_a_large_consumer_invoice_goes_in_full(emitter: Emitter, fake: Fak
     assert fake.received[-1].host == "ecf.fake.test"
 
 
-async def test_an_rfce_code_dgii_does_not_document_is_not_guessed(emitter: Emitter, fake: FakeDgii) -> None:
+async def test_an_rfce_code_dgii_does_not_document_is_not_guessed_and_the_rfce_is_parked(
+    emitter: Emitter, fake: FakeDgii
+) -> None:
     fake.script.default = Scripted(status=Status.IN_PROCESS)
-    with pytest.raises(UnknownDgiiCodeError):
-        await emitter.emit(consumer_invoice())
+    emitted = await emitter.emit(consumer_invoice())
+    assert (emitted.unknown, emitted.outcome, emitted.pending) == (
+        Unknown("do_ecf_dgii_code_unknown", None),
+        None,
+        True,
+    )
+    assert fake.received[-1].document == emitted.signed_rfce
 
 
 async def test_a_broken_connection_after_sending_is_resolved_by_track_ids_not_a_second_send(
@@ -219,8 +225,37 @@ async def test_an_rfce_whose_connection_broke_after_sending_is_parked_not_resent
     assert len(fake.received) == 1
     assert (emitted.route, emitted.unknown, emitted.outcome, emitted.pending) == (
         Route.RFCE,
-        Failure.BROKEN,
+        Unknown("do_ecf_dgii_outcome_unknown", Failure.BROKEN),
         None,
         True,
     )
     assert fake.received[0].document == emitted.signed_rfce
+
+
+async def test_an_e_cf_whose_outcome_certecf_cannot_tell_is_parked_with_the_signed_document(
+    signer: KeyPairSigner, fake: FakeDgii, clock: ManualClock
+) -> None:
+    broken = Counting(BreaksAfterSending(httpx.ASGITransport(app=fake.app), RECEPTION))
+    async with DgiiClient(
+        signer, hosts=FAKE_HOSTS, clock=clock, sleep=no_sleep, transport=broken
+    ).opened() as dgii:
+        emitter = Emitter(
+            xml=DgiiXml(),
+            signer=signer,
+            authority=dgii,
+            environment=Environment.CERTECF,
+            clock=clock,
+            sleep=no_sleep,
+        )
+        emitted = await emitter.emit(credit_invoice())
+    assert [path for path in broken.paths if RECEPTION in path] == [
+        "/certecf/recepcion/api/facturaselectronicas"
+    ]
+    assert not any("trackids" in path for path in broken.paths)
+    assert (emitted.unknown, emitted.track_id, emitted.pending) == (
+        Unknown("do_ecf_dgii_outcome_unknown", Failure.BROKEN),
+        None,
+        True,
+    )
+    assert fake.received[0].document == emitted.signed_ecf
+    assert emitted.qr.startswith("https://ecf.dgii.gov.do/certecf/consultatimbre?")
