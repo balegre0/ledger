@@ -13,6 +13,7 @@ _IMPORTS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
         "opentelemetry-sdk": ("opentelemetry",),
         "opentelemetry-exporter-otlp-proto-grpc": ("opentelemetry",),
         "prometheus-client": ("prometheus_client",),
+        "protobuf": ("google",),
         "pydantic-settings": ("pydantic_settings",),
         "pytest-asyncio": ("pytest_asyncio",),
         "pytest-xdist": ("xdist",),
@@ -26,6 +27,11 @@ def distribution_of(requirement: str) -> str:
     """``psycopg[binary]>=3.3.6`` → ``psycopg``."""
     found = _DISTRIBUTION.match(requirement)
     return "" if found is None else found[0]
+
+
+def renamed(distribution: str) -> bool:
+    """Whether ``distribution`` installs modules named otherwise (deptry's module map lists exactly those)."""
+    return distribution in _IMPORTS
 
 
 def import_names(distribution: str) -> tuple[str, ...]:

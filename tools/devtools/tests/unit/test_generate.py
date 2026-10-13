@@ -20,6 +20,22 @@ type Writer = Callable[[str, str, tuple[str, ...]], Path]
 
 ROOT: Final = Path(__file__).parents[4]
 """The repository: ``ruff format`` reads its configuration from there."""
+LINE_LENGTH: Final = 110
+
+QUOTES: Final = r"""
+[package]
+name = "quotes"
+kind = "module"
+summary = 'Say "hi".'
+owners = ["it's", '''It's "x" and "y"''', '''one "x" it's and it's''', "tab\there, back\\slash, bell\u0007"]
+"""
+LONG: Final = f"""
+[package]
+name = "long"
+kind = "module"
+summary = "{" ".join(["lorem"] * 33)}"
+owners = ["@{"x" * 300}", "{"ab " * 60}"]
+"""
 
 COUNTRY: Final = """
 [package]
@@ -30,7 +46,13 @@ owners = ["@o"]
 
 [dependencies]
 packages = ["kernel", "platform"]
-python = ["lxml>=6.0", "opentelemetry-api>=1.45.1", "opentelemetry-sdk>=1.45.1"]
+python = [
+    "lxml>=6.0",
+    "opentelemetry-api>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
+    "protobuf>=7.35.0",
+    "typing-extensions>=4.15",
+]
 
 [country]
 iso = "DO"
@@ -139,7 +161,10 @@ def test_a_country_declares_its_regimes_and_channels_as_entry_points(tree: Path,
         '"do-ecf-v1" = "ledger_country_do.channels.ecf_v1:CHANNEL"'
     ) in text
     assert '"opentelemetry-api" = "opentelemetry"' in text
-    assert "lxml" not in text.split("[tool.deptry.package_module_name_map]", 1)[1]
+    assert '"protobuf" = "google"' in text
+    module_map = text.split("[tool.deptry.package_module_name_map]", 1)[1]
+    assert "lxml" not in module_map
+    assert "typing-extensions" not in module_map
     assert tomllib.loads(text)["project"]["name"] == "ledger-country-do"
 
 
@@ -184,16 +209,56 @@ def test_manifest_values_of_every_toml_type_are_written_as_ruff_formats_them(
     assert scripts in platform
     identity = manifest_module_text(workspace.by_name("identity"))
     assert '                "version": 1,\n' in identity
-    for name, text in (("do", country), ("platform", platform), ("identity", identity)):
-        formatted = subprocess.run(
-            [sys.executable, "-m", "ruff", "format", "--stdin-filename", f"{name}/_manifest.py", "-"],
-            input=text,
-            capture_output=True,
-            text=True,
-            check=True,
-            cwd=ROOT,
-        )
-        assert formatted.stdout == text
+    for text in (country, platform, identity):
+        assert_ruff_accepts(text)
+
+
+def assert_ruff_accepts(text: str) -> None:
+    """``ruff format`` leaves ``text`` as it is and ``ruff check`` (every rule) finds nothing in it."""
+    stdin = ("--stdin-filename", "packages/platform/src/ledger_platform/_manifest.py", "-")
+    ruff = (sys.executable, "-m", "ruff")
+    formatted = subprocess.run(
+        [*ruff, "format", *stdin], input=text, capture_output=True, text=True, check=True, cwd=ROOT
+    )
+    assert formatted.stdout == text
+    checked = subprocess.run(
+        [*ruff, "check", "--no-cache", *stdin],
+        input=text,
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+    )
+    assert (checked.returncode, checked.stdout) == (0, "All checks passed!\n")
+    assert all(len(line) <= LINE_LENGTH for line in text.splitlines())
+
+
+def assert_round_trips(tree: Path, name: str) -> None:
+    """The generated module, imported, holds the manifest the workspace read."""
+    package = Workspace.load(tree).by_name(name)
+    module = tree / f"{name}_manifest.py"
+    module.write_text(manifest_module_text(package), encoding="utf-8")
+    assert runpy.run_path(str(module))["MANIFEST"] == package.manifest
+
+
+def test_strings_are_quoted_the_way_ruff_quotes_them(tree: Path, write: Writer) -> None:
+    write("modules/quotes", QUOTES, ())
+    text = manifest_module_text(Workspace.load(tree).by_name("quotes"))
+    assert "'Say \"hi\".'" in text
+    assert '"it\'s"' in text
+    assert '\'It\\\'s "x" and "y"\'' in text
+    assert '"one \\"x\\" it\'s and it\'s"' in text
+    assert '"tab\\there, back\\\\slash, bell\\x07"' in text
+    assert_ruff_accepts(text)
+    assert_round_trips(tree, "quotes")
+
+
+def test_long_strings_are_wrapped_to_the_line_length(tree: Path, write: Writer) -> None:
+    write("modules/long", LONG, ())
+    text = manifest_module_text(Workspace.load(tree).by_name("long"))
+    assert '            "summary": (\n' in text
+    assert_ruff_accepts(text)
+    assert_round_trips(tree, "long")
 
 
 def test_booleans_and_empty_tables_are_written_too(tree: Path, write: Writer) -> None:
@@ -229,7 +294,24 @@ def test_importlinter_contracts_follow_the_manifests(tree: Path) -> None:
     assert "identity-declared-edges" not in text
     assert "modules-never-import-countries" not in text
     assert "countries-are-independent" not in text
-    assert "    runtime\n    http | grpc\n    events | jobs\n" in text
+    assert "containers =\n    ledger_platform\nexhaustive = True\nlayers =\n    _manifest\n" in text
+
+
+def test_platform_layers_list_the_subpackages_that_exist(tree: Path) -> None:
+    for child in ("runtime", "http", "data"):
+        (tree / "packages/platform/src/ledger_platform" / child).mkdir()
+    text = importlinter_text(Workspace.load(tree))
+    assert "layers =\n    runtime\n    http\n    data\n    _manifest\n" in text
+
+
+def test_contracts_over_sources_that_do_not_exist_are_left_out(tree: Path) -> None:
+    for name in ("kernel", "platform"):
+        source = tree / f"packages/{name}/src/ledger_{name}"
+        (source / "__init__.py").unlink()
+        source.rmdir()
+    text = importlinter_text(Workspace.load(tree))
+    assert "kernel-is-stdlib-only" not in text
+    assert "platform-layers" not in text
 
 
 def test_importlinter_contracts_cover_countries_edges_and_the_kit(tree: Path, write: Writer) -> None:
@@ -274,6 +356,7 @@ def test_importlinter_without_apps_has_no_compose_contract(tree: Path) -> None:
 
 def test_targets_cover_every_generated_file(tree: Path, write: Writer) -> None:
     write("countries/mx", OTHER_COUNTRY, ())
+    write("modules/billing", BILLING, ())
     generated = targets(Workspace.load(tree))
     assert {
         Path(".importlinter"),
@@ -281,6 +364,7 @@ def test_targets_cover_every_generated_file(tree: Path, write: Writer) -> None:
         Path("modules/identity/src/ledger_identity/_manifest.py"),
         Path("packages/platform/src/ledger_platform/_manifest.py"),
         Path("countries/mx/src/ledger_country_mx/_manifest.py"),
+        Path("modules/billing/src/ledger_billing/_manifest.py"),  # every module: its assembly reads it
         Path("apps/api/pyproject.toml"),
     } <= set(generated)
     assert (

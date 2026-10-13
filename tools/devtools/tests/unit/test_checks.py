@@ -87,7 +87,14 @@ summary = "A fake DGII."
 owners = ["@o"]
 """
 IDENTITY: Final = "modules/identity"
+DEPENDS_ON_DO: Final = """
+[dependencies]
+packages = ["do"]
+"""
 PLATFORM: Final = "packages/platform"
+COUNTRY_DEPENDENCY: Final = (
+    "dependencies.packages names 'do', a country, which only apps and its own testing package may depend on"
+)
 
 
 def messages(root: Path) -> list[str]:
@@ -156,13 +163,13 @@ def test_a_dependency_on_an_unknown_package_or_module_is_reported(tree: Path, ed
     edit(
         IDENTITY,
         'packages = ["kernel", "platform"]',
-        'packages = ["kernel", "ghost", "identity"]\nmodules = ["ghost"]',
+        'packages = ["kernel", "ghost", "api"]\nmodules = ["ghost"]',
     )
     where = "modules/identity/manifest.toml"
     assert messages(tree) == [
         f"{where}: dependencies.modules names 'ghost', which is not a module",
+        f"{where}: dependencies.packages names 'api', which is not a package",
         f"{where}: dependencies.packages names 'ghost', which is not a package",
-        f"{where}: dependencies.packages names 'identity', which is not a package",
     ]
 
 
@@ -254,4 +261,50 @@ def test_a_module_submodule_outside_the_layers_is_reported(tree: Path) -> None:
     assert messages(tree) == [
         f"{where}: ledger_identity.helpers is not a layer {layers}",
         f"{where}: ledger_identity.utils is not a layer {layers}",
+    ]
+
+
+def test_only_apps_and_its_own_testing_package_depend_on_a_country(
+    tree: Path, write: Writer, edit: Editor
+) -> None:
+    write("countries/do", COUNTRY, ())
+    write(
+        "countries/do/testing", NESTED.replace('name = "testing"', 'name = "do-testing"') + DEPENDS_ON_DO, ()
+    )
+    write(
+        "countries/mx/testing",
+        NESTED.replace('name = "testing"', 'name = "mx-testing"') + DEPENDS_ON_DO,
+        (),
+    )
+    edit("apps/api", 'packages = ["platform"]', 'packages = ["platform", "do"]')
+    edit(IDENTITY, 'packages = ["kernel", "platform"]', 'packages = ["kernel", "platform", "do"]')
+    assert messages(tree) == [
+        f"countries/mx/testing/manifest.toml: {COUNTRY_DEPENDENCY}",
+        f"modules/identity/manifest.toml: {COUNTRY_DEPENDENCY}",
+    ]
+
+
+def test_a_package_never_depends_on_itself(tree: Path, edit: Editor) -> None:
+    edit(PLATFORM, 'packages = ["kernel"]', 'packages = ["kernel", "platform"]')
+    edit(
+        IDENTITY,
+        'packages = ["kernel", "platform"]',
+        'packages = ["kernel", "platform"]\nmodules = ["identity"]',
+    )
+    assert messages(tree) == [
+        "modules/identity/manifest.toml: dependencies.modules names 'identity', which is the package itself",
+        (
+            "packages/platform/manifest.toml: dependencies.packages names 'platform', "
+            "which is the package itself"
+        ),
+    ]
+
+
+def test_packages_never_depend_on_each_other_in_a_cycle(tree: Path) -> None:
+    kernel = tree / "packages/kernel/manifest.toml"
+    kernel.write_text(
+        kernel.read_text(encoding="utf-8") + '\n[dependencies]\npackages = ["platform"]\n', "utf-8"
+    )
+    assert messages(tree) == [
+        "packages/platform/manifest.toml: the package graph has a cycle: platform -> kernel -> platform"
     ]

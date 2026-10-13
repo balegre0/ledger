@@ -156,17 +156,35 @@ def _names_start_with_their_owner(workspace: Workspace) -> Iterator[Problem]:
                 yield scope.problem(f"{what} '{name}' {rule}")
 
 
+def _dependency_problem(package: Package, name: str, kinds: Mapping[str, PackageKind]) -> str | None:
+    """What is wrong with ``package`` naming ``name`` in ``dependencies.packages``, if anything."""
+    kind = kinds.get(name)
+    if name == package.name:
+        return f"dependencies.packages names '{name}', which is the package itself"
+    if kind not in _DEPENDED_ON:
+        return f"dependencies.packages names '{name}', which is not a package"
+    if kind is PackageKind.COUNTRY and package.kind is not PackageKind.APP and package.nested_country != name:
+        return (
+            f"dependencies.packages names '{name}', a country, "
+            "which only apps and its own testing package may depend on"
+        )
+    return None
+
+
 def _dependencies_exist(workspace: Workspace) -> Iterator[Problem]:
     kinds: Mapping[str, PackageKind] = {package.name: package.kind for package in workspace.packages}
     for package in workspace.packages:
         dependencies = package.manifest.dependencies
         for name in dependencies.packages:
-            if kinds.get(name) not in _DEPENDED_ON:
-                yield Problem(
-                    package.manifest_path, f"dependencies.packages names '{name}', which is not a package"
-                )
+            problem = _dependency_problem(package, name, kinds)
+            if problem is not None:
+                yield Problem(package.manifest_path, problem)
         for name in dependencies.modules:
-            if kinds.get(name) is not PackageKind.MODULE:
+            if name == package.name:
+                yield Problem(
+                    package.manifest_path, f"dependencies.modules names '{name}', which is the package itself"
+                )
+            elif kinds.get(name) is not PackageKind.MODULE:
                 yield Problem(
                     package.manifest_path, f"dependencies.modules names '{name}', which is not a module"
                 )
@@ -184,14 +202,30 @@ def _consumed_types_are_published(workspace: Workspace) -> Iterator[Problem]:
                     )
 
 
-def _modules_are_acyclic(workspace: Workspace) -> Iterator[Problem]:
+def _cycle(workspace: Workspace, graph: Mapping[str, tuple[str, ...]], what: str) -> Iterator[Problem]:
+    """A cycle of ``graph`` (names to the names they depend on), reported at its first package."""
     try:
-        TopologicalSorter(workspace.module_graph()).prepare()
+        TopologicalSorter(graph).prepare()
     except CycleError as error:
         cycle = _CYCLE.validate_python(error.args[1])
         yield Problem(
-            workspace.by_name(cycle[0]).manifest_path, f"the module graph has a cycle: {' -> '.join(cycle)}"
+            workspace.by_name(cycle[0]).manifest_path, f"the {what} graph has a cycle: {' -> '.join(cycle)}"
         )
+
+
+def _modules_are_acyclic(workspace: Workspace) -> Iterator[Problem]:
+    return _cycle(workspace, workspace.module_graph(), "module")
+
+
+def _packages_are_acyclic(workspace: Workspace) -> Iterator[Problem]:
+    names = {package.name for package in workspace.packages}
+    graph = {
+        package.name: tuple(
+            name for name in package.manifest.dependencies.packages if name in names and name != package.name
+        )
+        for package in workspace.packages
+    }
+    return _cycle(workspace, graph, "package")
 
 
 def _schedules_enqueue_declared_jobs(workspace: Workspace) -> Iterator[Problem]:
@@ -234,6 +268,7 @@ _RULES: Final[tuple[Callable[[Workspace], Iterator[Problem]], ...]] = (
     _dependencies_exist,
     _consumed_types_are_published,
     _modules_are_acyclic,
+    _packages_are_acyclic,
     _schedules_enqueue_declared_jobs,
     _modules_are_layers,
 )

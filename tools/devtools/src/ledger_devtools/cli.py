@@ -7,11 +7,12 @@ from typing import ClassVar, Final, final
 lazy from collections.abc import Mapping, Sequence
 
 from ledger_devtools.checks import check
-from ledger_devtools.generate import targets
+from ledger_devtools.generate import orphans, targets
 from ledger_devtools.workspace import Workspace, WorkspaceError
 
 _PROBLEMS: Final = 1
 _UNREADABLE: Final = 2
+_ORPHAN: Final = "generated, but no manifest implies it any more: run `uv run ledger-devtools sync`"
 
 
 @final
@@ -41,9 +42,10 @@ def _report(lines: Sequence[str]) -> int:
 def main(arguments: Sequence[str] | None = None) -> int:
     """Run ``sync`` or ``check`` on ``--root`` (the current directory by default); the exit status.
 
-    ``check`` exits 1 when a manifest breaks a rule or a generated file is stale; ``sync`` writes nothing
-    while a manifest breaks a rule (what it writes follows from the manifests) and exits 1. Both exit 2 when
-    the tree has no readable manifest.
+    ``check`` exits 1 when a manifest breaks a rule, a generated file is stale, or a generated file is one
+    no manifest implies any more; ``sync`` writes the stale files and deletes those, but writes nothing while
+    a manifest breaks a rule (what it writes follows from the manifests) and exits 1. Both exit 2 when the
+    tree has no readable manifest.
     """
     parser = argparse.ArgumentParser(prog="ledger-devtools")
     parser.add_argument("command", choices=_Arguments.commands)
@@ -60,9 +62,18 @@ def main(arguments: Sequence[str] | None = None) -> int:
         return _report(problems)
     generated = targets(workspace)
     stale = _stale(root, generated)
+    unwanted = orphans(workspace, generated)
     if command == "check":
-        return _report([f"{path.as_posix()}: stale, run `uv run ledger-devtools sync`" for path in stale])
+        return _report(
+            [
+                *(f"{path.as_posix()}: stale, run `uv run ledger-devtools sync`" for path in stale),
+                *(f"{path.as_posix()}: {_ORPHAN}" for path in unwanted),
+            ]
+        )
     for path in stale:
         (root / path).write_text(generated[path], encoding="utf-8", newline="\n")
         sys.stdout.write(f"wrote {path.as_posix()}\n")
+    for path in unwanted:
+        (root / path).unlink()
+        sys.stdout.write(f"deleted {path.as_posix()}\n")
     return 0

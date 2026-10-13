@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from typing import Final
 lazy from pathlib import Path
 
 lazy import pytest
@@ -71,3 +72,43 @@ def test_the_root_defaults_to_the_current_directory(
 ) -> None:
     monkeypatch.chdir(tree)
     assert run(capsys, "check")[0] == 1
+
+
+ORPHAN: Final = "generated, but no manifest implies it any more: run `uv run ledger-devtools sync`"
+
+
+def test_a_package_that_drops_its_schema_loses_its_manifest_module(
+    tree: Path, capsys: pytest.CaptureFixture[str], edit: Editor
+) -> None:
+    run(capsys, "sync", "--root", str(tree))
+    edit("packages/platform", '[data]\nschema = "platform"\n', "")
+    manifest_module = "packages/platform/src/ledger_platform/_manifest.py"
+    code, lines, _ = run(capsys, "check", "--root", str(tree))
+    assert code == 1
+    assert f"{manifest_module}: {ORPHAN}" in lines
+    code, lines, _ = run(capsys, "sync", "--root", str(tree))
+    assert code == 0
+    assert f"deleted {manifest_module}" in lines
+    assert not (tree / manifest_module).exists()
+    assert run(capsys, "check", "--root", str(tree)) == (0, [], "")
+
+
+def test_generated_files_nothing_implies_are_deleted_and_hand_written_ones_kept(
+    tree: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run(capsys, "sync", "--root", str(tree))
+    (tree / "apps/api/manifest.toml").unlink()
+    stray = tree / "packages/kernel/src/ledger_kernel/_manifest.py"
+    stray.write_text('"""Hand-written."""\n', encoding="utf-8")
+    hand_written = tree / "apps/legacy/pyproject.toml"
+    hand_written.parent.mkdir()
+    hand_written.write_text("[project]\n", encoding="utf-8")
+    code, lines, _ = run(capsys, "check", "--root", str(tree))
+    assert code == 1
+    assert f"apps/api/pyproject.toml: {ORPHAN}" in lines
+    assert f"packages/kernel/src/ledger_kernel/_manifest.py: {ORPHAN}" in lines
+    assert not any(line.startswith("apps/legacy") for line in lines)
+    run(capsys, "sync", "--root", str(tree))
+    assert not (tree / "apps/api/pyproject.toml").exists()
+    assert not stray.exists()
+    assert hand_written.exists()
