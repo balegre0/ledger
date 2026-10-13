@@ -13,3 +13,4 @@ dist/
 htmlcov/
 .tilt-dev/
 .env
+deploy/local/zitadel/.local/

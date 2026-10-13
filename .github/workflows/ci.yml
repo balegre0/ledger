@@ -43,7 +43,9 @@ jobs:
       - name: Format, lint, types x2, architecture, deps, spelling, tests
         run: uv run poe check
       - name: Local infrastructure configuration
-        run: docker compose -f deploy/local/compose.yaml config --quiet
+        run: |
+          docker compose -f deploy/local/compose.yaml config --quiet
+          docker compose -f deploy/local/compose.yaml --profile zitadel config --quiet
       - uses: docker/setup-buildx-action@v4
       - name: Identity's production image
         # Built once, with its layers cached in GitHub Actions' cache (the dependencies' layer changes only with the

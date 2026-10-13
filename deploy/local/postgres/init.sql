@@ -14,3 +14,8 @@ CREATE DATABASE ledger OWNER ledger_app;
 -- and it cannot bypass row-level security (the migrations force it on every table of a tenant's data).
 CREATE ROLE identity LOGIN PASSWORD 'identity' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
 CREATE DATABASE identity OWNER identity;
+
+-- The local Zitadel's database and role (compose profile `zitadel`): Zitadel makes its schema at its first start,
+-- as the owner of its database; it needs no superuser either.
+CREATE ROLE zitadel LOGIN PASSWORD 'zitadel' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+CREATE DATABASE zitadel OWNER zitadel;

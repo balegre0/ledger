@@ -13,11 +13,13 @@
 # created: after editing it, `docker compose down -v` starts over.
 #
 # Every image is pinned to an exact version tag, not to a floating one. A version tag can still be
-# re-pushed (a rebuild on a newer base image keeps it); pinning digests is a later hardening step.
+# re-pushed (a rebuild on a newer base image keeps it): Zitadel's is pinned by digest too, and pinning the others'
+# digests is a later hardening step.
 #
 # Services: identity runs from its production image (services/identity/Dockerfile), read-only, as nonroot, with
 # its migrations applied first by the one-shot identity-migrate. Its database and role come from
-# postgres/init.sql; a data volume made before that file listed them needs `docker compose down -v`.
+# postgres/init.sql; a data volume made before that file listed them needs `docker compose down -v`. The profile
+# `zitadel` adds a local identity provider (zitadel/README.md).
 name: ledger
 
 services:
@@ -90,6 +92,47 @@ services:
       identity-migrate: {condition: service_completed_successfully}
       nats: {condition: service_healthy}
 
+  zitadel:
+    # The identity provider of the local stack, optional: `docker compose --profile zitadel up -d --wait`. It
+    # answers as zitadel.localhost:8080 on the host (curl and browsers resolve *.localhost to loopback) and in this
+    # network (an alias), so a token's issuer is one string for a developer and for identity: Zitadel tells its
+    # instance by the Host header. Machine users only, so no login UI runs. zitadel/README.md has the rest.
+    profiles: [zitadel]
+    image: ghcr.io/zitadel/zitadel:v4.19.2@sha256:956a298405189a8f6cd4ec92e8828b1bd10caa7da8b139c39d251d7053e33784
+    # Root, in this local profile only: a new named volume belongs to root, and Zitadel, which runs as an
+    # unprivileged user otherwise, writes the bootstrap token into it. Nothing of the profile ships.
+    user: "0"
+    command: ["start-from-init", "--masterkey", "MasterkeyNeedsToHave32Characters"]
+    environment:
+      ZITADEL_PORT: 8080
+      ZITADEL_TLS_ENABLED: "false"
+      ZITADEL_EXTERNALDOMAIN: zitadel.localhost
+      ZITADEL_EXTERNALPORT: 8080
+      ZITADEL_EXTERNALSECURE: "false"
+      ZITADEL_DATABASE_POSTGRES_DSN: postgresql://zitadel:zitadel@postgres:5432/zitadel?sslmode=disable
+      ZITADEL_FIRSTINSTANCE_ORG_NAME: ledger-local
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORDCHANGEREQUIRED: "false"
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME: ledger-bootstrap
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: ledger bootstrap
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: "2099-01-01T00:00:00Z"
+      ZITADEL_FIRSTINSTANCE_PATPATH: /bootstrap/admin.pat
+      ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED: "false"
+    ports: ["127.0.0.1:8080:8080"]
+    volumes: ["zitadel-bootstrap:/bootstrap"]
+    networks:
+      default:
+        aliases: [zitadel.localhost]
+    healthcheck:
+      # The setting ZITADEL_TLS_ENABLED (not the --tlsMode flag) is what `zitadel ready` reads too.
+      test: ["CMD", "/app/zitadel", "ready"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+    depends_on:
+      postgres: {condition: service_healthy}
+
 volumes:
   postgres: {}
   nats: {}
+  zitadel-bootstrap: {}
