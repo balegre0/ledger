@@ -234,6 +234,33 @@ async def test_a_token_for_another_audience_is_refused(
     )
 
 
+async def test_an_id_token_of_the_same_project_is_refused_as_no_access_token(
+    client: httpx.AsyncClient, issuer: LocalIssuer, owner: Caller, company: str
+) -> None:
+    """Shaped as Zitadel v4's ID token of a login: signed by the provider, the project among its audiences."""
+    id_token = issuer.token(
+        claims={
+            "aud": ["web-app", issuer.audience],
+            "azp": "web-app",
+            "client_id": "web-app",
+            "nonce": "a1b2c3d4",
+            "amr": ["pwd"],
+            "jti": None,
+            "nbf": None,
+        }
+    )
+    for path in ("/v1/companies", f"/v1/companies/{company}"):
+        response = await client.get(path, headers={"Authorization": f"Bearer {id_token}"})
+        body = document(response)
+        assert (response.status_code, body["code"], body["detail"]) == (
+            401,
+            "invalid_token",
+            "the access token was refused: not_access_token",
+        )
+        assert response.headers["WWW-Authenticate"] == 'Bearer realm="ledger", error="invalid_token"'
+    assert (await client.get(f"/v1/companies/{company}", headers=owner.bearer())).status_code == 200
+
+
 async def test_without_a_key_ever_fetched_a_token_cannot_be_checked(
     client: httpx.AsyncClient, issuer: LocalIssuer, owner: Caller
 ) -> None:

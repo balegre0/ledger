@@ -310,7 +310,9 @@ async def test_a_token_with_wrong_or_missing_claims_is_refused(
 # ── Access tokens, not ID tokens ─────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("typ", ["JWT", "jwt", "at+jwt", "AT+JWT", "application/at+jwt", None])
+@pytest.mark.parametrize(
+    "typ", ["JWT", "jwt", "at+jwt", "AT+JWT", "application/jwt", "application/at+jwt", None]
+)
 async def test_a_token_typed_as_an_access_token_or_untyped_is_accepted(
     issuer: LocalIssuer, verifier: TokenVerifier, typ: str | None
 ) -> None:
@@ -336,9 +338,12 @@ async def test_a_token_typed_as_something_else_is_refused_before_any_key_is_fetc
         {"jti": None},
         {"jti": ""},
         {"jti": 7},
+        {"jti": " "},
+        {"jti": "\t\n"},
         {"client_id": None},
         {"client_id": ""},
         {"client_id": ["ledger-test"]},
+        {"client_id": "   "},
         {"azp": "ledger-web"},
         {"nonce": "a1b2c3d4"},
         {"at_hash": "x7Kq2Lw9Rt4Vb8Zm1Hc5Jd"},
@@ -348,9 +353,12 @@ async def test_a_token_typed_as_something_else_is_refused_before_any_key_is_fetc
         "no-jti",
         "empty-jti",
         "number-jti",
+        "blank-jti",
+        "whitespace-jti",
         "no-client-id",
         "empty-client-id",
         "client-id-in-a-list",
+        "blank-client-id",
         "authorized-party",
         "nonce",
         "access-token-hash",

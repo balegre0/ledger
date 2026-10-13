@@ -1,8 +1,10 @@
 #!/bin/sh
-# Creates, in the local Zitadel, what a developer needs to call ledger with a real token: a project (its id is the
+# Makes the local Zitadel hold what a developer needs to call ledger with a real token: a project (its id is the
 # audience of the tokens), an API application for the platform, and a machine user with a client secret.
-# Run once, after `docker compose -f deploy/local/compose.yaml --profile zitadel up -d --wait`. A second run fails
-# (the names are taken); `docker compose ... --profile zitadel down -v` starts over. Needs curl and sed only.
+# Run after `docker compose -f deploy/local/compose.yaml --profile zitadel up -d --wait`. It can run again: what
+# exists is found by name and kept, and the machine user gets a new client secret (the previous one stops
+# working). Needs curl, grep and sed. Every step that fails, or answers without what it should, stops the script
+# with a message.
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -12,37 +14,91 @@ OUT="$HERE/.local"
 umask 077
 mkdir -p "$OUT"
 
-docker compose cp zitadel:/bootstrap/admin.pat "$OUT/admin.pat"
+fail() {
+  printf 'bootstrap.sh: %s\n' "$*" >&2
+  exit 1
+}
+
+docker compose cp zitadel:/bootstrap/admin.pat "$OUT/admin.pat" > /dev/null ||
+  fail "cannot copy Zitadel's bootstrap token: is the profile zitadel up?"
 PAT=$(tr -d '\r\n' < "$OUT/admin.pat")
+[ -n "$PAT" ] || fail "Zitadel's bootstrap token ($OUT/admin.pat) is empty"
 
-# A JSON request with the bootstrap service account; prints Zitadel's compact JSON answer.
+# call METHOD PATH [curl arguments]: Zitadel's answer, or a failure with its answer. The bootstrap token reaches
+# curl as configuration on its standard input, never on a command line other processes can read.
 call() {
-  curl --fail-with-body --silent --show-error -X "$1" "$ZITADEL$2" \
-    -H "Authorization: Bearer $PAT" -H 'Content-Type: application/json' --data "$3"
+  method=$1 path=$2
+  shift 2
+  printf 'header = "Authorization: Bearer %s"\n' "$PAT" |
+    curl --config - --fail-with-body --silent --show-error -X "$method" "$ZITADEL$path" \
+      -H 'Content-Type: application/json' "$@"
 }
 
-# The value of a string field of a compact JSON answer: Zitadel's ids, client ids and secrets hold no quotes.
+# field NAME: the first string field NAME of the JSON on standard input, or nothing. Zitadel's ids, client ids
+# and secrets hold no quotes or escapes.
 field() {
-  sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p"
+  grep -o "\"$1\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -n 1 | sed 's/^.*:[[:space:]]*"\(.*\)"$/\1/'
 }
 
-project=$(call POST /management/v1/projects '{"name":"ledger","projectRoleAssertion":true}' | field id)
-call POST "/management/v1/projects/$project/apps/api" \
-  '{"name":"ledger-api","authMethodType":"API_AUTH_METHOD_TYPE_PRIVATE_KEY_JWT"}' > /dev/null
-user=$(call POST /management/v1/users/machine \
-  '{"userName":"ledger-dev","name":"ledger developer","accessTokenType":"ACCESS_TOKEN_TYPE_JWT"}' | field userId)
-secret=$(call PUT "/management/v1/users/$user/secret" '{}')
-organization=$(curl --fail-with-body --silent --show-error "$ZITADEL/management/v1/orgs/me" \
-  -H "Authorization: Bearer $PAT" | field id)
+# require WHAT VALUE: stop unless VALUE holds something.
+require() {
+  [ -n "$2" ] || fail "Zitadel answered without $1"
+}
 
-cat > "$OUT/client.env" <<ENV
+# equals NAME FIELD: a search query for the entity whose FIELD is exactly NAME.
+equals() {
+  printf '{"queries":[{"%sQuery":{"%s":"%s","method":"TEXT_QUERY_METHOD_EQUALS"}}]}' "$2" "$2" "$1"
+}
+
+answer=$(call GET /management/v1/orgs/me) || fail "reading the organization failed: $answer"
+organization=$(printf '%s' "$answer" | field id)
+require "the organization's id" "$organization"
+
+answer=$(call POST /management/v1/projects/_search --data "$(equals ledger name)") ||
+  fail "looking for the project failed: $answer"
+project=$(printf '%s' "$answer" | field id)
+if [ -z "$project" ]; then
+  answer=$(call POST /management/v1/projects --data '{"name":"ledger","projectRoleAssertion":true}') ||
+    fail "creating the project failed: $answer"
+  project=$(printf '%s' "$answer" | field id)
+  require "the project's id" "$project"
+fi
+
+answer=$(call POST "/management/v1/projects/$project/apps/_search" --data "$(equals ledger-api name)") ||
+  fail "looking for the API application failed: $answer"
+if [ -z "$(printf '%s' "$answer" | field id)" ]; then
+  answer=$(call POST "/management/v1/projects/$project/apps/api" \
+    --data '{"name":"ledger-api","authMethodType":"API_AUTH_METHOD_TYPE_PRIVATE_KEY_JWT"}') ||
+    fail "creating the API application failed: $answer"
+  require "the API application's id" "$(printf '%s' "$answer" | field appId)"
+fi
+
+answer=$(call POST /management/v1/users/_search --data "$(equals ledger-dev userName)") ||
+  fail "looking for the machine user failed: $answer"
+user=$(printf '%s' "$answer" | field id)
+if [ -z "$user" ]; then
+  answer=$(call POST /management/v1/users/machine \
+    --data '{"userName":"ledger-dev","name":"ledger developer","accessTokenType":"ACCESS_TOKEN_TYPE_JWT"}') ||
+    fail "creating the machine user failed: $answer"
+  user=$(printf '%s' "$answer" | field userId)
+  require "the machine user's id" "$user"
+fi
+
+answer=$(call PUT "/management/v1/users/$user/secret" --data '{}') ||
+  fail "issuing the machine user's client secret failed"
+client_id=$(printf '%s' "$answer" | field clientId)
+client_secret=$(printf '%s' "$answer" | field clientSecret)
+require "the client id" "$client_id"
+require "the client secret" "$client_secret"
+
+cat > "$OUT/client.env" << ENV
 ZITADEL=$ZITADEL
 PROJECT_ID=$project
 ORGANIZATION_ID=$organization
-CLIENT_ID=$(printf '%s' "$secret" | field clientId)
-CLIENT_SECRET=$(printf '%s' "$secret" | field clientSecret)
+CLIENT_ID=$client_id
+CLIENT_SECRET=$client_secret
 ENV
-cat > "$OUT/identity.env" <<ENV
+cat > "$OUT/identity.env" << ENV
 LEDGER_TOKEN_AUDIENCE=$project
 ENV
 

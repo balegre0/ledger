@@ -20,7 +20,10 @@ A token is accepted only when all of this holds:
   project's id too, so the audience cannot tell them apart): it carries ``jti`` and ``client_id``, both
   required of a JWT access token by RFC 9068, and none of the claims an OpenID Connect ID token carries,
   ``azp``, ``nonce``, ``at_hash`` and ``c_hash``. Zitadel v4 types both kinds ``JWT``; its access tokens
-  carry a ``jti`` and no ``azp``, its ID tokens an ``azp`` and no ``jti``;
+  carry a ``jti`` and no ``azp``, its ID tokens an ``azp`` (their client's id) and no ``jti``. The rule is
+  Zitadel's: a second provider would get an access-token rule of its own in ``TokenPolicy`` (such as
+  requiring ``typ`` ``at+jwt`` where the provider issues it), since some providers put ``azp`` in access
+  tokens too;
 * ``sub`` and the organization claim are there and well formed.
 
 Keys come from the provider's JWKS document and are fresh for ``keys_ttl`` seconds. Past that, a token whose
@@ -470,8 +473,8 @@ class _Header(BaseModel):
 
 _TEXT: Final = TypeAdapter(StrictStr)
 """The subject claim: text, whose form ``parse_subject`` then checks."""
-_IDENTIFIER: Final = TypeAdapter(Annotated[str, StringConstraints(strict=True, min_length=1)])
-"""``jti`` and ``client_id``: text, not empty."""
+_IDENTIFIER: Final = TypeAdapter(Annotated[str, StringConstraints(strict=True, pattern=r"\S")])
+"""``jti`` and ``client_id``: text with something in it besides white space."""
 _PROVIDER_ORGANIZATION: Final = TypeAdapter(
     Annotated[str, StringConstraints(strict=True, pattern=r"^[A-Za-z0-9_-]{1,64}$")]
 )
