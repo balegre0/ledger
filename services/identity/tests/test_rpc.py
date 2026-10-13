@@ -17,7 +17,12 @@ from ledger_kernel.access import Permission, Principal, SubjectId
 from ledger_kernel.ids import CompanyId
 from ledger_platform.authentication import organization_of
 from ledger_platform.authorization import CachedPermissions
-from ledger_platform.grpc_client import RemoteDefectError, RemoteNotFoundError, call_unary
+from ledger_platform.grpc_client import (
+    RemoteDefectError,
+    RemoteNotFoundError,
+    RemoteUnavailableError,
+    call_unary,
+)
 from ledger_platform.identity_client import RemotePermissions
 lazy from ledger_identity.settings import IdentitySettings
 lazy from ledger_platform.service import Service
@@ -97,6 +102,36 @@ async def test_a_question_that_cannot_be_read_is_an_invalid_argument(
     with pytest.raises(RemoteDefectError) as caught:
         await permissions_asked(channel, organization, company_id, subject)
     assert (caught.value.status, caught.value.remote_code) == (grpc.StatusCode.INVALID_ARGUMENT, code)
+
+
+@pytest.mark.parametrize(
+    ("organization", "company_id", "code"),
+    [
+        ("not-an-id", "0192f7a4-6b1e-7c3d-8e4f-5a6b7c8d9e0f", "invalid_id"),
+        (ORGANIZATION, "", "invalid_id"),
+        (ORGANIZATION, "not-an-id", "invalid_id"),
+    ],
+    ids=["organization", "empty company", "company"],
+)
+async def test_a_company_asked_by_a_malformed_id_is_an_invalid_argument(
+    channel: grpc.aio.Channel, organization: str, company_id: str, code: str
+) -> None:
+    request = GetCompanyRequest(organization_id=organization, company_id=company_id)
+    with pytest.raises(RemoteDefectError) as caught:
+        await call_unary(IdentityQueryServiceStub(channel).GetCompany, request, rpc=GET_COMPANY)
+    assert (caught.value.status, caught.value.remote_code) == (grpc.StatusCode.INVALID_ARGUMENT, code)
+
+
+async def test_a_deadline_that_passes_is_an_unavailable_identity(
+    company: str, channel: grpc.aio.Channel
+) -> None:
+    request = GetCompanyRequest(organization_id=ORGANIZATION, company_id=company)
+    with pytest.raises(RemoteUnavailableError) as caught:
+        # No answer fits in a microsecond: the deadline passes whatever identity is doing.
+        await call_unary(
+            IdentityQueryServiceStub(channel).GetCompany, request, rpc=GET_COMPANY, deadline=0.000_001
+        )
+    assert (caught.value.status, caught.value.remote_code) == (grpc.StatusCode.DEADLINE_EXCEEDED, "unknown")
 
 
 async def test_permissions_are_the_role_s_in_the_company_and_none_elsewhere(
