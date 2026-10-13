@@ -17,6 +17,7 @@ e-CF v1.0*), **FMT** (*Formato e-CF V1.0*).
 | F3 | DGII's answer to a type 32 below RD$250,000 sent to `recepcion` | A refusal (the fake answers 400 with `error`/`mensaje`); our routing never sends one | Not exercised on purpose | not exercised | — |
 | F4 | An anonymous type 32: its XSD requires `Comprador` with every child optional, while DT-EMI forbids empty tags | The builder writes an empty `<Comprador />` only for an anonymous buyer | Runbook step 6 | | |
 | F5 | Directory `urlRecepcion`/`urlAceptacion`/`urlOpcional`: a base URL or the full endpoint? | A base: the client appends `/fe/recepcion/api/ecf` and `/fe/autenticacion/api/{semilla,validacioncertificado}` (consistent with TesteCF's directory returning `…/testecf/emisorreceptor`) | Runbook step 7 | | |
+| F16 (with F5) | Does TesteCF's directory answer an RNC with an entry naming another RNC (its emisor-receptor simulator under the simulator's own RNC, say)? | It names the RNC asked about; an entry naming another RNC is never used (the buyer is taken as no electronic receiver, nothing is sent) | Runbook step 7 | | |
 | F6 | Is `consultadirectorio` authenticated? | DT-DGII's curl has no `Authorization`; the client sends the bearer anyway (harmless if ignored) | Runbook step 7 | | |
 | F7 | The line limit of a type 32 | 1,000 (the e-CF 32 XSD: `Item [1..1000]`); [06]'s 10,000 for RFCE-summarized invoices is kept as a regime parameter, unused | Out of scope | not exercised | — |
 | F8 | `RncComprador` in the QR when there is no buyer RNC | Left out | Runbook step 6 | | |

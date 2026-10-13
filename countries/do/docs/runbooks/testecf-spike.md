@@ -1,7 +1,7 @@
 # Runbook: the DGII spike against TesteCF
 
 Runs the spike's emission (`ledger-dgii-spike`) against DGII's pre-certification environment, TesteCF, and
-records what DGII's documentation left open (`../spike-findings.md`, rows F1-F15). Nothing here reaches
+records what DGII's documentation left open (`../spike-findings.md`, rows F1-F16). Nothing here reaches
 production: the CLI refuses the `ecf` environment whatever hosts it is given, and DGII's client refuses the
 live environment on any host but DGII's.
 
@@ -158,6 +158,10 @@ DGII's emisor-receptor simulator), and `.dgii/out/<RNC>E310000000002.arecf.xml`.
 
 - **F5**: a receipt means the directory's URLs are bases; `buyer: do_ecf_buyer_unavailable: ... its
   reception` after a 404 means they are full endpoints.
+- **F16** (with F5): `buyer: not applicable: the buyer is not an electronic receiver` for a buyer TesteCF
+  does list means its directory answered with an entry naming **another** RNC (the client uses only an entry
+  naming the RNC asked about, so nothing was sent). Record which RNC the entry named (DGII's simulator's own,
+  for example) by asking `consultadirectorio` by hand; widening the match is a decision, never a quiet fix.
 - **F6**: the client always sends the bearer to `consultadirectorio`; a directory answer settles that it is
   reachable, a 401 there would contradict DT-DGII. Whether it also works without a token is DGII's to say.
 - **F15**: the receipt may be **refused** with `do_ecf_counterparty_certificate_refused` ("it is not the
@@ -205,6 +209,7 @@ A document still pending after the polling schedule (`DGII: still pending ...`) 
 | F4 | The anonymous type 32 (`<Comprador />`) accepted, or rejected naming `Comprador` | 5, 6 |
 | F5 | Delivery reaches the simulator's reception (bases), or a 404 (full endpoints) | 7 |
 | F6 | The directory answers with the bearer sent; whether it needs one is asked of DGII | 7 |
+| F16 | The directory's entry names the RNC asked about (delivery runs), or another (not applicable) | 7 |
 | F7 | Out of scope (a 1,000-line type 32 is not sampled) | — |
 | F8 | The 31's QR opens with `RncComprador`; the omission case is asked of DGII | 6 |
 | F9 | The owner's certificate authenticates; optionally a test-PKI certificate is refused | 4 |

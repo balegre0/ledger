@@ -506,12 +506,16 @@ class DgiiClient(Authority):
         return tuple(sorted(ordered, key=lambda each: each.received_at))
 
     async def directory(self, environment: Environment, rnc: str) -> DirectoryEntry | None:
-        """The receiver ``rnc`` in DGII's directory; ``None`` if it is no electronic receiver (F5, F6)."""
+        """The receiver ``rnc`` in DGII's directory; ``None`` if it is no electronic receiver (F5, F6, F16).
+
+        Only an entry naming ``rnc`` itself is taken: an answer listing another taxpayer's endpoints (whatever
+        DGII's reason) never sends ``rnc``'s documents there.
+        """
         response = await self._query(environment, Service.DIRECTORY, {"RNC": rnc})
         found = read_answer(_DIRECTORY, response, Service.DIRECTORY)
-        if not found:
+        entry = next((each for each in found if each.rnc.strip() == rnc), None)
+        if entry is None:
             return None
-        entry = found[0]
         return DirectoryEntry(
             entry.name, entry.rnc, entry.reception, entry.approval, entry.authentication or None
         )

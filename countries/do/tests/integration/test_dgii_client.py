@@ -813,7 +813,30 @@ async def test_the_directory_names_testecf_s_simulator(dgii: DgiiClient) -> None
         "https://ecf.fake.test/testecf/emisorreceptor",
         "https://ecf.fake.test/testecf/emisorreceptor",
     )
-    assert await dgii.directory(Environment.TESTECF, "1") is not None
+    assert entry.rnc == "131098193"
+
+
+OTHER_ENTRY: Final = b'[{"rnc": "101850043", "urlRecepcion": "https://a.example.com"}]'
+
+
+@pytest.mark.parametrize(
+    ("listed", "found"),
+    [
+        (OTHER_ENTRY, None),
+        (
+            OTHER_ENTRY[:-1] + b', {"rnc": "131098193", "urlRecepcion": "https://b.example.com"}]',
+            "https://b.example.com",
+        ),
+        (b"[]", None),
+    ],
+    ids=["another-rnc", "ours-second", "none"],
+)
+async def test_the_directory_answers_only_with_the_entry_of_the_rnc_asked_about(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float], listed: bytes, found: str | None
+) -> None:
+    async with client_over(scripted_dgii(GOOD_TOKEN, 200, listed), signer, clock, sleeps).opened() as dgii:
+        entry = await dgii.directory(T, "131098193")
+    assert (None if entry is None else entry.reception) == found
 
 
 async def test_a_document_is_not_sent_with_less_time_left_than_an_attempt_may_take(
