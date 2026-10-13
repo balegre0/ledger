@@ -275,7 +275,8 @@ async def test_the_live_environment_is_never_reached_through_an_injected_transpo
 
 
 SEED: Final = b"<SemillaModel><valor>v</valor><fecha>f</fecha></SemillaModel>"
-GOOD_TOKEN: Final = b'{"token": "t", "expira": "2026-10-13T14:30:00Z"}'
+GOOD_TOKEN: Final = b'{"token": "t", "expira": "2099-12-31T00:00:00Z"}'
+"""Expires long after any test's clock: the client keeps it an hour at most (``TOKEN_CEILING``)."""
 
 
 def reply(status: int, body: bytes = b"", headers: dict[str, str] | None = None) -> httpx.Response:
@@ -462,7 +463,7 @@ async def test_only_the_token_dgii_refused_is_dropped(
             return reply(200, SEED)
         if request.url.path.endswith("validarsemilla"):
             issued.append(f"t{len(issued) + 1}")
-            return reply(200, b'{"token": "' + issued[-1].encode() + b'", "expira": "2026-10-13T14:30:00Z"}')
+            return reply(200, b'{"token": "' + issued[-1].encode() + b'", "expira": "2099-12-31T00:00:00Z"}')
         if request.headers["authorization"] != "Bearer t1":
             renewed_used.set()
             return reply(200, b'{"codigo": 0}')

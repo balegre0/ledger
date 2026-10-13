@@ -11,6 +11,7 @@ from ledger_country_do.channels.ecf_v1.adapters.xml import ecf, rfce
 from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import MAX_DOCUMENT, texts
 from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import violations
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
+from ledger_country_do.channels.ecf_v1.domain.notation import SANTO_DOMINGO
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.answers import json_list, json_object, objects
 from ledger_country_do_testing.fake_dgii.app import DEFAULT_PUBLIC_URL, FakeDgii
@@ -25,7 +26,7 @@ from ledger_country_do_testing.fake_dgii.state import (
 )
 from ledger_country_do_testing.local_signer import KeyPairSigner
 from ledger_country_do_testing.pki import Authority, person
-from ledger_country_do_testing.samples import SIGNED_AT, consumer_invoice, credit_invoice
+from ledger_country_do_testing.samples import SIGNED_AT, SIGNER_VALID_FROM, consumer_invoice, credit_invoice
 from ledger_country_do_testing.signatures import forge
 lazy from ledger_country_do_testing.clock import ManualClock
 lazy from ledger_country_do_testing.pki import Issued
@@ -80,15 +81,17 @@ def with_an_id(text: str) -> str:
 
 
 async def test_a_signed_seed_buys_a_token_valid_an_hour(
-    http: httpx.AsyncClient, signer: KeyPairSigner
+    http: httpx.AsyncClient, signer: KeyPairSigner, clock: ManualClock
 ) -> None:
+    now = clock()
     seed = await http.get(f"{AUTH}/semilla")
     assert seed.headers["content-type"].startswith("text/xml")
     assert violations(Format.SEED, seed.content, unsigned=True) == ()
-    assert texts(seed.content, "fecha") == ("2026-10-13T09:30:00-04:00",)
+    assert texts(seed.content, "fecha") == (now.astimezone(SANTO_DOMINGO).isoformat(),)
     answer = await http.post(f"{AUTH}/validarsemilla", files=xml(await signer.sign_seed(seed.content)))
     body = json_object(answer)
-    assert (body["expedido"], body["expira"]) == ("2026-10-13T13:30:00Z", "2026-10-13T14:30:00Z")
+    later = now + timedelta(hours=1)
+    assert (body["expedido"], body["expira"]) == (f"{now:%Y-%m-%dT%H:%M:%SZ}", f"{later:%Y-%m-%dT%H:%M:%SZ}")
 
 
 async def test_a_seed_serves_once_and_for_five_minutes(
@@ -103,7 +106,9 @@ async def test_a_seed_serves_once_and_for_five_minutes(
 
 
 async def test_a_seed_signed_by_a_stranger_or_not_xml_buys_nothing(http: httpx.AsyncClient) -> None:
-    stranger = KeyPairSigner.from_issued(Authority.root().issue(person()))
+    stranger = KeyPairSigner.from_issued(
+        Authority.root(now=SIGNER_VALID_FROM).issue(person(), not_before=SIGNER_VALID_FROM)
+    )
     signed = await stranger.sign_seed((await http.get(f"{AUTH}/semilla")).content)
     refused = await http.post(f"{AUTH}/validarsemilla", files=xml(signed))
     assert (refused.status_code, json_object(refused)["mensaje"]) == (400, "La firma del XML no es válida")
@@ -117,7 +122,7 @@ async def test_the_fake_checks_signatures_with_our_verifier_strictly_and_with_si
 ) -> None:
     document = await signed_credit_invoice(signer)
     trusted = [issued.certificate]
-    stranger = Authority.root().issue(person())
+    stranger = Authority.root(now=SIGNER_VALID_FROM).issue(person(), not_before=SIGNER_VALID_FROM)
     assert dgii_check(trusted=trusted).verify(document)
     assert VerifierCheck(trusted=None).verify(document)
     assert not VerifierCheck(trusted=[stranger.certificate]).verify(document)
@@ -201,7 +206,9 @@ async def test_what_breaks_the_schema_or_the_signature_is_rejected_and_the_numbe
     live = await token(http, signer)
     broken = (await signed_credit_invoice(signer)).replace(b"<TipoIngresos>01</TipoIngresos>", b"")
     unsigned = unsigned_credit_invoice(3)
-    stranger = KeyPairSigner.from_issued(Authority.root().issue(person()))
+    stranger = KeyPairSigner.from_issued(
+        Authority.root(now=SIGNER_VALID_FROM).issue(person(), not_before=SIGNER_VALID_FROM)
+    )
     by_a_stranger = await signed_credit_invoice(stranger, 4)
     not_strict = forge(unsigned_credit_invoice(5), rsa(issued), issued.certificate, edit=with_an_id)
     for document, code in ((broken, 1), (unsigned, 1), (by_a_stranger, 2), (not_strict, 2)):

@@ -5,7 +5,7 @@ The credit invoice's numbers are worked out in ``test_totals``: lines of 3,000.0
 (295,000.00) goes in full and names its buyer. TesteCF's ranges expire on 2028-12-31 ([06] quick reference).
 """
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Final
 
@@ -27,6 +27,10 @@ BUYER: Final = Buyer(rnc="131098193", name="CONSTRUCTORA DEL CARIBE SRL")
 ISSUED_ON: Final = date(2026, 10, 13)
 SIGNED_AT: Final = datetime(2026, 10, 13, 9, 30, tzinfo=SANTO_DOMINGO)
 SEQUENCE_EXPIRES_ON: Final = date(2028, 12, 31)
+SIGNER_VALID_FROM: Final = datetime(2026, 1, 1, tzinfo=UTC)
+"""When the tests' certificates start being valid: before every moment the tests sign at (2026-10-13),
+whatever day they run. A certificate dated from the real "now" would stop covering those moments a day
+later."""
 CREDIT_LINES: Final = (
     Line(
         name="CEMENTO GRIS 42.5 KG",

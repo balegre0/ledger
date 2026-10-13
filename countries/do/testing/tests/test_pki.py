@@ -4,7 +4,17 @@ from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePrivateKey
 from cryptography.hazmat.primitives.serialization import pkcs12
 from cryptography.x509.oid import NameOID
 
-from ledger_country_do_testing.pki import OPENING_PHRASE, Authority, bundle, ec_key, organization, pem, person
+from ledger_country_do_testing.pki import (
+    OPENING_PHRASE,
+    Authority,
+    bundle,
+    ec_key,
+    organization,
+    pem,
+    person,
+)
+from ledger_country_do_testing.samples import SIGNER_VALID_FROM
+lazy from ledger_country_do_testing.pki import Issued
 
 
 def test_subjects_follow_the_dominican_conventions() -> None:
@@ -33,3 +43,10 @@ def test_a_test_breaks_what_it_needs() -> None:
     issued = root.issue(organization(), key=ec_key(), not_before=past - timedelta(days=1), not_after=past)
     assert isinstance(issued.key, EllipticCurvePrivateKey)
     assert issued.certificate.not_valid_after_utc == past.replace(microsecond=0)
+
+
+def test_the_fixture_hierarchy_is_dated_from_a_fixed_moment_not_from_today(
+    authority: Authority, issued: Issued, receiver_identity: Issued
+) -> None:
+    for certificate in (authority.certificate, issued.certificate, receiver_identity.certificate):
+        assert certificate.not_valid_before_utc <= SIGNER_VALID_FROM

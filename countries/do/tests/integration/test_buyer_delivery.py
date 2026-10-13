@@ -44,7 +44,14 @@ from ledger_country_do_testing.fake_dgii.app import FakeDgii
 from ledger_country_do_testing.fake_dgii.receiver import arecf
 from ledger_country_do_testing.fake_dgii.state import dgii_check
 from ledger_country_do_testing.pki import Authority, organization
-from ledger_country_do_testing.samples import BUYER, ISSUER, SIGNED_AT, consumer_invoice, credit_invoice
+from ledger_country_do_testing.samples import (
+    BUYER,
+    ISSUER,
+    SIGNED_AT,
+    SIGNER_VALID_FROM,
+    consumer_invoice,
+    credit_invoice,
+)
 from ledger_country_do_testing.signatures import sign_with_signxml
 from ledger_country_do_testing.transports import FAKE_HOSTS
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.client import DirectoryLookup
@@ -61,8 +68,6 @@ PUBLIC: Final = IPv4Address("93.184.215.14")
 SEED: Final = b"<SemillaModel><valor>v</valor><fecha>f</fecha></SemillaModel>"
 REFUSED: Final = "the connection was refused"
 NO_SUCH_NAME: Final = "no such name"
-VALID_FROM: Final = datetime(2026, 1, 1, tzinfo=UTC)
-"""As the session's test authority (``conftest``): before any moment a test signs at."""
 TOKEN: Final = b'{"token": "buyer-token", "expira": "2026-10-13T14:30:00Z"}'
 
 
@@ -541,7 +546,9 @@ async def test_a_receipt_dated_far_from_its_receipt_is_refused(party: Party, fak
 async def test_a_client_s_own_clock_is_the_system_s(
     authority: Authority, issued: Issued, party: Party
 ) -> None:
-    receiver = authority.issue(organization(BUYER.rnc or "", name=BUYER.name or ""), not_before=VALID_FROM)
+    receiver = authority.issue(
+        organization(BUYER.rnc or "", name=BUYER.name or ""), not_before=SIGNER_VALID_FROM
+    )
     live = FakeDgii(
         check=dgii_check(trusted=[issued.certificate]), receiver=receiver, public_url=FAKE_HOSTS.ecf
     )
