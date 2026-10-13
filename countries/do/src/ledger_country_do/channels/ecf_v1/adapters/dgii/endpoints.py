@@ -4,9 +4,10 @@ A URL is a host, the environment's segment, the service and its resource:
 ``https://ecf.dgii.gov.do/testecf/recepcion/api/facturaselectronicas``. The RFCE has a host of its own,
 ``fc.dgii.gov.do``. CerteCF publishes neither ``consultatrackids`` nor ``consultadirectorio``. The live
 environment is reached on DGII's own hosts only (``LiveHostRefusedError``), compared exactly: a fake can stand
-in for TesteCF and CerteCF, never for production. Every host, DGII's or a fake's, is an ``https`` origin and
-nothing more (``HostRefusedError``): TLS always, no path, user, query or fragment. DGII's paths ignore case;
-DT-DGII's lower-case spelling is used.
+in for TesteCF and CerteCF, never for production. Every host is an origin and nothing more
+(``HostRefusedError``): no path, user, query or fragment, and ``https``, except a fake on this machine
+(``LOOPBACK``: 127.0.0.1, ::1, localhost), which may be plain ``http`` and, not being DGII's, never serves the
+live environment. DGII's paths ignore case; DT-DGII's lower-case spelling is used.
 """
 
 from dataclasses import dataclass
@@ -68,24 +69,30 @@ class LiveHostRefusedError(EcfError):
         super().__init__("the live environment is reached on DGII's own hosts only")
 
 
+LOOPBACK: Final = frozenset({"127.0.0.1", "::1", "localhost"})
+"""The hosts a fake on this machine answers on: the only ones plain ``http`` may reach."""
+
+
 class HostRefusedError(EcfError):
-    """A host that is not an ``https`` origin: a defect of configuration."""
+    """A host that is not an ``https`` origin (or an ``http`` one on loopback): a defect of configuration."""
 
     code: ClassVar[str] = "do_ecf_dgii_host_refused"
 
     def __init__(self) -> None:
-        super().__init__("DGII's hosts are each an https origin: no path, user, query or fragment")
+        super().__init__(
+            "DGII's hosts are each an https origin (http on loopback only): no path, user, query or fragment"
+        )
 
 
 def _origin(host: str) -> bool:
-    """Whether ``host`` is ``https://`` and an authority without user information, and nothing more."""
+    """Whether ``host`` is an origin without user information: ``https``, or ``http`` on loopback."""
     try:
         parts = urlsplit(host)
         hostname = parts.hostname
     except ValueError:
         return False
     return (
-        parts.scheme == "https"
+        (parts.scheme == "https" or (parts.scheme == "http" and hostname in LOOPBACK))
         and bool(hostname)
         and "@" not in parts.netloc
         and (parts.path, parts.query, parts.fragment) == ("", "", "")
@@ -101,7 +108,7 @@ def offered(service: Service, environment: Environment) -> bool:
 @final
 @dataclass(frozen=True, slots=True)
 class DgiiHosts:
-    """DGII's two hosts (scheme and authority, no trailing slash), or a fake's."""
+    """DGII's two hosts (scheme and authority, no trailing slash), or a fake's (see the module)."""
 
     ecf: str = OFFICIAL_ECF_HOST
     fc: str = OFFICIAL_FC_HOST

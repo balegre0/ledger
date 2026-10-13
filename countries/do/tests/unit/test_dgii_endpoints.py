@@ -2,6 +2,7 @@ import pytest
 
 from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import (
     OFFICIAL_HOSTS,
+    PATHS,
     DgiiHosts,
     HostRefusedError,
     LiveHostRefusedError,
@@ -60,6 +61,12 @@ def test_nothing_but_dgii_s_exact_hosts_counts_as_dgii_s(hosts: DgiiHosts) -> No
     "host",
     [
         "http://ecf.dgii.gov.do",
+        "http://example.com",
+        "http://127.0.0.2:8471",
+        "http://localhost.example.com",
+        "http://user@127.0.0.1:8471",
+        "http://127.0.0.1:8471/",
+        "ftp://127.0.0.1",
         "ecf.dgii.gov.do",
         "https://",
         "https://ecf.dgii.gov.do/",
@@ -72,6 +79,12 @@ def test_nothing_but_dgii_s_exact_hosts_counts_as_dgii_s(hosts: DgiiHosts) -> No
     ],
     ids=[
         "plain-http",
+        "plain-http-elsewhere",
+        "plain-http-other-loopback-address",
+        "plain-http-lookalike-localhost",
+        "plain-http-loopback-userinfo",
+        "plain-http-loopback-path",
+        "ftp",
         "no-scheme",
         "no-host",
         "trailing-slash",
@@ -88,3 +101,15 @@ def test_a_host_is_an_https_origin_and_nothing_more(host: str) -> None:
         DgiiHosts(ecf=host)
     with pytest.raises(HostRefusedError, match="https origin"):
         DgiiHosts(fc=host)
+
+
+@pytest.mark.parametrize(
+    "host", ["http://127.0.0.1:8471", "http://[::1]:8471", "http://localhost:8471", "http://LOCALHOST"]
+)
+def test_plain_http_reaches_a_fake_on_this_machine_for_testecf_and_certecf_only(host: str) -> None:
+    fake = DgiiHosts(ecf=host, fc=host)
+    assert fake.url(Service.SEED, Environment.TESTECF) == f"{host}/testecf/{PATHS[Service.SEED]}"
+    assert fake.url(Service.RFCE, Environment.CERTECF) == f"{host}/certecf/{PATHS[Service.RFCE]}"
+    assert not fake.official
+    with pytest.raises(LiveHostRefusedError):
+        fake.url(Service.SEED, Environment.ECF)

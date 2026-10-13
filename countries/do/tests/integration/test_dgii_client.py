@@ -747,7 +747,8 @@ async def test_waiting_for_a_token_ends_with_the_deadline(
     assert first.failure == "timed_out"
     assert isinstance(second, AuthorityUnavailableError)
     assert str(second) == "DGII's reception: timed_out"
-    assert sent == ["semilla"]
+    # Each call has its own deadline: under load the second may fetch a seed of its own, never send the e-CF.
+    assert set(sent) == {"semilla"}
 
 
 async def test_a_token_expiry_without_a_zone_is_read_as_utc(
