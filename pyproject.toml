@@ -21,6 +21,7 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
     "pytest-randomly>=5.0.0",
+    "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.17.0",
     "signxml>=5.1.0",
@@ -97,33 +98,37 @@ all([subprocess.run(["deptry", f"{directory}/src", "--config", f"{directory}/pyp
 ])
 """
 
-# Every package's tests at once, each run with its own coverage (its data file named after it), its output kept
-# and printed whole, package by package, once all have finished. A package with an integration suite of four
-# files or more spreads it over four workers (the packages share the machine); for the others, starting workers
-# (and the PostgreSQL server xdist's controller starts for them) costs more than it saves.
+# Every package's tests, up to LEDGER_TEST_JOBS packages at a time (default: the machine's CPU count; CI runners
+# have few, set it lower to trade wall time for memory). Each line a package's run prints is streamed as it comes,
+# prefixed with the package's directory, so a package that hangs is the one whose lines stop; pytest-timeout
+# ([tool.pytest] timeout) ends any test that runs past its budget with its stack. Each package keeps its own
+# coverage (its data file named after it). A package with an integration suite of four files or more spreads it
+# over four workers (the packages share the machine); for the others, starting workers (and the PostgreSQL server
+# xdist's controller starts for them) costs more than it saves. LEDGER_TEST_JOBS is the runner's alone: it is
+# taken out of the tests' environment, where Settings refuses any LEDGER_* name it does not know.
 [tool.poe.tasks.test]
-help = "Each package's tests, all packages at once, each with its own 100 % branch coverage"
-imports = ["glob", "os", "subprocess", "tempfile"]
+help = "Each package's tests with its own 100 % branch coverage, LEDGER_TEST_JOBS packages at a time"
+imports = ["concurrent.futures", "glob", "os", "subprocess"]
 assert = true
 expr = """
-(lambda started: all([
-    (process.wait(), log.seek(0), print(f"=== {directory}", log.read().decode("utf-8", "replace"), sep="\\n"))[0] == 0
-    for directory, log, process in started
-]))([
-    (directory, log, subprocess.Popen(
-        [
-            "pytest", f"{directory}/tests", "-c", "pyproject.toml", "-p", "no:cacheprovider",
-            *(["-n", "4"] if len(glob.glob(f"{directory}/tests/integration/test_*.py")) >= 4 else []),
-            "--cov", f"--cov-config={directory}/pyproject.toml", "--cov-report=term-missing:skip-covered",
-        ],
-        stdout=log, stderr=subprocess.STDOUT,
-        env={**os.environ, "COVERAGE_FILE": f".coverage.{directory.replace('/', '-')}"},
-    ))
-    for directory, log in [(directory, tempfile.TemporaryFile()) for directory in sorted(
-        os.path.dirname(path).replace(os.sep, "/")
-        for path in glob.glob("*/*/manifest.toml") + glob.glob("countries/*/testing/manifest.toml")
-    )]
-])
+(lambda run: all([code == 0 for code in concurrent.futures.ThreadPoolExecutor(
+    max(1, int(os.environ.get("LEDGER_TEST_JOBS") or os.cpu_count() or 1))
+).map(run, sorted(
+    os.path.dirname(path).replace(os.sep, "/")
+    for path in glob.glob("*/*/manifest.toml") + glob.glob("countries/*/testing/manifest.toml")
+))]))(lambda directory: (lambda process: (
+    [print(f"{directory} | {line.rstrip()}", flush=True) for line in process.stdout],
+    process.wait(),
+)[1])(subprocess.Popen(
+    [
+        "pytest", f"{directory}/tests", "-c", "pyproject.toml", "-p", "no:cacheprovider",
+        *(["-n", "4"] if len(glob.glob(f"{directory}/tests/integration/test_*.py")) >= 4 else []),
+        "--cov", f"--cov-config={directory}/pyproject.toml", "--cov-report=term-missing:skip-covered",
+    ],
+    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+    env={name: value for name, value in os.environ.items() if name != "LEDGER_TEST_JOBS"}
+    | {"COVERAGE_FILE": f".coverage.{directory.replace('/', '-')}"},
+)))
 """
 
 # Dead code in every package's sources. Each package's tests are scanned with them, as their users: the test
@@ -137,6 +142,17 @@ subprocess.run(["vulture", *sorted(
     glob.glob("*/*/src") + glob.glob("*/*/tests") + glob.glob("countries/*/testing/src")
     + glob.glob("countries/*/testing/tests")
 )]).returncode == 0
+"""
+
+# What only tests use: vulture over production sources alone. A report, not part of `check` (see [tool.vulture]).
+[tool.poe.tasks.dead-src]
+help = "Code no production code uses (vulture over the shipped packages' sources): a report, never failing"
+imports = ["glob", "subprocess"]
+expr = """
+subprocess.run(["vulture", *sorted(
+    glob.glob("packages/kernel/src") + glob.glob("packages/platform/src") + glob.glob("modules/*/src")
+    + glob.glob("countries/*/src") + glob.glob("apps/*/src")
+)]).returncode in {0, 3}
 """
 
 # buf lint over contracts/, in the image deploy/local/images.toml pins. Skipped while no .proto exists: the signer
@@ -285,10 +301,17 @@ xfail_strict = true
 filterwarnings = ["error"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# A test that runs longer is ended with its stack (pytest-timeout; threads on Windows, signals elsewhere): a hang
+# is a failure with a cause, not a gate that never ends. Generous: the slowest test takes seconds.
+timeout = "300"
 
 # ── Dead code (vulture) ─────────────────────────────────────────────────────────
 # A finding is dead code (delete it) or something a framework reads or calls by name or by registration; only
 # patterns of the latter are listed, each with what reads it. No symbol of the repository is named here.
+# The trade-off: `poe dead` (in `check`) scans the tests with the sources, so code only a test calls counts as
+# used. That keeps the test tooling's helpers and the chassis API the spec requires before any module calls it
+# (wake, wake_all, audit, replay, ...) out of the report, at the price of missing production code that has become
+# test-only. `poe dead-src` scans the shipped sources alone and lists exactly that, as a report to read, not a gate.
 [tool.vulture]
 min_confidence = 60
 ignore_decorators = [

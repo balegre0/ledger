@@ -74,3 +74,19 @@ def test_an_image_that_is_not_a_pin_is_named_where_it_is(tmp_path: Path) -> None
 
 def test_a_tree_without_deploy_files_has_no_image_problems(tmp_path: Path) -> None:
     assert image_problems(tmp_path, frozenset()) == ()
+
+
+def test_every_dockerfile_of_the_repository_is_checked_wherever_it_is(tmp_path: Path) -> None:
+    root = deploy(tmp_path)
+    nested = root / "countries/do/testing/src/ledger_country_do_testing/xmlsec1"
+    nested.mkdir(parents=True)
+    (nested / "Dockerfile").write_text("FROM debian:trixie-slim\n", encoding="utf-8")
+    hidden = root / ".venv/lib/somewhere"
+    hidden.mkdir(parents=True)
+    (hidden / "Dockerfile").write_text("FROM anything:latest\n", encoding="utf-8")
+    assert image_problems(root, pinned_images(root)) == (
+        Problem(
+            "countries/do/testing/src/ledger_country_do_testing/xmlsec1/Dockerfile",
+            "image 'debian:trixie-slim' is not pinned in deploy/local/images.toml",
+        ),
+    )

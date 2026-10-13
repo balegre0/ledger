@@ -4,6 +4,7 @@ from typing import Final
 lazy from pathlib import Path
 
 from pydantic import TypeAdapter
+lazy import pytest
 
 from ledger_devtools.openapi import api_document, openapi_text
 from ledger_devtools.workspace import Workspace
@@ -76,3 +77,13 @@ def test_the_api_document_is_the_api_app_s_and_connects_nowhere() -> None:
     document = api_document()
     assert TABLE.validate_python(document["paths"])
     assert document is api_document()  # built once per process
+
+
+def test_the_api_document_ignores_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LEDGER_BOGUS", "1")
+    monkeypatch.setenv("LEDGER_DATABASE_URL", "not a url")
+    api_document.cache_clear()
+    try:
+        assert TABLE.validate_python(api_document()["paths"])
+    finally:
+        api_document.cache_clear()

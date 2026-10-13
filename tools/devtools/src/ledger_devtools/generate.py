@@ -17,7 +17,7 @@ from ledger_devtools.names import LOADED_BY_OTHERS, TEST_TOOLING, distribution_o
 from ledger_devtools.sql import init_sql_text
 from ledger_devtools.workspace import MANIFEST_GLOBS, MODULE_LAYERS
 from ledger_platform.config.manifest import PackageKind
-lazy from ledger_devtools.openapi import api_document, openapi_text
+lazy from ledger_devtools.openapi import api_document, openapi_text, require_installed
 lazy from ledger_devtools.workspace import Package, Workspace
 
 GENERATED_HEADER: Final = (
@@ -595,6 +595,7 @@ def targets(
         if module.manifest.http is not None and "api" in module.manifest.http.mounted_in
     ]
     if mounted:
+        require_installed(mounted)
         whole = (api_document if document is None else document)()
         for module in mounted:
             generated[module.directory / "openapi.json"] = openapi_text(module, whole)

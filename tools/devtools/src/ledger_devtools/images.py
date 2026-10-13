@@ -1,13 +1,15 @@
 """Image pins (Decision 20): ``deploy/local/images.toml`` is the only place an image version is spelled.
 
-compose cannot read TOML, so ``compose.yaml`` and the Dockerfiles repeat the pins; ``check`` reports every
-image they name that is not one of them. The image the repository builds (``ledger:<tag>``) is no pin.
+compose cannot read TOML, so ``compose.yaml`` and every Dockerfile of the repository repeat the pins;
+``check`` reports every image they name that is not one of them. The image the repository builds
+(``ledger:<tag>``) is no pin.
 """
 
+import os
 import re
 import tomllib
+from pathlib import Path
 from typing import Final
-lazy from pathlib import Path
 
 from pydantic import TypeAdapter
 
@@ -15,7 +17,8 @@ from ledger_devtools.checks import Problem
 
 PINS: Final = "deploy/local/images.toml"
 COMPOSE: Final = "deploy/local/compose.yaml"
-DOCKERFILES: Final = "deploy/docker/*.Dockerfile"
+_SKIPPED: Final = ("node_modules", "__pycache__")
+"""Directories never searched for a Dockerfile, with every hidden one (``.venv``, ``.git``)."""
 _OWN: Final = re.compile(r"ledger:[A-Za-z0-9_.-]+", re.ASCII)
 _COMPOSE_IMAGE: Final = re.compile(r"^\s*image:\s*[\"']?([^\"'\s#]+)", re.MULTILINE)
 _FROM: Final = re.compile(r"^FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?", re.MULTILINE | re.IGNORECASE)
@@ -32,6 +35,17 @@ def pinned_images(root: Path) -> frozenset[str]:
     )
 
 
+def _dockerfiles(root: Path) -> list[Path]:
+    """Every ``Dockerfile`` and ``*.Dockerfile`` of the repository, wherever it is, in path order."""
+    found: list[Path] = []
+    for directory, children, files in os.walk(root):
+        children[:] = [child for child in children if not child.startswith(".") and child not in _SKIPPED]
+        found += (
+            Path(directory) / name for name in files if name == "Dockerfile" or name.endswith(".Dockerfile")
+        )
+    return sorted(found)
+
+
 def _named(root: Path) -> tuple[tuple[str, str], ...]:
     """Each image a deploy file names, with the file (relative to ``root``), file by file in path order."""
     compose = root / COMPOSE
@@ -40,7 +54,7 @@ def _named(root: Path) -> tuple[tuple[str, str], ...]:
         named += (
             (COMPOSE, found[1]) for found in _COMPOSE_IMAGE.finditer(compose.read_text(encoding="utf-8"))
         )
-    for dockerfile in sorted(root.glob(DOCKERFILES)):
+    for dockerfile in _dockerfiles(root):
         stages: set[str] = set()
         where = dockerfile.relative_to(root).as_posix()
         for found in _FROM.finditer(dockerfile.read_text(encoding="utf-8")):

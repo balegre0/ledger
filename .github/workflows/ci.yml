@@ -38,7 +38,12 @@ jobs:
               --volume "$PWD:/repo" --workdir /repo/contracts "$buf_image" \
               breaking --against '/repo/.git#branch=origin/main,subdir=contracts'
           fi
-      - name: Format, lint, types x2, architecture, deps, spelling, tests
+      - name: Format, lint, types x2, architecture, deps, spelling, devtools, dead code, tests
+        # The packages' test runs share the runner: LEDGER_TEST_JOBS caps how many run at once (two on a 4-core
+        # runner keeps memory in bounds); each line of a run is prefixed with its package, and pytest-timeout ends
+        # a test past 300 s, so a hang names itself.
+        env:
+          LEDGER_TEST_JOBS: "2"
         run: uv run poe check
       - name: Local infrastructure configuration
         run: |

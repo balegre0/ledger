@@ -6,11 +6,14 @@ is trusted) with every installed module, and asked for its schema.
 
 import functools
 import json
-from typing import Final, TypeIs
-lazy from collections.abc import Iterator, Mapping
+from importlib import metadata
+from typing import ClassVar, Final, TypeIs, override
+lazy from collections.abc import Iterable, Iterator, Mapping
 
 from pydantic import SecretStr, TypeAdapter
+lazy from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 
+from ledger_kernel.errors import LedgerError
 from ledger_platform.runtime import App, Settings
 lazy from ledger_devtools.workspace import Package
 
@@ -21,13 +24,50 @@ _ISSUER: Final = "https://issuer.invalid"
 _AUDIENCE: Final = "ledger"
 
 
+class _Placeholders(Settings):
+    """``Settings`` from what it is given alone: no ``LEDGER_*`` variable of the shell reaches it."""
+
+    @classmethod
+    @override
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """The values given, and nothing else."""
+        del settings_cls, env_settings, dotenv_settings, file_secret_settings
+        return (init_settings,)
+
+
+class NotInstalledError(LedgerError):
+    """A module the ``api`` app mounts is not installed, so the document would silently lack its paths."""
+
+    code: ClassVar[str] = "devtools_module_not_installed"
+
+    def __init__(self, manifest: str, distribution: str) -> None:
+        cannot = "is not installed, so its OpenAPI document cannot be made: run `uv sync --all-packages`"
+        super().__init__(f"{manifest}: {distribution} {cannot}")
+
+
+def require_installed(modules: Iterable[Package]) -> None:
+    """Refuse to make the document while one of ``modules`` is not installed: the app finds installed ones."""
+    for module in modules:
+        try:
+            metadata.distribution(module.distribution)
+        except metadata.PackageNotFoundError as error:
+            raise NotInstalledError(module.manifest_path, module.distribution) from error
+
+
 @functools.cache
 def api_document() -> dict[str, object]:
     """The ``api`` app's whole document, built once per process.
 
     The document depends neither on whom the app trusts nor on where its database is: placeholders.
     """
-    settings = Settings(
+    settings = _Placeholders(
         environment="test",
         database_url=SecretStr("postgresql+psycopg://openapi@localhost/openapi"),
         token_issuer=_ISSUER,

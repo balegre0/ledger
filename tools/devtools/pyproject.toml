@@ -9,6 +9,7 @@ dependencies = [
     "ledger-kernel",
     "ledger-platform",
     "pydantic>=2.14.1",
+    "pydantic-settings>=2.15.0",
 ]
 
 [project.scripts]
@@ -33,3 +34,6 @@ show_missing = true
 skip_covered = true
 exclude_lines = []  # no "pragma: no cover": every line counts
 partial_branches = []  # no "pragma: no branch": every branch counts
+
+[tool.deptry.package_module_name_map]
+"pydantic-settings" = "pydantic_settings"

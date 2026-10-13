@@ -7,6 +7,7 @@ lazy import pytest
 from ledger_devtools.cli import main
 
 type Editor = Callable[[str, str, str], None]
+type Writer = Callable[[str, str, tuple[str, ...]], Path]
 
 
 def run(capsys: pytest.CaptureFixture[str], *arguments: str) -> tuple[int, list[str], str]:
@@ -129,3 +130,32 @@ def test_check_names_repository_problems_that_sync_leaves_alone(
         ["deploy/local/compose.yaml: image 'postgres:18.7' is not pinned in deploy/local/images.toml"],
         "",
     )
+
+
+UNINSTALLED: Final = """
+[package]
+name = "zzbilling"
+kind = "module"
+summary = "Bills, not installed."
+owners = ["@o"]
+
+[dependencies]
+packages = ["kernel", "platform"]
+
+[http]
+mounted_in = ["api"]
+prefixes = ["/v1/zzbills"]
+"""
+
+
+def test_a_module_the_api_mounts_must_be_installed(
+    tree: Path, capsys: pytest.CaptureFixture[str], write: Writer
+) -> None:
+    write("modules/zzbilling", UNINSTALLED, ())
+    for command in ("check", "sync"):
+        code, lines, error = run(capsys, command, "--root", str(tree))
+        assert (code, lines) == (2, [])
+        assert error == (
+            "modules/zzbilling/manifest.toml: ledger-zzbilling is not installed, so its OpenAPI document "
+            "cannot be made: run `uv sync --all-packages`\n"
+        )

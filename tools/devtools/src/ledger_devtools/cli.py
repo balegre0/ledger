@@ -8,6 +8,7 @@ lazy from collections.abc import Mapping, Sequence
 
 from ledger_devtools.checks import check
 from ledger_devtools.generate import orphans, targets
+from ledger_devtools.openapi import NotInstalledError
 from ledger_devtools.repository import repository_problems
 from ledger_devtools.workspace import Workspace, WorkspaceError
 
@@ -47,7 +48,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     manifest implies any more, or the repository around the manifests disagrees with them (the root's lists,
     the image pins); ``sync`` writes the stale files and deletes those, but writes nothing while
     a manifest breaks a rule (what it writes follows from the manifests) and exits 1. Both exit 2 when the
-    tree has no readable manifest.
+    tree has no readable manifest, or a module the ``api`` app mounts is not installed.
     """
     parser = argparse.ArgumentParser(prog="ledger-devtools")
     parser.add_argument("command", choices=_Arguments.commands)
@@ -62,7 +63,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
     problems = [f"{problem.where}: {problem.message}" for problem in check(workspace)]
     if problems:
         return _report(problems)
-    generated = targets(workspace)
+    try:
+        generated = targets(workspace)
+    except NotInstalledError as error:
+        sys.stderr.write(f"{error}\n")
+        return _UNREADABLE
     stale = _stale(root, generated)
     unwanted = orphans(workspace, generated)
     if command == "check":

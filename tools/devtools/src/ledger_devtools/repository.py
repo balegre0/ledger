@@ -37,8 +37,13 @@ class _Ruff(_Lenient):
     lint: _Lint = _Lint()
 
 
+class _UvWorkspace(_Lenient):
+    members: tuple[str, ...] = ()
+
+
 class _Uv(_Lenient):
     sources: dict[str, object] = Field(default_factory=dict)
+    workspace: _UvWorkspace = _UvWorkspace()
 
 
 class _Tool(_Lenient):
@@ -78,6 +83,32 @@ def _root_lists(workspace: Workspace) -> Iterator[Problem]:
         )
 
 
+def _members_without_manifests(workspace: Workspace) -> Iterator[Problem]:
+    """Every directory the root's member globs match without a manifest: no loop of the gate would see it."""
+    path = workspace.root / ROOT_PYPROJECT
+    if not path.is_file():
+        return
+    root = _Root.model_validate(tomllib.loads(path.read_text(encoding="utf-8")))
+    members = sorted(
+        {
+            found
+            for pattern in root.tool.uv.workspace.members
+            for found in workspace.root.glob(pattern)
+            if found.is_dir() and not found.name.startswith((".", "__"))
+        }
+    )
+    for member in members:
+        if not (member / "manifest.toml").is_file():
+            yield Problem(
+                member.relative_to(workspace.root).as_posix(),
+                "a workspace member without manifest.toml: the gate would leave it out",
+            )
+
+
 def repository_problems(workspace: Workspace) -> tuple[Problem, ...]:
-    """The root lists that differ from the workspace, then every image that is not pinned."""
-    return (*_root_lists(workspace), *image_problems(workspace.root, pinned_images(workspace.root)))
+    """The root lists that differ from the workspace, members without a manifest, images not pinned."""
+    return (
+        *_root_lists(workspace),
+        *_members_without_manifests(workspace),
+        *image_problems(workspace.root, pinned_images(workspace.root)),
+    )

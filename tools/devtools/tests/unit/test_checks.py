@@ -382,3 +382,21 @@ def test_an_unpinned_image_is_a_repository_problem(tree: Path) -> None:
     assert root_messages(tree) == [
         "deploy/local/compose.yaml: image 'postgres:18.7' is not pinned in deploy/local/images.toml"
     ]
+
+
+MEMBERS: Final = """
+[tool.uv.workspace]
+members = ["packages/*", "modules/*", "apps/*", "tools/*"]
+"""
+
+
+def test_a_workspace_member_without_a_manifest_is_named(tree: Path) -> None:
+    (tree / "pyproject.toml").write_text(MEMBERS, encoding="utf-8")
+    (tree / "packages/zzprobe/src/ledger_zzprobe").mkdir(parents=True)
+    (tree / "packages/zzprobe/pyproject.toml").write_text(
+        "[project]\nname = 'ledger-zzprobe'\n", encoding="utf-8"
+    )
+    (tree / "packages/notes.md").write_text("A file, not a member.\n", encoding="utf-8")
+    assert [line for line in root_messages(tree) if "zzprobe" in line or "notes" in line] == [
+        "packages/zzprobe: a workspace member without manifest.toml: the gate would leave it out"
+    ]
