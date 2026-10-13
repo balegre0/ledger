@@ -1,8 +1,8 @@
 """The ten e-CF types (FMT; spec §8.6.2): kind, direction, and whether the buyer's tax id is required.
 
 ``requires_buyer_tax_id`` is what the e-CF schemas demand (``RNCComprador`` required in types 31, 41 and 45);
-for a purchase (41, 43, 47) the "buyer" block names the seller the company self-bills. Corrections (which
-types a note may modify) are v2-M3's.
+for a purchase (41, 43, 47) the "buyer" block names the seller the company self-bills. ``test_xsd_pins``
+checks the table against DGII's vendored schemas. Corrections (which types a note may modify) are v2-M3's.
 """
 
 from typing import Final

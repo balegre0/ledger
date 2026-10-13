@@ -698,6 +698,12 @@ requires-dist = [
 name = "ledger-country-do"
 version = "0.1.0"
 source = { editable = "countries/do" }
+dependencies = [
+    { name = "lxml" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "lxml", specifier = ">=6.1.3" }]
 
 [[package]]
 name = "ledger-country-do-testing"

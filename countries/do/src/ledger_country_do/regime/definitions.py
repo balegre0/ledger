@@ -11,7 +11,7 @@ answers the one in force on a day. Standard library only.
 import itertools
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import final
+from typing import Literal, final
 lazy from collections.abc import Callable, Mapping
 lazy from datetime import date
 lazy from decimal import Decimal
@@ -186,12 +186,25 @@ class DocumentTypeDef:
     source: Source
 
 
+type RoundingMode = Literal[
+    "ROUND_DOWN",
+    "ROUND_HALF_UP",
+    "ROUND_HALF_EVEN",
+    "ROUND_CEILING",
+    "ROUND_FLOOR",
+    "ROUND_UP",
+    "ROUND_HALF_DOWN",
+    "ROUND_05UP",
+]
+"""The values of ``decimal``'s rounding constants (``decimal.ROUND_HALF_UP`` is ``"ROUND_HALF_UP"``)."""
+
+
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RoundingRule:
     """How amounts round, and how far a declared amount may stray before the authority flags it."""
 
-    mode: str
+    mode: RoundingMode
     """A ``decimal`` rounding constant, such as ``decimal.ROUND_HALF_UP``."""
     places: int
     unit_price_places: int

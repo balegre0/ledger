@@ -21,7 +21,9 @@ CONTINGENCY_REPLACEMENT_DAYS: Final = "contingency_replacement_days"
 LEGAL_NAME_MAX: Final = "legal_name_max"
 LINES_MAX: Final = "lines_max"
 RFCE_LINES_MAX: Final = "rfce_lines_max"
-"""[06] §2: an RFCE-summarized type 32 may hold 10,000 lines; the e-CF 32 schema says 1,000 (unused: F7)."""
+"""[06] §2: an RFCE-summarized type 32 may hold 10,000 lines, but the e-CF 32 schema allows 1,000 (``Item``
+at most 1,000 times) and the full e-CF is always built. Kept as data and read by nothing until DGII settles
+which limit holds (the plan's open fact F7)."""
 _DECREE_DATE: Final = date(2024, 10, 10)
 
 

@@ -1,3 +1,4 @@
+import decimal
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal
@@ -19,6 +20,7 @@ from ledger_country_do.regime.definitions import (
 from ledger_country_do.regime.parameters import PARAMETER_SOURCES, PARAMETERS
 from ledger_country_do.regime.rounding import round_amount, within_global_tolerance, within_line_tolerance
 from ledger_country_do.regime.sources import COVERED_FROM
+lazy from ledger_country_do.regime.definitions import RoundingMode
 
 TODAY = date(2026, 10, 13)
 
@@ -129,3 +131,19 @@ def test_the_technical_report_s_tolerance_examples() -> None:
     assert not within_line_tolerance(Decimal("668.51"), quantity=Decimal(2), unit_price=Decimal("333.25"))
     assert within_global_tolerance(Decimal("6914.30"), computed=Decimal("6911.58"), lines=3)
     assert not within_global_tolerance(Decimal("6914.59"), computed=Decimal("6911.58"), lines=3)
+
+
+def test_every_decimal_rounding_constant_is_a_rounding_mode() -> None:
+    modes: tuple[RoundingMode, ...] = (
+        decimal.ROUND_DOWN,
+        decimal.ROUND_HALF_UP,
+        decimal.ROUND_HALF_EVEN,
+        decimal.ROUND_CEILING,
+        decimal.ROUND_FLOOR,
+        decimal.ROUND_UP,
+        decimal.ROUND_HALF_DOWN,
+        decimal.ROUND_05UP,
+    )
+    assert len(set(modes)) == len(modes)
+    assert all(Decimal("0.125").quantize(Decimal("0.01"), rounding=mode) for mode in modes)
+    assert REGIME.rounding.mode in modes
