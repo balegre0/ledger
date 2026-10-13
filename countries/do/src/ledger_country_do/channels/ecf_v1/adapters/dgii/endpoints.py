@@ -23,6 +23,7 @@ from ledger_country_do.channels.ecf_v1.domain.environments import (
     Environment,
 )
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfConflictError, EcfError
+from ledger_country_do.channels.ecf_v1.domain.printed import QrHosts
 
 
 class Service(StrEnum):
@@ -121,6 +122,11 @@ class DgiiHosts:
     def official(self) -> bool:
         """Whether these are DGII's own hosts, exactly."""
         return (self.ecf, self.fc) == (OFFICIAL_ECF_HOST, OFFICIAL_FC_HOST)
+
+    @property
+    def qr(self) -> QrHosts:
+        """The QR's hosts: these, checked (a QR names where its document went)."""
+        return QrHosts(ecf=self.ecf, fc=self.fc)
 
     def url(self, service: Service, environment: Environment) -> str:
         """Where ``service`` answers in ``environment``."""

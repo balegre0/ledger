@@ -59,7 +59,6 @@ from ledger_country_do.channels.ecf_v1.domain.environments import (
 )
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 from ledger_country_do.channels.ecf_v1.domain.notation import local_date
-from ledger_country_do.channels.ecf_v1.domain.printed import QrHosts
 from ledger_country_do.channels.ecf_v1.domain.routing import Route
 from ledger_country_do.channels.ecf_v1.domain.status_map import DOCUMENTED, FiscalStatus
 from ledger_country_do_testing.local_signer import BundleIncompleteError, KeyPairSigner
@@ -549,7 +548,7 @@ async def _emitted(draft: EcfDraft, trust: CounterpartyTrust | None, context: _R
         environment=settings.environment,
         clock=context.wiring.clock,
         sleep=context.wiring.sleep,
-        qr_hosts=QrHosts(ecf=settings.hosts.ecf, fc=settings.hosts.fc),
+        qr_hosts=settings.hosts.qr,
     )
     signed = await emitter.sign(draft)
     _written(signed, settings, out)

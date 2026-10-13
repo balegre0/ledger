@@ -15,7 +15,6 @@ from ledger_country_do.channels.ecf_v1.application.emission import (
 )
 from ledger_country_do.channels.ecf_v1.application.ports import AuthorityUnavailableError, Failure
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
-from ledger_country_do.channels.ecf_v1.domain.printed import QrHosts
 from ledger_country_do.channels.ecf_v1.domain.routing import Route
 from ledger_country_do.channels.ecf_v1.domain.status_map import (
     DgiiMessage,
@@ -32,7 +31,7 @@ lazy from ledger_country_do_testing.clock import ManualClock
 lazy from ledger_country_do_testing.fake_dgii.app import FakeDgii
 lazy from ledger_country_do_testing.local_signer import KeyPairSigner
 
-QR_HOSTS: Final = QrHosts(ecf=FAKE_HOSTS.ecf, fc=FAKE_HOSTS.fc)
+QR_HOSTS: Final = FAKE_HOSTS.qr
 RECEPTION: Final = "facturaselectronicas"
 _LOST: Final = "the connection was lost on the way to DGII"
 

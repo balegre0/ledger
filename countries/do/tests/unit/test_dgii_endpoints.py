@@ -11,6 +11,7 @@ from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import (
     offered,
 )
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
+from ledger_country_do.channels.ecf_v1.domain.printed import OFFICIAL_QR, QrHosts
 
 
 def test_dgii_s_documented_urls() -> None:
@@ -113,3 +114,9 @@ def test_plain_http_reaches_a_fake_on_this_machine_for_testecf_and_certecf_only(
     assert not fake.official
     with pytest.raises(LiveHostRefusedError):
         fake.url(Service.SEED, Environment.ECF)
+
+
+def test_the_qr_s_hosts_are_the_checked_hosts_documents_go_to() -> None:
+    assert OFFICIAL_HOSTS.qr == OFFICIAL_QR
+    fake = DgiiHosts(ecf="http://127.0.0.1:8471", fc="https://fc.fake.test")
+    assert fake.qr == QrHosts(ecf="http://127.0.0.1:8471", fc="https://fc.fake.test")
