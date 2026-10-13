@@ -406,6 +406,10 @@ company can certify while another runs in production.
   with the same keys, types `JWT` alike and gives the project as an audience too (it carries `azp`). The
   principal is the token's `sub`; its organization is Zitadel's `urn:zitadel:iam:user:resourceowner:id`, whose
   ledger id is a UUIDv5 of it, the same in every service.
+  Its roles in the organization come only from `urn:zitadel:iam:org:project:<project id>:roles`, the claim of
+  the project that is the tokens' audience, and only those granted in the token's organization: Zitadel's
+  generic `urn:zitadel:iam:org:project:roles` (the roles of every project the token was asked for) and the
+  claims of other projects are ignored.
 - Authorization is decided in the service, per request: `platform` loads the principal's permissions
   for the target company through `IdentityQueryService` (cached 30 s, invalidated by `identity.membership.*`
   and `identity.company.deactivated` events) and checks a typed permission (`Permission.INVOICE_ISSUE`).

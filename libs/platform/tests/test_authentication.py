@@ -23,7 +23,6 @@ from ledger_kernel.errors import ErrorKind
 from ledger_platform.authentication import (
     MAX_KEYS_SIZE,
     MAX_TOKEN_LENGTH,
-    PROJECT_ROLES_CLAIM,
     HttpKeys,
     InvalidTokenError,
     InvalidTokenOptionError,
@@ -35,6 +34,7 @@ from ledger_platform.authentication import (
     TokenProblem,
     TokenVerifier,
     organization_of,
+    project_roles_claim,
 )
 from ledger_platform.settings import ApiSettings
 from ledger_testing.clock import Moment
@@ -176,12 +176,31 @@ async def test_a_token_of_the_provider_proves_who_calls(issuer: LocalIssuer, ver
     assert principal.roles == frozenset()
 
 
-async def test_project_roles_granted_in_the_callers_organization_are_read(
+async def test_the_roles_of_this_project_granted_in_the_callers_organization_are_read(
     issuer: LocalIssuer, verifier: TokenVerifier
 ) -> None:
-    generic = {"support": {PROVIDER_ORGANIZATION: "ledger.test"}, "auditor": {"9999": "other.test"}}
-    token = issuer.token(roles=("operator",), claims={PROJECT_ROLES_CLAIM: generic})
-    assert (await verifier.verify(token)).roles == frozenset({"operator", "support"})
+    ours = {"operator": {PROVIDER_ORGANIZATION: "ledger.test"}, "auditor": {"9999": "other.test"}}
+    token = issuer.token(claims={project_roles_claim(AUDIENCE): ours})
+    assert (await verifier.verify(token)).roles == frozenset({"operator"})
+
+
+async def test_roles_of_no_project_or_of_another_project_do_not_count(
+    issuer: LocalIssuer, verifier: TokenVerifier
+) -> None:
+    """Zitadel's generic claim gathers the roles of whatever projects the token was asked for: a role there,
+    or under another project's id, was granted for something else than this API."""
+    granted = {"ledger.organization.admin": {PROVIDER_ORGANIZATION: "ledger.test"}}
+    token = issuer.token(
+        claims={
+            "urn:zitadel:iam:org:project:roles": granted,
+            project_roles_claim("another-project"): granted,
+        }
+    )
+    assert (await verifier.verify(token)).roles == frozenset()
+
+
+def test_the_roles_of_a_project_are_in_a_claim_named_after_it() -> None:
+    assert project_roles_claim("394892279531175940") == "urn:zitadel:iam:org:project:394892279531175940:roles"
 
 
 async def test_an_audience_among_others_or_alone_is_enough(
@@ -279,7 +298,7 @@ async def test_the_verifier_reads_the_time_from_its_clock(issuer: LocalIssuer, p
         ({ORGANIZATION_CLAIM: None}, TokenProblem.CLAIMS),
         ({ORGANIZATION_CLAIM: "10 01"}, TokenProblem.CLAIMS),
         ({ORGANIZATION_CLAIM: 1001}, TokenProblem.CLAIMS),
-        ({PROJECT_ROLES_CLAIM: ["operator"]}, TokenProblem.CLAIMS),
+        ({project_roles_claim(AUDIENCE): ["operator"]}, TokenProblem.CLAIMS),
     ],
     ids=[
         "issuer",

@@ -95,8 +95,6 @@ MAX_HEADER_SIZE: Final = 2048
 refused for its signature, not for its size (joserfc's own limit is 512)."""
 ORGANIZATION_CLAIM: Final = "urn:zitadel:iam:user:resourceowner:id"
 """The caller's organization (asked for with the scope ``urn:zitadel:iam:user:resourceowner``)."""
-PROJECT_ROLES_CLAIM: Final = "urn:zitadel:iam:org:project:roles"
-"""Project roles, ``{role: {organization id: domain}}``; the per-project claim has the same shape."""
 ACCESS_TOKEN_TYPES: Final = frozenset({"jwt", "at+jwt", "application/jwt", "application/at+jwt"})
 """The ``typ`` headers of an access token, in lower case (RFC 7515 4.1.9 allows the ``application/`` form)."""
 ACCESS_TOKEN_CLAIMS: Final = ("jti", "client_id")
@@ -517,18 +515,27 @@ def _numeric_date(claims: Mapping[str, object], name: str) -> float | None:
             _refuse(TokenProblem.CLAIMS)
 
 
-def _granted_roles(claims: Mapping[str, object], names: tuple[str, ...], organization: str) -> Iterator[str]:
-    """The roles the role claims ``names`` grant in ``organization``."""
-    for name in names:
-        roles = _ROLES.validate_python(claims.get(name, {}))
-        yield from (role for role, organizations in roles.items() if organization in organizations)
+def project_roles_claim(project: str) -> str:
+    """The claim of the roles granted in ``project``: ``{role: {organization id: domain}}``.
+
+    The only claim roles are read from, for the project that is the tokens' audience. Zitadel's generic
+    ``urn:zitadel:iam:org:project:roles`` gathers the roles of every project the token was asked for, and a
+    role of another project, though named alike, was granted for something else: neither counts.
+    """
+    return f"urn:zitadel:iam:org:project:{project}:roles"
+
+
+def _granted_roles(claims: Mapping[str, object], name: str, organization: str) -> Iterator[str]:
+    """The roles the claim ``name`` grants in ``organization``."""
+    roles = _ROLES.validate_python(claims.get(name, {}))
+    yield from (role for role, organizations in roles.items() if organization in organizations)
 
 
 @final
 class TokenVerifier:
     """Turns a bearer token into the ``Principal`` it proves, or refuses it (see the module)."""
 
-    __slots__ = ("_clock", "_keys", "_policy", "_role_claims")
+    __slots__ = ("_clock", "_keys", "_policy", "_roles_claim")
 
     def __init__(
         self, policy: TokenPolicy, *, keys: PublishedKeys | None = None, clock: Callable[[], float] = time
@@ -536,7 +543,7 @@ class TokenVerifier:
         self._policy = policy
         self._keys = PublishedKeys(policy) if keys is None else keys
         self._clock = clock
-        self._role_claims = (f"urn:zitadel:iam:org:project:{policy.audience}:roles", PROJECT_ROLES_CLAIM)
+        self._roles_claim = project_roles_claim(policy.audience)
 
     async def verify(self, token: str) -> Principal:
         """The principal ``token`` proves, else ``InvalidTokenError`` (or ``TokenKeysUnavailableError``)."""
@@ -592,6 +599,6 @@ class TokenVerifier:
                 subject=parse_subject(_TEXT.validate_python(claims.get("sub"))),
                 organization=organization_of(organization),
                 provider_organization=organization,
-                roles=frozenset(_granted_roles(claims, self._role_claims, organization)),
+                roles=frozenset(_granted_roles(claims, self._roles_claim, organization)),
             )
         _refuse(TokenProblem.CLAIMS)
