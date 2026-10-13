@@ -8,6 +8,7 @@ from ledger_kernel.ids import new_id
 from ledger_kernel.pagination import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
+    ConflictingCursorsError,
     InvalidCursorError,
     InvalidPageSizeError,
     Page,
@@ -92,3 +93,46 @@ def test_the_last_page_says_nothing_follows() -> None:
 def test_an_empty_page() -> None:
     nothing: list[UUID] = []
     assert page_of(nothing, PageRequest(), key=same) == Page(items=(), next_cursor=None)
+
+
+def test_a_page_says_whether_more_follow() -> None:
+    ids = sorted(new_id() for _ in range(3))
+    assert page_of(ids, PageRequest(size=2), key=same).has_more
+    assert not page_of(ids, PageRequest(size=3), key=same).has_more
+
+
+def test_a_page_read_backwards_holds_the_items_before_the_cursor_in_id_order() -> None:
+    """``ending_before``: rows come newest first; the page holds them oldest first."""
+    ids = sorted(new_id() for _ in range(4))
+    page = page_of([ids[2], ids[1], ids[0]], PageRequest(size=2, before=ids[3]), key=same)
+    assert page.items == (ids[1], ids[2])
+    assert page.has_more
+    assert (decoded(page.previous_cursor), decoded(page.next_cursor)) == (ids[1], ids[2])
+    first = page_of([ids[1], ids[0]], PageRequest(size=2, before=ids[2]), key=same)
+    assert first.items == (ids[0], ids[1])
+    assert not first.has_more
+    assert (first.previous_cursor, decoded(first.next_cursor)) == (None, ids[1])
+
+
+def test_a_page_says_where_the_pages_on_either_side_of_it_start() -> None:
+    """``next_cursor`` after its last item, ``previous_cursor`` before its first: ``None`` where none is."""
+    ids = sorted(new_id() for _ in range(5))
+    first = page_of(ids[:3], PageRequest(size=2), key=same)
+    assert (first.previous_cursor, decoded(first.next_cursor)) == (None, ids[1])
+    middle = page_of(ids[2:5], PageRequest(size=2, after=ids[1]), key=same)
+    assert (decoded(middle.previous_cursor), decoded(middle.next_cursor)) == (ids[2], ids[3])
+    last = page_of(ids[4:], PageRequest(size=2, after=ids[3]), key=same)
+    assert (decoded(last.previous_cursor), last.next_cursor, last.has_more) == (ids[4], None, False)
+    nothing: list[UUID] = []
+    beyond = page_of(nothing, PageRequest(size=2, after=ids[4]), key=same)
+    assert (beyond.previous_cursor, beyond.next_cursor, beyond.has_more) == (None, None, False)
+
+
+def decoded(cursor: str | None) -> UUID | None:
+    return None if cursor is None else decode_cursor(cursor)
+
+
+def test_a_page_cannot_start_after_one_id_and_end_before_another() -> None:
+    with pytest.raises(ConflictingCursorsError) as caught:
+        PageRequest(after=new_id(), before=new_id())
+    assert caught.value.code == "page_cursors_conflict"

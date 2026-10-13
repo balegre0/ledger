@@ -1,17 +1,12 @@
 """What identity's routes are built with: the runtime, the caller, its access, and what ``main`` wires."""
 
-from contextlib import contextmanager
 from dataclasses import dataclass
-from http import HTTPStatus
-from typing import Annotated, Final, Literal, final
-lazy from collections.abc import Callable, Generator
+from typing import Annotated, final
+lazy from collections.abc import Callable
 
 from fastapi import Depends
 
-from ledger_identity.api.models import Problem
-from ledger_identity.domain.errors import StaleVersionError
-from ledger_platform.http.app import PROBLEM_JSON
-from ledger_platform.http.deps import REPLAYED_HEADER, authenticated, company_in_path, precondition_failed
+from ledger_platform.http.deps import authenticated, company_in_path
 lazy from ledger_identity.application.ports import IdentityUnit
 lazy from ledger_identity.settings import IdentitySettings
 lazy from ledger_platform.auth.access import PermissionSource
@@ -26,23 +21,6 @@ type BindUnit = Callable[[UnitOfWork, Outbox], IdentityUnit]
 """identity's unit of work over a chassis transaction (``adapters.postgres.unit.bind``)."""
 type PermissionsOf = Callable[[Database], PermissionSource]
 """identity's permission source over its database (``adapters.permissions.MembershipPermissions``)."""
-type Answers = dict[int | str, dict[str, object]]
-"""What a route documents as ``responses``: its answers by status."""
-type SuccessHeader = Literal["Location", "ETag", "Idempotent-Replayed"]
-"""A header a successful answer may carry."""
-_PROBLEM_SCHEMA: Final = Problem.model_json_schema()
-"""What every error answer holds, written into each answer: the document then needs no shared component."""
-_UNAVAILABLE: Final = 503
-"""What any operation may answer: the database, or the identity provider's keys, cannot be reached now."""
-_TEXT: Final = {"type": "string"}
-_SUCCESS_HEADERS: Final[dict[SuccessHeader, dict[str, object]]] = {
-    "Location": {"description": "The path of the resource created.", "schema": _TEXT},
-    "ETag": {"description": "The resource's version: what If-Match names to change it.", "schema": _TEXT},
-    REPLAYED_HEADER: {
-        "description": "true when the answer is the one stored for an earlier use of the Idempotency-Key.",
-        "schema": {"type": "string", "enum": ["true"]},
-    },
-}
 
 
 @final
@@ -85,32 +63,3 @@ class ApiContext:
             bind=bind,
             idempotency=idempotency,
         )
-
-
-def problems(*statuses: int) -> Answers:
-    """The error answers an operation documents, and 503: RFC 9457 problem documents, ``problem+json``.
-
-    Written out: FastAPI's ``model`` would document them as ``application/json``, which no error is sent as.
-    """
-    answers: Answers = {
-        status: {
-            "description": HTTPStatus(status).phrase,
-            "content": {PROBLEM_JSON: {"schema": _PROBLEM_SCHEMA}},
-        }
-        for status in (*statuses, _UNAVAILABLE)
-    }
-    return answers
-
-
-def success(status: HTTPStatus, *headers: SuccessHeader) -> Answers:
-    """The headers the success answer ``status`` carries, documented (FastAPI merges them into its answer)."""
-    return {status.value: {"headers": {name: _SUCCESS_HEADERS[name] for name in headers}}}
-
-
-@contextmanager
-def precondition_checked() -> Generator[None]:
-    """An update whose ``If-Match`` names no current version answers 412, as RFC 9110 says, not 409."""
-    try:
-        yield
-    except StaleVersionError as error:
-        raise precondition_failed() from error

@@ -50,7 +50,7 @@ from ledger_kernel.countries.do import TaxId
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.pagination import PageRequest, decode_cursor
 from ledger_kernel.tenancy import OrganizationScope, Tenant
-from ledger_platform.auth.tokens import organization_of
+from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_platform.outbox import OutboxRecord
 from ledger_testing.waiting import eventually, waits_for_a_lock
 lazy from ledger_identity.application.ports import IdentityUnit

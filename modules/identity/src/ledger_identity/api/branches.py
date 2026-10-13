@@ -6,7 +6,6 @@ from typing import Annotated, Final
 from fastapi import APIRouter, Depends
 lazy from fastapi import Request, Response
 
-from ledger_identity.api.context import problems, success
 from ledger_identity.api.models import BranchPage, BranchView
 from ledger_identity.application import commands, queries
 from ledger_identity.domain.ids import BranchId
@@ -22,6 +21,7 @@ from ledger_platform.http.deps import (
     json_response,
     page_request,
 )
+from ledger_platform.http.openapi import problems, success
 lazy from ledger_identity.api.context import ApiContext
 lazy from ledger_identity.api.models import NewBranch
 lazy from ledger_identity.settings import IdentitySettings

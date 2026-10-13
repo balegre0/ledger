@@ -11,11 +11,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 lazy from fastapi import Response
 
-from ledger_identity.api.context import problems
 from ledger_identity.api.models import MembershipPage, MembershipView
 from ledger_identity.application import commands, queries
 from ledger_kernel.access import Permission, parse_subject
 from ledger_platform.http.deps import allowed, page_request
+from ledger_platform.http.openapi import problems
 lazy from ledger_identity.api.context import ApiContext
 lazy from ledger_identity.api.models import RoleAssignment
 lazy from ledger_identity.settings import IdentitySettings

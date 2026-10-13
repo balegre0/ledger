@@ -20,7 +20,7 @@ from ledger.identity.v1.identity_query_pb2_grpc import (
 from ledger_kernel.access import Permission, Principal, SubjectId
 from ledger_kernel.ids import CompanyId
 from ledger_platform.auth.access import CachedPermissions
-from ledger_platform.auth.tokens import organization_of
+from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_platform.grpc.client import (
     RemoteDefectError,
     RemoteNotFoundError,

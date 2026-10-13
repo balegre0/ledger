@@ -22,16 +22,6 @@ class _Shape(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True)
 
 
-class Problem(BaseModel):
-    """An RFC 9457 problem document: what every failure answers."""
-
-    type: str = Field(description="urn:ledger:error:<code>")
-    title: str
-    status: int
-    code: str = Field(description="The stable code to match on.")
-    detail: str | None = None
-
-
 class NewCompany(_Shape):
     """A company to register."""
 

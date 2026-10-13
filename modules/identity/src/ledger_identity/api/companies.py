@@ -14,9 +14,9 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 lazy from fastapi import Request, Response
 
-from ledger_identity.api.context import precondition_checked, problems, success
 from ledger_identity.api.models import CompanyPage, CompanyView
 from ledger_identity.application import commands, queries
+from ledger_identity.domain.errors import StaleVersionError
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN
 from ledger_identity.domain.text import parse_legal_name
 from ledger_kernel.access import Permission
@@ -36,6 +36,7 @@ from ledger_platform.http.deps import (
     json_response,
     page_request,
 )
+from ledger_platform.http.openapi import precondition_checked, problems, success
 lazy from ledger_identity.api.context import ApiContext
 lazy from ledger_identity.api.models import CompanyChanges, NewCompany
 lazy from ledger_identity.domain.company import Company
@@ -146,7 +147,7 @@ def router(context: ApiContext) -> APIRouter:
     ) -> CompanyView:
         """Change a company, if it is at a version ``If-Match`` names."""
         legal_name = parse_legal_name(body.legal_name)
-        with precondition_checked():
+        with precondition_checked(StaleVersionError):
             async with current.database.transaction(access.tenant) as transaction:
                 changed = await commands.rename_company(
                     context.bind(transaction, current.outbox),
@@ -174,7 +175,7 @@ def router(context: ApiContext) -> APIRouter:
     ) -> Response:
         """Deactivate a company, if it is at a version ``If-Match`` names: it changes no more."""
         attempt = attempt_of(request, access.principal, key)
-        with precondition_checked():
+        with precondition_checked(StaleVersionError):
             async with current.database.transaction(access.tenant) as transaction:
 
                 async def deactivate() -> StoredResponse:

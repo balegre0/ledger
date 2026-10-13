@@ -16,7 +16,8 @@ from ledger_identity.api.context import ApiContext
 from ledger_identity.api.rest import routes
 from ledger_identity.api.rpc import services
 from ledger_identity.settings import IdentitySettings
-from ledger_platform.auth.tokens import HttpKeys, PublishedKeys, TokenPolicy, TokenVerifier
+from ledger_platform.auth.keys import HttpKeys, PublishedKeys
+from ledger_platform.auth.tokens import TokenPolicy, TokenVerifier
 from ledger_platform.idempotency import Idempotency
 from ledger_platform.service import Events, Interfaces, Service
 lazy from ledger_platform.service import Runtime, RuntimeDependency
