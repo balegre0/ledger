@@ -28,7 +28,7 @@ from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.data.bound import BoundDatabase
 from ledger_platform.data.database import Database, DatabaseLimits
-from ledger_platform.data.queue import Backoff
+from ledger_platform.data.queue import Backoff, release
 from ledger_platform.data.unit_of_work import JobPolicy
 from ledger_platform.jobs import Done, Job, JobOutcome, JobRunner, Park, RunAgain
 from ledger_platform.runtime.manifest import JobDecl
@@ -715,7 +715,7 @@ async def test_a_runner_stopped_mid_job_stops_the_handler_and_records_nothing(
     assert registry.get_sample_value("ledger_job_lease_lost_total", {"kind": SLOW}) is None
 
 
-async def test_a_stopped_runner_lets_its_job_finish_and_claims_no_more(
+async def test_a_stopped_runner_lets_its_job_finish(
     probe: BoundDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry
 ) -> None:
     blocking = Blocking()
@@ -724,17 +724,81 @@ async def test_a_stopped_runner_lets_its_job_finish_and_claims_no_more(
     running = asyncio.create_task(runner.run())
     await blocking.started.wait()
     runner.stop()
-    await enqueue(probe, "k2", kind=SLOW)
     blocking.release.set()
     async with asyncio.timeout(5):
         await runner.drained.wait()
     assert (await state(admin, "k1"))[:2] == ("done", 1)
-    assert (await state(admin, "k2"))[:2] == ("ready", 0)
     assert not blocking.cancelled
     assert not running.done()  # a stopped worker waits to be cancelled: it never returns
     running.cancel()
     with pytest.raises(asyncio.CancelledError):
         await running
+
+
+async def test_a_job_claimed_while_the_runner_stops_is_given_back_unstarted(
+    chassis: WorkerDatabase, probe: BoundDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry
+) -> None:
+    """``stop()`` lands while a claim waits (on a lock the test holds): the job it claims never starts."""
+    blocking = Blocking()
+    runner = JobRunner(database=probe, kinds={SLOW: (DECLS[SLOW], blocking)}, registry=registry, poll=0.02)
+    await enqueue(probe, "k1", kind=SLOW)
+    async with admin.transaction():
+        await admin.execute("LOCK TABLE probe.jobs IN ACCESS EXCLUSIVE MODE")
+        running = asyncio.create_task(runner.run())
+
+        async def claim_waits() -> bool:
+            return await waiting.waits_for_a_lock(app_url(chassis))
+
+        await waiting.eventually(claim_waits)
+        runner.stop()
+    async with asyncio.timeout(5):
+        await runner.drained.wait()
+    assert not blocking.started.is_set()
+    found = await state(admin, "k1")
+    assert (found[:2], found[4:6]) == (("ready", 0), UNLEASED)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+
+async def test_a_stopped_runner_starts_no_job_and_gives_it_back_unspent(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry
+) -> None:
+    """A job claimed before ``stop()`` and not started yet: refused at its start, its attempt refunded."""
+    blocking = Blocking()
+    runner = JobRunner(database=probe, kinds={SLOW: (DECLS[SLOW], blocking)}, registry=registry)
+    await enqueue(probe, "k1", kind=SLOW)
+    (job,) = await runner.claim_now()
+    runner.stop()
+    await runner.handle(job)
+    assert not blocking.started.is_set()
+    found = await state(admin, "k1")
+    assert (found[:2], found[4:6]) == (("ready", 0), UNLEASED)
+    assert finished(registry, "dead", SLOW) is None
+    assert registry.get_sample_value("ledger_job_lease_lost_total", {"kind": SLOW}) is None
+
+
+async def test_a_late_give_back_never_touches_a_job_another_runner_took_over(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry
+) -> None:
+    """The release is fenced by the lease token: a replica that reclaimed the job keeps it."""
+    runner = runner_of(probe, Scripted(), registry)
+    await enqueue(probe, "k1")
+    (job,) = await runner.claim_now()
+    await admin.execute(
+        "UPDATE probe.jobs SET lease_token = gen_random_uuid(), attempts = attempts + 1 WHERE key = 'k1'"
+    )
+    taken = await state(admin, "k1")
+    async with probe.unit(None) as unit:
+        await release(
+            unit.connection,
+            probe.tables.jobs,
+            keys=("kind", "key"),
+            started=[],
+            unstarted=[(job.kind, job.key, job.lease_token)],
+        )
+    assert await state(admin, "k1") == taken
+    assert taken[:2] == ("running", 2)
 
 
 async def test_a_runner_cancelled_mid_job_gives_the_job_back_with_its_attempt_spent(

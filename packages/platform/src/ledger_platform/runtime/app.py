@@ -27,6 +27,9 @@ nothing more, finish what they run, give back what they hold) and given ``drain`
 is cancelled (the runners give back what they still hold); then the resources, the pending NOTIFYs, the pools
 and the spans still pending. A step that runs out of time is left behind and logged
 (``app.stop_step_timed_out``), one that fails is logged (``app.stop_step_failed``): neither holds the rest.
+Limit: a step left behind is cancelled but cannot be forced to end. One that ignores its cancellation runs on
+(kept in ``_ABANDONED``) until the process exits, and may still hold a pool connection when the pools close
+(``app.pools_closing`` logs how many are out); the process exiting is what ends it.
 """
 
 import asyncio
@@ -42,7 +45,7 @@ import structlog
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from prometheus_client import CollectorRegistry, GCCollector, PlatformCollector, ProcessCollector
 from sqlalchemy import create_engine, text
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import NullPool, QueuePool
 lazy from fastapi import FastAPI
 lazy from sqlalchemy import Connection
 
@@ -207,6 +210,12 @@ async def _within(step: str, seconds: float, work: Awaitable[object]) -> None:
     error = running.exception()
     if error is not None:
         _logger.error("app.stop_step_failed", step=step, exc_info=error)
+
+
+def _checked_out(database: Database) -> int:
+    """Connections of ``database``'s pool in use now."""
+    pool = database.engine.pool
+    return pool.checkedout() if isinstance(pool, QueuePool) else 0
 
 
 def _route(url: str, declared: Mapping[str, Mapping[str, frozenset[str]]]) -> None:
@@ -421,6 +430,11 @@ class App:
         await _within("spans", stop.spans, asyncio.to_thread(self._tracing.shutdown, stop.spans * 0.9))
 
     async def _close_pools(self) -> None:
+        """Both pools; how many connections are still out (a step left behind may hold one) is logged."""
+        _logger.info(
+            "app.pools_closing",
+            checked_out=_checked_out(self._database) + _checked_out(self._notifications),
+        )
         try:
             await self._notifications.aclose()
         finally:
@@ -428,6 +442,7 @@ class App:
 
     def _start_workers(self) -> None:
         settings, supervisor, members = self._settings, self._supervisor, self._assembled.members
+        self._running = True  # from the first worker on: a start that fails halfway is stopped all the same
         wakeups = self._wakeups = Wakeups(settings.listen_url.get_secret_value())
         _ = supervisor.start("wakeups", wakeups.run)
         dispatcher = Dispatcher(
@@ -453,4 +468,3 @@ class App:
                 _ = supervisor.start(f"jobs {member.schema}", jobs.run)
         scheduler = Scheduler(platform=self._assembled.bound[PLATFORM], schedules=self._assembled.schedules)
         _ = supervisor.start("scheduler", scheduler.run)
-        self._running = True

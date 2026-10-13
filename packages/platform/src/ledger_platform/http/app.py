@@ -30,7 +30,7 @@ from opentelemetry import trace
 from opentelemetry.trace import SpanContext
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from prometheus_client import Histogram
-from starlette.datastructures import Headers, MutableHeaders
+from starlette.datastructures import MutableHeaders
 lazy from fastapi import APIRouter
 lazy from fastapi.telemetry import TelemetryConfig
 lazy from opentelemetry.trace import TracerProvider
@@ -165,8 +165,9 @@ class _Named:
 
         async def named(message: AsgiMessage) -> None:
             if request_id is not None and message["type"] == "http.response.start":
+                message.setdefault("headers", [])
                 headers = MutableHeaders(scope=message)
-                if REQUEST_ID_HEADER not in Headers(raw=headers.raw):
+                if REQUEST_ID_HEADER not in headers:
                     headers.append(REQUEST_ID_HEADER, request_id)
             await send(message)
 

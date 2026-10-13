@@ -563,6 +563,31 @@ async def failing() -> AsyncGenerator[None]:
     raise CloseFailedError
 
 
+@final
+class SchedulerBrokenError(Exception):
+    def __init__(self) -> None:
+        super().__init__("the scheduler cannot be made")
+
+
+def broken_scheduler(**_: object) -> object:
+    raise SchedulerBrokenError
+
+
+async def test_a_worker_whose_start_fails_halfway_stops_what_it_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scheduler, made last, fails: the workers started before it are stopped all the same."""
+    monkeypatch.setattr(runtime_app, "Scheduler", broken_scheduler)
+    quick = StopTimes(drain=0.2, workers=0.5, resources=0.1, notifications=0.1, pools=0.5, spans=0.5)
+    monkeypatch.setattr(runtime_app, "STOP", quick)
+    served = App("worker", settings=SETTINGS, discover=discovering()).asgi()
+    before = asyncio.all_tasks()
+    with pytest.raises(SchedulerBrokenError):
+        async with served.router.lifespan_context(served):
+            pass
+    assert asyncio.all_tasks() - before == set()
+
+
 async def test_a_stop_step_that_hangs_or_fails_never_holds_the_rest(monkeypatch: pytest.MonkeyPatch) -> None:
     quick = StopTimes(drain=0.1, workers=0.1, resources=0.4, notifications=0.1, pools=0.5, spans=0.5)
     monkeypatch.setattr(runtime_app, "STOP", quick)

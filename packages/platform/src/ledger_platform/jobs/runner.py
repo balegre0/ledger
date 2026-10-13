@@ -21,8 +21,10 @@ the error's code; a retry that would come after the deadline makes it dead with 
 error makes it ready again after the kind's backoff. Dead jobs are kept for an operator.
 
 A runner asked to ``stop`` claims nothing more, lets the jobs in flight finish and record, then sets
-``drained``. A runner cancelled with jobs in flight stops their handlers and gives the jobs back, in a short
-shielded unit: ``ready`` at once, the lease cleared; a job whose handler never started gets its attempt back.
+``drained``. It starts no job after ``stop()``: jobs a claim in flight brings back, and a claimed job whose
+handler has not begun, are given back unstarted (``ready``, the attempt refunded, the lease cleared). A runner
+cancelled with jobs in flight stops their handlers and gives the jobs back, in a short shielded unit:
+``ready`` at once, the lease cleared; a job whose handler never started gets its attempt back.
 
 Time is the database's: due and lease comparisons are ``now()`` in SQL, and the times a record writes are the
 recording unit's ``now``.
@@ -129,6 +131,15 @@ def _job_of(row: RowMapping) -> Job:
 def _code_of(error: Exception) -> str:
     """The error's stable code, ``internal`` when none names it: rows and logs never hold a message."""
     return error.code if isinstance(error, LedgerError) else "internal"
+
+
+class _StoppingError(LedgerError):
+    """A job not started because its runner is stopping: given back already, nothing to record."""
+
+    code: ClassVar[str] = "job_runner_stopping"
+
+    def __init__(self, kind: str) -> None:
+        super().__init__(f"a {kind} job was not started: its runner is stopping")
 
 
 class LeaseLostError(LedgerError):
@@ -243,6 +254,8 @@ class JobRunner:
             except LeaseLostError:
                 self._lost(job)
                 return
+            except _StoppingError:
+                return
             except Exception as error:  # a handler may fail with anything; a cancellation is no Exception
                 _logger.exception("job_failed", kind=job.kind, code=_code_of(error))
                 await self._record(job, partial(self._failure, job, error))
@@ -308,7 +321,8 @@ class JobRunner:
                         await self._pause(self._poll)
         finally:
             if self._holding:
-                await self._give_back()
+                await self._give_back(list(self._holding.values()))
+                self._holding.clear()
         self.drained.set()
         await parked()
 
@@ -318,10 +332,8 @@ class JobRunner:
             async with asyncio.timeout(seconds):
                 await self._stopping.wait()
 
-    async def _give_back(self) -> None:
-        """Release the jobs this runner still holds, in a short shielded unit (see the module)."""
-        holding = list(self._holding.values())
-        self._holding.clear()
+    async def _give_back(self, holding: Sequence[_Holding]) -> None:
+        """Release ``holding``, jobs this runner claimed, in a short shielded unit (see the module)."""
         started: list[tuple[object, ...]] = [
             (h.job.kind, h.job.key, h.job.lease_token) for h in holding if h.started
         ]
@@ -346,6 +358,9 @@ class JobRunner:
             free = min(self._batch, decl.concurrency - held[kind])
             if free > 0:
                 jobs = await self._claim(kind, decl, free)
+                if self._stopping.is_set():  # stopped while the claim was in flight: start none of them
+                    await self._give_back([_Holding(job) for job in jobs])
+                    return False
                 for job in jobs:
                     held[kind] += 1
                     self._holding[job.lease_token] = _Holding(job)
@@ -356,7 +371,7 @@ class JobRunner:
     async def _hold(self, job: Job, held: dict[str, int]) -> None:
         try:
             await self.handle(job)
-            del self._holding[job.lease_token]  # finished: nothing left to give back
+            _ = self._holding.pop(job.lease_token, None)  # finished or given back: nothing left to give back
         finally:
             held[job.kind] -= 1
 
@@ -367,6 +382,10 @@ class JobRunner:
         """
         if not await self._renewed(job):  # taken over since the claim, or unrenewable: never start it
             raise LeaseLostError(job.kind)
+        if self._stopping.is_set():  # claimed before ``stop()``, not started: given back unspent
+            await self._give_back([_Holding(job)])
+            _ = self._holding.pop(job.lease_token, None)
+            raise _StoppingError(job.kind)
         holding = self._holding.get(job.lease_token)
         if holding is not None:  # claimed by ``run`` (``run_due`` holds nothing to give back)
             holding.started = True
