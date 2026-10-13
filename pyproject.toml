@@ -69,7 +69,7 @@ spell = { cmd = "typos", help = "Spell check" }
 # spelled the same way: hence the absolute --proto_path. The *_out directories take no such comparison and
 # stay relative to the project root, where poe runs every task. CI regenerates and diffs the committed code.
 proto = { cmd = "python -m grpc_tools.protoc --proto_path=${POE_ROOT}/libs/contracts/proto --python_out=libs/contracts/src --mypy_out=libs/contracts/src --grpc_python_out=libs/contracts/src --mypy_grpc_out=libs/contracts/src libs/contracts/proto/ledger/**/*.proto", help = "Regenerate the code of every .proto" }
-proto-lint = { cmd = "docker run --rm --volume ${POE_ROOT}/libs/contracts:/workspace --workdir /workspace bufbuild/buf:1.73.0 lint", help = "buf lint" }
+proto-lint = { cmd = "docker run --rm --volume ${POE_ROOT}/libs/contracts:/workspace --workdir /workspace bufbuild/buf:1.73.0@sha256:75d8f756f0919dcded71e67968a91adfe55fe4dd62c4900c57bbfcd7fe625608 lint", help = "buf lint" }
 test = { cmd = "pytest", help = "Tests with coverage" }
 openapi = { cmd = "ledger-identity-openapi services/identity/openapi.json", help = "Regenerate the published OpenAPI documents" }
 check = { sequence = ["format-check", "lint", "suppressions", "types", "arch", "deps", "spell", "proto-lint", "test"], help = "Everything CI runs" }
