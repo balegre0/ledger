@@ -35,6 +35,7 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from ledger_country_do.channels.ecf_v1.adapters.signing.certificates import signing_problem
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError, EcfInvalidError
+from ledger_country_do.regime.tax_ids import normalize, scheme_of
 lazy from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import VerifiedSignature
 
 DEFAULT_SKEW: Final = timedelta(minutes=5)
@@ -53,7 +54,8 @@ DOCUMENT_SIGNING_PURPOSES: Final = frozenset(
 """Any purpose; client authentication and e-mail protection, which qualified certificates for persons and
 seals carry; document signing (RFC 9336, Microsoft's, Adobe's)."""
 _NUMBER: Final = r"([0-9]{9}|[0-9]{11}|[0-9]{3}-[0-9]{7}-[0-9]|[0-9]-[0-9]{2}-[0-9]{5}-[0-9])"
-"""An RNC (``131098193``, ``1-31-09819-3``) or a cédula (``40212345678``, ``402-1234567-8``)."""
+"""How an RNC (``131098193``, ``1-31-09819-3``) or a cédula (``40212345678``, ``402-1234567-8``) is spelled
+in a certificate; the number itself is read by the regime's ``tax_ids`` (``normalize``, ``scheme_of``)."""
 _SERIAL_NUMBER: Final = re.compile(rf"(?:(?:IDC|TIN|PNO)DO-)?{_NUMBER}")
 """``serialNumber``: bare, or after ETSI EN 319 412-1's natural-person prefixes for the Dominican Republic
 (national identity card, tax identification number, national personal number)."""
@@ -97,13 +99,18 @@ def identities(name: x509.Name) -> frozenset[str]:
     prefixed ``VATDO-`` or ``NTRDO-``. Any other prefix (a passport's ``PASDO-``, another country's) or shape
     names nothing.
     """
-    found: set[str] = set()
-    for attribute in name:
-        reader = _READERS.get(attribute.oid)
-        value = attribute.value if isinstance(attribute.value, str) else ""
-        if reader is not None and (matched := reader.fullmatch(value)) is not None:
-            found.add(matched[1].replace("-", ""))
-    return frozenset(found)
+    spelled = [
+        matched[1]
+        for attribute in name
+        if (reader := _READERS.get(attribute.oid)) is not None
+        and (matched := reader.fullmatch(attribute.value if isinstance(attribute.value, str) else ""))
+        is not None
+    ]
+    return frozenset(
+        digits
+        for text in spelled
+        if (digits := normalize(text)) is not None and scheme_of(digits) is not None
+    )
 
 
 def _valid_at(certificate: x509.Certificate, moment: datetime) -> bool:
