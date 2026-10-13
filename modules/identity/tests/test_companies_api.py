@@ -215,8 +215,10 @@ async def test_a_taxpayer_another_organization_holds_is_the_same_conflict_tellin
     ours = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("k-2"))
     other = Caller(local_issuer, organization="1002", roles=(ORGANIZATION_ADMIN,))
     theirs = await client.post("/v1/companies", json=DUARTE, headers=other.posting("k-1"))
-    assert (theirs.status_code, theirs.content) == (409, ours.content)
-    assert document(theirs)["code"] == "tax_id_taken"
+    told, answered = document(theirs), document(ours)
+    del told["request_id"], answered["request_id"]  # each request's own trace
+    assert (theirs.status_code, told) == (409, answered)
+    assert told["code"] == "tax_id_taken"
 
 
 async def test_a_deactivated_company_s_taxpayer_may_be_registered_again(

@@ -4,7 +4,7 @@ import sys
 import types
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Annotated, ClassVar, Final, Literal, TypedDict, final, override
+from typing import Annotated, ClassVar, Final, Literal, NotRequired, TypedDict, final, override
 from uuid import UUID
 lazy from collections.abc import AsyncGenerator, MutableMapping
 
@@ -130,6 +130,7 @@ class Problem(TypedDict):
     title: str
     status: int
     code: str
+    request_id: NotRequired[str]
 
 
 class Liveness(TypedDict):
@@ -379,6 +380,13 @@ async def client(app: FastAPI) -> AsyncGenerator[httpx.AsyncClient]:
         yield client
 
 
+def named(response: httpx.Response) -> dict[str, JsonValue]:
+    """A problem document without its ``request_id``, once that is seen to be the ``Request-Id`` it names."""
+    document = RECORD.validate_json(response.content)
+    assert document.pop("request_id") == response.headers["Request-Id"]
+    return document
+
+
 async def metrics_of(client: httpx.AsyncClient) -> str:
     return (await client.get("/metrics")).text
 
@@ -558,7 +566,7 @@ async def test_a_ledger_error_is_a_problem_document(client: httpx.AsyncClient) -
     response = await client.get("/items/404")
     assert response.status_code == 404
     assert response.headers["content-type"] == PROBLEM_JSON
-    assert response.json() == {
+    assert named(response) == {
         "type": "urn:ledger:error:missing_item",
         "title": "Not Found",
         "status": 404,
@@ -586,7 +594,7 @@ async def test_a_body_that_breaks_the_schema_is_a_problem_document_listing_every
     response = await client.post("/items", json={"quantity": "SECRET-4f9a"})
     assert response.status_code == 422
     assert response.headers["content-type"] == PROBLEM_JSON
-    assert response.json() == {
+    assert named(response) == {
         "type": "urn:ledger:error:invalid_request",
         "title": "Unprocessable Content",
         "status": 422,
@@ -671,7 +679,7 @@ async def test_a_flood_of_problems_is_cut_and_counted(client: httpx.AsyncClient)
 async def test_a_bug_is_a_500_without_details(client: httpx.AsyncClient) -> None:
     response = await client.get("/crash")
     assert response.status_code == 500
-    assert response.json() == {
+    assert named(response) == {
         "type": "urn:ledger:error:internal",
         "title": "Internal Server Error",
         "status": 500,
@@ -685,7 +693,7 @@ async def test_an_internal_error_answers_like_a_bug_and_keeps_its_code_for_the_l
     with capture_logs() as logs:
         response = await client.get("/errors/defect")
     assert response.status_code == 500
-    assert response.json() == {
+    assert named(response) == {
         "type": "urn:ledger:error:internal",
         "title": "Internal Server Error",
         "status": 500,
@@ -748,7 +756,7 @@ async def test_an_unknown_path_is_a_problem_document(client: httpx.AsyncClient) 
     response = await client.get("/nowhere")
     assert response.status_code == 404
     assert response.headers["content-type"] == PROBLEM_JSON
-    assert response.json() == {
+    assert named(response) == {
         "type": "urn:ledger:error:not_found",
         "title": "Not Found",
         "status": 404,
@@ -761,6 +769,7 @@ async def test_a_method_the_route_does_not_take_keeps_its_allow_header(client: h
     assert response.status_code == 405
     assert response.headers["allow"] == "GET"
     assert response.headers["content-type"] == PROBLEM_JSON
+    assert "Request-Id" not in response.headers  # the operational routes are not traced
     assert response.json() == {
         "type": "urn:ledger:error:method_not_allowed",
         "title": "Method Not Allowed",
@@ -795,7 +804,7 @@ async def test_an_http_exception_keeps_its_headers_and_does_not_repeat_its_detai
     assert response.status_code == 401
     assert response.headers["www-authenticate"] == 'Bearer realm="ledger"'
     assert response.headers["content-type"] == PROBLEM_JSON
-    assert response.json() == {
+    assert named(response) == {
         "type": "urn:ledger:error:unauthenticated",
         "title": "Unauthorized",
         "status": 401,
@@ -813,7 +822,7 @@ async def test_a_status_the_standard_does_not_name_is_a_generic_problem(
     response = await client.get(f"/http-errors/{status}")
     assert response.status_code == status
     assert response.headers["x-reason"] == "test"
-    assert response.json() == {
+    assert named(response) == {
         "type": f"urn:ledger:error:{code}",
         "title": title,
         "status": status,
@@ -1091,3 +1100,36 @@ async def test_liveness_fails_while_a_part_of_the_process_is_dead(
         503,
         {"status": "unrecoverable", "wedged": [], "dead": ["workers"]},
     )
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "status"),
+    [
+        ("GET", "/items/404", 404),
+        ("POST", "/strict", 422),
+        ("GET", "/crash", 500),
+        ("GET", "/http-errors/503", 503),
+        ("GET", "/nowhere", 404),
+    ],
+    ids=["ledger-error", "invalid-request", "bug", "http-exception", "unmatched"],
+)
+async def test_a_problem_names_its_request_by_the_trace_it_continues(
+    client: httpx.AsyncClient, method: str, path: str, status: int
+) -> None:
+    """``request_id`` (§9.6) is the request's trace id, in the document and in ``Request-Id``."""
+    with capture_logs():
+        response = await client.request(method, path, json={}, headers={"traceparent": TRACEPARENT})
+    assert response.status_code == status
+    assert (PROBLEM.validate_json(response.content).get("request_id"), response.headers["Request-Id"]) == (
+        TRACE_ID,
+        TRACE_ID,
+    )
+
+
+async def test_a_request_without_a_caller_s_trace_is_named_by_its_own(client: httpx.AsyncClient) -> None:
+    response = await client.get("/items/404")
+    request_id = PROBLEM.validate_json(response.content).get("request_id")
+    assert request_id is not None
+    assert response.headers["Request-Id"] == request_id
+    assert len(request_id) == 32
+    assert request_id != "0" * 32

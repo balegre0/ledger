@@ -12,6 +12,9 @@ A ``LedgerError`` answers the status of its kind (§9.6), except a ``BadRequestE
 layer refuses before reading its body (a missing ``Ledger-Mode``, say) answers 400, its kind still
 ``INVALID``.
 
+A problem names its request (``request_id``, and the ``Request-Id`` header): the id of the trace the request
+is part of, the caller's when it sent a ``traceparent``. A request outside any trace has none.
+
 A failure's log line names the route (``route_of``, the app's route labels) and the caller and its company
 when the route's dependencies learned them (``request_fields``).
 """
@@ -26,6 +29,7 @@ from fastapi import Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.utils import is_body_allowed_for_status_code
+from opentelemetry import trace
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from starlette.exceptions import HTTPException
 lazy from fastapi import FastAPI, Request
@@ -35,6 +39,8 @@ from ledger_platform.http.metrics import declared_route
 from ledger_platform.http.request_fields import remembered
 
 PROBLEM_JSON: Final = "application/problem+json"
+REQUEST_ID_HEADER: Final = "Request-Id"
+"""Where a problem's ``request_id`` is repeated (§9.6): the request's trace id, what support asks for."""
 INTERNAL_CODE: Final = "internal"
 """The code of every defect: a client learns nothing else of it."""
 _STANDARD: Final = {status.value: status for status in HTTPStatus}
@@ -189,7 +195,17 @@ def _problem(
         body["detail"] = detail
     if extra is not None:
         body.update(extra)
-    return JSONResponse(body, status_code=status, headers=headers, media_type=PROBLEM_JSON)
+    answered = dict(headers or {})
+    request_id = _request_id()
+    if request_id is not None:
+        body["request_id"] = answered[REQUEST_ID_HEADER] = request_id
+    return JSONResponse(body, status_code=status, headers=answered, media_type=PROBLEM_JSON)
+
+
+def _request_id() -> str | None:
+    """The id of the request being answered: the id of its trace (the caller's, when it sent one), if any."""
+    context = trace.get_current_span().get_span_context()
+    return trace.format_trace_id(context.trace_id) if context.is_valid else None
 
 
 def _challenge(code: str) -> Mapping[str, str]:

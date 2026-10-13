@@ -9,6 +9,7 @@ from typing import ClassVar
 import httpx
 import pytest
 from fastapi import APIRouter, FastAPI
+from opentelemetry.trace import NoOpTracerProvider
 from structlog.testing import capture_logs
 
 from ledger_kernel.errors import ErrorKind, InvalidInputError, LedgerError
@@ -24,7 +25,15 @@ class BrokenInvariantError(LedgerError):
 
 
 def bare(*routers: APIRouter) -> FastAPI:
-    built = FastAPI()
+    """An app of its own, traced nowhere (whatever provider another test made process-wide)."""
+    built = FastAPI(
+        telemetry={
+            "tracer_provider": NoOpTracerProvider(),
+            "logs": False,
+            "metrics": False,
+            "auto_configure": False,
+        }
+    )
     install_problem_handlers(built)
     for router in routers:
         built.include_router(router)
@@ -102,3 +111,16 @@ async def test_a_bad_request_is_a_400_problem_of_its_own_code() -> None:
 )
 def test_every_other_error_keeps_the_status_of_its_kind(error: LedgerError, status: HTTPStatus) -> None:
     assert status_of(error) == status
+
+
+async def test_a_request_outside_any_trace_has_no_request_id() -> None:
+    router = APIRouter()
+
+    @router.get("/refused")
+    async def refused() -> None:
+        raise RefusedHeaderError
+
+    async with client_of(bare(router)) as client:
+        response = await client.get("/refused")
+    assert "request_id" not in response.json()
+    assert "Request-Id" not in response.headers
