@@ -4,18 +4,26 @@ One builder for ``init.sql`` (devtools), the test template (``ledger_testing``) 
 grants. Roles are the cluster's, shared by every database on it: each is created if missing, then altered to
 exactly the options it must have, so a role that existed with others (``INHERIT``, ``BYPASSRLS``, a stale
 password) is normalized; memberships are granted with their options spelled out for the same reason. No role
-is a superuser or ``BYPASSRLS``. Logins are ``NOINHERIT``: ``ledger_app`` reaches a module's tables only after
-``SET LOCAL ROLE <schema>_rw`` (one unit at a time), ``ledger_migrator`` a schema only after
-``SET ROLE <schema>_owner``.
+is a superuser or ``BYPASSRLS``, none has a connection limit or an expiry, no group role a password.
+Logins are ``NOINHERIT``: ``ledger_app`` reaches a module's tables only after ``SET LOCAL ROLE <schema>_rw``
+(one unit at a time), ``ledger_migrator`` a schema only after ``SET ROLE <schema>_owner``. Memberships
+nobody grants here are revoked last (``_revoke_strays``).
 
-Every identifier is quoted (``identifier``) after its name was checked; passwords are escape-string literals
-outside any dollar-quoted block.
+Every identifier is quoted (``identifier``) after its name was checked. A password never reaches the
+server: the statements carry its SCRAM-SHA-256 verifier (``scram_verifier``), so neither ``log_statement``
+nor an error report can show it. The verifier is an escape-string literal outside any dollar-quoted block.
 """
 
+import base64
+import hashlib
+import hmac
 import re
+import secrets
 from dataclasses import dataclass
 from typing import ClassVar, Final, final
-lazy from collections.abc import Sequence
+lazy from collections.abc import Callable, Sequence
+
+from psycopg import sql
 
 from ledger_kernel.errors import LedgerError, excerpt
 
@@ -135,8 +143,15 @@ RESERVED_WORDS: Final = frozenset(
 )
 """PostgreSQL's reserved key words (``pg_get_keywords()``, categories R and T; a test keeps them equal)."""
 _REFUSED: Final = RESERVED_WORDS | {"pg", "public", "information_schema"}
-_GROUP: Final = "NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION"
-_LOGIN: Final = "LOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION"
+_UNLIMITED: Final = "CONNECTION LIMIT -1 VALID UNTIL 'infinity'"
+"""A limit or an expiry someone set on a role is taken off: the apps' pools size the connections."""
+_GROUP: Final = (
+    f"NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION {_UNLIMITED} PASSWORD NULL"
+)
+_LOGIN: Final = f"LOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION {_UNLIMITED}"
+SCRAM_ITERATIONS: Final = 4096
+"""PostgreSQL's own default (``scram_iterations``)."""
+_SALT_BYTES: Final = 16
 _MEMBER: Final = "WITH ADMIN FALSE, INHERIT FALSE, SET TRUE"
 """A login becomes the role with ``SET ROLE``; it never inherits it, and can grant it to no one."""
 _DATABASE: Final = "DO $$ BEGIN EXECUTE format('{} ON DATABASE %I {}', current_database()); END $$"
@@ -158,6 +173,44 @@ class InvalidSchemaNameError(LedgerError):
             if signer_without_password
             else f"the schema name {shown} is not 2 to 31 lower-case letters, digits and underscores"
         )
+
+
+class UnsupportedPasswordError(LedgerError):
+    """A login password whose SCRAM verifier this module cannot compute as PostgreSQL would.
+
+    PostgreSQL prepares a password with SASLprep before hashing it, which leaves printable ASCII alone and may
+    rewrite anything else; such a verifier would not match. The password itself is never shown.
+    """
+
+    code: ClassVar[str] = "unsupported_password"
+
+    def __init__(self) -> None:
+        super().__init__("a login password is 1 or more printable ASCII characters")
+
+
+type Salting = Callable[[str], bytes]
+"""The salt of a login's verifier, by the login's name."""
+
+
+def random_salt(login: str) -> bytes:
+    """A new random salt (the default): every run makes another verifier of the same password."""
+    del login
+    return secrets.token_bytes(_SALT_BYTES)
+
+
+def scram_verifier(password: str, *, salt: bytes) -> str:
+    """``password`` as PostgreSQL stores it for SCRAM-SHA-256 (RFC 5802, RFC 7677).
+
+    ``SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>``, base64: what ``ALTER ROLE ... PASSWORD``
+    keeps as it is, without ever seeing the password.
+    """
+    if not password or not (password.isascii() and password.isprintable()):
+        raise UnsupportedPasswordError
+    salted = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, SCRAM_ITERATIONS)
+    stored = hashlib.sha256(hmac.digest(salted, b"Client Key", "sha256")).digest()
+    server = hmac.digest(salted, b"Server Key", "sha256")
+    encoded = [base64.b64encode(part).decode("ascii") for part in (salt, stored, server)]
+    return f"SCRAM-SHA-256${SCRAM_ITERATIONS}:{encoded[0]}${encoded[1]}:{encoded[2]}"
 
 
 def identifier(name: str) -> str:
@@ -224,34 +277,90 @@ def _role(name: str, options: str) -> tuple[str, str]:
     )
 
 
+def _login(name: str, password: str, salt: Salting) -> tuple[str, str]:
+    return _role(name, f"{_LOGIN} PASSWORD {_literal(scram_verifier(password, salt=salt(name)))}")
+
+
 def _member(role: str, login: str) -> str:
     return f"GRANT {identifier(role)} TO {identifier(login)} {_MEMBER}"
 
 
-def cluster_statements(schemas: Sequence[SchemaRoles], logins: Logins) -> tuple[str, ...]:
-    """The roles of every schema and the logins, with their memberships (run once per server)."""
+_KEPT_BY_LOGIN: Final = {APP: "_(rw|purge)$", MIGRATOR: "_owner$", SIGNER: "_(rw|purge)$"}
+"""The roles a login may stay a member of although this run names them not: another database's schemas."""
+
+
+_STRAYS: Final = sql.SQL("""DO $$ DECLARE stray record; BEGIN
+FOR stray IN
+    SELECT granted.rolname AS role, member.rolname AS member, grantor.rolname AS grantor
+    FROM pg_auth_members AS membership
+    JOIN pg_roles AS granted ON granted.oid = membership.roleid
+    JOIN pg_roles AS member ON member.oid = membership.member
+    JOIN pg_roles AS grantor ON grantor.oid = membership.grantor
+    WHERE (granted.rolname, member.rolname) NOT IN ({expected}) AND member.rolname <> current_user
+      AND (granted.rolname IN ({granted}) OR member.rolname IN ({groups}) OR {families})
+LOOP
+    EXECUTE format('REVOKE %I FROM %I GRANTED BY %I CASCADE', stray.role, stray.member, stray.grantor);
+END LOOP;
+END $$""")
+
+
+def _names(names: Sequence[str]) -> sql.Composed:
+    return sql.SQL(", ").join(sql.Literal(name) for name in names)
+
+
+def _revoke_strays(
+    groups: Sequence[str], logins: Sequence[str], memberships: Sequence[tuple[str, str]]
+) -> str:
+    """Revoke, whoever granted it, every membership no statement here granted.
+
+    That is any membership in this run's roles (nobody is a member of a login either), any of this run's group
+    roles in another role, and any of a login outside its family of roles (``_KEPT_BY_LOGIN``). The role
+    running the statements keeps its own (PostgreSQL makes a ``CREATEROLE`` creator a member of what it
+    creates). Every name is a constant or a checked schema's role, and goes in as a literal.
+    """
+    pair = sql.SQL("({}, {})")
+    family = sql.SQL("(member.rolname = {} AND granted.rolname !~ {})")
+    return _STRAYS.format(
+        expected=sql.SQL(", ").join(pair.format(sql.Literal(r), sql.Literal(m)) for r, m in memberships),
+        granted=_names([*groups, *logins]),
+        groups=_names(groups),
+        families=sql.SQL(" OR ").join(
+            family.format(sql.Literal(login), sql.Literal(kept)) for login, kept in _KEPT_BY_LOGIN.items()
+        ),
+    ).as_string()
+
+
+def cluster_statements(
+    schemas: Sequence[SchemaRoles], logins: Logins, *, salt: Salting = random_salt
+) -> tuple[str, ...]:
+    """The roles of every schema and the logins, with their memberships (run once per server).
+
+    ``salt`` gives each login's verifier its salt; a generated file that must come out the same at every run
+    passes one of its own.
+    """
     statements = [
         *_role(RELAY, _GROUP),
-        *_role(APP, f"{_LOGIN} PASSWORD {_literal(logins.app)}"),
-        *_role(MIGRATOR, f"{_LOGIN} PASSWORD {_literal(logins.migrator)}"),
+        *_login(APP, logins.app, salt),
+        *_login(MIGRATOR, logins.migrator, salt),
     ]
+    names = [APP, MIGRATOR]
     signed = [schema.schema for schema in schemas if schema.signer]
     if signed:
         if logins.signer is None:
             raise InvalidSchemaNameError(signed[0], signer_without_password=True)
-        statements += _role(SIGNER, f"{_LOGIN} PASSWORD {_literal(logins.signer)}")
+        statements += _login(SIGNER, logins.signer, salt)
+        names.append(SIGNER)
+    groups = [RELAY]
+    memberships: list[tuple[str, str]] = []
     for schema in schemas:
-        statements += [
-            *_role(schema.owner, _GROUP),
-            *_role(schema.rw, _GROUP),
-            *_role(schema.purge, _GROUP),
-            _member(schema.owner, MIGRATOR),
-            _member(schema.rw, schema.login),
-            _member(schema.purge, schema.login),
-        ]
-    statements.append(_member(RELAY, APP))
+        groups += [schema.owner, schema.rw, schema.purge]
+        statements += [*_role(schema.owner, _GROUP), *_role(schema.rw, _GROUP), *_role(schema.purge, _GROUP)]
+        memberships += [(schema.owner, MIGRATOR), (schema.rw, schema.login), (schema.purge, schema.login)]
+    memberships.append((RELAY, APP))
     if signed:
-        statements.append(_member(f"{PLATFORM}_rw", SIGNER))
+        memberships.append((f"{PLATFORM}_rw", SIGNER))
+    statements += [_member(role, login) for role, login in memberships]
+    statements.append(_revoke_strays(groups, names, memberships))
     return tuple(statements)
 
 

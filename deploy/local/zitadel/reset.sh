@@ -19,4 +19,4 @@ fi
 rm -rf "$HERE/.local"
 
 echo "Zitadel starts over at its next start: docker compose -f deploy/local/compose.yaml --profile zitadel up -d --wait"
-echo "then run bootstrap.sh and restart identity (until then it expects the audience of deploy/local/identity.env)"
+echo "then run bootstrap.sh and restart the api (until then it expects the audience of deploy/local/ledger.env)"

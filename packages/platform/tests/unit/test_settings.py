@@ -39,6 +39,7 @@ def test_settings_need_only_the_database_and_the_environment(monkeypatch: pytest
         LogFormat.CONSOLE,
     )
     assert (settings.database_direct_url, settings.http_port, settings.otlp_endpoint) == (None, 8000, None)
+    assert settings.http_host == "127.0.0.1"  # a run on a host binds loopback; the image says otherwise
     assert (settings.token_issuer, settings.token_audience, settings.token_jwks_url) == (None, None, None)
     assert (settings.token_algorithms, settings.token_leeway_seconds) == (frozenset({"RS256"}), 60)
 
@@ -46,10 +47,17 @@ def test_settings_need_only_the_database_and_the_environment(monkeypatch: pytest
 def test_settings_come_from_ledger_environment_variables(monkeypatch: pytest.MonkeyPatch) -> None:
     environment(
         monkeypatch,
-        REQUIRED | {"LEDGER_LOG_FORMAT": "json", "LEDGER_LOG_LEVEL": "WARNING", "LEDGER_HTTP_PORT": "9000"},
+        REQUIRED
+        | {
+            "LEDGER_LOG_FORMAT": "json",
+            "LEDGER_LOG_LEVEL": "WARNING",
+            "LEDGER_HTTP_HOST": "::1",
+            "LEDGER_HTTP_PORT": "9000",
+        },
     )
     settings = Settings()
     assert (settings.log_format, settings.log_level, settings.http_port) == (LogFormat.JSON, "WARNING", 9000)
+    assert settings.http_host == "::1"
 
 
 def test_a_pooled_database_url_is_said_so(monkeypatch: pytest.MonkeyPatch) -> None:

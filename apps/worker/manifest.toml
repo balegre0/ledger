@@ -1,0 +1,13 @@
+[package]
+name = "worker"
+kind = "app"
+summary = "Fan-out, consumers, jobs and schedules."
+owners = ["@balegre0"]
+
+[dependencies]
+packages = ["platform"]
+python = ["fastapi>=0.143.0", "granian[uvloop]>=2.8.4"]
+
+[app]
+script = "ledger-worker"
+role = "worker"

@@ -1,0 +1,13 @@
+[package]
+name = "migrate"
+kind = "app"
+summary = "Every schema's migrations, subscriptions and routing, before a rollout."
+owners = ["@balegre0"]
+
+[dependencies]
+packages = ["platform"]
+python = []
+
+[app]
+script = "ledger-migrate"
+role = "migrate"

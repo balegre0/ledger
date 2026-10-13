@@ -3,7 +3,10 @@ name = "ledger-workspace"
 version = "0.0.0"
 description = "Workspace root: the shared tooling of every ledger package and service."
 requires-python = ">=3.15"
-dependencies = ["ledger-kernel", "ledger-platform", "ledger-identity", "ledger-country-do"]
+dependencies = [
+    "ledger-kernel", "ledger-platform", "ledger-identity", "ledger-country-do", "ledger-app-api", "ledger-app-worker",
+    "ledger-app-migrate",
+]
 
 [dependency-groups]
 dev = [
@@ -37,7 +40,7 @@ package = false
 constraint-dependencies = ["cryptography>=50.0.2"]  # joserfc's: the first release with CPython 3.15 wheels of its own
 
 [tool.uv.workspace]
-members = ["packages/*", "modules/*", "tools/*", "countries/do", "countries/do/testing"]
+members = ["packages/*", "modules/*", "tools/*", "countries/do", "countries/do/testing", "apps/*"]
 
 [tool.uv.sources]
 ledger-kernel = { workspace = true }
@@ -47,6 +50,9 @@ ledger-identity = { workspace = true }
 ledger-devtools = { workspace = true }
 ledger-country-do = { workspace = true }
 ledger-country-do-testing = { workspace = true }
+ledger-app-api = { workspace = true }
+ledger-app-worker = { workspace = true }
+ledger-app-migrate = { workspace = true }
 
 # ── Tasks: `uv run poe <task>` ──────────────────────────────────────────────────
 [tool.poe.tasks]
@@ -61,8 +67,11 @@ mypy-identity = { cmd = "mypy modules/identity" }
 mypy-devtools = { cmd = "mypy tools/devtools" }
 mypy-country-do = { cmd = "mypy countries/do/src countries/do/tests" }
 mypy-country-do-testing = { cmd = "mypy countries/do/testing" }
+mypy-app-api = { cmd = "mypy apps/api" }
+mypy-app-worker = { cmd = "mypy apps/worker" }
+mypy-app-migrate = { cmd = "mypy apps/migrate" }
 mypy-workspace = { cmd = "mypy tests" }
-mypy = { sequence = ["mypy-kernel", "mypy-platform", "mypy-testing", "mypy-identity", "mypy-devtools", "mypy-country-do", "mypy-country-do-testing", "mypy-workspace"], help = "Type check #2, one package at a time (each has its own tests), then the workspace's own tests" }
+mypy = { sequence = ["mypy-kernel", "mypy-platform", "mypy-testing", "mypy-identity", "mypy-devtools", "mypy-country-do", "mypy-country-do-testing", "mypy-app-api", "mypy-app-worker", "mypy-app-migrate", "mypy-workspace"], help = "Type check #2, one package at a time (each has its own tests), then the workspace's own tests" }
 types = { sequence = ["pyright", "mypy"], help = "Both type checkers" }
 arch = { cmd = "lint-imports", help = "Architecture contracts (import-linter)" }
 deps-kernel = { cmd = "deptry packages/kernel/src --config packages/kernel/pyproject.toml" }
@@ -72,7 +81,10 @@ deps-identity = { cmd = "deptry modules/identity/src --config modules/identity/p
 deps-devtools = { cmd = "deptry tools/devtools/src --config tools/devtools/pyproject.toml" }
 deps-country-do = { cmd = "deptry countries/do/src --config countries/do/pyproject.toml" }
 deps-country-do-testing = { cmd = "deptry countries/do/testing/src --config countries/do/testing/pyproject.toml" }
-deps = { sequence = ["deps-kernel", "deps-platform", "deps-testing", "deps-identity", "deps-devtools", "deps-country-do", "deps-country-do-testing"], help = "Unused / missing / transitive dependencies, per package" }
+deps-app-api = { cmd = "deptry apps/api/src --config apps/api/pyproject.toml" }
+deps-app-worker = { cmd = "deptry apps/worker/src --config apps/worker/pyproject.toml" }
+deps-app-migrate = { cmd = "deptry apps/migrate/src --config apps/migrate/pyproject.toml" }
+deps = { sequence = ["deps-kernel", "deps-platform", "deps-testing", "deps-identity", "deps-devtools", "deps-country-do", "deps-country-do-testing", "deps-app-api", "deps-app-worker", "deps-app-migrate"], help = "Unused / missing / transitive dependencies, per package" }
 spell = { cmd = "typos", help = "Spell check" }
 test = { cmd = "pytest -n auto", help = "Tests with coverage, in parallel" }
 openapi = { cmd = "pytest modules/identity/tests/contract --no-cov -q -p no:randomly", env = { UPDATE_SNAPSHOTS = "1" }, help = "Rewrite the published OpenAPI documents (the snapshot test writes them, then fails: review the diff)" }
@@ -138,7 +150,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"{packages/*/tests,modules/*/tests,tools/*/tests,countries/do/tests,countries/do/testing/tests,tests}/**" = [
+"{packages/*/tests,modules/*/tests,tools/*/tests,countries/do/tests,countries/do/testing/tests,apps/*/tests,tests}/**" = [
     "S101",    # assert is the point of a test
     "D",       # test names are the documentation
     "PLR2004", # magic values are fine in assertions
@@ -162,7 +174,10 @@ runtime-evaluated-base-classes = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["ledger_kernel", "ledger_platform", "ledger_testing", "ledger_identity", "ledger_devtools", "ledger_country_do", "ledger_country_do_testing"]
+known-first-party = [
+    "ledger_kernel", "ledger_platform", "ledger_testing", "ledger_identity", "ledger_devtools", "ledger_country_do",
+    "ledger_country_do_testing", "ledger_app_api", "ledger_app_worker", "ledger_app_migrate",
+]
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -171,7 +186,7 @@ exclude = ["*.md"]  # ruff 0.17 formats Python blocks inside Markdown; the docs 
 # ── Type checker #1: basedpyright ───────────────────────────────────────────────
 [tool.basedpyright]
 pythonVersion = "3.15"
-include = ["packages", "modules", "tools", "countries", "tests"]
+include = ["packages", "modules", "tools", "countries", "apps", "tests"]
 exclude = ["**/.venv", "**/__pycache__"]
 typeCheckingMode = "all"
 failOnWarnings = true
@@ -214,7 +229,7 @@ warn_required_dynamic_aliases = true
 # ── Tests ───────────────────────────────────────────────────────────────────────
 [tool.pytest]
 minversion = "9.0"
-testpaths = ["packages", "modules", "tools", "countries", "tests"]
+testpaths = ["packages", "modules", "tools", "countries", "apps", "tests"]
 addopts = [
     "--strict-markers",
     "--strict-config",
@@ -231,7 +246,7 @@ asyncio_default_fixture_loop_scope = "function"
 branch = true
 source_pkgs = [
     "ledger_kernel", "ledger_platform", "ledger_testing", "ledger_identity", "ledger_devtools", "ledger_country_do",
-    "ledger_country_do_testing",
+    "ledger_country_do_testing", "ledger_app_api", "ledger_app_worker", "ledger_app_migrate",
 ]
 # Alembic runs a service's migration environment and scripts from their files, as modules named after the file
 # (`env_py`), outside the service's package: coverage, which picks `source_pkgs` by module name, would never
@@ -253,14 +268,17 @@ partial_branches = []  # no "pragma: no branch": every branch counts
 [tool.importlinter]
 root_packages = [
     "ledger_kernel", "ledger_platform", "ledger_testing", "ledger_identity", "ledger_devtools", "ledger_country_do",
-    "ledger_country_do_testing",
+    "ledger_country_do_testing", "ledger_app_api", "ledger_app_worker", "ledger_app_migrate",
 ]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Production code never imports test tooling"
 type = "forbidden"
-source_modules = ["ledger_kernel", "ledger_platform", "ledger_identity", "ledger_country_do"]
+source_modules = [
+    "ledger_kernel", "ledger_platform", "ledger_identity", "ledger_country_do", "ledger_app_api", "ledger_app_worker",
+    "ledger_app_migrate",
+]
 forbidden_modules = [
     "pytest", "hypothesis", "testcontainers", "ledger_testing", "ledger_country_do_testing", "signxml", "xmlschema",
 ]
@@ -284,6 +302,19 @@ name = "Kernel is standard library only"
 type = "forbidden"
 source_modules = ["ledger_kernel"]
 forbidden_modules = ["pydantic", "pydantic_settings", "sqlalchemy", "fastapi", "starlette", "structlog", "google", "grpc", "opentelemetry", "prometheus_client", "psycopg"]
+
+# An app is a composition root (§3.3): it builds an App and serves it. Modules are found through their entry
+# points, so an app never imports one; nor does it reach below the platform's runtime.
+[[tool.importlinter.contracts]]
+name = "Apps only compose"
+type = "forbidden"
+source_modules = ["ledger_app_api", "ledger_app_worker", "ledger_app_migrate"]
+forbidden_modules = [
+    "ledger_identity.domain", "ledger_identity.application", "ledger_identity.adapters",
+    "ledger_platform.config", "ledger_platform.observability", "ledger_platform.data", "ledger_platform.auth",
+    "ledger_platform.events", "ledger_platform.jobs", "ledger_platform.http", "ledger_platform.grpc",
+]
+allow_indirect_imports = true
 
 [[tool.importlinter.contracts]]
 name = "Libraries never import services"

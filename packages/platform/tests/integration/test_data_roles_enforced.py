@@ -422,40 +422,81 @@ def test_the_reserved_words_are_postgresqls(chassis: WorkerDatabase) -> None:
     assert {word for (word,) in _WORDS.validate_python(rows)} == RESERVED_WORDS
 
 
-def test_a_password_literal_means_what_it_says(chassis: WorkerDatabase) -> None:
-    hostile = HOSTILE
-    statements = cluster_statements((), Logins(app=hostile, migrator="m"))
-    literal = statements[3].split(" PASSWORD ", 1)[1]
-    with psycopg.connect(chassis.admin_url()) as connection:
-        connection.execute("SET standard_conforming_strings = off")
-        off = connection.execute(f"SELECT {literal}".encode()).fetchone()
-        connection.execute("SET standard_conforming_strings = on")
-        on = connection.execute(f"SELECT {literal}".encode()).fetchone()
-    assert off == on == (hostile,)
+def test_a_login_signs_in_with_its_password_whose_verifier_alone_reached_the_server(
+    chassis: WorkerDatabase,
+) -> None:
+    """The server keeps what it was sent (a SCRAM verifier), and the password still opens a session."""
+    statements = cluster_statements((), Logins(app=HOSTILE, migrator="m"))
+    verifier = statements[3].split(" PASSWORD ", 1)[1]
+    server = chassis.server
+    role = f"scram_{uuid.uuid7().hex}"
+
+    def sign_in(password: str) -> None:
+        with psycopg.connect(
+            host=server.host, port=server.port, dbname="postgres", user=role, password=password
+        ) as connection:
+            connection.execute("SELECT 1")
+
+    with psycopg.connect(chassis.admin_url(), autocommit=True) as admin:
+        admin.execute(f"CREATE ROLE {role} LOGIN PASSWORD {verifier}".encode())
+        try:
+            kept = admin.execute("SELECT rolpassword FROM pg_authid WHERE rolname = %s", (role,)).fetchone()
+            sign_in(HOSTILE)
+            with pytest.raises(psycopg.OperationalError, match="password authentication failed"):
+                sign_in(HOSTILE + "x")
+        finally:
+            admin.execute(f"DROP ROLE {role}".encode())
+    assert kept is not None
+    assert kept[0] == verifier.removeprefix("E'").removesuffix("'")
 
 
 def test_roles_that_exist_with_other_options_are_normalized(chassis: WorkerDatabase) -> None:
     roles = SchemaRoles(schema="stale")
     with psycopg.connect(chassis.admin_url(), autocommit=True) as connection:
         try:
-            connection.execute("CREATE ROLE stale_owner LOGIN INHERIT BYPASSRLS CREATEDB PASSWORD 'old'")
-            connection.execute("CREATE ROLE stale_rw INHERIT")
+            connection.execute(
+                """CREATE ROLE stale_owner LOGIN INHERIT BYPASSRLS CREATEDB PASSWORD 'old'
+                   CONNECTION LIMIT 1 VALID UNTIL '2000-01-01'"""
+            )
+            connection.execute("CREATE ROLE stale_rw INHERIT CONNECTION LIMIT 0")
+            connection.execute("CREATE ROLE stale_intruder LOGIN")
             connection.execute("GRANT stale_rw TO ledger_app WITH INHERIT TRUE, ADMIN TRUE")
+            # memberships nobody asked for: the app login in an owner role, an intruder in a rw role, a
+            # module role in a predefined one, the migrator login in a predefined one
+            connection.execute("GRANT stale_owner TO ledger_app")
+            connection.execute("GRANT stale_rw TO stale_intruder")
+            connection.execute("GRANT pg_read_all_stats TO stale_rw")
+            connection.execute("GRANT pg_read_all_stats TO ledger_migrator")
             for statement in cluster_statements((roles,), TEST_LOGINS):
                 connection.execute(statement.encode())
             options = connection.execute(
-                """SELECT rolname::text, rolcanlogin, rolbypassrls, rolcreatedb, rolpassword IS NULL
-                   FROM pg_authid WHERE rolname LIKE 'stale%%' ORDER BY 1"""
+                """SELECT rolname::text, rolcanlogin, rolbypassrls, rolcreatedb, rolpassword IS NULL,
+                          rolconnlimit, rolvaliduntil = 'infinity'
+                   FROM pg_authid WHERE rolname LIKE 'stale%%' AND rolname <> 'stale_intruder' ORDER BY 1"""
             ).fetchall()
             member = connection.execute(
                 """SELECT inherit_option, admin_option, set_option FROM pg_auth_members
                    WHERE roleid = 'stale_rw'::regrole AND member = 'ledger_app'::regrole"""
             ).fetchall()
+            memberships = connection.execute(
+                """SELECT granted.rolname::text, member.rolname::text
+                   FROM pg_auth_members
+                   JOIN pg_roles granted ON granted.oid = roleid
+                   JOIN pg_roles member ON member.oid = pg_auth_members.member
+                   WHERE granted.rolname LIKE 'stale%%' OR member.rolname LIKE 'stale%%'
+                      OR (granted.rolname = 'pg_read_all_stats' AND member.rolname = 'ledger_migrator')
+                   ORDER BY 1, 2"""
+            ).fetchall()
         finally:
-            connection.execute("DROP ROLE IF EXISTS stale_owner, stale_rw, stale_purge")
+            connection.execute("DROP ROLE IF EXISTS stale_owner, stale_rw, stale_purge, stale_intruder")
     assert options == [
-        ("stale_owner", False, False, False, False),
-        ("stale_purge", False, False, False, True),
-        ("stale_rw", False, False, False, True),
+        ("stale_owner", False, False, False, True, -1, True),
+        ("stale_purge", False, False, False, True, -1, True),
+        ("stale_rw", False, False, False, True, -1, True),
     ]
     assert member == [(False, False, True)]
+    assert memberships == [
+        ("stale_owner", "ledger_migrator"),
+        ("stale_purge", "ledger_app"),
+        ("stale_rw", "ledger_app"),
+    ]

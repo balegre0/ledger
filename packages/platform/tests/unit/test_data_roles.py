@@ -1,3 +1,7 @@
+import base64
+import hashlib
+import hmac
+
 import pytest
 
 from ledger_platform.data.roles import (
@@ -5,21 +9,36 @@ from ledger_platform.data.roles import (
     MIGRATOR,
     RELAY,
     RESERVED_WORDS,
+    SCRAM_ITERATIONS,
     SIGNER,
     InvalidSchemaNameError,
     Logins,
     SchemaRoles,
+    UnsupportedPasswordError,
     cluster_statements,
     database_statements,
     identifier,
     migrated_statements,
+    random_salt,
     relay_statements,
+    scram_verifier,
 )
 
 LOGINS = Logins(app="a'pp", migrator="m", signer="s")
-GROUP = "NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION"
-LOGIN = "LOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION"
+UNLIMITED = "CONNECTION LIMIT -1 VALID UNTIL 'infinity'"
+GROUP = f"NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION {UNLIMITED} PASSWORD NULL"
+LOGIN = f"LOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION {UNLIMITED}"
 MEMBER = "WITH ADMIN FALSE, INHERIT FALSE, SET TRUE"
+SALT = b"0123456789abcdef"
+
+
+def salted(login: str) -> bytes:
+    """A salt of the login's name: the statements a test compares come out the same every time."""
+    return login.encode().ljust(16, b"-")[:16]
+
+
+def password(login: str, secret: str) -> str:
+    return f"PASSWORD E'{scram_verifier(secret, salt=salted(login))}'"
 
 
 def created(role: str) -> str:
@@ -52,45 +71,95 @@ def test_identifiers_are_quoted() -> None:
 
 
 def test_each_role_is_created_if_missing_then_normalized() -> None:
-    statements = cluster_statements((SchemaRoles(schema="platform"), SchemaRoles(schema="identity")), LOGINS)
+    statements = cluster_statements(
+        (SchemaRoles(schema="platform"), SchemaRoles(schema="identity")), LOGINS, salt=salted
+    )
     assert statements[:6] == (
         created(RELAY),
         f'ALTER ROLE "ledger_relay" WITH {GROUP}',
         created(APP),
-        f"ALTER ROLE \"ledger_app\" WITH {LOGIN} PASSWORD E'a''pp'",
+        f'ALTER ROLE "ledger_app" WITH {LOGIN} {password(APP, "a'pp")}',
         created(MIGRATOR),
-        f"ALTER ROLE \"ledger_migrator\" WITH {LOGIN} PASSWORD E'm'",
+        f'ALTER ROLE "ledger_migrator" WITH {LOGIN} {password(MIGRATOR, "m")}',
     )
     assert f'ALTER ROLE "identity_purge" WITH {GROUP}' in statements
     assert f'GRANT "identity_owner" TO "ledger_migrator" {MEMBER}' in statements
     assert f'GRANT "identity_rw" TO "ledger_app" {MEMBER}' in statements
     assert f'GRANT "identity_purge" TO "ledger_app" {MEMBER}' in statements
     assert f'GRANT "ledger_relay" TO "ledger_app" {MEMBER}' in statements
-    assert not any("ledger_signer" in statement for statement in statements)
+    assert not any("ledger_signer" in statement for statement in statements[:-1])  # the last: its strays
     altered = [statement for statement in statements if statement.startswith("ALTER ROLE")]
     assert len(altered) == 9
     assert all("NOSUPERUSER NOBYPASSRLS" in statement for statement in altered)
 
 
-def test_a_password_never_reaches_a_dollar_quoted_block() -> None:
+def test_a_password_never_reaches_the_server_only_its_scram_verifier_does() -> None:
     hostile = "x$$; DROP ROLE ledger_app; $$'\\"
-    statements = cluster_statements((), Logins(app=hostile, migrator="m"))
-    assert all(hostile not in statement for statement in statements if statement.startswith("DO"))
-    assert (
-        statements[3]
-        == f"ALTER ROLE \"ledger_app\" WITH {LOGIN} PASSWORD E'x$$; DROP ROLE ledger_app; $$''\\\\'"
-    )
+    statements = cluster_statements((), Logins(app=hostile, migrator="m"), salt=salted)
+    assert all(hostile not in statement for statement in statements)
+    assert statements[3] == f'ALTER ROLE "ledger_app" WITH {LOGIN} {password(APP, hostile)}'
+
+
+def test_a_verifier_is_postgresqls_scram_sha_256_form() -> None:
+    verifier = scram_verifier("pencil", salt=SALT)
+    method, count_and_salt, keys = verifier.split("$")
+    iterations, salt = count_and_salt.split(":")
+    stored, server = keys.split(":")
+    assert (method, int(iterations), base64.b64decode(salt)) == ("SCRAM-SHA-256", SCRAM_ITERATIONS, SALT)
+    assert len(base64.b64decode(stored)) == len(base64.b64decode(server)) == 32
+
+
+def test_a_verifier_answers_rfc_7677s_exchange() -> None:
+    """RFC 7677 section 3: its keys make the server signature the RFC's server sent and check its proof."""
+    verifier = scram_verifier("pencil", salt=base64.b64decode("W22ZaJ0SNY7soEsUEjb6gQ=="))
+    stored, server = (base64.b64decode(key) for key in verifier.rsplit("$", 1)[1].split(":"))
+    nonce = "rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0"
+    message = f"n=user,r=rOprNGfwEbeRWgbNEkqO,r={nonce},s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096,c=biws,r={nonce}"
+    signature = hmac.digest(server, message.encode(), "sha256")
+    assert base64.b64encode(signature) == b"6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4="
+    proof = base64.b64decode("dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=")
+    mask = hmac.digest(stored, message.encode(), "sha256")
+    client = bytes(a ^ b for a, b in zip(proof, mask, strict=True))
+    assert hashlib.sha256(client).digest() == stored
+
+
+def test_salts_are_random_unless_given() -> None:
+    assert len(random_salt(APP)) == 16
+    assert random_salt(APP) != random_salt(APP)
+    first, second = (cluster_statements((), Logins(app="a", migrator="m"))[3] for _ in range(2))
+    assert first != second
+
+
+@pytest.mark.parametrize("secret", ["contraseña", "", "tab\there"])
+def test_a_password_postgresql_would_prepare_otherwise_is_refused(secret: str) -> None:
+    """SASLprep rewrites what is not printable ASCII before PostgreSQL hashes it; an empty one is none."""
+    with pytest.raises(UnsupportedPasswordError) as raised:
+        scram_verifier(secret, salt=SALT)
+    assert raised.value.code == "unsupported_password"
+    assert secret not in str(raised.value) or not secret
+
+
+def test_memberships_nobody_granted_here_are_revoked_last() -> None:
+    statements = cluster_statements((SchemaRoles(schema="identity"),), LOGINS, salt=salted)
+    revoke = statements[-1]
+    assert revoke.startswith("DO $$")
+    assert "REVOKE %I FROM %I GRANTED BY %I CASCADE" in revoke
+    assert "('identity_rw', 'ledger_app')" in revoke
+    assert "('identity_owner', 'ledger_migrator')" in revoke
+    assert "('ledger_relay', 'ledger_app')" in revoke
+    assert "'a''pp'" not in revoke
 
 
 def test_a_signer_schema_belongs_to_the_signer_login_only() -> None:
     statements = cluster_statements(
-        (SchemaRoles(schema="platform"), SchemaRoles(schema="signer", signer=True)), LOGINS
+        (SchemaRoles(schema="platform"), SchemaRoles(schema="signer", signer=True)), LOGINS, salt=salted
     )
     assert f'GRANT "signer_rw" TO "ledger_signer" {MEMBER}' in statements
     assert f'GRANT "signer_purge" TO "ledger_signer" {MEMBER}' in statements
     assert f'GRANT "signer_rw" TO "ledger_app" {MEMBER}' not in statements
     assert f'GRANT "platform_rw" TO "ledger_signer" {MEMBER}' in statements
-    assert f"ALTER ROLE \"ledger_signer\" WITH {LOGIN} PASSWORD E's'" in statements
+    assert f'ALTER ROLE "ledger_signer" WITH {LOGIN} {password(SIGNER, "s")}' in statements
+    assert "('platform_rw', 'ledger_signer')" in statements[-1]
 
 
 def test_a_signer_schema_needs_the_signer_password() -> None:

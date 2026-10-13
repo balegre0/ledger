@@ -1,0 +1,20 @@
+[project]
+name = "ledger-app-worker"
+version = "0.1.0"
+description = "Fan-out, consumers, jobs and schedules."
+requires-python = ">=3.15"
+dependencies = [
+    "ledger-platform",
+    "fastapi>=0.143.0",
+    "granian[uvloop]>=2.8.4",
+]
+
+[project.scripts]
+ledger-worker = "ledger_app_worker.main:main"
+
+[tool.uv.sources]
+ledger-platform = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"

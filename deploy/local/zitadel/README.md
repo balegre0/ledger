@@ -8,10 +8,11 @@ needs it: the tests use a local OpenID provider of their own (`ledger_testing.is
 ```sh
 docker compose -f deploy/local/compose.yaml --profile zitadel up -d --wait --build   # the first start takes a minute
 sh deploy/local/zitadel/bootstrap.sh                                                  # again whenever you like
-docker compose -f deploy/local/compose.yaml up -d identity                            # identity takes the new audience
+docker compose -f deploy/local/compose.yaml up -d api                                 # the api takes the new audience
 TOKEN=$(sh deploy/local/zitadel/token.sh)
-curl -X POST "http://127.0.0.1:${LEDGER_IDENTITY_PORT:-8100}/v1/companies" \
-  -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: $(date +%s%N)" -H 'Content-Type: application/json' \
+curl -X POST "http://127.0.0.1:${LEDGER_API_PORT:-8100}/v1/companies" \
+  -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: $(date +%s%N)" -H 'Ledger-Mode: test' \
+  -H 'Content-Type: application/json' \
   -d '{"tax_id": "101850043", "legal_name": "Mi Empresa, S.R.L."}'
 ```
 
@@ -23,8 +24,8 @@ tokens are JWTs, exist, and that `ledger-dev` is granted the role (identity regi
 organization's administrators only): it finds them by name, creates what is missing, sets the grant to the role,
 and issues the machine user a new client secret each run (the previous one stops working). It writes,
 under `deploy/local/zitadel/.local/` (ignored by git): `admin.pat` (Zitadel's bootstrap service account),
-`client.env` (the developer client's id and secret) and `identity.env` (`LEDGER_TOKEN_AUDIENCE`, which compose
-gives identity after `deploy/local/identity.env`). Both scripts stop with a message when Zitadel refuses a call or
+`client.env` (the developer client's id and secret) and `ledger.env` (`LEDGER_TOKEN_AUDIENCE`, which compose
+gives the apps after `deploy/local/ledger.env`). Both scripts stop with a message when Zitadel refuses a call or
 answers without what they need, and pass the tokens and the secret to curl on its standard input, never on its
 command line.
 
@@ -63,7 +64,7 @@ Zitadel alone (its container, database and bootstrap volume, and `.local`; ident
 ```sh
 sh deploy/local/zitadel/reset.sh
 docker compose -f deploy/local/compose.yaml --profile zitadel up -d --wait
-sh deploy/local/zitadel/bootstrap.sh && docker compose -f deploy/local/compose.yaml up -d identity
+sh deploy/local/zitadel/bootstrap.sh && docker compose -f deploy/local/compose.yaml up -d api
 ```
 
 The whole stack, every volume included (every database, Zitadel):

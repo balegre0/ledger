@@ -128,9 +128,9 @@ ORGANIZATION_ID=$organization
 CLIENT_ID=$client_id
 CLIENT_SECRET=$client_secret
 ENV
-cat > "$OUT/identity.env" << ENV
+cat > "$OUT/ledger.env" << ENV
 LEDGER_TOKEN_AUDIENCE=$project
 ENV
 
 echo "project $project in organization $organization; the developer client is in $OUT/client.env"
-echo "now restart identity on the new audience: docker compose -f deploy/local/compose.yaml up -d identity"
+echo "now restart the api on the new audience: docker compose -f deploy/local/compose.yaml up -d api"

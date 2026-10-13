@@ -1,0 +1,13 @@
+[package]
+name = "api"
+kind = "app"
+summary = "The public API: every module's routers."
+owners = ["@balegre0"]
+
+[dependencies]
+packages = ["platform"]
+python = ["fastapi>=0.143.0", "granian[uvloop]>=2.8.4"]
+
+[app]
+script = "ledger-api"
+role = "api"
