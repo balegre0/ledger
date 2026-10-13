@@ -14,6 +14,7 @@ from ledger_identity.adapters.postgres.migrate import head, require_head
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.api.context import ApiContext
 from ledger_identity.api.rest import routes
+from ledger_identity.api.rpc import services
 from ledger_identity.settings import IdentitySettings
 from ledger_platform.authentication import HttpKeys, PublishedKeys, TokenPolicy, TokenVerifier
 from ledger_platform.idempotency import Idempotency
@@ -59,7 +60,11 @@ def build(settings: IdentitySettings) -> Service[IdentitySettings]:
         settings=settings,
         version=VERSION,
         interfaces=Interfaces(
-            http=http, resources=resources, checks={"migrations": migrations_at_head}, registry=registry
+            http=http,
+            grpc=services(bind),
+            resources=resources,
+            checks={"migrations": migrations_at_head},
+            registry=registry,
         ),
         events=Events(streams=(IDENTITY,)),
     )

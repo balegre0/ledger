@@ -632,6 +632,7 @@ source = { editable = "services/identity" }
 dependencies = [
     { name = "alembic" },
     { name = "fastapi" },
+    { name = "grpcio" },
     { name = "ledger-contracts" },
     { name = "ledger-kernel" },
     { name = "ledger-platform" },
@@ -646,6 +647,7 @@ dependencies = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.20.0" },
     { name = "fastapi", specifier = ">=0.143.0" },
+    { name = "grpcio", specifier = ">=1.84.0" },
     { name = "ledger-contracts", editable = "libs/contracts" },
     { name = "ledger-kernel", editable = "libs/kernel" },
     { name = "ledger-platform", editable = "libs/platform" },
