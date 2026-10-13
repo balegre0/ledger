@@ -833,18 +833,13 @@
             "description": "test or live: the mode the request acts in.",
             "in": "header",
             "name": "Ledger-Mode",
-            "required": false,
+            "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
+              "enum": [
+                "test",
+                "live"
               ],
-              "description": "test or live: the mode the request acts in.",
-              "title": "Ledger-Mode"
+              "type": "string"
             }
           },
           {
@@ -2622,18 +2617,13 @@
             "description": "test or live: the mode the request acts in.",
             "in": "header",
             "name": "Ledger-Mode",
-            "required": false,
+            "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
+              "enum": [
+                "test",
+                "live"
               ],
-              "description": "test or live: the mode the request acts in.",
-              "title": "Ledger-Mode"
+              "type": "string"
             }
           },
           {
@@ -3926,18 +3916,13 @@
             "description": "test or live: the mode the request acts in.",
             "in": "header",
             "name": "Ledger-Mode",
-            "required": false,
+            "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
+              "enum": [
+                "test",
+                "live"
               ],
-              "description": "test or live: the mode the request acts in.",
-              "title": "Ledger-Mode"
+              "type": "string"
             }
           },
           {
@@ -4823,18 +4808,13 @@
             "description": "test or live: the mode the request acts in.",
             "in": "header",
             "name": "Ledger-Mode",
-            "required": false,
+            "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
+              "enum": [
+                "test",
+                "live"
               ],
-              "description": "test or live: the mode the request acts in.",
-              "title": "Ledger-Mode"
+              "type": "string"
             }
           },
           {

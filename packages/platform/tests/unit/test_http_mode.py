@@ -7,7 +7,13 @@ import pytest
 from fastapi import Depends, FastAPI
 
 from ledger_kernel.errors import ErrorKind
-from ledger_platform.http.mode import MODE_HEADER, ModeInvalidError, ModeRequiredError, ledger_mode
+from ledger_platform.http.mode import (
+    MODE_HEADER,
+    ModeInvalidError,
+    ModeRequiredError,
+    ledger_mode,
+    require_mode_header,
+)
 from ledger_platform.http.problems import PROBLEM_JSON, install_problem_handlers
 lazy from ledger_kernel.tenancy import Mode
 
@@ -93,3 +99,47 @@ async def test_a_mode_sent_twice_is_refused_even_when_both_agree(second: str) ->
 def test_the_mode_errors_are_invalid_input_with_stable_codes() -> None:
     assert (ModeRequiredError().kind, ModeRequiredError.code) == (ErrorKind.INVALID, "mode_required")
     assert (ModeInvalidError().kind, ModeInvalidError.code) == (ErrorKind.INVALID, "mode_invalid")
+
+
+def test_a_document_says_the_mode_header_is_required_and_names_its_words() -> None:
+    """Missing, it is a 400 (``mode_required``), not a 422: FastAPI sees an optional header, the document must
+    not; only ``Ledger-Mode`` header parameters change."""
+    other = {"name": "Idempotency-Key", "in": "header", "required": True}
+    query = {"name": MODE_HEADER, "in": "query", "required": False}
+    document: dict[str, object] = {
+        "openapi": "3.1.0",
+        "paths": {
+            "/moded": {
+                "post": {
+                    "parameters": [{"name": MODE_HEADER, "in": "header", "required": False}, other, query]
+                },
+                "get": {"responses": {}},
+                "summary": "not an operation",
+            },
+            "/ignored": "not an operation",
+        },
+    }
+    require_mode_header(document)
+    assert document["paths"] == {
+        "/moded": {
+            "post": {
+                "parameters": [
+                    {
+                        "name": MODE_HEADER,
+                        "in": "header",
+                        "required": True,
+                        "schema": {"type": "string", "enum": ["test", "live"]},
+                        "description": "test or live: the mode the request acts in.",
+                    },
+                    other,
+                    query,
+                ]
+            },
+            "get": {"responses": {}},
+            "summary": "not an operation",
+        },
+        "/ignored": "not an operation",
+    }
+    without_paths: dict[str, object] = {"openapi": "3.1.0"}
+    require_mode_header(without_paths)
+    assert without_paths == {"openapi": "3.1.0"}

@@ -272,9 +272,15 @@ class InvoiceIssued(Event):
 
 **Envelope** (columns, CloudEvents-shaped so a broker adapter maps 1:1): `id` (UUIDv7, public `evt_`),
 `type`, `version`, `source` (producing module or channel key), `organization_id`, `company_id` (nullable for
-organization-wide events), `mode`, `subject` (aggregate id), `aggregate_version`, `occurred_at`, `traceparent`,
-`payload` (JSON by the platform codec: `Decimal` as string, ids as UUID strings, dates ISO 8601). Payload ≤ 64
-KiB, refused at `publish`.
+organization-wide events), `mode` (nullable: `null` for an event about data both modes share), `subject`
+(aggregate id), `aggregate_version`, `occurred_at`, `traceparent`, `payload` (JSON by the platform codec:
+`Decimal` as string, ids as UUID strings, dates ISO 8601). Payload ≤ 64 KiB, refused at `publish`.
+
+- **An event's scope lies inside its unit's** (`publish` refuses any other, `event_scope_mismatch`): the unit's
+  organization; its company where the unit names one; its mode where both name one. `mode` is `null` for an
+  event about data both modes share (a company, its memberships, §7.1), and a moded unit may publish such an
+  event (an idempotent route acts in a moded unit, §9.5); an event of the other mode is refused. A unit without
+  a scope (the platform's own) publishes for anyone.
 
 **Subscriptions** (C3, ADR 0002). Manifests declare consumers and their event types. `ledger-migrate`, before a
 rollout and after the schema migrations, upserts each consumer's rows into its own schema's `subscriptions`

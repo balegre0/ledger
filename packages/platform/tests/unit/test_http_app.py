@@ -10,7 +10,7 @@ lazy from collections.abc import AsyncGenerator, MutableMapping
 
 import httpx
 import pytest
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SpanExporter
@@ -36,10 +36,12 @@ from ledger_kernel.errors import (
 from ledger_platform.config.settings import LogFormat, ServiceSettings
 from ledger_platform.http.app import ApiInfo, Observability, create_app
 from ledger_platform.http.metrics import AmbiguousRouteError
+from ledger_platform.http.mode import ledger_mode
 from ledger_platform.http.problems import PROBLEM_JSON
 from ledger_platform.observability.health import Health
 from ledger_platform.observability.logs import configure_logging
 from ledger_testing.clock import Moment
+lazy from ledger_kernel.tenancy import Mode
 lazy from ledger_platform.observability.tracing import Tracing
 
 TRACE_ID: Final = "0af7651916cd43dd8448eb211c80319c"
@@ -1197,3 +1199,38 @@ async def test_every_traced_response_names_its_request(
     request_id = response.headers["Request-Id"]
     assert len(request_id) == 32
     assert expected is None or request_id == expected
+
+
+def test_the_app_s_document_says_a_moded_route_requires_its_mode(observability: Observability) -> None:
+    moded = APIRouter()
+
+    @moded.post("/v1/moded")
+    async def act(mode: Annotated[Mode, Depends(ledger_mode)]) -> dict[str, str]:
+        return {"mode": mode.value}
+
+    built = build(observability, moded)
+    document = DOCUMENT.validate_python(built.openapi())
+    (parameter,) = document["paths"]["/v1/moded"]["post"]["parameters"]
+    assert (parameter["name"], parameter["required"], parameter["schema"]) == (
+        "Ledger-Mode",
+        True,
+        {"type": "string", "enum": ["test", "live"]},
+    )
+    assert built.openapi() is built.openapi()  # made once, then kept
+
+
+class _Parameter(TypedDict):
+    name: str
+    required: bool
+    schema: dict[str, object]
+
+
+class _Operation(TypedDict):
+    parameters: list[_Parameter]
+
+
+class _Document(TypedDict):
+    paths: dict[str, dict[str, _Operation]]
+
+
+DOCUMENT: Final = TypeAdapter(_Document)

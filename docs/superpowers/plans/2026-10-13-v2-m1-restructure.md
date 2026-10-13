@@ -7780,6 +7780,19 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 15: Identity cutover to the v2 chassis
 
+**Amended by the Task 15 implementation and review (binding; the code in the steps below predates it):**
+- The snapshot switch is `UPDATE_SNAPSHOTS=1` (`uv run poe openapi`), not `LEDGER_UPDATE_SNAPSHOTS`:
+  `Settings` fails closed on any unknown `LEDGER_*` variable (Decision 14), so that name stops every app.
+- identity's template hook migrates with `ledger_testing.database.migrate(PLATFORM_MIGRATIONS, MIGRATIONS)`, not
+  `App("migrate")`: the template is shared by every package's hook, and the app's routing bump would leak into
+  the platform's tests. `App("migrate")` is tested on fresh databases (`test_migrations.py`, `test_readiness.py`).
+- `adapters/postgres/schema.py` has `migrations()`, one `SchemaMigrations` per app (its readiness, once met, is
+  remembered per instance); `MIGRATIONS` stays for tests and tools, as `platform_migrations()` does.
+- A moded unit may publish a mode-less event (spec §3.5): identity's events have no mode, and its idempotent
+  `POST`s run in moded units (Decision 4). `r0001` omits `uq_companies_tax_id` (v1's r0002 dropped it).
+- `Ledger-Mode` is documented required (the app's OpenAPI document, `http.mode.require_mode_header`); FastAPI
+  still reads it as optional so that a missing header is 400 `mode_required`.
+
 Spec §3.10 (assembly), §4.1 (module layout), §4.5, §5.3, §6.3-§6.5 (schema `identity`, roles, squashed `r0001`), §9.5, §9.7, §16.1 (`services/identity` table: rows marked for this milestone); Decisions 3, 4, 13, 26; "Deferred" list (what stays as it is). After Tasks 14 and 7. Identity keeps its domain, use cases, routes and API shapes; it changes how it is composed, stored, announced and tested. The old kernel `TaxId` (DO) and `Permission` enum stay until Task 18.
 
 **Files:**
@@ -8329,7 +8342,7 @@ The test modules:
 - `test_rpc.py` is deleted with the gRPC service.
 - API tests: `Caller.posting(key)` now also sends `Ledger-Mode: test` (`packages/testing/src/ledger_testing/api.py`: `def posting(self, key: str, mode: str = "test") -> dict[str, str]: return self.bearer() | {"Idempotency-Key": key, "Ledger-Mode": mode}`). Add to `test_companies_api.py`: a `POST /v1/companies` without `Ledger-Mode` is 400 `mode_required`; the same body under the same key, first in `test` then in `live`, is not replayed in `live` (the key is new there): the request runs and answers 409 `tax_id_taken` (one active company per tax id, whatever the mode), proving keys are kept per mode.
 - `test_readiness.py`: `/readyz` names `schema:platform` and `schema:identity` and answers 200 on the migrated worker database.
-- `tests/contract/test_openapi.py`: the document of `App("api", settings=<placeholders>).asgi().openapi()`, restricted to identity's prefixes and serialized as before (`json.dumps(..., indent=2, sort_keys=True, ensure_ascii=False) + "\n"`), equals `modules/identity/openapi.json`; with `LEDGER_UPDATE_SNAPSHOTS=1` in the environment the test writes the file instead and fails with "snapshot updated" (Task 19 moves the writing into `ledger-devtools sync` and removes the switch). Regenerate it now and review the diff: `Ledger-Mode` on the four `POST`s, 400 in their answers, `Page_*` schemas, no gRPC.
+- `tests/contract/test_openapi.py`: the document of `App("api", settings=<placeholders>).asgi().openapi()`, restricted to identity's prefixes and serialized as before (`json.dumps(..., indent=2, sort_keys=True, ensure_ascii=False) + "\n"`), equals `modules/identity/openapi.json`; with `UPDATE_SNAPSHOTS=1` in the environment (`uv run poe openapi`) the test writes the file instead and fails with "snapshot updated" (Task 19 moves the writing into `ledger-devtools sync` and removes the switch). Regenerate it now and review the diff: `Ledger-Mode` on the four `POST`s, 400 in their answers, `Page_*` schemas, no gRPC.
 
 - [ ] **Step 6: Compose, Tilt and CI follow**
 
@@ -8806,7 +8819,7 @@ Identity:
 - `adapters/http/companies.py`: the route parses with `context.tax_ids.parse(body.tax_id.scheme, body.tax_id.value).tax_id`, where `ApiContext.tax_ids` is `context.regimes.tax_id_schemes` handed in by `assembly.py` (`ApiContext.build(..., tax_ids=context.regimes.tax_id_schemes)`).
 - `platform/auth/access.py` and `http/deps.py` name `Permission` (the type is the same name, now a `NewType`: only `frozenset(Permission)` uses of the enum need a change).
 - Duplicated errors (audit D1, D2, D4): move `PermissionDeniedError` and `CompanyNotFoundError` into `ledger_kernel.access` with the messages the tests pin today (`git grep -n "permission_denied\|company_not_found"` lists the assertions: codes and messages stay); delete platform `auth.access.PermissionDeniedError`/`NoCompanyAccessError` and identity `domain/errors.py`'s `ActorNotAllowedError`/`CompanyNotFoundError`/`InvalidStateError`, and point every raiser and `pytest.raises` at the survivors. `Actor.require` in `domain/membership.py` raises the kernel's error, as `CompanyAccess.require` does.
-- Regenerate `modules/identity/openapi.json` (`LEDGER_UPDATE_SNAPSHOTS=1 uv run pytest modules/identity/tests/contract`) and review: `tax_id` is an object; `legal_name` max length 300.
+- Regenerate `modules/identity/openapi.json` (`uv run poe openapi`, which runs the contract tests with `UPDATE_SNAPSHOTS=1`) and review: `tax_id` is an object; `legal_name` max length 300.
 
 - [ ] **Step 4: Run, then the gate**
 

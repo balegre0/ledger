@@ -4,9 +4,13 @@ The value is one of the exact words ``test`` and ``live``, sent once: no other c
 header's name is matched in any case, as HTTP says. A refusal never repeats what was sent.
 
 API-client credentials carry their own mode from v2-M2 (§9.7); until then the header is the only source.
+
+FastAPI reads the header as optional, so that a missing one is our 400 (``mode_required``) and not its
+422; the app's OpenAPI document says what is true of a moded route instead: the header is required, ``test``
+or ``live`` (``require_mode_header``).
 """
 
-from typing import Annotated, ClassVar, Final
+from typing import Annotated, ClassVar, Final, TypeIs
 
 from fastapi import Header
 lazy from fastapi import Request
@@ -16,6 +20,7 @@ from ledger_platform.http.problems import BadRequestError
 
 MODE_HEADER: Final = "Ledger-Mode"
 _MODES: Final = {mode.value: mode for mode in Mode}
+_DESCRIPTION: Final = "test or live: the mode the request acts in."
 
 
 class ModeRequiredError(BadRequestError):
@@ -38,9 +43,7 @@ class ModeInvalidError(BadRequestError):
 
 async def ledger_mode(
     request: Request,
-    header: Annotated[
-        str | None, Header(alias=MODE_HEADER, description="test or live: the mode the request acts in.")
-    ] = None,
+    header: Annotated[str | None, Header(alias=MODE_HEADER, description=_DESCRIPTION)] = None,
 ) -> Mode:
     """The request's mode: ``ModeRequiredError`` without the header, ``ModeInvalidError`` for any other value.
 
@@ -54,3 +57,36 @@ async def ledger_mode(
     if mode is None:
         raise ModeInvalidError
     return mode
+
+
+def _is_object(value: object) -> TypeIs[dict[str, object]]:
+    return isinstance(value, dict)
+
+
+def _is_array(value: object) -> TypeIs[list[object]]:
+    return isinstance(value, list)
+
+
+def require_mode_header(document: dict[str, object]) -> None:
+    """Document each ``Ledger-Mode`` header parameter of an OpenAPI ``document`` as it is: required.
+
+    One of the words ``test`` and ``live``. In place; any other part of the document is left as it is.
+    """
+    paths = document.get("paths")
+    operations = [
+        operation
+        for item in (paths.values() if _is_object(paths) else ())
+        if _is_object(item)
+        for operation in item.values()
+        if _is_object(operation)
+    ]
+    for operation in operations:
+        parameters = operation.get("parameters")
+        for parameter in parameters if _is_array(parameters) else ():
+            if _is_object(parameter) and (parameter.get("name"), parameter.get("in")) == (
+                MODE_HEADER,
+                "header",
+            ):
+                parameter["required"] = True
+                parameter["schema"] = {"type": "string", "enum": [mode.value for mode in Mode]}
+                parameter["description"] = _DESCRIPTION

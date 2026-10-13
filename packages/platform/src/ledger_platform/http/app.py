@@ -38,6 +38,7 @@ lazy from prometheus_client import CollectorRegistry
 lazy from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ledger_platform.http.metrics import ROUTE_KEY, UNMATCHED, Measure, RouteLabels
+from ledger_platform.http.mode import require_mode_header
 from ledger_platform.http.probes import OPERATIONAL_PATHS, add_probes
 from ledger_platform.http.problems import (
     INTERNAL_CODE,
@@ -178,10 +179,19 @@ class _Named:
 class _ChassisApp(FastAPI):
     """FastAPI, with ``_Contained`` around everything Starlette builds: its error middleware included.
 
+    Its OpenAPI document says ``Ledger-Mode`` is required where a route reads it (``require_mode_header``).
+
     With ``caller_trace="link"`` a request loses its caller's trace headers before FastAPI traces it.
     """
 
     caller_trace: CallerTrace = "link"
+
+    @override
+    def openapi(self) -> dict[str, object]:
+        """FastAPI's document, made once, with what the chassis's dependencies need said of them."""
+        if self.openapi_schema is None:
+            require_mode_header(super().openapi())
+        return super().openapi()
 
     @override
     def build_middleware_stack(self) -> ASGIApp:

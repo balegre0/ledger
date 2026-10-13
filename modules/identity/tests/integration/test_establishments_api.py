@@ -256,3 +256,35 @@ async def test_a_branch_of_another_company_has_no_emission_points_here(
         (404, "branch_not_found"),
         (404, "emission_point_not_found"),
     ]
+
+
+async def test_a_page_ending_before_a_branch_holds_the_ones_just_before_it(
+    client: httpx.AsyncClient, owner: Caller, company: str
+) -> None:
+    """Read backwards from the newest (§9.7): the rows nearest the cursor, in id order, and more before."""
+    for code in ("SUC1", "SUC2", "SUC3"):
+        await branch(client, owner, company, code)
+    path, headers = f"/v1/companies/{company}/branches", owner.bearer()
+    ids = [item["id"] for item in page(await client.get(path, headers=headers))["items"]]
+    two = page(await client.get(path, params={"limit": 2}, headers=headers))
+    third = page(
+        await client.get(path, params={"limit": 1, "starting_after": two["next_cursor"]}, headers=headers)
+    )
+    assert [item["id"] for item in third["items"]] == ids[2:]
+    before = page(
+        await client.get(
+            path, params={"limit": 1, "ending_before": third["previous_cursor"]}, headers=headers
+        )
+    )
+    assert ([item["id"] for item in before["items"]], before["has_more"]) == ([ids[1]], True)
+    assert before["previous_cursor"] is not None
+    first = page(
+        await client.get(
+            path, params={"limit": 1, "ending_before": before["previous_cursor"]}, headers=headers
+        )
+    )
+    assert ([item["id"] for item in first["items"]], first["has_more"], first["previous_cursor"]) == (
+        [ids[0]],
+        False,
+        None,
+    )

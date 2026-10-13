@@ -94,9 +94,9 @@ def test_the_document_is_openapi_3_1_and_every_post_takes_an_idempotency_key_in_
     posts = [operations["post"] for operations in parsed["paths"].values() if "post" in operations]
     assert len(posts) == 4
     for post in posts:
-        parameters = [(parameter["name"], parameter["in"]) for parameter in post.get("parameters", [])]
-        assert {"name": "Idempotency-Key", "in": "header", "required": True} in post.get("parameters", [])
-        assert ("Ledger-Mode", "header") in parameters  # optional in the schema: missing is 400, not 422
+        required = post.get("parameters", [])
+        assert {"name": "Idempotency-Key", "in": "header", "required": True} in required
+        assert {"name": "Ledger-Mode", "in": "header", "required": True} in required  # missing: 400
         assert "400" in post.get("responses", {})
 
 
