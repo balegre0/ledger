@@ -5,6 +5,8 @@ A token is accepted only when all of this holds:
 
 * it is a JWS in compact form of at most ``MAX_TOKEN_LENGTH`` ASCII characters, whose header is well
   formed (``crit``, when there, a list of the names of other headers);
+* its header types it as an access token, when it types it at all (``typ``: ``JWT``, or RFC 9068's
+  ``at+jwt``);
 * its header names an algorithm the policy allows, all of them asymmetric (``none`` and the HMAC family
   cannot be configured, so a token "signed" with the public key as an HMAC secret is refused), and a key id
   (``kid``) the provider publishes, under which it publishes a key for that algorithm;
@@ -14,6 +16,11 @@ A token is accepted only when all of this holds:
 * ``exp``, ``nbf`` and ``iat`` are finite numbers; ``exp`` is ahead of now by more than ``leeway`` seconds
   ago (``exp`` itself is exclusive, RFC 7519 section 4.1.4), and ``nbf`` and ``iat`` are at most ``leeway``
   seconds ahead;
+* it is an access token, not an ID token of the same provider for the same project (whose ``aud`` holds the
+  project's id too, so the audience cannot tell them apart): it carries ``jti`` and ``client_id``, both
+  required of a JWT access token by RFC 9068, and none of the claims an OpenID Connect ID token carries,
+  ``azp``, ``nonce``, ``at_hash`` and ``c_hash``. Zitadel v4 types both kinds ``JWT``; its access tokens
+  carry a ``jti`` and no ``azp``, its ID tokens an ``azp`` and no ``jti``;
 * ``sub`` and the organization claim are there and well formed.
 
 Keys come from the provider's JWKS document and are fresh for ``keys_ttl`` seconds. Past that, a token whose
@@ -87,6 +94,12 @@ ORGANIZATION_CLAIM: Final = "urn:zitadel:iam:user:resourceowner:id"
 """The caller's organization (asked for with the scope ``urn:zitadel:iam:user:resourceowner``)."""
 PROJECT_ROLES_CLAIM: Final = "urn:zitadel:iam:org:project:roles"
 """Project roles, ``{role: {organization id: domain}}``; the per-project claim has the same shape."""
+ACCESS_TOKEN_TYPES: Final = frozenset({"jwt", "at+jwt", "application/jwt", "application/at+jwt"})
+"""The ``typ`` headers of an access token, in lower case (RFC 7515 4.1.9 allows the ``application/`` form)."""
+ACCESS_TOKEN_CLAIMS: Final = ("jti", "client_id")
+"""Claims every access token carries (RFC 9068 2.2): text, not empty."""
+ID_TOKEN_CLAIMS: Final = frozenset({"azp", "nonce", "at_hash", "c_hash"})
+"""Claims of an OpenID Connect ID token that no access token carries: a token with any of them is refused."""
 _RS256: Final = frozenset({"RS256"})
 _DOTS: Final = 2
 """A compact JWS has three parts: header, payload, signature."""
@@ -108,6 +121,7 @@ class TokenProblem(StrEnum):
     NOT_YET_VALID = "not_yet_valid"
     ISSUER = "issuer"
     AUDIENCE = "audience"
+    WRONG_KIND = "not_access_token"
     CLAIMS = "claims"
 
 
@@ -449,12 +463,15 @@ class _Header(BaseModel):
 
     alg: str = Field(max_length=16)
     kid: str = Field(min_length=1, max_length=255)
+    typ: str | None = Field(default=None, max_length=32)
     crit: tuple[str, ...] = Field(default=(), min_length=1)
     """Headers the token says must be understood: when there, a non-empty list of names (RFC 7515 4.1.11)."""
 
 
 _TEXT: Final = TypeAdapter(StrictStr)
 """The subject claim: text, whose form ``parse_subject`` then checks."""
+_IDENTIFIER: Final = TypeAdapter(Annotated[str, StringConstraints(strict=True, min_length=1)])
+"""``jti`` and ``client_id``: text, not empty."""
 _PROVIDER_ORGANIZATION: Final = TypeAdapter(
     Annotated[str, StringConstraints(strict=True, pattern=r"^[A-Za-z0-9_-]{1,64}$")]
 )
@@ -521,6 +538,8 @@ class TokenVerifier:
     async def verify(self, token: str) -> Principal:
         """The principal ``token`` proves, else ``InvalidTokenError`` (or ``TokenKeysUnavailableError``)."""
         header = _header_of(token)
+        if header.typ is not None and header.typ.lower() not in ACCESS_TOKEN_TYPES:
+            _refuse(TokenProblem.WRONG_KIND)
         if header.alg not in self._policy.algorithms:
             _refuse(TokenProblem.ALGORITHM)
         key = await self._keys.key(header.kid)
@@ -542,12 +561,16 @@ class TokenVerifier:
         _refuse(problem)
 
     def _check(self, claims: Mapping[str, object]) -> None:
-        """Refuse claims of another issuer, for another audience, expired or not yet valid."""
+        """Refuse claims of another issuer or audience, of another kind of token, expired or not yet valid."""
         if claims.get("iss") != self._policy.issuer:
             _refuse(TokenProblem.ISSUER)
         audiences = _valid(_AUDIENCES, claims.get("aud"), TokenProblem.AUDIENCE)
         if self._policy.audience not in ([audiences] if isinstance(audiences, str) else audiences):
             _refuse(TokenProblem.AUDIENCE)
+        for name in ACCESS_TOKEN_CLAIMS:
+            _valid(_IDENTIFIER, claims.get(name), TokenProblem.WRONG_KIND)
+        if not ID_TOKEN_CLAIMS.isdisjoint(claims):
+            _refuse(TokenProblem.WRONG_KIND)
         expires = _numeric_date(claims, "exp")
         not_before = _numeric_date(claims, "nbf")
         issued = _numeric_date(claims, "iat")

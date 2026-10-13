@@ -78,7 +78,12 @@ def test_a_token_verifies_with_the_published_keys_and_carries_zitadels_claims() 
     assert claims[f"urn:zitadel:iam:org:project:{AUDIENCE}:roles"] == {
         "operator": {PROVIDER_ORGANIZATION: "ledger.test"}
     }
-    assert {"exp", "iat", "nbf", "client_id"} <= claims.keys()
+    assert {"exp", "iat", "nbf", "client_id", "jti"} <= claims.keys()
+
+
+def test_every_token_has_an_id_of_its_own() -> None:
+    issuer = LocalIssuer()
+    assert claims_of(issuer, issuer.token())["jti"] != claims_of(issuer, issuer.token())["jti"]
 
 
 def test_claims_can_be_changed_and_left_out() -> None:

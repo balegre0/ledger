@@ -307,6 +307,90 @@ async def test_a_token_with_wrong_or_missing_claims_is_refused(
     assert await refused(verifier, issuer.token(claims=claims)) is problem
 
 
+# ── Access tokens, not ID tokens ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("typ", ["JWT", "jwt", "at+jwt", "AT+JWT", "application/at+jwt", None])
+async def test_a_token_typed_as_an_access_token_or_untyped_is_accepted(
+    issuer: LocalIssuer, verifier: TokenVerifier, typ: str | None
+) -> None:
+    header: dict[str, object] = {"alg": "RS256", "kid": "key-1"}
+    if typ is not None:
+        header["typ"] = typ
+    assert await accepted(verifier, signed(issuer.signing_key(), header, payload_of(issuer.token())))
+
+
+@pytest.mark.parametrize("typ", ["logout+jwt", "secevent+jwt", "JOSE", "id_token+jwt", ""])
+async def test_a_token_typed_as_something_else_is_refused_before_any_key_is_fetched(
+    issuer: LocalIssuer, verifier: TokenVerifier, typ: str
+) -> None:
+    header: dict[str, object] = {"alg": "RS256", "kid": "key-1", "typ": typ}
+    token = signed(issuer.signing_key(), header, payload_of(issuer.token()))
+    assert await refused(verifier, token) is TokenProblem.WRONG_KIND
+    assert issuer.fetches == 0
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [
+        {"jti": None},
+        {"jti": ""},
+        {"jti": 7},
+        {"client_id": None},
+        {"client_id": ""},
+        {"client_id": ["ledger-test"]},
+        {"azp": "ledger-web"},
+        {"nonce": "a1b2c3d4"},
+        {"at_hash": "x7Kq2Lw9Rt4Vb8Zm1Hc5Jd"},
+        {"c_hash": "LDktKdoQak3Pk0cnXxCltA"},
+    ],
+    ids=[
+        "no-jti",
+        "empty-jti",
+        "number-jti",
+        "no-client-id",
+        "empty-client-id",
+        "client-id-in-a-list",
+        "authorized-party",
+        "nonce",
+        "access-token-hash",
+        "code-hash",
+    ],
+)
+async def test_a_token_without_the_claims_of_an_access_token_or_with_an_id_token_s_is_refused(
+    issuer: LocalIssuer, verifier: TokenVerifier, claims: dict[str, object]
+) -> None:
+    assert await refused(verifier, issuer.token(claims=claims)) is TokenProblem.WRONG_KIND
+
+
+async def test_an_id_token_of_the_provider_for_the_same_project_is_refused(
+    issuer: LocalIssuer, verifier: TokenVerifier
+) -> None:
+    """Zitadel v4.19.2's ID tokens, a login's and a token exchange's, as issued: same issuer, keys, ``typ``
+    and organization claim, and the project among their audiences. Only what makes them ID tokens tells them
+    from an access token."""
+    id_token = {
+        "aud": ["394880619080908804", AUDIENCE],
+        "azp": "394880619080908804",
+        "client_id": "394880619080908804",
+        "amr": ["pwd"],
+        "at_hash": "x7Kq2Lw9Rt4Vb8Zm1Hc5Jd",
+        "auth_time": now(),
+        "nonce": "a1b2c3d4",
+        "sid": "394880668523298820",
+        "jti": None,
+        "nbf": None,
+    }
+    assert await refused(verifier, issuer.token(claims=id_token)) is TokenProblem.WRONG_KIND
+    exchanged = {
+        "aud": [AUDIENCE, "394880531453509636"],
+        "azp": "394880531453509636",
+        "jti": None,
+        "nbf": None,
+    }
+    assert await refused(verifier, issuer.token(claims=exchanged)) is TokenProblem.WRONG_KIND
+
+
 async def test_a_refusal_says_what_was_wrong_in_a_word(issuer: LocalIssuer, verifier: TokenVerifier) -> None:
     with pytest.raises(InvalidTokenError) as caught:
         await verifier.verify(issuer.token(claims={"exp": now() - 600}))

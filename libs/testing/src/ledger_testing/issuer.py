@@ -1,14 +1,15 @@
 """A local OpenID provider for tests: RSA keys, their JWKS served on 127.0.0.1, access tokens on demand.
 
-The tokens look like the ones Zitadel v4 issues to a machine user (``iss``, ``aud``, ``sub``, ``exp``,
-``iat``, ``nbf``, ``client_id``, the resource owner's organization id and, when asked, project roles), signed
-RS256 with a key the JWKS document publishes. A test can rotate and retire keys, make the endpoint fail or
-stall, and count how often it was asked.
+The tokens look like the access tokens Zitadel v4 issues to a machine user (``iss``, ``aud``, ``sub``,
+``exp``, ``iat``, ``nbf``, ``jti``, ``client_id``, the resource owner's organization id and, when asked,
+project roles; header ``typ`` ``JWT``), signed RS256 with a key the JWKS document publishes. A test can
+rotate and retire keys, make the endpoint fail or stall, and count how often it was asked.
 """
 
 import asyncio
 import contextlib
 import json
+import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
@@ -144,6 +145,7 @@ class LocalIssuer:
             "aud": [self.audience],
             "sub": subject,
             "client_id": "ledger-test",
+            "jti": f"V2_{uuid.uuid7().hex}-at_{uuid.uuid7().hex}",
             "iat": issued,
             "nbf": issued,
             "exp": issued + int(_LIFETIME.total_seconds()),
