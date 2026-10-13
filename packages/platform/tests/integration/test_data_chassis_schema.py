@@ -87,15 +87,23 @@ def unit(
     organization: uuid.UUID | None = None,
     mode: str = "",
     *,
-    purge: bool = False,
+    role: str = "probe_rw",
 ) -> None:
-    """Enter ``probe_rw`` and set the unit's settings (``''`` for what it has not, as units do)."""
-    connection.execute("SET LOCAL ROLE probe_rw")
+    """Enter ``role`` and set the unit's settings (``''`` for what it has not, as units do)."""
+    connection.execute(sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(role)))
     connection.execute(
-        """SELECT set_config('ledger.organization_id', %s, true), set_config('ledger.mode', %s, true),
-                  set_config('ledger.purge', %s, true)""",
-        ("" if organization is None else str(organization), mode, "on" if purge else ""),
+        "SELECT set_config('ledger.organization_id', %s, true), set_config('ledger.mode', %s, true)",
+        ("" if organization is None else str(organization), mode),
     )
+
+
+def expiring(connection: psycopg.Connection) -> None:
+    """Keys of A (expired), B (expired) and B (live), each written in its own unit."""
+    rows = ((A, "a-expired", "-1 second"), (B, "b-expired", "-1 day"), (B, "b-live", "1 day"))
+    for organization, key, expires in rows:
+        with connection.transaction():
+            unit(connection, organization, "test")
+            connection.execute(INSERT_KEY, (organization, "test", key, expires))
 
 
 def keys(connection: psycopg.Connection) -> list[tuple[uuid.UUID, str]]:
@@ -183,7 +191,9 @@ def test_storage_parameters_favour_queues(chassis: WorkerDatabase) -> None:
     }
 
 
-def test_only_idempotency_keys_are_under_forced_row_level_security(chassis: WorkerDatabase) -> None:
+def test_idempotency_keys_and_audit_events_are_under_forced_row_level_security(
+    chassis: WorkerDatabase,
+) -> None:
     with admin(chassis) as connection:
         rows = connection.execute(
             """SELECT relname::text, relrowsecurity, relforcerowsecurity FROM pg_class
@@ -193,10 +203,17 @@ def test_only_idempotency_keys_are_under_forced_row_level_security(chassis: Work
         policies = connection.execute(
             "SELECT policyname::text, cmd FROM pg_policies WHERE schemaname = 'probe' ORDER BY 1"
         ).fetchall()
-    assert _SECURED.validate_python(rows) == [("idempotency_keys", True, True)]
+    assert sorted(_SECURED.validate_python(rows)) == [
+        ("audit_events", True, True),
+        ("idempotency_keys", True, True),
+    ]
     assert _NAMED.validate_python(policies) == [
+        ("audit_events_insert", "INSERT"),
+        ("audit_events_select", "SELECT"),
         ("idempotency_keys_delete", "DELETE"),
         ("idempotency_keys_insert", "INSERT"),
+        ("idempotency_keys_purge_delete", "DELETE"),
+        ("idempotency_keys_purge_select", "SELECT"),
         ("idempotency_keys_select", "SELECT"),
         ("idempotency_keys_update", "UPDATE"),
     ]
@@ -224,36 +241,45 @@ def test_idempotency_keys_are_seen_per_organization_and_mode(connection: psycopg
             connection.execute("UPDATE probe.idempotency_keys SET organization_id = %s", (B,))
 
 
-def test_a_purging_unit_sees_expired_keys_and_nothing_else(connection: psycopg.Connection) -> None:
-    rows = ((A, "a-expired", "-1 second"), (B, "b-expired", "-1 day"), (B, "b-live", "1 day"))
-    for organization, key, expires in rows:
-        with connection.transaction():
-            unit(connection, organization, "test")
-            connection.execute(INSERT_KEY, (organization, "test", key, expires))
+def test_the_purge_role_sees_and_deletes_expired_keys_and_nothing_else(
+    connection: psycopg.Connection,
+) -> None:
+    expiring(connection)
     with connection.transaction():
-        unit(connection, purge=True)
+        unit(connection, role="probe_purge")
         assert keys(connection) == [(A, "a-expired"), (B, "b-expired")]
-        assert connection.execute("UPDATE probe.idempotency_keys SET response_status = 200").rowcount == 0
+        with pytest.raises(psycopg.errors.InsufficientPrivilege), connection.transaction():
+            connection.execute("UPDATE probe.idempotency_keys SET response_status = 200")
         with pytest.raises(psycopg.errors.InsufficientPrivilege), connection.transaction():
             connection.execute(INSERT_KEY, (A, "test", "purger's own", "-1 day"))
+        for table in ("outbox", "jobs", "audit_events", "inbox"):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege), connection.transaction():
+                connection.execute(sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier("probe", table)))
         assert connection.execute("DELETE FROM probe.idempotency_keys").rowcount == 2
-    with connection.transaction():
-        unit(connection, purge=True)
-        assert keys(connection) == []
     with connection.transaction():
         unit(connection, B, "test")
         assert keys(connection) == [(B, "b-live")]
 
 
-def test_a_purge_setting_other_than_on_purges_nothing(connection: psycopg.Connection) -> None:
+def test_the_purge_role_of_one_schema_reaches_no_other(connection: psycopg.Connection) -> None:
     with connection.transaction():
-        unit(connection, A, "test")
-        connection.execute(INSERT_KEY, (A, "test", "expired", "-1 day"))
+        unit(connection, role="other_purge")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            keys(connection)
+
+
+@pytest.mark.parametrize("local", [True, False])
+def test_the_purge_setting_opens_nothing_to_the_rw_role(
+    connection: psycopg.Connection, *, local: bool
+) -> None:
+    expiring(connection)
     with connection.transaction():
+        connection.execute("SELECT set_config('ledger.purge', 'on', %s)", (local,))
         unit(connection)
-        connection.execute("SELECT set_config('ledger.purge', 'yes', true)")
         assert keys(connection) == []
         assert connection.execute("DELETE FROM probe.idempotency_keys").rowcount == 0
+        unit(connection, A, "test")
+        assert keys(connection) == [(A, "a-expired")]
 
 
 def test_queue_tables_are_outside_row_level_security(connection: psycopg.Connection) -> None:

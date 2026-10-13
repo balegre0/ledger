@@ -8,7 +8,8 @@ scope sees no protected row and can write none, and a unit without a mode sees n
 The text is versioned like ``chassis_schema_v1``: migrations call ``policy`` and their meaning must not move,
 so the tests pin every statement, and a different policy is a new function. Every policy is permissive
 (PostgreSQL's default) and the only one per command on its table: permissive policies are OR-ed, so a second
-one would widen the first.
+one would widen the first. The purge policies are the exception, and apply to the schema's ``purge`` role
+only (Decision 6).
 """
 
 import re
@@ -16,14 +17,15 @@ from enum import StrEnum
 from typing import ClassVar, Final, Literal, assert_type
 
 from ledger_kernel.errors import LedgerError, excerpt
+from ledger_platform.data.roles import SchemaRoles, identifier
 
-_TABLE: Final = re.compile(r"((?!pg_)[a-z][a-z0-9_]{1,30})\.([a-z][a-z0-9_]{0,40})", re.ASCII)
-"""``<schema>.<table>``; the table part is short enough for ``<table>_select`` to stay an identifier."""
+_TABLE: Final = re.compile(r"([a-z][a-z0-9_]{1,30})\.([a-z][a-z0-9_]{0,40})", re.ASCII)
+"""``<schema>.<table>``; the table part is short enough for ``<table>_purge_select`` to stay an identifier."""
 _COLUMN: Final = re.compile(r"[a-z][a-z0-9_]{0,62}", re.ASCII)
 _ORGANIZATION: Final = "(SELECT NULLIF(current_setting('ledger.organization_id', true), '')::uuid)"
 _COMPANY: Final = "(SELECT NULLIF(current_setting('ledger.company_id', true), '')::uuid)"
 _MODE: Final = "(SELECT NULLIF(current_setting('ledger.mode', true), ''))"
-_PURGING: Final = "((SELECT current_setting('ledger.purge', true)) = 'on' AND expires_at < now())"
+_EXPIRED: Final = "expires_at < now()"
 
 
 class RlsScope(StrEnum):
@@ -52,42 +54,64 @@ class InvalidPolicyNameError(LedgerError):
         )
 
 
+def _named(table: str, command: str) -> str:
+    return identifier(f"{table}_{command}")
+
+
 def predicate(scope: RlsScope, *, organization_column: str = "organization_id") -> str:
     """The condition a row of ``scope`` must meet in the current unit."""
     if _COLUMN.fullmatch(organization_column) is None:
         raise InvalidPolicyNameError(organization_column, column=True)
+    organization = f"{identifier(organization_column)} = {_ORGANIZATION}"
     match scope:
         case RlsScope.TENANT:
-            return f"organization_id = {_ORGANIZATION} AND company_id = {_COMPANY} AND mode = {_MODE}"
+            return f'{organization} AND "company_id" = {_COMPANY} AND "mode" = {_MODE}'
         case RlsScope.COMPANY:
-            return f"organization_id = {_ORGANIZATION} AND company_id = {_COMPANY}"
+            return f'{organization} AND "company_id" = {_COMPANY}'
         case RlsScope.ORGANIZATION:
-            return f"{organization_column} = {_ORGANIZATION}"
+            return organization
         case _:
             assert_type(scope, Literal[RlsScope.MODED_ORGANIZATION])
-            return f"organization_id = {_ORGANIZATION} AND mode = {_MODE}"
+            return f'{organization} AND "mode" = {_MODE}'
 
 
 def policy(
-    table: str, scope: RlsScope, *, organization_column: str = "organization_id", purge_expired: bool = False
+    table: str,
+    scope: RlsScope,
+    *,
+    organization_column: str = "organization_id",
+    purge_expired: bool = False,
+    append_only: bool = False,
 ) -> tuple[str, ...]:
     """DDL that puts ``table`` (``schema.table``) under ``scope``: one permissive policy per command.
 
-    ``purge_expired`` (idempotency keys, Decision 6): a unit that set ``ledger.purge = 'on'`` may also read
-    and delete rows whose ``expires_at`` has passed, and nothing else: it can neither insert nor update
-    outside its scope.
+    ``purge_expired`` (idempotency keys, Decision 6): the schema's ``purge`` role may also read and delete
+    rows whose ``expires_at`` has passed, of every organization; no setting opens that path, only the role.
+    ``append_only`` (audit events): ``SELECT`` and ``INSERT`` policies only, so no row is ever updated or
+    deleted through the policies (the grants are revoked as well).
     """
     found = _TABLE.fullmatch(table)
     if found is None:
         raise InvalidPolicyNameError(table)
+    roles = SchemaRoles(schema=found[1])
     name = found[2]
+    on = f"{identifier(roles.schema)}.{identifier(name)}"
     rule = predicate(scope, organization_column=organization_column)
-    reachable = f"({rule}) OR {_PURGING}" if purge_expired else rule
-    return (
-        f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY",
-        f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY",
-        f"CREATE POLICY {name}_select ON {table} FOR SELECT USING ({reachable})",
-        f"CREATE POLICY {name}_insert ON {table} FOR INSERT WITH CHECK ({rule})",
-        f"CREATE POLICY {name}_update ON {table} FOR UPDATE USING ({rule}) WITH CHECK ({rule})",
-        f"CREATE POLICY {name}_delete ON {table} FOR DELETE USING ({reachable})",
-    )
+    statements = [
+        f"ALTER TABLE {on} ENABLE ROW LEVEL SECURITY",
+        f"ALTER TABLE {on} FORCE ROW LEVEL SECURITY",
+        f"CREATE POLICY {_named(name, 'select')} ON {on} FOR SELECT USING ({rule})",
+        f"CREATE POLICY {_named(name, 'insert')} ON {on} FOR INSERT WITH CHECK ({rule})",
+    ]
+    if not append_only:
+        statements += [
+            f"CREATE POLICY {_named(name, 'update')} ON {on} FOR UPDATE USING ({rule}) WITH CHECK ({rule})",
+            f"CREATE POLICY {_named(name, 'delete')} ON {on} FOR DELETE USING ({rule})",
+        ]
+    if purge_expired:
+        purge = identifier(roles.purge)
+        statements += [
+            f"CREATE POLICY {_named(name, 'purge_select')} ON {on} FOR SELECT TO {purge} USING ({_EXPIRED})",
+            f"CREATE POLICY {_named(name, 'purge_delete')} ON {on} FOR DELETE TO {purge} USING ({_EXPIRED})",
+        ]
+    return tuple(statements)

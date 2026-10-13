@@ -11,12 +11,23 @@ from psycopg import sql
 from pydantic import TypeAdapter
 
 from ledger_platform.data.rls import RlsScope, policy
-from ledger_platform.data.roles import APP, MIGRATOR, RELAY
+from ledger_platform.data.roles import (
+    APP,
+    MIGRATOR,
+    RELAY,
+    RESERVED_WORDS,
+    Logins,
+    SchemaRoles,
+    cluster_statements,
+)
 from ledger_testing.database import TEST_LOGINS, libpq_as
 lazy from ledger_testing.postgres import WorkerDatabase
 
 A, B = uuid.uuid7(), uuid.uuid7()
 _COUNT: Final = TypeAdapter(tuple[int])
+_WORDS: Final = TypeAdapter(list[tuple[str]])
+HOSTILE = "p$$w'o\\rd$$; DROP ROLE ledger_app; --"
+"""A password with dollar quotes, a quote and a backslash."""
 _ROLES: Final = TypeAdapter(list[tuple[str, bool, bool, bool, bool, bool, bool]])
 A1, A2, B1 = uuid.uuid7(), uuid.uuid7(), uuid.uuid7()
 INSERT_KEY = """
@@ -133,14 +144,18 @@ def test_the_rw_role_cannot_pass_its_privileges_on(chassis: WorkerDatabase) -> N
         ).fetchone() == (False,)
 
 
+AUDIT = """
+    INSERT INTO probe.audit_events
+        (id, occurred_at, organization_id, actor, call_id, action, subject_type, subject_id)
+    VALUES (gen_random_uuid(), now(), %s, 'system:test', 'c', 'probe.touch', 'probe', 'x')
+"""
+
+
 def test_audit_events_are_append_only_for_the_rw_role(chassis: WorkerDatabase) -> None:
     with app(chassis) as connection, connection.transaction():
         as_role(connection, "probe_rw")
-        connection.execute(
-            """INSERT INTO probe.audit_events
-                   (id, occurred_at, actor, call_id, action, subject_type, subject_id)
-               VALUES (gen_random_uuid(), now(), 'system:test', 'c', 'probe.touch', 'probe', 'x')"""
-        )
+        scope(connection, A)
+        connection.execute(AUDIT, (A,))
         for statement in (
             b"UPDATE probe.audit_events SET actor = 'x'",
             b"DELETE FROM probe.audit_events",
@@ -149,6 +164,30 @@ def test_audit_events_are_append_only_for_the_rw_role(chassis: WorkerDatabase) -
             with pytest.raises(psycopg.errors.InsufficientPrivilege), connection.transaction():
                 connection.execute(statement)
         assert count(connection, sql.Identifier("probe", "audit_events")) == 1
+
+
+def test_audit_events_are_seen_and_written_per_organization(chassis: WorkerDatabase) -> None:
+    audit = sql.Identifier("probe", "audit_events")
+    refused = pytest.raises(psycopg.errors.InsufficientPrivilege, match="row-level security")
+    with app(chassis) as connection:
+        for organization in (A, B):
+            with connection.transaction():
+                as_role(connection, "probe_rw")
+                scope(connection, organization, A1, "test")
+                connection.execute(AUDIT, (organization,))
+        with connection.transaction():
+            as_role(connection, "probe_rw")
+            scope(connection, A, A1, "live")
+            assert count(connection, audit) == 1  # the organization's rows, whatever the company and mode
+            with refused, connection.transaction():
+                connection.execute(AUDIT, (B,))
+            with refused, connection.transaction():
+                connection.execute(AUDIT, (None,))
+        with connection.transaction():
+            as_role(connection, "probe_rw")
+            assert count(connection, audit) == 0
+            with refused, connection.transaction():
+                connection.execute(AUDIT, (A,))
 
 
 @pytest.mark.parametrize("role", ["probe_owner", "ledger_migrator", "other_owner", "platform_owner"])
@@ -160,7 +199,11 @@ def test_the_app_login_cannot_become_an_owner_or_another_login(chassis: WorkerDa
 def test_no_role_of_the_platform_is_a_superuser_or_bypasses_row_level_security(
     chassis: WorkerDatabase,
 ) -> None:
-    owned = [f"{schema}_{suffix}" for schema in ("platform", "probe", "other") for suffix in ("owner", "rw")]
+    owned = [
+        f"{schema}_{suffix}"
+        for schema in ("platform", "probe", "other")
+        for suffix in ("owner", "rw", "purge")
+    ]
     with psycopg.connect(chassis.admin_url()) as connection:
         rows = connection.execute(
             """SELECT rolname::text, rolsuper, rolbypassrls, rolcreatedb, rolcreaterole, rolinherit,
@@ -169,7 +212,7 @@ def test_no_role_of_the_platform_is_a_superuser_or_bypasses_row_level_security(
             ([APP, MIGRATOR, RELAY, *owned],),
         ).fetchall()
     found = _ROLES.validate_python(rows)
-    assert len(found) == 9
+    assert len(found) == 12
     for name, superuser, bypass, createdb, createrole, inherit, login in found:
         assert (superuser, bypass, createdb, createrole) == (False, False, False, False), name
         assert login == (name in {APP, MIGRATOR}), name
@@ -179,7 +222,9 @@ def test_no_role_of_the_platform_is_a_superuser_or_bypasses_row_level_security(
 def test_the_relay_reaches_the_queue_tables_and_nothing_else(chassis: WorkerDatabase) -> None:
     allowed = (
         b"SELECT id FROM probe.outbox",
-        b"UPDATE probe.outbox SET attempts = attempts + 1",
+        b"SELECT id FROM probe.outbox FOR UPDATE SKIP LOCKED",
+        b"UPDATE probe.outbox SET attempts = attempts + 1, unrouted_since = now()",
+        b"UPDATE probe.outbox SET unrouted_since = NULL",
         b"DELETE FROM probe.outbox",
         (
             b"INSERT INTO probe.inbox (consumer, event_id, type, version, source, occurred_at, payload)"
@@ -194,6 +239,8 @@ def test_the_relay_reaches_the_queue_tables_and_nothing_else(chassis: WorkerData
             b"INSERT INTO probe.outbox (id, type, version, source, occurred_at, payload)"
             b" VALUES (gen_random_uuid(), 't', 1, 's', now(), '{}')"
         ),
+        b"UPDATE probe.outbox SET payload = '{}'",
+        b"UPDATE probe.outbox SET type = 'other'",
         b"SELECT consumer FROM probe.inbox",
         b"SELECT kind FROM probe.jobs",
         b"SELECT key FROM probe.idempotency_keys",
@@ -334,3 +381,77 @@ def test_each_scope_shows_its_rows_and_refuses_every_other_write(
         assert connection.execute(sql.SQL("DELETE FROM {}").format(name)).rowcount == visible[1]
         scope(connection, B, B1, "test")
         assert count(connection, name) == 1
+
+
+def test_the_relays_grants_were_made_by_each_schemas_owner(chassis: WorkerDatabase) -> None:
+    with psycopg.connect(chassis.admin_url()) as connection:
+        rows = connection.execute(
+            """SELECT DISTINCT table_schema::text, grantor::text FROM information_schema.table_privileges
+               WHERE grantee = 'ledger_relay'
+               UNION
+               SELECT DISTINCT table_schema::text, grantor::text FROM information_schema.column_privileges
+               WHERE grantee = 'ledger_relay'
+               ORDER BY 1"""
+        ).fetchall()
+    assert rows == [("other", "other_owner"), ("platform", "platform_owner"), ("probe", "probe_owner")]
+
+
+def test_the_version_table_is_read_only_for_the_rw_role(chassis: WorkerDatabase) -> None:
+    with app(chassis) as connection, connection.transaction():
+        as_role(connection, "platform_rw")
+        assert connection.execute("SELECT version_num FROM platform.alembic_version").fetchall() == [
+            ("0001",)
+        ]
+        for statement in (
+            b"UPDATE platform.alembic_version SET version_num = 'ffff'",
+            b"DELETE FROM platform.alembic_version",
+            b"INSERT INTO platform.alembic_version VALUES ('ffff')",
+            b"TRUNCATE platform.alembic_version",
+        ):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege), connection.transaction():
+                connection.execute(statement)
+
+
+def test_the_reserved_words_are_postgresqls(chassis: WorkerDatabase) -> None:
+    with psycopg.connect(chassis.admin_url()) as connection:
+        rows = connection.execute("SELECT word FROM pg_get_keywords() WHERE catcode IN ('R', 'T')").fetchall()
+    assert {word for (word,) in _WORDS.validate_python(rows)} == RESERVED_WORDS
+
+
+def test_a_password_literal_means_what_it_says(chassis: WorkerDatabase) -> None:
+    hostile = HOSTILE
+    statements = cluster_statements((), Logins(app=hostile, migrator="m"))
+    literal = statements[3].split(" PASSWORD ", 1)[1]
+    with psycopg.connect(chassis.admin_url()) as connection:
+        connection.execute("SET standard_conforming_strings = off")
+        off = connection.execute(f"SELECT {literal}".encode()).fetchone()
+        connection.execute("SET standard_conforming_strings = on")
+        on = connection.execute(f"SELECT {literal}".encode()).fetchone()
+    assert off == on == (hostile,)
+
+
+def test_roles_that_exist_with_other_options_are_normalized(chassis: WorkerDatabase) -> None:
+    roles = SchemaRoles(schema="stale")
+    with psycopg.connect(chassis.admin_url(), autocommit=True) as connection:
+        try:
+            connection.execute("CREATE ROLE stale_owner LOGIN INHERIT BYPASSRLS CREATEDB PASSWORD 'old'")
+            connection.execute("CREATE ROLE stale_rw INHERIT")
+            connection.execute("GRANT stale_rw TO ledger_app WITH INHERIT TRUE, ADMIN TRUE")
+            for statement in cluster_statements((roles,), TEST_LOGINS):
+                connection.execute(statement.encode())
+            options = connection.execute(
+                """SELECT rolname::text, rolcanlogin, rolbypassrls, rolcreatedb, rolpassword IS NULL
+                   FROM pg_authid WHERE rolname LIKE 'stale%%' ORDER BY 1"""
+            ).fetchall()
+            member = connection.execute(
+                """SELECT inherit_option, admin_option, set_option FROM pg_auth_members
+                   WHERE roleid = 'stale_rw'::regrole AND member = 'ledger_app'::regrole"""
+            ).fetchall()
+        finally:
+            connection.execute("DROP ROLE IF EXISTS stale_owner, stale_rw, stale_purge")
+    assert options == [
+        ("stale_owner", False, False, False, False),
+        ("stale_purge", False, False, False, True),
+        ("stale_rw", False, False, False, True),
+    ]
+    assert member == [(False, False, True)]

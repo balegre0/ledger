@@ -24,6 +24,7 @@ from ledger_platform.data.roles import (
     SchemaRoles,
     cluster_statements,
     database_statements,
+    identifier,
     relay_statements,
 )
 lazy from ledger_platform.data.migrations import SchemaMigrations
@@ -41,24 +42,24 @@ def bootstrap(template: Template, schemas: Sequence[str]) -> None:
 
 
 def migrate(template: Template, *migrations: SchemaMigrations) -> None:
-    """Each schema's revisions as ``ledger_migrator``, then the relay's grants, as ``ledger-migrate`` does."""
+    """Each schema's revisions as ``ledger_migrator``, as ``ledger-migrate`` does (grants included)."""
     url = template.url(role=MIGRATOR, password=TEST_LOGINS.migrator)
     for migration in migrations:
         migration.upgrade(url)
-        template.execute(relay_statements(migration.schema))
 
 
 def create_chassis(template: Template, schema: str) -> None:
-    """``chassis_schema_v1`` in a test schema, run as its owner (for the platform's own tests)."""
+    """``chassis_schema_v1`` and the relay's grants in a test schema, as its owner (for platform tests)."""
     owner = SchemaRoles(schema=schema).owner
     engine = create_engine(template.url(role=MIGRATOR, password=TEST_LOGINS.migrator), poolclass=NullPool)
     try:
         with engine.begin() as connection:
-            connection.execute(text(f"SET LOCAL ROLE {owner}"))
+            connection.execute(text(f"SET LOCAL ROLE {identifier(owner)}"))
             chassis_schema_v1(Operations(MigrationContext.configure(connection)), schema)
+            for statement in relay_statements(schema):
+                connection.execute(text(statement))
     finally:
         engine.dispose()
-    template.execute(relay_statements(schema))
 
 
 def fresh_database(server: PostgresServer, schemas: Sequence[str]) -> str:

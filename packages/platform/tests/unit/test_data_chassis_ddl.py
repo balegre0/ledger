@@ -13,32 +13,39 @@ class Recorder:
         self.statements.append(sqltext)
 
 
-def test_every_statement_names_the_schema_and_no_placeholder_is_left() -> None:
+def recorded(schema: str = "probe") -> list[str]:
     recorder = Recorder()
-    chassis_schema_v1(recorder, "probe")
-    joined = "\n".join(recorder.statements)
+    chassis_schema_v1(recorder, schema)
+    return recorder.statements
+
+
+def test_every_statement_names_the_quoted_schema_and_no_placeholder_is_left() -> None:
+    statements = recorded()
+    joined = "\n".join(statements)
     assert "{s}" not in joined
     assert "{{" not in joined
     assert joined.count("DEFAULT '{}'") == 2
-    created = [
-        statement.split(" (")[0] for statement in recorder.statements if statement.startswith("CREATE TABLE")
-    ]
+    created = [statement.split(" (")[0] for statement in statements if statement.startswith("CREATE TABLE")]
     assert created == [
-        "CREATE TABLE probe.outbox",
-        "CREATE TABLE probe.inbox",
-        "CREATE TABLE probe.jobs",
-        "CREATE TABLE probe.subscriptions",
-        "CREATE TABLE probe.idempotency_keys",
-        "CREATE TABLE probe.audit_events",
+        'CREATE TABLE "probe".outbox',
+        'CREATE TABLE "probe".inbox',
+        'CREATE TABLE "probe".jobs',
+        'CREATE TABLE "probe".subscriptions',
+        'CREATE TABLE "probe".idempotency_keys',
+        'CREATE TABLE "probe".audit_events',
     ]
 
 
-def test_idempotency_keys_are_put_under_rls_and_audit_rows_made_append_only_last() -> None:
-    recorder = Recorder()
-    chassis_schema_v1(recorder, "probe")
-    rls = policy("probe.idempotency_keys", RlsScope.MODED_ORGANIZATION, purge_expired=True)
-    assert tuple(recorder.statements[-1 - len(rls) : -1]) == rls
-    assert recorder.statements[-1] == "REVOKE UPDATE, DELETE, TRUNCATE ON probe.audit_events FROM probe_rw"
+def test_row_level_security_and_grants_follow_the_tables() -> None:
+    keys = policy("probe.idempotency_keys", RlsScope.MODED_ORGANIZATION, purge_expired=True)
+    audit = policy("probe.audit_events", RlsScope.ORGANIZATION, append_only=True)
+    tail = [
+        *keys,
+        'GRANT SELECT, DELETE ON "probe".idempotency_keys TO "probe_purge"',
+        *audit,
+        'REVOKE UPDATE, DELETE, TRUNCATE ON "probe".audit_events FROM "probe_rw"',
+    ]
+    assert recorded()[-len(tail) :] == tail
 
 
 def test_the_schema_is_checked_before_it_reaches_sql() -> None:
@@ -52,9 +59,9 @@ def test_the_platform_keeps_one_routing_row_and_the_schedule_leases() -> None:
     recorder = Recorder()
     platform_schema_v1(recorder)
     assert recorder.statements == [
-        "CREATE TABLE platform.routing (version bigint NOT NULL)",
-        "CREATE UNIQUE INDEX routing_one_row ON platform.routing ((true))",
-        "INSERT INTO platform.routing (version) VALUES (0)",
-        """CREATE TABLE platform.schedule_leases (
+        'CREATE TABLE "platform".routing (version bigint NOT NULL)',
+        'CREATE UNIQUE INDEX routing_one_row ON "platform".routing ((true))',
+        'INSERT INTO "platform".routing (version) VALUES (0)',
+        """CREATE TABLE "platform".schedule_leases (
   name text PRIMARY KEY, holder text, leased_until timestamptz, next_run_at timestamptz NOT NULL)""",
     ]

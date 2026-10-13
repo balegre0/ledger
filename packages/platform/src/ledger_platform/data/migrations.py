@@ -30,7 +30,7 @@ from sqlalchemy.pool import NullPool
 lazy from sqlalchemy import Connection, MetaData
 
 from ledger_kernel.errors import LedgerError, UnavailableError
-from ledger_platform.data.roles import PLATFORM, SchemaRoles
+from ledger_platform.data.roles import PLATFORM, SchemaRoles, identifier, migrated_statements
 lazy from ledger_platform.data.database import Database
 
 MIGRATION_LOCK_WAIT: Final = timedelta(minutes=10)
@@ -165,11 +165,14 @@ class SchemaMigrations:
                         raise MigrationLockTimeoutError(self.schema, lock_wait) from error
                     raise
                 connection.execute(_SET_LOCK_TIMEOUT, {"wait": _OTHER_LOCKS})
-                connection.execute(text(f"SET ROLE {SchemaRoles(schema=self.schema).owner}"))
+                connection.execute(text(f"SET ROLE {identifier(SchemaRoles(schema=self.schema).owner)}"))
                 connection.commit()  # the session keeps the lock and the role; each revision commits alone
                 config = self.config()
                 config.attributes[_TARGET] = _Target(self.schema, connection, self.metadata)
                 command.upgrade(config, "head")
+                for statement in migrated_statements(self.schema):
+                    connection.execute(text(statement))
+                connection.commit()
         finally:
             engine.dispose()  # closing the session releases the advisory lock and the role
 
@@ -180,7 +183,7 @@ class SchemaMigrations:
         known = {revision.revision for revision in self._revisions().walk_revisions()}
         head = self.head
         async with database.probing() as connection:
-            await connection.execute(text(f"SET LOCAL ROLE {SchemaRoles(schema=self.schema).rw}"))
+            await connection.execute(text(f"SET LOCAL ROLE {identifier(SchemaRoles(schema=self.schema).rw)}"))
             found = await connection.execute(_RECORDED, {"table": f"{self.schema}.alembic_version"})
             recorded = _FLAG.validate_python(found.scalar_one())
             versions = table("alembic_version", column("version_num", String), schema=self.schema)

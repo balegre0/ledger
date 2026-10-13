@@ -9,7 +9,7 @@ from abc import ABCMeta, abstractmethod
 from typing import Final, Protocol
 
 from ledger_platform.data.rls import RlsScope, policy
-from ledger_platform.data.roles import SchemaRoles
+from ledger_platform.data.roles import SchemaRoles, identifier
 
 _QUEUE: Final = (
     "autovacuum_vacuum_scale_factor = 0.0, autovacuum_vacuum_threshold = 1000,"
@@ -74,10 +74,9 @@ _V1: Final = (
   action text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL,
   before_hash bytea, after_hash bytea,
   detail jsonb NOT NULL DEFAULT '{}')""",
-    "REVOKE UPDATE, DELETE, TRUNCATE ON {s}.audit_events FROM {s}_rw",
 )
-"""§6.4's DDL. ``{s}`` is replaced with ``str.replace`` (never ``format``: the DDL holds ``'{}'``); the
-doubled braces above are the f-strings' own escapes of the jsonb default and the schema placeholder."""
+"""§6.4's tables and indexes. ``{s}`` is the quoted schema, put in with ``str.replace`` (never ``format``:
+the DDL holds ``'{}'``); the doubled braces above are the f-strings' own escapes."""
 
 
 class Executes(Protocol, metaclass=ABCMeta):
@@ -89,22 +88,32 @@ class Executes(Protocol, metaclass=ABCMeta):
 
 
 def chassis_schema_v1(op: Executes, schema: str) -> None:
-    """Create the chassis's tables in ``schema``, then put ``idempotency_keys`` under its RLS (Decision 6)."""
-    name = SchemaRoles(schema=schema).schema
-    *tables, append_only = _V1
-    for statement in tables:
-        op.execute(statement.replace("{s}", name))
-    for statement in policy(f"{name}.idempotency_keys", RlsScope.MODED_ORGANIZATION, purge_expired=True):
+    """Create the chassis's tables in ``schema``, then their row-level security and grants.
+
+    ``idempotency_keys`` is under the ``moded_organization`` scope, and its expired rows are the ``purge``
+    role's to read and delete (Decision 6). ``audit_events`` is under the ``organization`` scope, append-only:
+    a unit reads and inserts its organization's rows, and nothing updates or deletes any.
+    """
+    roles = SchemaRoles(schema=schema)
+    quoted = identifier(roles.schema)
+    for statement in _V1:
+        op.execute(statement.replace("{s}", quoted))
+    for statement in policy(
+        f"{roles.schema}.idempotency_keys", RlsScope.MODED_ORGANIZATION, purge_expired=True
+    ):
         op.execute(statement)
-    op.execute(append_only.replace("{s}", name))
+    op.execute(f"GRANT SELECT, DELETE ON {quoted}.idempotency_keys TO {identifier(roles.purge)}")
+    for statement in policy(f"{roles.schema}.audit_events", RlsScope.ORGANIZATION, append_only=True):
+        op.execute(statement)
+    op.execute(f"REVOKE UPDATE, DELETE, TRUNCATE ON {quoted}.audit_events FROM {identifier(roles.rw)}")
 
 
 def platform_schema_v1(op: Executes) -> None:
     """The platform's own tables (§6.4): the routing version (one row) and the schedules' lease rows."""
-    op.execute("CREATE TABLE platform.routing (version bigint NOT NULL)")
-    op.execute("CREATE UNIQUE INDEX routing_one_row ON platform.routing ((true))")
-    op.execute("INSERT INTO platform.routing (version) VALUES (0)")
+    op.execute('CREATE TABLE "platform".routing (version bigint NOT NULL)')
+    op.execute('CREATE UNIQUE INDEX routing_one_row ON "platform".routing ((true))')
+    op.execute('INSERT INTO "platform".routing (version) VALUES (0)')
     op.execute(
-        """CREATE TABLE platform.schedule_leases (
+        """CREATE TABLE "platform".schedule_leases (
   name text PRIMARY KEY, holder text, leased_until timestamptz, next_run_at timestamptz NOT NULL)"""
     )

@@ -34,6 +34,8 @@ PLATFORM_SCRIPTS = "ledger_platform.data:revisions"
 ENV = "from ledger_platform.data.migrations import run_schema_migrations\n\nrun_schema_migrations()\n"
 REVISION = """from alembic import op
 
+from ledger_platform.data.chassis_schema import chassis_schema_v1
+
 revision = "{revision}"
 down_revision = {down}
 branch_labels = None
@@ -41,7 +43,7 @@ depends_on = None
 
 
 def upgrade():
-    op.execute("{statement}")
+    {chassis}op.execute("{statement}")
 """
 
 
@@ -78,15 +80,22 @@ def fresh(chassis: WorkerDatabase, postgres: PostgresServer) -> Iterator[Fresh]:
 
 @pytest.fixture
 def probe_scripts(tmp_path: Path) -> SchemaMigrations:
-    """Two revisions of the test schema ``probe``: a table, then a column."""
+    """Two revisions of the test schema ``probe``: the chassis and a table, then a column."""
     versions = tmp_path / "versions"
     versions.mkdir()
     (tmp_path / "env.py").write_text(ENV)
     (versions / "r1.py").write_text(
-        REVISION.format(revision="r1", down=None, statement="CREATE TABLE probe.things (n int)")
+        REVISION.format(
+            revision="r1",
+            down=None,
+            chassis='chassis_schema_v1(op, "probe")\n    ',
+            statement="CREATE TABLE probe.things (n int)",
+        )
     )
     (versions / "r2.py").write_text(
-        REVISION.format(revision="r2", down='"r1"', statement="ALTER TABLE probe.things ADD COLUMN m int")
+        REVISION.format(
+            revision="r2", down='"r1"', chassis="", statement="ALTER TABLE probe.things ADD COLUMN m int"
+        )
     )
     return SchemaMigrations(schema="probe", scripts=str(tmp_path))
 
@@ -236,3 +245,38 @@ def test_the_lock_key_is_derived_from_the_schema_alone() -> None:
     assert -(2**63) <= PLATFORM_MIGRATIONS.lock_key < 2**63
     assert PLATFORM_MIGRATIONS.schema == "platform"
     assert PLATFORM_MIGRATIONS.metadata is None
+
+
+def test_a_database_is_closed_to_public(fresh: Fresh, probe_scripts: SchemaMigrations) -> None:
+    probe_scripts.upgrade(fresh.url())
+    outsider = f"outsider_{fresh.name}"
+    with fresh.admin() as admin:
+        admin.execute(sql.SQL("CREATE ROLE {} LOGIN PASSWORD 'outsider'").format(sql.Identifier(outsider)))
+        admin.execute(
+            """SET ROLE probe_owner;
+               CREATE FUNCTION probe.answer() RETURNS int LANGUAGE sql AS 'SELECT 42';
+               RESET ROLE"""
+        )
+    try:
+        with pytest.raises(psycopg.OperationalError, match="permission denied for database"):
+            psycopg.connect(
+                fresh.server.libpq(fresh.name).replace(
+                    f"{fresh.server.user}:{fresh.server.password}", f"{outsider}:outsider"
+                )
+            )
+        app = fresh.server.libpq(fresh.name).replace(
+            f"{fresh.server.user}:{fresh.server.password}", f"{APP}:{TEST_LOGINS.app}"
+        )
+        with psycopg.connect(app, autocommit=True) as connection:
+            for statement in (
+                b"CREATE TEMPORARY TABLE scratch (n int)",
+                b"CREATE TABLE public.scratch (n int)",
+                b"SELECT probe.answer()",
+            ):
+                for role in (b"RESET ROLE", b"SET ROLE probe_rw"):
+                    connection.execute(role)
+                    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                        connection.execute(statement)
+    finally:
+        with fresh.admin() as admin:
+            admin.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(outsider)))
