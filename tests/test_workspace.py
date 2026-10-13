@@ -110,7 +110,10 @@ def unguarded(packages: dict[str, tuple[str, ...]], config: Workspace) -> list[s
                 for module in modules
                 if module not in shielded
             )
-        mypy = {name for name, command in commands.items() if command == f"mypy {directory}"}
+        # A package with a member nested inside it (countries/do holds countries/do/testing) names its own
+        # src and tests: the nested member's are its own task's, and their `tests` would collide in one run.
+        checked = {f"mypy {directory}", f"mypy {directory}/src {directory}/tests"}
+        mypy = {name for name, command in commands.items() if command in checked}
         if not mypy & in_sequence["mypy"]:
             missing.append(f"{directory}: no task of the mypy sequence runs 'mypy {directory}'")
         deptry = f"deptry {directory}/src --config {directory}/pyproject.toml"
