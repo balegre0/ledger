@@ -9,12 +9,13 @@ import pytest
 from pydantic import TypeAdapter
 
 from ledger_country_do.channels.ecf_v1.adapters.dgii.client import (
+    DEFAULT_TIMEOUTS,
     MAX_ANSWER,
     DgiiClient,
     DgiiTimeouts,
     read_answer,
 )
-from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import LiveHostRefusedError, Service
+from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts, LiveHostRefusedError, Service
 from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import TokenAnswer
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf, rfce
 from ledger_country_do.channels.ecf_v1.application.ports import (
@@ -877,3 +878,28 @@ async def test_a_client_is_ready_for_an_environment_only_open_and_on_hosts_that_
         with pytest.raises(LiveHostRefusedError):
             client.require_ready(Environment.ECF)
     assert fake.received == []
+
+
+async def test_a_client_is_ready_only_when_every_host_the_environment_uses_may_serve_it(
+    signer: KeyPairSigner,
+    fake: FakeDgii,
+    clock: ManualClock,
+    sleeps: list[float],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = DgiiHosts.url
+
+    def fc_refused(self: DgiiHosts, service: Service, environment: Environment) -> str:
+        if service is Service.RFCE:
+            raise LiveHostRefusedError
+        return original(self, service, environment)
+
+    async with client_over(httpx.ASGITransport(app=fake.app), signer, clock, sleeps).opened() as client:
+        monkeypatch.setattr(DgiiHosts, "url", fc_refused)
+        with pytest.raises(LiveHostRefusedError):
+            client.require_ready(T)
+
+
+def test_a_client_s_longest_attempt_at_sending_is_its_per_attempt_limit(signer: KeyPairSigner) -> None:
+    assert DgiiClient(signer).attempt_limit() == DEFAULT_TIMEOUTS.total
+    assert DgiiClient(signer, timeouts=DgiiTimeouts(total=42.0)).attempt_limit() == 42.0

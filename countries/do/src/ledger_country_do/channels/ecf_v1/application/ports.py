@@ -151,6 +151,10 @@ class Authority(Protocol, metaclass=ABCMeta):
         """Raise unless ``environment`` can be served now (hosts allowed, connections open); sends nothing."""
 
     @abstractmethod
+    def attempt_limit(self) -> float:
+        """Seconds one attempt at sending a document may take: after them, it has landed or never will."""
+
+    @abstractmethod
     async def submit_ecf(
         self, environment: Environment, issuer_rnc: str, encf: Encf, signed: bytes
     ) -> Reception:

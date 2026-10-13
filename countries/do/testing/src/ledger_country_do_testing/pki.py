@@ -167,14 +167,16 @@ class Authority:
         key: PrivateKey | None = None,
         not_before: datetime | None = None,
         not_after: datetime | None = None,
+        extended_usage: Sequence[x509.ObjectIdentifier] = (),
     ) -> Issued:
         """An end-entity signing certificate for ``subject``.
 
-        Valid from a day ago for a year unless ``not_before`` or ``not_after`` say otherwise.
+        Valid from a day ago for a year unless ``not_before`` or ``not_after`` say otherwise; with an extended
+        key usage extension naming ``extended_usage`` when it names any.
         """
         own = rsa_key() if key is None else key
         now = datetime.now(UTC)
-        certificate = (
+        builder = (
             x509.CertificateBuilder()
             .subject_name(subject)
             .issuer_name(self.certificate.subject)
@@ -189,9 +191,10 @@ class Authority:
                 critical=False,
             )
             .add_extension(x509.SubjectKeyIdentifier.from_public_key(own.public_key()), critical=False)
-            .sign(self.issued.key, hashes.SHA256())
         )
-        return Issued(certificate, own)
+        if extended_usage:
+            builder = builder.add_extension(x509.ExtendedKeyUsage(extended_usage), critical=False)
+        return Issued(builder.sign(self.issued.key, hashes.SHA256()), own)
 
 
 def bundle(

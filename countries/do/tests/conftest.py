@@ -15,19 +15,18 @@ from ledger_country_do_testing.pki import Authority, organization, person
 from ledger_country_do_testing.transports import FAKE_HOSTS
 lazy from ledger_country_do_testing.pki import Issued
 
+SIGNER_VALID_FROM = datetime(2026, 1, 1, tzinfo=UTC)
+"""Before every moment the tests sign at (``clock``: 2026-10-13), whatever day they run."""
+
 
 @pytest.fixture(scope="session")
 def authority() -> Authority:
-    return Authority.root()
+    return Authority.root(now=SIGNER_VALID_FROM)
 
 
 @pytest.fixture(scope="session")
 def intermediate(authority: Authority) -> Authority:
     return authority.intermediate()
-
-
-SIGNER_VALID_FROM = datetime(2026, 1, 1, tzinfo=UTC)
-"""Before every moment the tests sign at (``clock``: 2026-10-13), whatever day they run."""
 
 
 @pytest.fixture(scope="session")
@@ -47,7 +46,9 @@ def clock() -> ManualClock:
 
 @pytest.fixture
 def fake(authority: Authority, issued: Issued, clock: ManualClock) -> FakeDgii:
-    receiver = authority.issue(organization("131098193", name="CONSTRUCTORA DEL CARIBE SRL"))
+    receiver = authority.issue(
+        organization("131098193", name="CONSTRUCTORA DEL CARIBE SRL"), not_before=SIGNER_VALID_FROM
+    )
     return FakeDgii(
         check=dgii_check(trusted=[issued.certificate]),
         receiver=receiver,

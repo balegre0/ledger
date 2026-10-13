@@ -13,6 +13,7 @@ from ledger_country_do.channels.ecf_v1.application.emission import (
     SETTLE_DELAY,
     CertificateNotValidError,
     Emitter,
+    SettleTooShortError,
     SigningSkewError,
     Unknown,
 )
@@ -59,6 +60,7 @@ class ScriptedAuthority(Authority):
     answers: list[Answer | EcfError] = field(default_factory=list)
     known: tuple[TrackId, ...] | EcfError | None = ()
     not_ready: EcfError | None = None
+    attempt: float = 20.0
     stall_submission: float = 0.0
     stall_result: float = 0.0
     events: list[str] = field(default_factory=list)
@@ -70,6 +72,10 @@ class ScriptedAuthority(Authority):
     def require_ready(self, environment: Environment) -> None:
         if self.not_ready is not None:
             raise self.not_ready
+
+    @override
+    def attempt_limit(self) -> float:
+        return self.attempt
 
     @override
     async def submit_ecf(
@@ -455,3 +461,25 @@ async def test_a_clock_that_runs_back_while_signing_is_refused_too(signer: KeyPa
     back = WatchedSigner(signer, clock, takes=-(MAX_SIGNING_SKEW + timedelta(seconds=1)))
     with pytest.raises(SigningSkewError):
         await emitter(ScriptedAuthority(), back, clock=clock).sign(credit_invoice())
+
+
+def test_the_settle_delay_is_at_least_the_longest_attempt_at_sending(signer: KeyPairSigner) -> None:
+    async def sleep(seconds: float) -> None:
+        del seconds
+
+    def built(attempt: float, settle: float) -> Emitter:
+        return Emitter(
+            xml=DgiiXml(),
+            signer=signer,
+            authority=ScriptedAuthority(attempt=attempt),
+            environment=Environment.TESTECF,
+            clock=lambda: NOW,
+            sleep=sleep,
+            settle=settle,
+        )
+
+    with pytest.raises(SettleTooShortError) as raised:
+        built(attempt=SETTLE_DELAY + 0.5, settle=SETTLE_DELAY)
+    assert raised.value.kind == "internal"
+    built(attempt=SETTLE_DELAY, settle=SETTLE_DELAY)
+    built(attempt=5.0, settle=5.0)

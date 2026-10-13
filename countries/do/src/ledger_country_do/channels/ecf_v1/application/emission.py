@@ -19,7 +19,8 @@ Emission is two steps, so a caller can keep what was signed before anything leav
   - RFCE route: sent once to the ``fc`` host and decided at once; the full signed e-CF is kept by the caller
     (IT §9.1).
   - Reception route: sent once. If DGII may have taken it with its answer unknown, the emitter waits a settle
-    delay (``SETTLE_DELAY``, at least the client's per-attempt time, so a request still in flight has landed),
+    delay (``SETTLE_DELAY``, at least the authority's ``attempt_limit``, so a request still in flight has
+    landed: an emitter whose settle delay is shorter is never built, ``SettleTooShortError``),
     then asks DGII for the e-NCF's track ids and adopts the newest received no earlier than
     ``RECEIPT_TOLERANCE`` before the moment of signing (an older one is another, earlier document). Anything
     else (none listed yet, only older ones, CerteCF has no such service, the question fails) parks it: the
@@ -82,7 +83,8 @@ POLL_SCHEDULE: Final = (1.0, 2.0, 5.0, 10.0, 30.0, 60.0)
 MAX_SIGNING_SKEW: Final = timedelta(minutes=5)
 """How far a signature may come back from its ``FechaHoraFirma``, either way."""
 SETTLE_DELAY: Final = 30.0
-"""Seconds waited after an unknown outcome before DGII is asked: more than ``DgiiTimeouts.total`` (20 s)."""
+"""Seconds waited after an unknown outcome before DGII is asked: at least ``Authority.attempt_limit`` (20 s by
+default, ``DgiiTimeouts.total``), which ``Emitter`` checks when it is built."""
 RECEIPT_TOLERANCE: Final = timedelta(minutes=2)
 """How long before the moment of signing DGII's reception time of our document may read (clocks differ)."""
 SEND_BUDGET: Final = 300.0
@@ -101,6 +103,18 @@ class CertificateNotValidError(EcfConflictError):
 
     def __init__(self) -> None:
         super().__init__("the signing certificate is not valid at the moment of signing")
+
+
+class SettleTooShortError(EcfError):
+    """An emitter that would ask DGII before its authority's longest attempt is over: a configuration defect.
+
+    A request still in flight when DGII is asked for track ids could land after the answer, and be missed.
+    """
+
+    code: ClassVar[str] = "do_ecf_settle_too_short"
+
+    def __init__(self) -> None:
+        super().__init__("the settle delay is shorter than the longest attempt at sending a document")
 
 
 class SigningSkewError(EcfUnavailableError):
@@ -256,6 +270,8 @@ class Emitter:
         self._budget = options.get("budget", SEND_BUDGET)
         self._qr_hosts = options.get("qr_hosts", OFFICIAL_QR)
         self._regime = options.get("regime", REGIME)
+        if self._settle < authority.attempt_limit():
+            raise SettleTooShortError
         authority.require_ready(self._environment)
 
     async def emit(self, draft: EcfDraft) -> Emitted:

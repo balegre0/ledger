@@ -3,11 +3,16 @@ from typing import Final, final, override
 import httpx
 import pytest
 
-from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
+from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient, DgiiTimeouts
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import verify_enveloped
 from ledger_country_do.channels.ecf_v1.adapters.xml.documents import DgiiXml
 from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import texts
-from ledger_country_do.channels.ecf_v1.application.emission import SETTLE_DELAY, Emitter, Unknown
+from ledger_country_do.channels.ecf_v1.application.emission import (
+    SETTLE_DELAY,
+    Emitter,
+    SettleTooShortError,
+    Unknown,
+)
 from ledger_country_do.channels.ecf_v1.application.ports import AuthorityUnavailableError, Failure
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 from ledger_country_do.channels.ecf_v1.domain.printed import QrHosts
@@ -248,6 +253,34 @@ async def test_an_emitter_is_built_only_over_an_open_client(
             environment=Environment.TESTECF,
             clock=clock,
             sleep=no_sleep,
+        )
+
+
+async def test_an_emitter_waits_out_at_least_its_client_s_longest_attempt_before_asking_dgii(
+    signer: KeyPairSigner, fake: FakeDgii, clock: ManualClock
+) -> None:
+    longer = DgiiTimeouts(total=SETTLE_DELAY + 10, call=SETTLE_DELAY * 4)
+    transport = httpx.ASGITransport(app=fake.app)
+    async with DgiiClient(
+        signer, hosts=FAKE_HOSTS, clock=clock, timeouts=longer, transport=transport
+    ).opened() as dgii:
+        with pytest.raises(SettleTooShortError):
+            Emitter(
+                xml=DgiiXml(),
+                signer=signer,
+                authority=dgii,
+                environment=Environment.TESTECF,
+                clock=clock,
+                sleep=no_sleep,
+            )
+        Emitter(
+            xml=DgiiXml(),
+            signer=signer,
+            authority=dgii,
+            environment=Environment.TESTECF,
+            clock=clock,
+            sleep=no_sleep,
+            settle=longer.total,
         )
 
 

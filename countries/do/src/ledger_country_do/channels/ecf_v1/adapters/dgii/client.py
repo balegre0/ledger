@@ -187,7 +187,7 @@ def _submitted[T](model: TypeAdapter[T], response: httpx.Response, service: Serv
         raise OutcomeUnknownError(service.value, Failure.UNREADABLE) from error
 
 
-async def _bounded(response: httpx.Response) -> bytes | None:
+async def bounded(response: httpx.Response) -> bytes | None:
     """The body, plain or one gzip layer decompressed as it streams; ``None`` if unreadable or too large."""
     encodings = [
         each.strip().lower() for each in response.headers.get_list("content-encoding", split_commas=True)
@@ -252,7 +252,13 @@ class DgiiClient(Authority):
     @override
     def require_ready(self, environment: Environment) -> None:
         self._client(Service.RECEPTION)
-        self._url(Service.RECEPTION, environment)
+        for service in Service:
+            if offered(service, environment):
+                self._url(service, environment)
+
+    @override
+    def attempt_limit(self) -> float:
+        return self._timeouts.total
 
     def _client(self, service: Service) -> httpx.AsyncClient:
         if self._http is None:
@@ -277,7 +283,7 @@ class DgiiClient(Authority):
             async with asyncio.timeout_at(min(loop.time() + self._timeouts.total, deadline)):
                 streamed = await http.send(request, stream=True)
                 try:
-                    body = await _bounded(streamed)
+                    body = await bounded(streamed)
                 finally:
                     await streamed.aclose()
         except httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout:
