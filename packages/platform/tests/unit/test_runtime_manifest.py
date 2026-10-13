@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from types import MappingProxyType
 
 import pytest
 
@@ -178,9 +179,25 @@ def test_an_app_names_its_script_and_role() -> None:
 def test_a_bad_manifest_lists_where_it_is_wrong_never_the_value(text: str, location: str) -> None:
     with pytest.raises(InvalidManifestError) as caught:
         load_manifest(text)
-    assert location in str(caught.value)
+    assert caught.value.problems[0].startswith(f"{location}:")
+    assert str(caught.value).startswith(f"manifest: {location}:")
     assert "3 days" not in str(caught.value)
     assert "/invoices" not in str(caught.value).replace("/v1/invoices", "")
+
+
+def test_a_bad_id_prefix_is_located_never_echoed() -> None:
+    with pytest.raises(InvalidManifestError) as caught:
+        load_manifest(MODULE.replace('prefix = "inv"', 'prefix = "zzzzzzzz"'))
+    assert caught.value.problems[0].startswith("ids.0.prefix:")
+    assert "zzzzzzzz" not in str(caught.value)
+
+
+def test_scripts_cannot_be_changed_after_reading() -> None:
+    manifest = load_manifest(APP_HEAD + 'scripts = { "ledger-x" = "ledger_app_api.x:main" }\n' + APP_SECTION)
+    scripts = manifest.package.scripts
+    assert dict(scripts) == {"ledger-x": "ledger_app_api.x:main"}
+    assert isinstance(scripts, MappingProxyType)
+    assert isinstance(load_manifest(APP_HEAD + APP_SECTION).package.scripts, MappingProxyType)
 
 
 @pytest.mark.parametrize(("text", "seconds"), [("60s", 60), ("10m", 600), ("1h", 3600), ("15d", 1_296_000)])
