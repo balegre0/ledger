@@ -205,9 +205,9 @@ class ApiSettings(ServiceSettings):
 class Settings(BaseSettings):
     """Settings of every app process (Decision 14): one class, so one environment file serves every app.
 
-    Token settings are optional here; the ``api`` role requires them when it starts. Every field can come from
-    the environment, so none is an argument the constructor demands (``Field(default=...)``: required when
-    validating, optional to the type checkers).
+    ``environment`` and ``database_url`` are required. Token settings are optional here; the ``api`` role
+    requires them when it starts. Every field can come from the environment, so none is an argument the
+    constructor demands (``Field(default=...)``: required when validating, optional to the type checkers).
     """
 
     model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
@@ -218,7 +218,8 @@ class Settings(BaseSettings):
         hide_input_in_errors=True,  # a validation error must never print a secret
     )
 
-    environment: Literal["local", "test", "staging", "production"] = "local"
+    environment: Literal["local", "test", "staging", "production"] = Field(default=...)
+    """Required: a process that forgot to say where it runs must not run with local defaults in production."""
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: LogFormat = LogFormat.CONSOLE
     database_url: SecretStr = Field(default=...)
@@ -255,10 +256,13 @@ class Settings(BaseSettings):
         return self
 
     @property
-    def listen_url(self) -> str:
-        """The direct URL in libpq form (psycopg's LISTEN connection); the database URL when none is set."""
+    def listen_url(self) -> SecretStr:
+        """The direct URL in libpq form (psycopg's LISTEN connection); the database URL when none is set.
+
+        A secret like the URLs it comes from: it holds the password, so it never renders in a repr or a log.
+        """
         url = (self.database_direct_url or self.database_url).get_secret_value()
-        return url.replace(_DATABASE_URL_SCHEME, "postgresql://", 1)
+        return SecretStr(url.replace(_DATABASE_URL_SCHEME, "postgresql://", 1))
 
     @classmethod
     @override

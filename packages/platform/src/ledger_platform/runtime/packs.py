@@ -1,21 +1,29 @@
 """Channel packs and modules, found by entry point group (§3.10 step 1; Decision 13).
 
-A channel pack must be of an installed regime and a key of its own, named like its entry point and its
-manifest entry; a module must be named like its manifest. Anything else fails the start, naming the group
-and the entry (``InvalidPackError``). A suspended module is neither assembled nor migrated.
+A channel pack must load, be of an installed regime of the country its key names, and have a key of its own,
+named like its entry point; a module must load, be of kind ``module`` and be named like its manifest. Anything
+else fails the start, naming the group and the entry (``InvalidPackError``). A suspended module is
+neither assembled nor migrated.
 """
 
 from typing import Final, final
 lazy from collections.abc import Iterable
 
 from ledger_platform.runtime.contexts import ChannelPack, Module
-from ledger_platform.runtime.manifest import PackageStatus
-from ledger_platform.runtime.registries import CHANNELS, MODULES, InvalidPackError, check_unique, installed
+from ledger_platform.runtime.manifest import PackageKind, PackageStatus
+from ledger_platform.runtime.registries import (
+    CHANNELS,
+    MODULES,
+    InvalidPackError,
+    check_unique,
+    installed,
+    load_entry,
+)
 lazy from ledger_platform.runtime.registries import Discover, Discovered, Regimes
 
 
 def _pack(found: Discovered, regimes: Regimes, seen: set[str]) -> ChannelPack:
-    value = found.load()
+    value = load_entry(CHANNELS, found)
     if not isinstance(value, ChannelPack):
         raise InvalidPackError(CHANNELS, found.name, "does not name a channel pack")
     if value.key != found.name:
@@ -23,6 +31,10 @@ def _pack(found: Discovered, regimes: Regimes, seen: set[str]) -> ChannelPack:
     if value.regime not in regimes:
         raise InvalidPackError(
             CHANNELS, found.name, f"serves the regime {value.regime!r}, which is not installed"
+        )
+    if regimes.get(value.regime).jurisdiction.country.lower() != value.key.partition("-")[0]:
+        raise InvalidPackError(
+            CHANNELS, found.name, f"serves the regime {value.regime!r}, of another country"
         )
     check_unique(CHANNELS, found.name, seen)
     return value
@@ -45,9 +57,11 @@ class Channels:
 
 
 def _module(found: Discovered, seen: set[str]) -> Module:
-    value = found.load()
+    value = load_entry(MODULES, found)
     if not isinstance(value, Module):
         raise InvalidPackError(MODULES, found.name, "does not name a Module")
+    if value.manifest.package.kind is not PackageKind.MODULE:
+        raise InvalidPackError(MODULES, found.name, f"names a package of kind {value.manifest.package.kind}")
     if value.manifest.package.name != found.name:
         raise InvalidPackError(MODULES, found.name, f"names the module {value.manifest.package.name!r}")
     check_unique(MODULES, found.name, seen)

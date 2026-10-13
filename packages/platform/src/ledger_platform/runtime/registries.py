@@ -14,7 +14,7 @@ from types import MappingProxyType
 from typing import ClassVar, Final, final
 lazy from collections.abc import Callable, Iterable, Mapping, Sequence
 
-from ledger_kernel.errors import LedgerError
+from ledger_kernel.errors import LedgerError, error_type
 from ledger_kernel.regimes import RegimeDef, TaxIdSchemes
 
 MODULES: Final = "ledger.modules"
@@ -65,13 +65,27 @@ def check_unique(group: str, name: str, seen: set[str]) -> None:
     seen.add(name)
 
 
-def _regime(found: Discovered, seen: set[str]) -> RegimeDef:
-    value = found.load()
+def load_entry(group: str, found: Discovered) -> object:
+    """What ``found`` names; a failure to import it is its package's defect (``InvalidPackError``)."""
+    try:
+        return found.load()
+    except Exception as error:  # importing a package can fail with anything: it fails the start, named
+        raise InvalidPackError(group, found.name, f"could not be loaded ({error_type(error)})") from error
+
+
+def _regime(found: Discovered, seen: set[str], schemes: dict[str, str]) -> RegimeDef:
+    value = load_entry(REGIMES, found)
     if not isinstance(value, RegimeDef):
         raise InvalidPackError(REGIMES, found.name, "does not name a RegimeDef")
     if value.key != found.name:
         raise InvalidPackError(REGIMES, found.name, f"names the regime {value.key!r}")
     check_unique(REGIMES, found.name, seen)
+    for scheme in value.tax_id_schemes:
+        owner = schemes.setdefault(scheme.key, found.name)
+        if owner != found.name:
+            raise InvalidPackError(
+                REGIMES, found.name, f"declares tax id scheme {scheme.key!r}, as {owner!r} does"
+            )
     try:
         zoneinfo.ZoneInfo(value.time_zone)
     except zoneinfo.ZoneInfoNotFoundError as error:
@@ -97,7 +111,8 @@ class Regimes:
     def load(cls, discover: Discover = installed) -> Regimes:
         """The regimes of group ``ledger.countries.regimes`` (``InvalidPackError`` for a bad entry)."""
         seen: set[str] = set()
-        return cls([_regime(found, seen) for found in discover(REGIMES)])
+        schemes: dict[str, str] = {}
+        return cls([_regime(found, seen, schemes) for found in discover(REGIMES)])
 
     def get(self, key: str) -> RegimeDef:
         """The regime of ``key`` (``RegimeUnknownError`` if none is installed)."""

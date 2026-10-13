@@ -2,8 +2,12 @@
 
 A ``Key[T]`` names one bound thing and knows how to recognize it (a ``TypeIs`` function, usually
 ``isinstance`` on a runtime-checkable Protocol): binding checks the type statically, reading checks it at
-runtime, and no cast is ever needed. A module reads only the keys of its declared dependencies
-(``view(allowed)``): an undeclared edge fails at assembly, never later.
+runtime, and no cast is ever needed.
+
+Authority runs both ways. A package binds only the names its manifest declares (``add(..., declared=)``):
+a module's API under its own name, extension point implementations under ``<declaring module>.<Protocol>``,
+ports under the port's name. A package reads only the names it declares (``view(allowed)``): reading anything
+else fails at that read, whenever it happens (at assembly, or at call time for what a module reads later).
 """
 
 from dataclasses import dataclass
@@ -20,6 +24,15 @@ class UndeclaredDependencyError(LedgerError):
 
     def __init__(self, label: str, name: str) -> None:
         super().__init__(f"{label} {name!r} is read by a package that does not declare it")
+
+
+class UndeclaredBindingError(LedgerError):
+    """A package bound a name its manifest does not declare: a defect of the package."""
+
+    code: ClassVar[str] = "binding_undeclared"
+
+    def __init__(self, label: str, name: str, binder: str) -> None:
+        super().__init__(f"{label} {name!r} is bound by {binder!r}, which does not declare it")
 
 
 class BindingMissingError(LedgerError):
@@ -106,8 +119,10 @@ class Directory:
         self.label = label
         self._values: dict[str, object] = {}
 
-    def add(self, binding: Binding) -> None:
-        """Bind; a name is bound once."""
+    def add(self, binding: Binding, *, by: str, declared: frozenset[str]) -> None:
+        """Bind for the package ``by``, which may bind only ``declared``; a name is bound once."""
+        if binding.name not in declared:
+            raise UndeclaredBindingError(self.label, binding.name, by)
         if binding.name in self._values:
             raise DuplicateBindingError(self.label, binding.name)
         self._values[binding.name] = binding.value

@@ -19,6 +19,7 @@ lazy from opentelemetry.trace import Tracer
 lazy from prometheus_client import CollectorRegistry
 
 from ledger_kernel.errors import LedgerError
+from ledger_platform.runtime.facade import require_facades
 lazy from ledger_kernel.clock import Clock
 lazy from ledger_kernel.regimes import RegimeDef
 lazy from ledger_platform.config.settings import Settings
@@ -28,7 +29,7 @@ lazy from ledger_platform.events.consumers import ConsumerSpec
 lazy from ledger_platform.jobs.outcomes import JobSpec
 lazy from ledger_platform.observability.health import Check
 lazy from ledger_platform.observability.tracing import Tracing
-lazy from ledger_platform.runtime.keys import ApiDirectory, Binding, ExtensionDirectory, Ports
+lazy from ledger_platform.runtime.keys import ApiDirectory, Binding, Directory, ExtensionDirectory, Ports
 lazy from ledger_platform.runtime.manifest import AppRole, ChannelEntry, PackageManifest
 lazy from ledger_platform.runtime.registries import Regimes
 
@@ -190,6 +191,45 @@ class Module:
 
     manifest: PackageManifest
     assemble: Callable[[ModuleContext], ModuleParts]
+
+
+def bind_parts(
+    manifest: PackageManifest,
+    parts: ModuleParts,
+    *,
+    apis: Directory,
+    extensions: Directory,
+    ports: Directory,
+) -> None:
+    """Bind what a module's assembly hands over, with the authority its manifest gives it.
+
+    Its API only under its own name; extension point implementations only under the qualified names it
+    declares (``[extension_points] implements``, as ``<declaring module>.<Protocol>``); ports only under the
+    names it declares (``provides``). What other modules call (an API, an extension point implementation)
+    must have every public coroutine method a ``@facade``.
+    """
+    name = manifest.package.name
+    if parts.api is not None:
+        require_facades(parts.api.value)
+        apis.add(parts.api, by=name, declared=frozenset({name}))
+    implements = frozenset(manifest.extension_points.implements)
+    for binding in parts.implements:
+        require_facades(binding.value)
+        extensions.add(binding, by=name, declared=implements)
+    provides = frozenset(manifest.extension_points.provides)
+    for binding in parts.provides:
+        ports.add(binding, by=name, declared=provides)
+
+
+def api_view(manifest: PackageManifest, apis: Directory) -> ApiDirectory:
+    """The APIs a module may read: those of the modules it depends on."""
+    return apis.view(frozenset(manifest.dependencies.modules))
+
+
+def extension_view(manifest: PackageManifest, extensions: Directory) -> ExtensionDirectory:
+    """The implementations a module may read: of the extension points it declares, by qualified name."""
+    name = manifest.package.name
+    return extensions.view(frozenset(f"{name}.{point}" for point in manifest.extension_points.declares))
 
 
 @final

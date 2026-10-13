@@ -455,8 +455,8 @@ The signer is the worked example from day one.
 
 1. Load manifests (entry point group `ledger.modules`, generated `_manifest.py`), regimes
    (`ledger.countries.regimes`) and channels (`ledger.countries.channels`) through `Regimes.load()` and
-   `Channels.load()` (both in `platform.runtime.registries`; validated and frozen; a duplicate or invalid pack
-   fails the start).
+   `Channels.load()` (`Regimes` in `platform.runtime.registries`, `Channels` and the modules' loader in
+   `platform.runtime.packs`; validated and frozen; a duplicate or invalid pack fails the start).
 2. Assemble modules in topological order. Each gets a `ModuleContext`; its `ModuleParts` add its API
    implementation to the API directory (for later modules), its extension-point implementations, and the ports
    it provides to channels.
@@ -845,7 +845,7 @@ outbox, inbox and jobs under `data`; v2 keeps their **tables** in `data` (`chass
 |---|---|---|
 | `config` | `Settings` (base, `LEDGER_*`, fail-closed on unknown variables), `InvalidOptionError(component, option, requirement)` | `settings.py` (kept), `options.py` (12 subclasses collapsed into one, [05] D7) |
 | `observability` | `configure_logging`, `Tracing`, `Health`, `Check`, `Telemetry`, metrics helpers | `logs.py`, `tracing.py`, `health.py`, `probe.py` (kept, moved); validation-issue rendering shared with `http` ([05] D10) |
-| `runtime` | `App`, `AppRole`, `ModuleContext`, `ModuleParts`, `ChannelContext`, `ChannelParts`, `Call`, `SystemCall`, `facade` (decorator with the open-unit guard), `UnitOpenError`, `Supervisor`, `registries.Regimes`, `registries.Channels`, `run(app)` | `service.py` split, `supervision.py` kept, `lifecycle.py` merged into `AsyncExitStack` use, `interruptions.py` deleted |
+| `runtime` | `App`, `AppRole`, `ModuleContext`, `ModuleParts`, `ChannelContext`, `ChannelParts`, `Call`, `SystemCall`, `facade` (decorator with the open-unit guard), `UnitOpenError`, `Supervisor`, `registries.Regimes`, `packs.Channels`, `run(app)` | `service.py` split, `supervision.py` kept, `lifecycle.py` merged into `AsyncExitStack` use, `interruptions.py` deleted |
 | `data` | `Database`, `BoundDatabase` (`unit(scope)`), `UnitOfWork` (`uow.publish(event)`, `uow.jobs`, `uow.audit(...)`), `tenant_table`/`organization_table`/`moded_organization_table` (scope columns, tenant-carrying FKs, RLS), `chassis_schema_v1(op, schema)`, `Migrations` | `database.py` split, `migrations.py` kept (data-migration helpers deleted until needed), `schema.py` merged |
 | `data.queue` | the claim/lease/fencing/retry engine shared by inbox and jobs (`claim`, `Backoff`, `Lease`) | new; replaces the relay half of `outbox.py` and the delivery loop of `consumer.py` |
 | `events` | `Event`, `RawEvent` (generic envelope, for webhooks), `EventBus`, `PostgresEventBus`, `ConsumerSpec`, `Dispatcher` (fan-out), codec | `outbox.py` writer kept, `consumer.py` inbox part kept; JetStream parts deleted |
@@ -1212,7 +1212,7 @@ their language (`{"code": "...", "message": "...", "lang": "es"}`), never transl
 | Content | currency, time zone, tax-id schemes, tax categories with dated rates, document types and correction rules, rounding, law-level fields, dated parameters, sources | builders, vendored schemas + pins, signing profile, gateway, numbering, status map, state machine, contingency, delivery, printed representation, receiver routes, requirements, format-level fields |
 | Code shape | pure typed data + pure functions; imports `ledger_kernel` only | layered like a module; imports `ledger_fiscal_kit`, `ledger_platform`, `ledger_kernel` |
 | Used by | any module through `Regimes` | `fiscal` through `ChannelRegistry`; the `receiver` app |
-| Registry | entry points `ledger.countries.regimes`, loaded by `platform.runtime.registries.Regimes` | `ledger.countries.channels`, loaded by `platform.runtime.registries.Channels` |
+| Registry | entry points `ledger.countries.regimes`, loaded by `platform.runtime.registries.Regimes` | `ledger.countries.channels`, loaded by `platform.runtime.packs.Channels` |
 
 A fiscal document records the regime and channel keys it was produced with (ADR 0005, [01] R1).
 

@@ -276,6 +276,23 @@ layers = [
     "config | lifecycle | interruptions",
 ]
 
+# Until Task 16 restores the final layers (`runtime` on top): nothing below the composition root imports it.
+[[tool.importlinter.contracts]]
+name = "Only the composition root imports the runtime's composition types"
+type = "forbidden"
+source_modules = [
+    "ledger_platform.service", "ledger_platform.migrations", "ledger_platform.schema", "ledger_platform.http",
+    "ledger_platform.consumer", "ledger_platform.identity_client", "ledger_platform.outbox",
+    "ledger_platform.idempotency", "ledger_platform.auth", "ledger_platform.grpc", "ledger_platform.events",
+    "ledger_platform.jobs", "ledger_platform.streams", "ledger_platform.data", "ledger_platform.jetstream",
+    "ledger_platform.observability", "ledger_platform.config", "ledger_platform.lifecycle",
+    "ledger_platform.interruptions",
+]
+forbidden_modules = [
+    "ledger_platform.runtime.keys", "ledger_platform.runtime.contexts", "ledger_platform.runtime.registries",
+    "ledger_platform.runtime.packs",
+]
+
 [[tool.importlinter.contracts]]
 name = "Kernel is standard library only"
 type = "forbidden"

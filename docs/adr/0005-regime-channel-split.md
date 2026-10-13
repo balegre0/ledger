@@ -18,8 +18,9 @@ several formats (Spain has four), and that generic EDI state machines fail (Odoo
   schemas, signing profile, gateway, numbering, status map, explicit state machine, contingency, delivery,
   printed representation, receiver routes, requirements, format-level fields). Dev-only fakes live in a separate
   distribution (`ledger-country-<cc>-testing`).
-- Registries in `platform.runtime.registries` load the entry points `ledger.countries.regimes` and
-  `ledger.countries.channels` at startup, validate and freeze them. Modules never import countries; countries
+- At startup the runtime loads the entry points `ledger.countries.regimes` (`Regimes`, in
+  `platform.runtime.registries`) and `ledger.countries.channels` (`Channels`, in `platform.runtime.packs`, which
+  also loads `ledger.modules`: packs name the contexts they assemble with), validates and freezes them. Modules never import countries; countries
   never import modules or each other; channels receive ports (`SignerPort`, `CompanyDirectory`, `ArchivePort`)
   through a `ChannelContext` built by the runtime from what modules provide.
 - `fiscal-kit` holds only the contract between `fiscal` and channels: `Channel`, `FiscalDraft`, `FiscalStatus`,

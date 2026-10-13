@@ -48,11 +48,13 @@ def unchanged(value: str) -> str:
     return value
 
 
-def regime(country: str, *, time_zone: str = "America/New_York") -> RegimeDef:
+def regime(key: str, *, time_zone: str = "America/New_York") -> RegimeDef:
+    """The regime of ``key`` (``us``, or ``us-ca`` for a subdivision); its one scheme is ``<cc>.probe``."""
+    country = key.partition("-")[0]
     code = CountryCode(country.upper())
     return RegimeDef(
-        key=RegimeKey(country),
-        jurisdiction=Jurisdiction(code),
+        key=RegimeKey(key),
+        jurisdiction=Jurisdiction(code, key.upper() if "-" in key else None),
         currency=Currency.of("USD"),
         time_zone=time_zone,
         labels=LABELS,
@@ -120,11 +122,15 @@ def nothing(context: ModuleContext) -> ModuleParts:
     return ModuleParts()
 
 
-def module(name: str, *, status: str = "active") -> Module:
+def broken() -> object:
+    raise ImportError
+
+
+def module(name: str, *, status: str = "active", kind: str = "module") -> Module:
     lines = (
         "[package]",
         f'name = "{name}"',
-        'kind = "module"',
+        f'kind = "{kind}"',
         'summary = "A probe."',
         'owners = ["@o"]',
         f'status = "{status}"',
@@ -151,8 +157,17 @@ def test_regimes_load_validate_and_freeze() -> None:
         ((entry("us", regime("us", time_zone="Mars/Olympus")),), "us"),
         ((entry("us", 42),), "us"),
         ((entry("xx", regime("us")),), "xx"),
+        ((Discovered("us", broken),), "us"),
+        ((entry("us", regime("us")), entry("us-ca", regime("us-ca"))), "us-ca"),
     ],
-    ids=["duplicate-key", "unknown-time-zone", "not-a-regime", "named-apart-from-its-key"],
+    ids=[
+        "duplicate-key",
+        "unknown-time-zone",
+        "not-a-regime",
+        "named-apart-from-its-key",
+        "fails-to-load",
+        "tax-id-scheme-of-another-regime",
+    ],
 )
 def test_a_duplicate_regime_key_an_unknown_time_zone_or_a_wrong_object_fails_the_start(
     entries: tuple[Discovered, ...], named: str
@@ -175,8 +190,17 @@ def test_channels_load_with_a_known_regime_and_a_unique_key() -> None:
         (entry("us-probe-v1", pack()), entry("us-probe-v1", pack())),
         (entry("us-probe-v1", 42),),
         (entry("us-other-v1", pack()),),
+        (Discovered("us-probe-v1", broken),),
+        (entry("mx-probe-v1", pack("mx-probe-v1", regime_key="us")),),
     ],
-    ids=["unknown-regime", "duplicate-key", "not-a-pack", "named-apart-from-its-key"],
+    ids=[
+        "unknown-regime",
+        "duplicate-key",
+        "not-a-pack",
+        "named-apart-from-its-key",
+        "fails-to-load",
+        "regime-of-another-country",
+    ],
 )
 def test_channels_need_a_known_regime_and_a_unique_key(entries: tuple[Discovered, ...]) -> None:
     regimes = Regimes.load(finding(REGIMES, entry("us", regime("us"))))
@@ -196,8 +220,16 @@ def test_modules_load_and_suspended_ones_are_skipped() -> None:
         (entry("other", module("probe")),),
         (entry("probe", 42),),
         (entry("probe", module("probe")), entry("probe", module("probe"))),
+        (Discovered("probe", broken),),
+        (entry("probe", module("probe", kind="package")),),
     ],
-    ids=["named-apart-from-its-manifest", "not-a-module", "duplicate-name"],
+    ids=[
+        "named-apart-from-its-manifest",
+        "not-a-module",
+        "duplicate-name",
+        "fails-to-load",
+        "not-a-module-kind",
+    ],
 )
 def test_a_module_entry_that_does_not_hold_its_module_fails_the_start(
     entries: tuple[Discovered, ...],
