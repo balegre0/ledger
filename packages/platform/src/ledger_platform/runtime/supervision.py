@@ -68,6 +68,13 @@ def restart_delay(in_a_row: int, draw: float) -> float:
     return backoff * (1 - RESTART_JITTER * draw)
 
 
+async def parked() -> Never:
+    """Wait to be cancelled: where a stopped worker's loop ends (a worker never returns)."""
+    forever: asyncio.Future[None] = asyncio.get_running_loop().create_future()  # nothing completes it
+    while True:
+        await forever
+
+
 def being_cancelled() -> bool:
     """Whether the task running this has been asked to stop.
 

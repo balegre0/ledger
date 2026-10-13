@@ -29,10 +29,16 @@ they wait, as many as the fan-out delivers while the subscription stays active, 
 them. Nothing else bounds them; ``ledger_inbox_unhandled_oldest_seconds`` (the age of the oldest, measured
 once per drain) is what an alert watches, and an ordered subject whose head is one of them waits behind it.
 
+A runner asked to ``stop`` claims nothing more: it finishes the row it is handling, gives the rest of its
+batch back unspent (``ready``, the attempt returned) and sets ``drained``. A runner cancelled mid-batch gives
+its rows back too, in a short shielded unit; the row whose handler it stopped keeps its attempt. A stopping
+worker never leaves rows to wait out their leases.
+
 Every time is the database's (§3.6): due rows and expired leases are compared with the claim unit's ``now()``;
 a lease extension and a retry run from the statement that writes them (``statement_timestamp()``).
 """
 
+import asyncio
 import contextlib
 from dataclasses import dataclass
 from datetime import timedelta
@@ -54,10 +60,11 @@ lazy from sqlalchemy import ColumnElement, RowMapping, Update
 from ledger_kernel.errors import ConflictError, ErrorKind, LedgerError, error_type
 from ledger_platform.data.audit import Actor, acting_as
 from ledger_platform.data.notifier import INBOX
-from ledger_platform.data.queue import DEFAULT_BACKOFF, claim, recover
+from ledger_platform.data.queue import DEFAULT_BACKOFF, RELEASE_TIMEOUT, claim, recover, release
 from ledger_platform.events.consumers import raw_event_of
 from ledger_platform.events.dispatcher import POLL, reraise_when_stopping
 from ledger_platform.observability.metrics import counter, gauge
+from ledger_platform.runtime.supervision import parked
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.database import AnyTable
 lazy from ledger_platform.data.queue import Backoff
@@ -214,8 +221,11 @@ class InboxRunner:
         "_handled",
         "_lease",
         "_recovered",
+        "_stopping",
         "_tracing",
         "_waiting",
+        "_woken",
+        "drained",
     )
 
     def __init__(
@@ -227,6 +237,10 @@ class InboxRunner:
         self._batch = options.get("batch", DEFAULT_BATCH)
         self._backoff = options.get("backoff", DEFAULT_BACKOFF)
         self._tracing = options.get("tracing")
+        self._stopping = asyncio.Event()
+        self._woken: asyncio.Event | None = None
+        self.drained: Final = asyncio.Event()
+        """Set once a stopped runner has finished its row and given the rest back."""
         registry = options.get("registry")
         self._handled = counter(
             registry,
@@ -427,24 +441,62 @@ class InboxRunner:
             age = _AGE.validate_python((await unit.connection.execute(oldest)).scalar_one())
         self._waiting.labels(consumer=self._consumer.name).set(age)
 
+    def stop(self) -> None:
+        """Claim nothing more: finish the row in hand, give the rest back, then set ``drained``."""
+        self._stopping.set()
+        if self._woken is not None:
+            self._woken.set()
+
     async def run_once(self) -> int:
-        """Claim the due rows and handle each, in order; how many were claimed."""
+        """Claim the due rows and handle each, in order, until asked to stop; how many were claimed."""
         rows = await self.claim_now()
-        for row in rows:
-            await self.handle(row)
+        pending = list(rows)
+        started = False
+        try:
+            while pending and not self._stopping.is_set():
+                started = True
+                await self.handle(pending[0])
+                started = False
+                del pending[0]
+        finally:
+            if pending:
+                await self._give_back(pending, started=started)
         return len(rows)
+
+    async def _give_back(self, rows: Sequence[ClaimedEvent], *, started: bool) -> None:
+        """Release ``rows`` (the first one's handler ``started``) in a short shielded unit of its own."""
+        held: list[tuple[object, ...]] = [
+            (self._consumer.name, row.event.id, row.lease_token) for row in rows
+        ]
+        split = int(started)
+        async with asyncio.timeout(RELEASE_TIMEOUT):
+            await asyncio.shield(self._released(held[:split], held[split:]))
+        _logger.info("inbox_released", consumer=self._consumer.name, rows=len(held))
+
+    async def _released(
+        self, started: Sequence[tuple[object, ...]], unstarted: Sequence[tuple[object, ...]]
+    ) -> None:
+        inbox = self._database.tables.inbox
+        async with self._database.unit(None) as unit:
+            keys = ("consumer", "event_id")
+            await release(unit.connection, inbox, keys=keys, started=started, unstarted=unstarted)
 
     async def run_until_idle(self) -> int:
         """Run until a claim finds nothing (tests drain with it: absence is proved by draining, §14.2)."""
         total = 0
-        while handled := await self.run_once():
+        while not self._stopping.is_set() and (handled := await self.run_once()):
             total += handled
         return total
 
     async def run(self, wakeups: Waker) -> Never:
-        """Forever: drain, then wait for a NOTIFY on ``ledger_inbox`` or the poll (the supervised loop)."""
-        woken = wakeups.subscribe(INBOX)
-        while True:
+        """Until stopped: drain, then wait for a NOTIFY on ``ledger_inbox`` or the poll (the supervised loop).
+
+        Stopped, it sets ``drained`` and waits to be cancelled.
+        """
+        woken = self._woken = wakeups.subscribe(INBOX)
+        while not self._stopping.is_set():
             await self.run_until_idle()
             await self.measure()
             await wakeups.wait(woken, poll=POLL)
+        self.drained.set()
+        await parked()

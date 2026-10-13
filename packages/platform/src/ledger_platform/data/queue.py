@@ -16,6 +16,10 @@ runs from the claiming statement's time (``statement_timestamp()``), not from it
 (``now()``, frozen when the transaction began): a claim made late in a transaction still holds its rows for
 the whole lease. Callers claim in short units of their own, where the two differ by milliseconds, and their
 ``due`` predicates compare with ``now()``.
+
+A worker that stops gives back what it claimed and holds (``release``): the rows are ``ready`` again at once,
+their leases cleared, instead of waiting for the leases to run out. A row whose handler never started gets
+its attempt back; one whose handler started (and was stopped) keeps it, as a crash would.
 """
 
 from dataclasses import dataclass
@@ -25,7 +29,7 @@ from typing import Final, NotRequired, TypedDict, Unpack, final
 lazy from collections.abc import Mapping, Sequence
 
 from pydantic import TypeAdapter
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, func, select, tuple_, update
 lazy from sqlalchemy import ColumnElement, RowMapping, Update
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -99,6 +103,39 @@ def claim_statement(
         )
         .returning(table)
     )
+
+
+RELEASE_TIMEOUT: Final = 2.0
+"""Seconds a stopping worker gives the statement that releases its rows."""
+
+
+def release_statement(
+    table: AnyTable, *, keys: Sequence[str], claimed: Sequence[tuple[object, ...]], refund: bool
+) -> Update:
+    """Make ``claimed`` (each row's keys, then its lease token) ``ready`` again while this worker holds them.
+
+    ``refund`` gives back the attempt the claim counted (the handler never started).
+    """
+    held = tuple_(*(table.c[key] for key in keys), table.c.lease_token)
+    return (
+        update(table)
+        .where(held.in_(claimed), table.c.status == "running")
+        .values(status="ready", lease_until=None, lease_token=None, attempts=table.c.attempts - int(refund))
+    )
+
+
+async def release(
+    connection: AsyncConnection,
+    table: AnyTable,
+    *,
+    keys: Sequence[str],
+    started: Sequence[tuple[object, ...]],
+    unstarted: Sequence[tuple[object, ...]],
+) -> None:
+    """Give back the rows a stopping worker holds (see the module): the started ones keep their attempt."""
+    for claimed, refund in ((started, False), (unstarted, True)):
+        if claimed:
+            await connection.execute(release_statement(table, keys=keys, claimed=claimed, refund=refund))
 
 
 async def claim(

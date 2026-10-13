@@ -26,7 +26,7 @@ from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.data.bound import BoundDatabase
 from ledger_platform.data.unit_of_work import JobPolicy
-from ledger_platform.events import Consumer, Dispatcher, InboxRunner
+from ledger_platform.events import Consumer, Dispatcher, InboxRunner, Wakeups
 from ledger_platform.events.inbox import ReplayRefusedError
 from ledger_testing import waiting
 lazy from ledger_kernel.tenancy import Scope
@@ -56,6 +56,7 @@ LOCK_WAITERS: Final = (
     "SELECT EXISTS (SELECT 1 FROM pg_stat_activity"
     " WHERE datname = current_database() AND wait_event_type = 'Lock')"
 )
+LEASED: Final = "SELECT count(*) FROM other.inbox WHERE lease_token IS NOT NULL OR lease_until IS NOT NULL"
 _ROWS: Final = TypeAdapter(list[tuple[object, ...]])
 _MOMENT: Final = TypeAdapter(datetime)
 _IDS: Final = TypeAdapter(list[uuid.UUID])
@@ -444,8 +445,9 @@ async def test_another_consumers_rows_are_never_claimed(bench: Bench) -> None:
     ]
 
 
-async def test_a_cancelled_handling_is_raised_and_leaves_its_row_to_the_lease(bench: Bench) -> None:
-    (event,) = await bench.deliver(renamed())
+async def test_a_cancelled_batch_is_raised_and_gives_its_rows_back(bench: Bench) -> None:
+    """The row whose handler was stopped keeps its attempt; the rows never started get theirs back."""
+    event, later = await bench.deliver(renamed(S, "1"), renamed(T, "2"))
     started, release = asyncio.Event(), asyncio.Event()
 
     async def stubborn(raw: RawEvent, unit: UnitOfWork) -> None:
@@ -465,8 +467,50 @@ async def test_a_cancelled_handling_is_raised_and_leaves_its_row_to_the_lease(be
     running.cancel()
     with pytest.raises(CleanupFailedError):
         await running
-    assert await bench.state(event) == ("running", 1, None)
+    assert await bench.state(event) == ("ready", 1, None)
+    assert await bench.state(later) == ("ready", 0, None)
+    assert await bench.rows(LEASED) == [(0,)]
     assert (bench.handled("retry"), bench.handled("dead")) == (0, 0)
+
+
+async def test_a_stopped_runner_finishes_its_row_and_gives_the_rest_back_unspent(bench: Bench) -> None:
+    first, second, third = await bench.deliver(renamed(S, "1"), renamed(T, "2"), renamed(None, "3"))
+    entered, go_on = asyncio.Event(), asyncio.Event()
+
+    async def held() -> None:
+        entered.set()
+        await go_on.wait()
+
+    bench.handler.during = held
+    runner = bench.runner()
+    running = asyncio.create_task(runner.run(Wakeups("postgresql://never.invalid/ledger")))
+    await entered.wait()
+    runner.stop()
+    go_on.set()
+    async with asyncio.timeout(5):
+        await runner.drained.wait()
+    assert bench.handler.calls == [first]
+    assert await bench.rows("SELECT event_id FROM other.inbox WHERE event_id = %s", first) == []
+    assert await bench.state(second) == ("ready", 0, None)
+    assert await bench.state(third) == ("ready", 0, None)
+    assert await bench.rows(LEASED) == [(0,)]
+    assert not running.done()  # a stopped worker waits to be cancelled: it never returns
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+
+async def test_a_runner_stopped_before_it_runs_claims_nothing(bench: Bench) -> None:
+    (event,) = await bench.deliver(renamed())
+    runner = bench.runner()
+    runner.stop()
+    running = asyncio.create_task(runner.run(Wakeups("postgresql://never.invalid/ledger")))
+    async with asyncio.timeout(5):
+        await runner.drained.wait()
+    assert await bench.state(event) == ("ready", 0, None)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
 
 
 async def test_an_ordered_consumer_follows_aggregate_versions_not_ids(bench: Bench) -> None:

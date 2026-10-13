@@ -715,6 +715,44 @@ async def test_a_runner_stopped_mid_job_stops_the_handler_and_records_nothing(
     assert registry.get_sample_value("ledger_job_lease_lost_total", {"kind": SLOW}) is None
 
 
+async def test_a_stopped_runner_lets_its_job_finish_and_claims_no_more(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry
+) -> None:
+    blocking = Blocking()
+    runner = JobRunner(database=probe, kinds={SLOW: (DECLS[SLOW], blocking)}, registry=registry, poll=0.02)
+    await enqueue(probe, "k1", kind=SLOW)
+    running = asyncio.create_task(runner.run())
+    await blocking.started.wait()
+    runner.stop()
+    await enqueue(probe, "k2", kind=SLOW)
+    blocking.release.set()
+    async with asyncio.timeout(5):
+        await runner.drained.wait()
+    assert (await state(admin, "k1"))[:2] == ("done", 1)
+    assert (await state(admin, "k2"))[:2] == ("ready", 0)
+    assert not blocking.cancelled
+    assert not running.done()  # a stopped worker waits to be cancelled: it never returns
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+
+async def test_a_runner_cancelled_mid_job_gives_the_job_back_with_its_attempt_spent(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry
+) -> None:
+    blocking = Blocking()
+    runner = JobRunner(database=probe, kinds={SLOW: (DECLS[SLOW], blocking)}, registry=registry, poll=0.02)
+    await enqueue(probe, "k1", kind=SLOW)
+    running = asyncio.create_task(runner.run())
+    await blocking.started.wait()
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert blocking.cancelled
+    found = await state(admin, "k1")
+    assert (found[:2], found[4:6]) == (("ready", 1), UNLEASED)
+
+
 async def test_a_job_whose_lease_ran_out_waits_out_its_backoff_before_another_claim(
     runner: JobRunner, probe: BoundDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry
 ) -> None:

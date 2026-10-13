@@ -20,13 +20,19 @@ wake. An error of kind ``INVALID`` or ``CONFLICT`` or a failure of the last atte
 the error's code; a retry that would come after the deadline makes it dead with ``deadline_passed``; any other
 error makes it ready again after the kind's backoff. Dead jobs are kept for an operator.
 
+A runner asked to ``stop`` claims nothing more, lets the jobs in flight finish and record, then sets
+``drained``. A runner cancelled with jobs in flight stops their handlers and gives the jobs back, in a short
+shielded unit: ``ready`` at once, the lease cleared; a job whose handler never started gets its attempt back.
+
 Time is the database's: due and lease comparisons are ``now()`` in SQL, and the times a record writes are the
 recording unit's ``now``.
 """
 
 import asyncio
+import contextlib
 import math
 from contextlib import nullcontext
+from dataclasses import dataclass
 from functools import partial
 from types import MappingProxyType
 from typing import ClassVar, Final, Never, NotRequired, TypedDict, Unpack, assert_type, final
@@ -44,10 +50,11 @@ lazy from sqlalchemy import RowMapping, Update
 from ledger_kernel.errors import ErrorKind, LedgerError
 from ledger_platform.data.audit import Actor, acting_as
 from ledger_platform.data.codec import JsonValue
-from ledger_platform.data.queue import DEFAULT_BACKOFF, claim, recover
+from ledger_platform.data.queue import DEFAULT_BACKOFF, RELEASE_TIMEOUT, claim, recover, release
 from ledger_platform.data.scopes import scope_of
 from ledger_platform.jobs.outcomes import Done, Job, Park, RunAgain
 from ledger_platform.observability.metrics import counter
+from ledger_platform.runtime.supervision import parked
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.database import AnyTable
 lazy from ledger_platform.data.queue import Backoff
@@ -155,6 +162,15 @@ def _outcome(job: Job, outcome: JobOutcome, now: datetime) -> tuple[_Values, str
 
 
 @final
+@dataclass(slots=True)
+class _Holding:
+    """A job ``run`` claimed and has not finished with; ``started`` once its handler has begun."""
+
+    job: Job
+    started: bool = False
+
+
+@final
 class JobRunner:
     """Runs one module's job kinds (see the module)."""
 
@@ -163,11 +179,14 @@ class JobRunner:
         "_batch",
         "_database",
         "_finished",
+        "_holding",
         "_kinds",
         "_lease_lost",
         "_poll",
         "_recovered",
+        "_stopping",
         "_tracing",
+        "drained",
     )
 
     def __init__(
@@ -184,6 +203,10 @@ class JobRunner:
         self._backoff = options.get("backoff", DEFAULT_BACKOFF)
         self._tracing = options.get("tracing")
         self._poll = options.get("poll", POLL)
+        self._stopping = asyncio.Event()
+        self._holding: dict[UUID, _Holding] = {}
+        self.drained: Final = asyncio.Event()
+        """Set once a stopped runner's jobs in flight have finished."""
         self._lease_lost = counter(
             registry,
             "ledger_job_lease_lost",
@@ -254,29 +277,67 @@ class JobRunner:
             await self.handle(job)
         return len(jobs)
 
+    def stop(self) -> None:
+        """Claim nothing more; let the jobs in flight finish, then set ``drained``."""
+        self._stopping.set()
+
     async def run(self) -> Never:
-        """Claim and handle forever, never more jobs of a kind at once than its ``concurrency``.
+        """Claim and handle until stopped, never more jobs of a kind at once than its ``concurrency``.
 
         Each pass claims, per kind, at most the slots that kind has free; each job runs in a task of its own.
         A pass that filled a claim while slots stay free is followed by another at once, else by a poll's
         wait. A claim the database refuses is logged and tried again after a growing wait (up to
         ``_CLAIM_RETRY_LONGEST``), leaving the jobs in flight alone. A failure to record (the database is
-        gone while a job ends) ends the run, for its supervisor to restart.
+        gone while a job ends) ends the run, for its supervisor to restart. Stopped (see the module), it sets
+        ``drained`` and waits to be cancelled; whatever way it ends, the jobs it still holds are given back.
         """
         held = dict.fromkeys(self._kinds, 0)
         failures = 0
-        async with asyncio.TaskGroup() as group:
-            while True:
-                try:
-                    more = await self._claim_free(group, held)
-                except Exception:  # the database: retried, never the end of the jobs in flight
-                    failures = min(failures + 1, _CLAIM_RETRY_DOUBLINGS)
-                    _logger.exception("job_claim_failed", failures=failures)
-                    await asyncio.sleep(min(math.ldexp(self._poll, failures), _CLAIM_RETRY_LONGEST))
-                    continue
-                failures = 0
-                if not more:
-                    await asyncio.sleep(self._poll)
+        try:
+            async with asyncio.TaskGroup() as group:
+                while not self._stopping.is_set():
+                    try:
+                        more = await self._claim_free(group, held)
+                    except Exception:  # the database: retried, never the end of the jobs in flight
+                        failures = min(failures + 1, _CLAIM_RETRY_DOUBLINGS)
+                        _logger.exception("job_claim_failed", failures=failures)
+                        await self._pause(min(math.ldexp(self._poll, failures), _CLAIM_RETRY_LONGEST))
+                        continue
+                    failures = 0
+                    if not more:
+                        await self._pause(self._poll)
+        finally:
+            if self._holding:
+                await self._give_back()
+        self.drained.set()
+        await parked()
+
+    async def _pause(self, seconds: float) -> None:
+        """Wait ``seconds``, or less when asked to stop."""
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(seconds):
+                await self._stopping.wait()
+
+    async def _give_back(self) -> None:
+        """Release the jobs this runner still holds, in a short shielded unit (see the module)."""
+        holding = list(self._holding.values())
+        self._holding.clear()
+        started: list[tuple[object, ...]] = [
+            (h.job.kind, h.job.key, h.job.lease_token) for h in holding if h.started
+        ]
+        unstarted: list[tuple[object, ...]] = [
+            (h.job.kind, h.job.key, h.job.lease_token) for h in holding if not h.started
+        ]
+        async with asyncio.timeout(RELEASE_TIMEOUT):
+            await asyncio.shield(self._released(started, unstarted))
+        _logger.info("jobs_released", jobs=len(holding))
+
+    async def _released(
+        self, started: Sequence[tuple[object, ...]], unstarted: Sequence[tuple[object, ...]]
+    ) -> None:
+        jobs = self._database.tables.jobs
+        async with self._database.unit(None) as unit:
+            await release(unit.connection, jobs, keys=("kind", "key"), started=started, unstarted=unstarted)
 
     async def _claim_free(self, group: asyncio.TaskGroup, held: dict[str, int]) -> bool:
         """Claim each kind's free slots; whether a kind filled its claim and still has slots free."""
@@ -287,6 +348,7 @@ class JobRunner:
                 jobs = await self._claim(kind, decl, free)
                 for job in jobs:
                     held[kind] += 1
+                    self._holding[job.lease_token] = _Holding(job)
                     group.create_task(self._hold(job, held))
                 more = more or (len(jobs) == free and held[kind] < decl.concurrency)
         return more
@@ -294,6 +356,7 @@ class JobRunner:
     async def _hold(self, job: Job, held: dict[str, int]) -> None:
         try:
             await self.handle(job)
+            del self._holding[job.lease_token]  # finished: nothing left to give back
         finally:
             held[job.kind] -= 1
 
@@ -304,6 +367,9 @@ class JobRunner:
         """
         if not await self._renewed(job):  # taken over since the claim, or unrenewable: never start it
             raise LeaseLostError(job.kind)
+        holding = self._holding.get(job.lease_token)
+        if holding is not None:  # claimed by ``run`` (``run_due`` holds nothing to give back)
+            holding.started = True
         work = asyncio.ensure_future(handler(job))
         lost = asyncio.Event()
         keeper = asyncio.create_task(self._keep(job, decl, work, lost))
