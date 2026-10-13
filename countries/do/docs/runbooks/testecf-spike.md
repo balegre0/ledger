@@ -84,18 +84,23 @@ simulator for every buyer:
 uv run ledger-fake-dgii
 ```
 
-Terminal 2, with the settings above plus the fake's host (plain `http` is allowed on loopback only):
+Terminal 2, with the settings above plus the fake's host (plain `http` is allowed on loopback only) and an
+output directory of the dry run's own, so the fake's e-NCF journal never mixes with TesteCF's:
 
 ```powershell
 $env:LEDGER_DO_ECF_SPIKE_ECF_HOST = "http://127.0.0.1:8471"
 $env:LEDGER_DO_ECF_SPIKE_FC_HOST = "http://127.0.0.1:8471"
+$env:LEDGER_DO_ECF_SPIKE_OUT = ".dgii/fake-out"
 uv run ledger-dgii-spike auth
 uv run ledger-dgii-spike emit --type 31 --sequence 9000001
 uv run ledger-dgii-spike emit --type 32 --sequence 9000001
 uv run ledger-dgii-spike emit --type 32 --sequence 9000002 --large
 Remove-Item env:LEDGER_DO_ECF_SPIKE_ECF_HOST, env:LEDGER_DO_ECF_SPIKE_FC_HOST
-Remove-Item .dgii/out -Recurse   # the fake's e-NCF ledger must not block TesteCF's sequences
+$env:LEDGER_DO_ECF_SPIKE_OUT = ".dgii/out"   # back to TesteCF's journal before any TesteCF run
 ```
+
+`.dgii/fake-out` may be deleted whenever no dry run is going. **Never delete `.dgii/out`**: it is TesteCF's
+journal of every e-NCF signed and the signed documents of any parked one (step 9).
 
 Expected: `authenticated with testecf: a token was issued (not shown); consultaresultado answered codigo 0`;
 `codigo 1 Aceptado -> accepted (number used)` for the 31 (with a track id) and for the large 32
@@ -224,5 +229,5 @@ A document still pending after the polling schedule (`DGII: still pending ...`) 
 
 Fill in `../spike-findings.md` (one line per F row: settled, how, DGII's words) and commit it. Copy no secret
 into it: no token, no password, no certificate, no cédula, no full XML (DGII's messages and codes are fine).
-`.dgii/out` keeps the signed documents and DGII's answers locally; keep it until the findings are recorded
-and no document is parked, then delete it. Never commit `.dgii/`.
+`.dgii/out` keeps the signed documents, DGII's answers and the journal of every e-NCF signed: keep it, never
+delete it (a later run would otherwise sign a sequence TesteCF already holds). Never commit `.dgii/`.
