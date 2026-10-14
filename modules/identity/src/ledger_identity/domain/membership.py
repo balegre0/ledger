@@ -218,10 +218,10 @@ def revoke(roster: Roster, *, actor: Actor, now: datetime) -> tuple[Membership, 
 
 
 def permissions_in(company: Company, membership: Membership) -> frozenset[Permission]:
-    """What other services may let ``membership``'s holder do for ``company``.
+    """What other modules may let ``membership``'s holder do for ``company``.
 
     Its role's permissions while it is active; of those, only the ones that read once the company is
-    deactivated (other services cannot tell, and must not issue for it); nothing once it is revoked.
+    deactivated (other modules cannot tell, and must not issue for it); nothing once it is revoked.
     """
     if company.status is CompanyStatus.INACTIVE:
         return membership.permissions & READ_ONLY

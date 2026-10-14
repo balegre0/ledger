@@ -9,6 +9,7 @@ lazy from pathlib import Path
 
 from ledger_kernel.errors import LedgerError
 from ledger_platform.config.manifest import InvalidManifestError, PackageKind, load_manifest
+from ledger_platform.config.names import PLATFORM
 lazy from ledger_platform.config.manifest import PackageManifest
 
 MANIFEST_GLOBS: Final = (
@@ -172,7 +173,7 @@ class Workspace:
 
     def schemas(self) -> tuple[str, ...]:
         """Every schema in migration order: the platform's, then each module's, then each channel's."""
-        platform = tuple(package for package in self.packages if package.name == "platform")
+        platform = tuple(package for package in self.packages if package.name == PLATFORM)
         names: list[str] = []
         for package in (*platform, *self.module_order(), *self.countries):
             if package.manifest.schema_name is not None:

@@ -49,21 +49,21 @@ def migrated(postgres: PostgresServer, models: MetaData) -> str:
 def test_a_schema_built_from_the_models_is_read_back_as_them(postgres: PostgresServer) -> None:
     both = combined(*models())
     url = migrated(postgres, both)
-    assert tables_of(url) == {"notes", "tags"}
-    assert pending_changes(url, both) is None
-    assert check_constraints(url) == {"ck_notes_size": "CHECK ((size > 0))"}
-    assert primary_keys(url) == {"notes": ["id"], "tags": ["note_id", "tag"]}
-    assert indexes_of(url, "tags") == {
+    assert tables_of(url, schema="public") == {"notes", "tags"}
+    assert pending_changes(url, both, schema="public") is None
+    assert check_constraints(url, schema="public") == {"ck_notes_size": "CHECK ((size > 0))"}
+    assert primary_keys(url, schema="public") == {"notes": ["id"], "tags": ["note_id", "tag"]}
+    assert indexes_of(url, "tags", schema="public") == {
         "tags_pkey": "CREATE UNIQUE INDEX tags_pkey ON public.tags USING btree (note_id, tag)"
     }
-    assert policies(url) == [("notes", "mine")]
-    assert row_security(url) == {"notes": (True, True), "tags": (False, False)}
+    assert policies(url, schema="public") == [("notes", "mine")]
+    assert row_security(url, schema="public") == {"notes": (True, True), "tags": (False, False)}
 
 
 def test_a_model_the_schema_lacks_is_a_pending_change(postgres: PostgresServer) -> None:
     first, second = models()
     url = migrated(postgres, first)
-    assert "tags" in (pending_changes(url, combined(first, second)) or "")
+    assert "tags" in (pending_changes(url, combined(first, second), schema="public") or "")
 
 
 def test_the_readers_read_the_schema_they_are_told(postgres: PostgresServer) -> None:
@@ -95,7 +95,10 @@ def test_the_readers_read_the_schema_they_are_told(postgres: PostgresServer) -> 
     }
     assert policies(url, schema="books") == [("shelves", "mine")]
     assert row_security(url, schema="books") == {"shelves": (True, False)}
-    assert (tables_of(url), policies(url)) == (set(), [])  # nothing of it in public
+    assert (tables_of(url, schema="public"), policies(url, schema="public")) == (
+        set(),
+        [],
+    )  # nothing of it in public
     assert pending_changes(url, models, schema="books") is None
     Table("labels", models, Column("shelf_id", Uuid(), primary_key=True), schema="books")
     assert "labels" in (pending_changes(url, models, schema="books") or "")

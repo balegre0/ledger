@@ -53,6 +53,7 @@ lazy from sqlalchemy import Connection
 
 from ledger_kernel.clock import utc_now
 from ledger_kernel.errors import LedgerError
+from ledger_platform.config.names import PLATFORM
 from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.data.database import Database, DatabaseLimits, Pooling
 from ledger_platform.data.migrations import MIGRATION_LOCK_WAIT
@@ -69,13 +70,14 @@ from ledger_platform.jobs.schedules import Scheduler
 from ledger_platform.observability.health import Health
 from ledger_platform.observability.logs import configure_logging
 from ledger_platform.observability.tracing import DEFAULT_SHUTDOWN_TIMEOUT, Tracing
-from ledger_platform.runtime.assembly import PLATFORM, Shared, assemble
+from ledger_platform.runtime.assembly import Shared, assemble
 from ledger_platform.runtime.registries import installed
 from ledger_platform.runtime.supervision import Supervisor
 lazy from ledger_kernel.clock import Clock
 lazy from ledger_platform.config.manifest import AppRole, PackageManifest
 lazy from ledger_platform.config.settings import Settings
 lazy from ledger_platform.data.bound import BoundDatabase
+lazy from ledger_platform.data.migrations import SchemaMigrations
 lazy from ledger_platform.runtime.assembly import Member
 lazy from ledger_platform.runtime.registries import Discover
 
@@ -363,6 +365,10 @@ class App:
             authentication=self._authentication,
         )
         self._assembled = assemble(shared, discover)
+        if (
+            not self._assembled.modules
+        ):  # nothing installed, or every module suspended: almost surely a mistake
+            _logger.warning("app.no_modules", role=role)
         need = pool_need(role, self._assembled.members)
         if settings.database_pool_size < need.total:
             raise PoolTooSmallError(role, settings.database_pool_size, need)
@@ -377,6 +383,11 @@ class App:
     def modules(self) -> tuple[PackageManifest, ...]:
         """The modules' manifests, in assembly order."""
         return self._assembled.modules
+
+    @property
+    def migrations(self) -> tuple[SchemaMigrations, ...]:
+        """Every schema's revisions, in migration order: the platform's, then each module's and channel's."""
+        return tuple(member.migrations for member in self._assembled.members)
 
     def bound(self, schema: str) -> BoundDatabase:
         """The units of ``schema`` (``SchemaUnknownError`` if no package of the app owns it)."""

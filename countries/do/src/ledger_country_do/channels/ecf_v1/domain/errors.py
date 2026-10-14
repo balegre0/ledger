@@ -6,14 +6,12 @@ errors answers the channel's alike. Each has a stable ``code`` (``do_ecf_*``). A
 class and never quotes a document, an amount, a token or a tax id.
 """
 
-from typing import ClassVar, Final
+from typing import ClassVar
 lazy from collections.abc import Callable
 
 from ledger_country_do.regime.entries import RegimeEntryError
 from ledger_kernel.dated import NotInEffectError
 from ledger_kernel.errors import ConflictError, InvalidInputError, LedgerError, UnavailableError
-
-_ELLIPSIS: Final = "…"
 
 
 class EcfError(LedgerError):
@@ -38,11 +36,6 @@ class EcfUnavailableError(EcfError, UnavailableError):
     """Something outside failed; the same call may succeed later."""
 
     code: ClassVar[str] = "do_ecf_unavailable"
-
-
-def truncate(text: str, limit: int) -> str:
-    """``text`` cut to at most ``limit`` characters, an ellipsis marking the cut."""
-    return text if len(text) <= limit else text[: limit - 1] + _ELLIPSIS
 
 
 class RegimeNotInForceError(EcfInvalidError):

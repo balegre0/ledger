@@ -266,7 +266,7 @@ def unguarded_routes(routes: Sequence[BaseRoute], *, prefix: str = "/v1") -> tup
     depends, directly or through another dependency, on ``authenticated``'s bearer scheme; it declares a
     requirement when one of its dependencies was made by ``allowed``, ``holding`` or ``in_organization``. Both
     are read from the route's own dependencies: a dependency an ``APIRouter`` adds to all its routes is not
-    seen. Empty when every route is guarded: a service's test asserts so.
+    seen. Empty when every route is guarded: an app's test asserts so.
     """
     found: list[str] = []
     for context in iter_route_contexts(routes):

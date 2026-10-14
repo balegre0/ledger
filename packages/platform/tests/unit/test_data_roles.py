@@ -4,11 +4,11 @@ import hmac
 
 import pytest
 
+from ledger_platform.config.names import RESERVED_WORDS
 from ledger_platform.data.roles import (
     APP,
     MIGRATOR,
     RELAY,
-    RESERVED_WORDS,
     SCRAM_ITERATIONS,
     SIGNER,
     InvalidSchemaNameError,

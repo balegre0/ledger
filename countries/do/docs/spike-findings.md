@@ -2,9 +2,9 @@
 
 What DGII's documentation left open (plan `docs/superpowers/plans/2026-10-13-v2-dgii-spike.md`, "DGII facts
 this plan could not pin down", and the reviews of Tasks 11-13), what the code assumes, and what TesteCF
-answered. The runbook (`runbooks/testecf-spike.md`, "Open questions") says how each row is settled. Fill the
-last two columns from a TesteCF run; never paste a token, a password, a certificate, a cédula or a whole
-document (DGII's codes and messages are fine).
+answered. The runbook ([`docs/runbooks/do/testecf-spike.md`](../../../docs/runbooks/do/testecf-spike.md),
+"Open questions") says how each row is settled. Fill the last two columns from a TesteCF run; never paste a
+token, a password, a certificate, a cédula or a whole document (DGII's codes and messages are fine).
 
 Documents cited by the short names of `.superpowers/research/06-dgii-facts.md`: **DT-DGII** (*Descripción
 Técnica Servicios DGII*), **DT-EMI** (*Descripción Técnica Emisores Electrónicos*), **IT** (*Informe Técnico

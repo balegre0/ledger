@@ -1,6 +1,6 @@
 """Bearer tokens: OAuth 2.0 access tokens (JWT) checked against the identity provider's published keys.
 
-The gateway checks tokens too; a service checks them again (defense in depth) and reads from them who calls.
+The gateway checks tokens too; an app checks them again (defense in depth) and reads from them who calls.
 A token is accepted only when all of this holds:
 
 * it is a JWS in compact form of at most ``MAX_TOKEN_LENGTH`` ASCII characters, whose header is well

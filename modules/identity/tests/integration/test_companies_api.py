@@ -33,10 +33,10 @@ FAR_FUTURE: Final = 4_102_444_800
 """2100-01-01, as a JWT's ``exp``."""
 
 
-async def grant(identity_db: BoundDatabase, company: str, subject: str, role: Role) -> None:
+async def grant(module_database: BoundDatabase, company: str, subject: str, role: Role) -> None:
     """Give ``subject`` a role directly, as the owner (``2001``) would through the memberships API."""
     tenant = Tenant(organization_of("1001"), CompanyId(UUID(company)), None)
-    async with identity_db.unit(tenant) as unit:
+    async with module_database.unit(tenant) as unit:
         await commands.grant_role(
             bind(unit),
             tenant.company,
@@ -522,9 +522,9 @@ async def test_a_company_is_not_found_by_whoever_holds_no_role_in_it(
 
 
 async def test_a_viewer_reads_but_does_not_change(
-    client: httpx.AsyncClient, local_issuer: LocalIssuer, identity_db: BoundDatabase, company: str
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, module_database: BoundDatabase, company: str
 ) -> None:
-    await grant(identity_db, company, "3001", Role.VIEWER)
+    await grant(module_database, company, "3001", Role.VIEWER)
     viewer = TestPrincipal(local_issuer, subject="3001")
     assert (await client.get(f"/v1/companies/{company}", headers=viewer.bearer())).status_code == 200
     listed = page(await client.get("/v1/companies", headers=viewer.bearer()))
@@ -540,9 +540,9 @@ async def test_a_viewer_reads_but_does_not_change(
 
 
 async def test_a_caller_without_the_permission_is_refused_before_its_preconditions_are_read(
-    client: httpx.AsyncClient, local_issuer: LocalIssuer, identity_db: BoundDatabase, company: str
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, module_database: BoundDatabase, company: str
 ) -> None:
-    await grant(identity_db, company, "3001", Role.VIEWER)
+    await grant(module_database, company, "3001", Role.VIEWER)
     viewer = TestPrincipal(local_issuer, subject="3001")
     unconditional = await client.patch(
         f"/v1/companies/{company}", json={"legal_name": "X"}, headers=viewer.bearer()
@@ -555,15 +555,15 @@ async def test_a_caller_without_the_permission_is_refused_before_its_preconditio
 async def test_an_admin_demoted_while_its_deactivation_waits_for_the_company_cannot_deactivate(
     client: httpx.AsyncClient,
     local_issuer: LocalIssuer,
-    identity_db: BoundDatabase,
+    module_database: BoundDatabase,
     migrated: WorkerDatabase,
     company: str,
 ) -> None:
-    await grant(identity_db, company, "2002", Role.ADMIN)
+    await grant(module_database, company, "2002", Role.ADMIN)
     tenant = Tenant(organization_of("1001"), CompanyId(UUID(company)), None)
     headers = TestPrincipal(local_issuer, subject="2002").posting("k-off") | {"If-Match": '"1"'}
     outside = contextvars.copy_context()  # the request is another client's: it holds no unit of the test's
-    async with identity_db.unit(tenant) as unit:  # holds the company's lock
+    async with module_database.unit(tenant) as unit:  # holds the company's lock
         await commands.grant_role(
             bind(unit),
             tenant.company,

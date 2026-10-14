@@ -15,6 +15,7 @@ from datetime import date, timedelta
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Annotated, ClassVar, Final, Literal, Self
+lazy from collections.abc import Callable
 
 from pydantic import (
     AfterValidator,
@@ -26,8 +27,11 @@ from pydantic import (
     model_validator,
 )
 
-from ledger_kernel.access import Role
+from ledger_kernel.access import Role, parse_permission
 from ledger_kernel.errors import LedgerError
+from ledger_kernel.events import parse_event_type
+from ledger_kernel.ids import parse_id_prefix
+from ledger_platform.config.names import is_schema_name
 
 type AppRole = Literal["api", "worker", "signer", "receiver", "migrate"]
 """What an app process runs (§3.3)."""
@@ -39,13 +43,52 @@ _VALUE_ERROR: Final = "Value error, "
 _DURATION: Final = re.compile(r"([1-9][0-9]*)([smhd])", re.ASCII)
 _UNIT_SECONDS: Final[Mapping[str, int]] = {"s": 1, "m": 60, "h": 3600, "d": 86_400}
 
+
+class _NameRuleError(ValueError):
+    """A name that breaks its rule; the rule is the message, never the name."""
+
+
+def _ruled(parse: Callable[[str], object], rule: str) -> AfterValidator:
+    """A validator applying the kernel's ``parse``, refusing with ``rule``: its own error quotes names."""
+
+    def check(text: str) -> str:
+        try:
+            parse(text)
+        except LedgerError as error:
+            raise _NameRuleError(rule) from error
+        return text
+
+    return AfterValidator(check)
+
+
+def _schema_name(text: str) -> str:
+    if not is_schema_name(text):
+        raise _NameRuleError(_SCHEMA_RULE)
+    return text
+
+
+_SCHEMA_RULE: Final = (
+    "a schema name is 2 to 31 lower-case letters, digits and underscores, and no reserved or system name"
+)
 type Name = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{1,30}$")]
-type SchemaName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{1,30}$")]
-type Prefix = Annotated[str, Field(pattern=r"^[a-z]{2,5}$")]
+type SchemaName = Annotated[str, AfterValidator(_schema_name)]
+"""The one rule of schema names (``config.names``): the roles builder makes roles with it."""
+type ResourceName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{1,30}$")]
+type Prefix = Annotated[str, _ruled(parse_id_prefix, "an id prefix is 2 to 5 lower-case letters")]
 type PermissionCode = Annotated[
-    str, Field(pattern=r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*\.(read|create|issue|void|manage|own)$")
+    str,
+    _ruled(
+        parse_permission,
+        "a permission is <module>.<resource>.<action>, action read|create|issue|void|manage|own",
+    ),
 ]
-type EventType = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")]
+type EventType = Annotated[
+    str, _ruled(parse_event_type, "an event type is <module>.<aggregate>.<past_participle>, lower case")
+]
+type ProtocolName = Annotated[str, Field(pattern=r"^[A-Z][A-Za-z0-9]{1,63}$")]
+"""An extension point or a port: the name of a Protocol (``IssuePolicy``, ``SignerPort``)."""
+type QualifiedProtocol = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*\.[A-Z][A-Za-z0-9]{1,63}$")]
+"""An extension point another module declares: ``<module>.<Protocol>``."""
 type PublicName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")]
 type Dotted = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")]
 """A consumer (``<module>.<purpose>``), a job kind or a schedule name (``<module or channel>.<name>``)."""
@@ -141,7 +184,7 @@ class IdPrefix(_Section):
     """``[[ids]]``: a public id prefix the package mints."""
 
     prefix: Prefix
-    resource: SchemaName
+    resource: ResourceName
 
 
 class PermissionDecl(_Section):
@@ -211,9 +254,12 @@ class _CadenceError(ValueError):
 class ExtensionPoints(_Section):
     """``[extension_points]``."""
 
-    declares: tuple[str, ...] = ()
-    implements: tuple[str, ...] = ()
-    provides: tuple[str, ...] = ()
+    declares: tuple[ProtocolName, ...] = ()
+    """Protocols of the module's ``api`` that other modules may implement."""
+    implements: tuple[QualifiedProtocol, ...] = ()
+    """Extension points of other modules it implements: ``<module>.<Protocol>``."""
+    provides: tuple[ProtocolName, ...] = ()
+    """Ports it provides to channels (``SignerPort``, ``CompanyDirectory``)."""
 
 
 class HttpSection(_Section):
@@ -260,7 +306,7 @@ class ChannelEntry(_Section):
 
     key: str = Field(pattern=r"^[a-z]{2}-[a-z0-9]+-v[0-9]+$")
     entry_point: ObjectPath
-    assembly: ObjectPath
+    """The ``ChannelPack``: its manifest entry, the regime it serves and its assembly."""
     schema_name: SchemaName = Field(alias="schema")
     valid_from: date
     valid_until: date | None = None

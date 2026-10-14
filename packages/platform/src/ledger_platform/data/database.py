@@ -105,9 +105,9 @@ def _milliseconds(option: str, value: timedelta) -> None:
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class DatabaseLimits:
-    """How long the service waits on PostgreSQL, and PostgreSQL on the service, before giving up.
+    """How long the app waits on PostgreSQL, and PostgreSQL on the app, before giving up.
 
-    The defaults are for a service that answers requests: every wait is short enough to fail inside a
+    The defaults are for an app that answers requests: every wait is short enough to fail inside a
     request's own deadline, and none is unlimited (a missing limit turns one stuck dependency into every
     worker stuck). A migration or a batch job passes its own, longer ``statement_timeout``.
     """
@@ -128,7 +128,7 @@ class DatabaseLimits:
     """To get a connection from a full pool; then the caller gets an error and the request can answer 503."""
     pool_recycle: timedelta = timedelta(minutes=30)
     """A connection older than this (whole seconds, at least one) is replaced when next used, so that none
-    outlives what sits between the service and PostgreSQL (proxies and load balancers drop idle ones)."""
+    outlives what sits between the app and PostgreSQL (proxies and load balancers drop idle ones)."""
 
     def __post_init__(self) -> None:
         _whole_seconds("connect_timeout", self.connect_timeout)
@@ -293,9 +293,9 @@ def _server_options(limits: DatabaseLimits) -> str:
 
 @final
 class Database:
-    """A service's PostgreSQL database, reached through SQLAlchemy's asynchronous psycopg driver.
+    """An app's PostgreSQL database, reached through SQLAlchemy's asynchronous psycopg driver.
 
-    ``engine`` pools the connections of the service's work; ``probe`` is an engine of the same database
+    ``engine`` pools the connections of the app's work; ``probe`` is an engine of the same database
     without a pool (``NullPool``), on which ``ping`` opens a connection of its own each time. ``create``
     builds both.
     """
@@ -321,7 +321,7 @@ class Database:
         """A connection pool to ``url`` (``postgresql+psycopg://``), not yet connected; ``aclose`` closes it.
 
         No I/O: SQLAlchemy connects on first use. ``application_name`` is how PostgreSQL names these
-        connections (``pg_stat_activity``, its logs): the service passes its own name. Beyond ``pool_size``
+        connections (``pg_stat_activity``, its logs): the app passes its own name. Beyond ``pool_size``
         the pool opens ``pooling.overflow`` more for bursts (as many again by default). The URL must not
         carry ``application_name``, ``connect_timeout`` or ``options``: the chassis sets them from its
         arguments.
@@ -396,7 +396,7 @@ class Database:
     async def probing(self) -> AsyncGenerator[AsyncConnection]:
         """A connection of its own for a readiness check, outside the pool, closed on exit; no tenant scope.
 
-        Never one of the pool's: a pool that every request holds is a busy service, not a broken one, and a
+        Never one of the pool's: a pool that every request holds is a busy app, not a broken one, and a
         readiness check that waited for it would take every replica out of rotation at the worst moment. Each
         use opens a connection, so a check that keeps passing should remember it did and stop asking.
         """

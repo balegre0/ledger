@@ -50,7 +50,7 @@ def test_settings_need_only_the_database_and_the_environment(monkeypatch: pytest
         "INFO",
         LogFormat.CONSOLE,
     )
-    assert (settings.database_direct_url, settings.http_port, settings.otlp_endpoint) == (None, 8000, None)
+    assert (settings.database_direct_url, settings.http_port, settings.otlp_endpoint) == (None, 8100, None)
     assert settings.http_host == "127.0.0.1"  # a run on a host binds loopback; the image says otherwise
     assert (settings.token_issuer, settings.token_audience, settings.token_jwks_url) == (None, None, None)
     assert (settings.token_algorithms, settings.token_leeway_seconds) == (frozenset({"RS256"}), 60)

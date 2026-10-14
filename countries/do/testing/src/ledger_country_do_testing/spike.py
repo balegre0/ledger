@@ -1,6 +1,6 @@
 """``ledger-dgii-spike``: the spike's emission, run by hand against DGII's TesteCF or CerteCF, or the fake.
 
-Read ``countries/do/docs/runbooks/testecf-spike.md`` first. Settings come from ``LEDGER_DO_ECF_SPIKE_*``
+Read ``docs/runbooks/do/testecf-spike.md`` first. Settings come from ``LEDGER_DO_ECF_SPIKE_*``
 environment variables. The certificate (``P12``) and its password (``P12_PASSWORD_FILE``) are read from files
 inside the project's ``.dgii`` directory (git-ignored), and so are the documents written (``OUT``): the
 project is the directory the CLI runs in (the repository's root, as the runbook runs it), and a path anywhere

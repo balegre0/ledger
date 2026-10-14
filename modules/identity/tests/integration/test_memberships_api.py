@@ -165,12 +165,12 @@ async def test_memberships_of_another_organization_are_out_of_reach(
 
 
 async def test_an_owner_demoted_while_its_grant_of_ownership_waits_for_the_company_is_refused(
-    identity_db: BoundDatabase, migrated: WorkerDatabase, members: Members
+    module_database: BoundDatabase, migrated: WorkerDatabase, members: Members
 ) -> None:
     await members.assign("2002", "owner")
     tenant = Tenant(organization_of("1001"), CompanyId(UUID(members.company)), None)
     outside = contextvars.copy_context()  # the request is another client's: it holds no unit of the test's
-    async with identity_db.unit(tenant) as unit:  # holds the company's lock
+    async with module_database.unit(tenant) as unit:  # holds the company's lock
         await commands.grant_role(
             bind(unit),
             tenant.company,

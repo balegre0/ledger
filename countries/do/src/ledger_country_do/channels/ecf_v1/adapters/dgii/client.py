@@ -83,6 +83,7 @@ lazy from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
 lazy from ledger_country_do.channels.ecf_v1.application.ports import Reception, XmlSigner
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
+lazy from ledger_kernel.clock import Sleep
 
 TOKEN_MARGIN: Final = timedelta(minutes=5)
 TOKEN_CEILING: Final = timedelta(hours=1)
@@ -96,8 +97,6 @@ _RECEPTION: Final = TypeAdapter(ReceptionAnswer)
 _RESULT: Final = TypeAdapter(ResultAnswer)
 _TRACK_IDS: Final = TypeAdapter(list[TrackIdAnswer])
 _DIRECTORY: Final = TypeAdapter(list[DirectoryAnswer])
-
-type Sleep = Callable[[float], Awaitable[None]]
 
 
 @final

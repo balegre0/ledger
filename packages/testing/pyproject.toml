@@ -6,6 +6,7 @@ version = "0.1.0"
 description = "The shared test harness: a pytest plugin, PostgreSQL, a local OpenID provider, clocks. Dev-only."
 requires-python = ">=3.15"
 dependencies = [
+    "ledger-kernel",
     "ledger-platform",
     "alembic>=1.20.0",
     "httpx>=0.28.1",
@@ -22,6 +23,7 @@ dependencies = [
 ledger = "ledger_testing.plugin"
 
 [tool.uv.sources]
+ledger-kernel = { workspace = true }
 ledger-platform = { workspace = true }
 
 [build-system]

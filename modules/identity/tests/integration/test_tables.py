@@ -76,12 +76,12 @@ def point_of(tenant: Tenant, branch: UUID, code: str = "001") -> dict[str, objec
     }
 
 
-async def seeded(identity_db: BoundDatabase, organization: OrganizationId | None = None) -> Seeded:
+async def seeded(module_database: BoundDatabase, organization: OrganizationId | None = None) -> Seeded:
     """A company (of a new organization unless ``organization`` is given) with one branch and one owner."""
     tenant = Tenant(
         organization=organization or OrganizationId(new_id()), company=CompanyId(new_id()), mode=None
     )
-    async with identity_db.unit(OrganizationScope(tenant.organization, None)) as unit:
+    async with module_database.unit(OrganizationScope(tenant.organization, None)) as unit:
         if organization is None:
             await unit.connection.execute(
                 insert(OrganizationRecord).values(
@@ -103,15 +103,15 @@ async def seeded(identity_db: BoundDatabase, organization: OrganizationId | None
         )
         await unit.connection.execute(insert(MembershipRecord).values(membership_of(tenant)))
     branch = new_id()
-    async with identity_db.unit(tenant) as unit:
+    async with module_database.unit(tenant) as unit:
         await unit.connection.execute(insert(BranchRecord).values(branch_of(tenant, branch)))
         await unit.connection.execute(insert(EmissionPointRecord).values(point_of(tenant, branch)))
     return Seeded(tenant=tenant, branch=branch)
 
 
-async def counts(identity_db: BoundDatabase, scope: Scope | None) -> dict[str, int]:
+async def counts(module_database: BoundDatabase, scope: Scope | None) -> dict[str, int]:
     """How many rows of each of identity's tables ``scope`` sees."""
-    async with identity_db.unit(scope) as unit:
+    async with module_database.unit(scope) as unit:
         return {
             table.name: (await unit.connection.execute(select(func.count()).select_from(table))).scalar_one()
             for table in IdentityTable.metadata.tables.values()
@@ -125,52 +125,58 @@ def violated_key(caught: pytest.ExceptionInfo[IntegrityError]) -> str | None:
 
 
 async def test_row_level_security_shows_a_scope_what_it_owns_and_nothing_without_one(
-    identity_db: BoundDatabase,
+    module_database: BoundDatabase,
 ) -> None:
-    first = await seeded(identity_db)
-    sibling = await seeded(identity_db, first.tenant.organization)  # another company of the same organization
-    other = await seeded(identity_db)
+    first = await seeded(module_database)
+    sibling = await seeded(
+        module_database, first.tenant.organization
+    )  # another company of the same organization
+    other = await seeded(module_database)
     everything = {"organizations": 1, "companies": 2, "memberships": 2, "branches": 1, "emission_points": 1}
-    assert await counts(identity_db, first.tenant) == everything
-    assert await counts(identity_db, sibling.tenant) == everything
-    assert await counts(identity_db, OrganizationScope(first.tenant.organization, None)) == {
+    assert await counts(module_database, first.tenant) == everything
+    assert await counts(module_database, sibling.tenant) == everything
+    assert await counts(module_database, OrganizationScope(first.tenant.organization, None)) == {
         **everything,
         "branches": 0,
         "emission_points": 0,
     }
-    assert await counts(identity_db, other.tenant) == {**everything, "companies": 1, "memberships": 1}
-    assert await counts(identity_db, None) == dict.fromkeys(everything, 0)
+    assert await counts(module_database, other.tenant) == {**everything, "companies": 1, "memberships": 1}
+    assert await counts(module_database, None) == dict.fromkeys(everything, 0)
 
 
-async def test_a_membership_cannot_point_at_another_organizations_company(identity_db: BoundDatabase) -> None:
-    victim = await seeded(identity_db)
-    attacker = await seeded(identity_db)
+async def test_a_membership_cannot_point_at_another_organizations_company(
+    module_database: BoundDatabase,
+) -> None:
+    victim = await seeded(module_database)
+    attacker = await seeded(module_database)
     across = Tenant(organization=attacker.tenant.organization, company=victim.tenant.company, mode=None)
     with pytest.raises(IntegrityError) as caught:
-        async with identity_db.unit(
+        async with module_database.unit(
             OrganizationScope(attacker.tenant.organization, None)
         ) as unit:  # the policy lets the row in
             await unit.connection.execute(insert(MembershipRecord).values(membership_of(across, INTRUDER)))
     assert violated_key(caught) == "fk_memberships_company"
 
 
-async def test_a_branch_cannot_point_at_another_organizations_company(identity_db: BoundDatabase) -> None:
-    victim = await seeded(identity_db)
-    attacker = await seeded(identity_db)
+async def test_a_branch_cannot_point_at_another_organizations_company(module_database: BoundDatabase) -> None:
+    victim = await seeded(module_database)
+    attacker = await seeded(module_database)
     across = Tenant(organization=attacker.tenant.organization, company=victim.tenant.company, mode=None)
     with pytest.raises(IntegrityError) as caught:
-        async with identity_db.unit(across) as unit:
+        async with module_database.unit(across) as unit:
             await unit.connection.execute(insert(BranchRecord).values(branch_of(across, new_id(), "999")))
     assert violated_key(caught) == "fk_branches_company"
 
 
 async def test_an_emission_point_cannot_point_at_the_branch_of_another_company(
-    identity_db: BoundDatabase,
+    module_database: BoundDatabase,
 ) -> None:
-    victim = await seeded(identity_db)
-    attacker = await seeded(identity_db, victim.tenant.organization)  # the same organization, another company
+    victim = await seeded(module_database)
+    attacker = await seeded(
+        module_database, victim.tenant.organization
+    )  # the same organization, another company
     with pytest.raises(IntegrityError) as caught:
-        async with identity_db.unit(attacker.tenant) as unit:
+        async with module_database.unit(attacker.tenant) as unit:
             await unit.connection.execute(
                 insert(EmissionPointRecord).values(point_of(attacker.tenant, victim.branch, "999"))
             )
@@ -178,13 +184,13 @@ async def test_an_emission_point_cannot_point_at_the_branch_of_another_company(
 
 
 async def test_an_emission_point_cannot_point_at_another_organizations_company(
-    identity_db: BoundDatabase,
+    module_database: BoundDatabase,
 ) -> None:
-    victim = await seeded(identity_db)
-    attacker = await seeded(identity_db)
+    victim = await seeded(module_database)
+    attacker = await seeded(module_database)
     across = Tenant(organization=attacker.tenant.organization, company=victim.tenant.company, mode=None)
     with pytest.raises(IntegrityError) as caught:
-        async with identity_db.unit(across) as unit:
+        async with module_database.unit(across) as unit:
             await unit.connection.execute(
                 insert(EmissionPointRecord).values(point_of(across, victim.branch, "999"))
             )
@@ -199,9 +205,11 @@ async def test_an_emission_point_cannot_point_at_another_organizations_company(
         "DELETE FROM platform.idempotency_keys",
     ],
 )
-async def test_identity_s_role_reaches_no_other_schema(identity_db: BoundDatabase, statement: str) -> None:
+async def test_identity_s_role_reaches_no_other_schema(
+    module_database: BoundDatabase, statement: str
+) -> None:
     """A statement naming another schema's table fails, even in a valid unit (Review Focus 5)."""
     with pytest.raises(ProgrammingError) as caught:
-        async with identity_db.unit(OrganizationScope(OrganizationId(new_id()), None)) as unit:
+        async with module_database.unit(OrganizationScope(OrganizationId(new_id()), None)) as unit:
             await unit.connection.execute(text(statement))
     assert isinstance(caught.value.orig, InsufficientPrivilege)

@@ -1,6 +1,6 @@
 """identity's state in PostgreSQL: repositories, units, the outbox and the permission source, for real.
 
-Units are identity's own (``identity_db``: ``identity_rw``, its schema); what they announced is read from
+Units are identity's own (``module_database``: ``identity_rw``, its schema); what they announced is read from
 ``identity.outbox`` past row-level security (``admin``).
 """
 
@@ -104,7 +104,7 @@ class RecordedSignals:
 
 @pytest.fixture
 def signals() -> RecordedSignals:
-    """What identity's units signalled after their commits (``identity_db`` signals here)."""
+    """What identity's units signalled after their commits (``module_database`` signals here)."""
     return RecordedSignals()
 
 
@@ -114,15 +114,17 @@ def anything(version: int) -> bool:
 
 
 async def in_unit[T](
-    identity_db: BoundDatabase, scope: Scope, work: Callable[[IdentityUnit], Awaitable[T]]
+    module_database: BoundDatabase, scope: Scope, work: Callable[[IdentityUnit], Awaitable[T]]
 ) -> T:
-    async with identity_db.unit(scope) as unit:
+    async with module_database.unit(scope) as unit:
         return await work(bind(unit))
 
 
-async def create(identity_db: BoundDatabase, founder: Principal = FOUNDER, tax_id: TaxId = RNC) -> Company:
+async def create(
+    module_database: BoundDatabase, founder: Principal = FOUNDER, tax_id: TaxId = RNC
+) -> Company:
     return await in_unit(
-        identity_db,
+        module_database,
         OrganizationScope(founder.organization, None),
         lambda unit: commands.create_company(
             unit, founder, tax_id=tax_id, legal_name=parse_legal_name("Duarte")
@@ -130,8 +132,8 @@ async def create(identity_db: BoundDatabase, founder: Principal = FOUNDER, tax_i
     )
 
 
-async def write(identity_db: BoundDatabase, scope: Scope, statement: Insert) -> None:
-    async with identity_db.unit(scope) as unit:
+async def write(module_database: BoundDatabase, scope: Scope, statement: Insert) -> None:
+    async with module_database.unit(scope) as unit:
         await unit.connection.execute(statement)
 
 
@@ -144,25 +146,25 @@ async def published(admin: psycopg.AsyncConnection) -> list[str]:
 # ── Companies ───────────────────────────────────────────────────────────────────
 
 
-async def test_a_company_is_kept_with_its_owner_and_organization(identity_db: BoundDatabase) -> None:
-    company = await create(identity_db)
+async def test_a_company_is_kept_with_its_owner_and_organization(module_database: BoundDatabase) -> None:
+    company = await create(module_database)
     tenant = company.tenant
-    read = await in_unit(identity_db, tenant, lambda unit: queries.company(unit, company.id))
+    read = await in_unit(module_database, tenant, lambda unit: queries.company(unit, company.id))
     assert read == company
     organization = await in_unit(
-        identity_db, tenant, lambda unit: queries.organization(unit, tenant.organization)
+        module_database, tenant, lambda unit: queries.organization(unit, tenant.organization)
     )
     assert (organization.id, organization.provider_id) == (FOUNDER.organization, "1001")
     permissions = await in_unit(
-        identity_db, tenant, lambda unit: queries.permissions_of(unit, company.id, OWNER)
+        module_database, tenant, lambda unit: queries.permissions_of(unit, company.id, OWNER)
     )
     assert permissions == EVERYTHING
 
 
 async def test_what_a_unit_changes_is_announced_through_the_outbox_when_it_commits(
-    identity_db: BoundDatabase, signals: RecordedSignals, admin: psycopg.AsyncConnection
+    module_database: BoundDatabase, signals: RecordedSignals, admin: psycopg.AsyncConnection
 ) -> None:
-    company = await create(identity_db)
+    company = await create(module_database)
     cursor = await admin.execute(
         """
         SELECT source, organization_id, company_id, mode, subject, aggregate_version, occurred_at
@@ -185,15 +187,15 @@ async def test_what_a_unit_changes_is_announced_through_the_outbox_when_it_commi
 
 
 async def test_a_unit_that_fails_keeps_and_announces_nothing(
-    identity_db: BoundDatabase, admin: psycopg.AsyncConnection
+    module_database: BoundDatabase, admin: psycopg.AsyncConnection
 ) -> None:
     async def create_then_fail(unit: IdentityUnit) -> None:
         await commands.create_company(unit, FOUNDER, tax_id=RNC, legal_name=parse_legal_name("Duarte"))
         raise ZeroDivisionError
 
     with pytest.raises(ZeroDivisionError):
-        await in_unit(identity_db, OrganizationScope(FOUNDER.organization, None), create_then_fail)
-    async with identity_db.unit(
+        await in_unit(module_database, OrganizationScope(FOUNDER.organization, None), create_then_fail)
+    async with module_database.unit(
         OrganizationScope(FOUNDER.organization, None)
     ) as unit:  # the scope that would see the company
         companies = (
@@ -202,102 +204,106 @@ async def test_a_unit_that_fails_keeps_and_announces_nothing(
     assert (companies, await published(admin)) == (0, [])
 
 
-async def test_a_tax_id_is_one_active_company_s_in_every_organization(identity_db: BoundDatabase) -> None:
+async def test_a_tax_id_is_one_active_company_s_in_every_organization(module_database: BoundDatabase) -> None:
     """One RNC is one taxpayer: another organization cannot register it, though it sees none of the first's
     rows (the unique index enforces it whatever the policies show)."""
-    await create(identity_db)
+    await create(module_database)
     with pytest.raises(TaxIdTakenError):
-        await create(identity_db)
+        await create(module_database)
     with pytest.raises(TaxIdTakenError):
-        await create(identity_db, founder=STRANGER)
-    async with identity_db.unit(OrganizationScope(STRANGER.organization, None)) as unit:
+        await create(module_database, founder=STRANGER)
+    async with module_database.unit(OrganizationScope(STRANGER.organization, None)) as unit:
         assert (
             await unit.connection.execute(select(func.count()).select_from(CompanyRecord))
         ).scalar_one() == 0
 
 
-async def test_a_tax_id_is_unique_by_its_scheme_and_its_value(identity_db: BoundDatabase) -> None:
+async def test_a_tax_id_is_unique_by_its_scheme_and_its_value(module_database: BoundDatabase) -> None:
     """The same characters under another scheme are another taxpayer's: they never collide."""
-    rnc = await create(identity_db)
-    cedula = await create(identity_db, founder=STRANGER, tax_id=TaxId(TaxIdScheme("do.cedula"), RNC.value))
+    rnc = await create(module_database)
+    cedula = await create(
+        module_database, founder=STRANGER, tax_id=TaxId(TaxIdScheme("do.cedula"), RNC.value)
+    )
     assert (rnc.tax_id, cedula.tax_id) == (RNC, TaxId(TaxIdScheme("do.cedula"), "101850043"))
-    read = await in_unit(identity_db, cedula.tenant, lambda unit: queries.company(unit, cedula.id))
+    read = await in_unit(module_database, cedula.tenant, lambda unit: queries.company(unit, cedula.id))
     assert read.tax_id == cedula.tax_id
     with pytest.raises(TaxIdTakenError):
-        await create(identity_db, founder=STRANGER, tax_id=TaxId(TaxIdScheme("do.cedula"), RNC.value))
+        await create(module_database, founder=STRANGER, tax_id=TaxId(TaxIdScheme("do.cedula"), RNC.value))
 
 
 async def test_two_organizations_registering_one_taxpayer_at_once_get_one_company(
-    identity_db: BoundDatabase,
+    module_database: BoundDatabase,
 ) -> None:
     outcomes = await asyncio.gather(
-        create(identity_db), create(identity_db, founder=STRANGER), return_exceptions=True
+        create(module_database), create(module_database, founder=STRANGER), return_exceptions=True
     )
     assert sorted(type(outcome).__name__ for outcome in outcomes) == ["Company", "TaxIdTakenError"]
 
 
-async def deactivate(identity_db: BoundDatabase, company: Company) -> None:
+async def deactivate(module_database: BoundDatabase, company: Company) -> None:
     tenant = Tenant(company.organization, company.id, None)
     await in_unit(
-        identity_db,
+        module_database,
         tenant,
         lambda unit: commands.deactivate_company(unit, company.id, admits=lambda _: True, actor=OWNER),
     )
 
 
 async def test_a_deactivated_company_frees_its_tax_id_for_any_organization(
-    identity_db: BoundDatabase,
+    module_database: BoundDatabase,
 ) -> None:
-    first = await create(identity_db)
-    await deactivate(identity_db, first)
-    again = await create(identity_db)  # the same organization registers the taxpayer again
-    await deactivate(identity_db, again)
-    theirs = await create(identity_db, founder=STRANGER)  # or another one does
+    first = await create(module_database)
+    await deactivate(module_database, first)
+    again = await create(module_database)  # the same organization registers the taxpayer again
+    await deactivate(module_database, again)
+    theirs = await create(module_database, founder=STRANGER)  # or another one does
     assert len({first.id, again.id, theirs.id}) == 3
     with pytest.raises(TaxIdTakenError):
-        await create(identity_db)
+        await create(module_database)
 
 
-async def test_another_organization_sees_none_of_a_company(identity_db: BoundDatabase) -> None:
-    company = await create(identity_db)
+async def test_another_organization_sees_none_of_a_company(module_database: BoundDatabase) -> None:
+    company = await create(module_database)
     with pytest.raises(CompanyNotFoundError):
         await in_unit(
-            identity_db,
+            module_database,
             OrganizationScope(STRANGER.organization, None),
             lambda unit: queries.company(unit, company.id),
         )
     stranger_tenant = Tenant(STRANGER.organization, company.id, None)
     with pytest.raises(CompanyNotFoundError):
-        await in_unit(identity_db, stranger_tenant, lambda unit: queries.company(unit, company.id))
-    assert await MembershipPermissions(identity_db).permissions(STRANGER, company.id) == frozenset()
+        await in_unit(module_database, stranger_tenant, lambda unit: queries.company(unit, company.id))
+    assert await MembershipPermissions(module_database).permissions(STRANGER, company.id) == frozenset()
 
 
-async def test_a_change_applies_to_the_version_it_was_made_from_only(identity_db: BoundDatabase) -> None:
-    company = await create(identity_db)
+async def test_a_change_applies_to_the_version_it_was_made_from_only(module_database: BoundDatabase) -> None:
+    company = await create(module_database)
     renamed, _ = company.rename(parse_legal_name("Duarte Hermanos"), now=NOW)
-    assert await in_unit(identity_db, company.tenant, lambda unit: unit.companies.update(renamed, version=1))
+    assert await in_unit(
+        module_database, company.tenant, lambda unit: unit.companies.update(renamed, version=1)
+    )
     again, _ = company.rename(parse_legal_name("Duarte e Hijos"), now=NOW)
     assert not await in_unit(
-        identity_db, company.tenant, lambda unit: unit.companies.update(again, version=1)
+        module_database, company.tenant, lambda unit: unit.companies.update(again, version=1)
     )
     assert (
-        await in_unit(identity_db, company.tenant, lambda unit: queries.company(unit, company.id))
+        await in_unit(module_database, company.tenant, lambda unit: queries.company(unit, company.id))
     ).legal_name == ("Duarte Hermanos")
 
 
 async def test_renames_and_deactivations_are_announced(
-    identity_db: BoundDatabase, admin: psycopg.AsyncConnection
+    module_database: BoundDatabase, admin: psycopg.AsyncConnection
 ) -> None:
-    company = await create(identity_db)
+    company = await create(module_database)
     await in_unit(
-        identity_db,
+        module_database,
         company.tenant,
         lambda unit: commands.rename_company(
             unit, company.id, legal_name=parse_legal_name("Duarte S.A."), admits=anything, actor=OWNER
         ),
     )
     await in_unit(
-        identity_db,
+        module_database,
         company.tenant,
         lambda unit: commands.deactivate_company(unit, company.id, admits=anything, actor=OWNER),
     )
@@ -309,12 +315,14 @@ async def test_renames_and_deactivations_are_announced(
     ]
 
 
-async def test_a_principal_pages_through_the_companies_it_holds_a_role_in(identity_db: BoundDatabase) -> None:
+async def test_a_principal_pages_through_the_companies_it_holds_a_role_in(
+    module_database: BoundDatabase,
+) -> None:
     for rnc in ("101850043", "130000012", "401007551"):
-        await create(identity_db, tax_id=TaxId(TaxIdScheme("do.rnc"), rnc))
-    await create(identity_db, founder=STRANGER, tax_id=THEIRS)
+        await create(module_database, tax_id=TaxId(TaxIdScheme("do.rnc"), rnc))
+    await create(module_database, founder=STRANGER, tax_id=THEIRS)
     first = await in_unit(
-        identity_db,
+        module_database,
         OrganizationScope(FOUNDER.organization, None),
         lambda unit: queries.companies_of(unit, OWNER, PageRequest(size=2)),
     )
@@ -322,14 +330,14 @@ async def test_a_principal_pages_through_the_companies_it_holds_a_role_in(identi
     assert first.next_cursor is not None
     after = first.items[-1].id
     rest = await in_unit(
-        identity_db,
+        module_database,
         OrganizationScope(FOUNDER.organization, None),
         lambda unit: queries.companies_of(unit, OWNER, PageRequest(size=2, after=after)),
     )
     assert (len(rest.items), rest.next_cursor) == (1, None)
     assert all(company.organization == FOUNDER.organization for company in (*first.items, *rest.items))
     partner = await in_unit(
-        identity_db,
+        module_database,
         OrganizationScope(FOUNDER.organization, None),
         lambda unit: queries.companies_of(unit, PARTNER.subject, PageRequest()),
     )
@@ -339,18 +347,18 @@ async def test_a_principal_pages_through_the_companies_it_holds_a_role_in(identi
 # ── Branches and emission points ───────────────────────────────────────────────
 
 
-async def test_branches_and_emission_points_are_kept_per_company(identity_db: BoundDatabase) -> None:
-    company = await create(identity_db)
-    other = await create(identity_db, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
+async def test_branches_and_emission_points_are_kept_per_company(module_database: BoundDatabase) -> None:
+    company = await create(module_database)
+    other = await create(module_database, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
     branch = await in_unit(
-        identity_db,
+        module_database,
         company.tenant,
         lambda unit: commands.open_branch(
             unit, company.id, commands.Opening(parse_code("SUC1"), parse_name("Santiago")), actor=OWNER
         ),
     )
     await in_unit(
-        identity_db,
+        module_database,
         other.tenant,
         lambda unit: commands.open_branch(
             unit, other.id, commands.Opening(parse_code("SUC1"), parse_name("Bonao")), actor=OWNER
@@ -358,14 +366,14 @@ async def test_branches_and_emission_points_are_kept_per_company(identity_db: Bo
     )
     with pytest.raises(BranchCodeTakenError):
         await in_unit(
-            identity_db,
+            module_database,
             company.tenant,
             lambda unit: commands.open_branch(
                 unit, company.id, commands.Opening(parse_code("SUC1"), parse_name("X")), actor=OWNER
             ),
         )
     point = await in_unit(
-        identity_db,
+        module_database,
         company.tenant,
         lambda unit: commands.open_emission_point(
             unit, company.id, branch.id, commands.Opening(parse_code("001"), parse_name("Caja")), actor=OWNER
@@ -373,50 +381,52 @@ async def test_branches_and_emission_points_are_kept_per_company(identity_db: Bo
     )
     with pytest.raises(EmissionPointCodeTakenError):
         await in_unit(
-            identity_db,
+            module_database,
             company.tenant,
             lambda unit: commands.open_emission_point(
                 unit, company.id, branch.id, commands.Opening(parse_code("001"), parse_name("Y")), actor=OWNER
             ),
         )
     assert (
-        await in_unit(identity_db, company.tenant, lambda unit: queries.branch(unit, company.id, branch.id))
+        await in_unit(
+            module_database, company.tenant, lambda unit: queries.branch(unit, company.id, branch.id)
+        )
         == branch
     )
     assert (
         await in_unit(
-            identity_db,
+            module_database,
             company.tenant,
             lambda unit: queries.emission_point(unit, company.id, branch.id, point.id),
         )
         == point
     )
     branches = await in_unit(
-        identity_db, company.tenant, lambda unit: queries.branches(unit, company.id, PageRequest())
+        module_database, company.tenant, lambda unit: queries.branches(unit, company.id, PageRequest())
     )
     points = await in_unit(
-        identity_db,
+        module_database,
         company.tenant,
         lambda unit: queries.emission_points(unit, company.id, branch.id, PageRequest()),
     )
     assert (branches.items, points.items) == ((branch,), (point,))
 
 
-async def test_a_company_scope_sees_no_branch_of_another_company(identity_db: BoundDatabase) -> None:
-    company = await create(identity_db)
-    other = await create(identity_db, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
+async def test_a_company_scope_sees_no_branch_of_another_company(module_database: BoundDatabase) -> None:
+    company = await create(module_database)
+    other = await create(module_database, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
     branch = await in_unit(
-        identity_db,
+        module_database,
         company.tenant,
         lambda unit: commands.open_branch(
             unit, company.id, commands.Opening(parse_code("SUC1"), parse_name("Santiago")), actor=OWNER
         ),
     )
     seen_by_other = await in_unit(
-        identity_db, other.tenant, lambda unit: unit.branches.page(company.id, PageRequest())
+        module_database, other.tenant, lambda unit: unit.branches.page(company.id, PageRequest())
     )
     asked_wrongly = await in_unit(
-        identity_db, company.tenant, lambda unit: unit.branches.get(other.id, branch.id)
+        module_database, company.tenant, lambda unit: unit.branches.get(other.id, branch.id)
     )
     assert (seen_by_other.items, asked_wrongly) == ((), None)
 
@@ -425,13 +435,13 @@ async def test_a_company_scope_sees_no_branch_of_another_company(identity_db: Bo
 
 
 async def test_a_row_cannot_point_at_a_company_or_a_branch_of_another_tenant(
-    identity_db: BoundDatabase,
+    module_database: BoundDatabase,
 ) -> None:
-    mine = await create(identity_db)
-    sister = await create(identity_db, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
-    theirs = await create(identity_db, founder=STRANGER, tax_id=THEIRS)
+    mine = await create(module_database)
+    sister = await create(module_database, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
+    theirs = await create(module_database, founder=STRANGER, tax_id=THEIRS)
     branch = await in_unit(
-        identity_db,
+        module_database,
         sister.tenant,
         lambda unit: commands.open_branch(
             unit, sister.id, commands.Opening(parse_code("SUC1"), parse_name("Bonao")), actor=OWNER
@@ -475,12 +485,12 @@ async def test_a_row_cannot_point_at_a_company_or_a_branch_of_another_tenant(
     )
     for scope, statement in attempts:
         with pytest.raises(IntegrityError) as caught:
-            await write(identity_db, scope, statement)
+            await write(module_database, scope, statement)
         assert isinstance(caught.value.orig, psycopg.errors.ForeignKeyViolation)
 
 
 async def with_the_policies_showing[T](
-    identity_db: BoundDatabase,
+    module_database: BoundDatabase,
     scope: Scope,
     shown: Tenant,
     look: Callable[[IdentityUnit, AsyncConnection], Awaitable[T]],
@@ -490,7 +500,7 @@ async def with_the_policies_showing[T](
     What a policy dropped by mistake (or a setting gone wrong) would leave: the repositories, bound to the
     unit's own scope, are the only filter between the unit and another tenant's rows.
     """
-    async with identity_db.unit(scope) as unit:
+    async with module_database.unit(scope) as unit:
         await unit.connection.execute(
             SHOWING, {"organization": str(shown.organization), "company": str(shown.company)}
         )
@@ -498,18 +508,18 @@ async def with_the_policies_showing[T](
 
 
 async def a_company_with_a_branch_and_a_point(
-    identity_db: BoundDatabase,
+    module_database: BoundDatabase,
 ) -> tuple[Company, Branch, EmissionPoint]:
-    company = await create(identity_db)
+    company = await create(module_database)
     branch = await in_unit(
-        identity_db,
+        module_database,
         company.tenant,
         lambda unit: commands.open_branch(
             unit, company.id, commands.Opening(parse_code("SUC1"), parse_name("S")), actor=OWNER
         ),
     )
     point = await in_unit(
-        identity_db,
+        module_database,
         company.tenant,
         lambda unit: commands.open_emission_point(
             unit, company.id, branch.id, commands.Opening(parse_code("001"), parse_name("Caja")), actor=OWNER
@@ -519,9 +529,9 @@ async def a_company_with_a_branch_and_a_point(
 
 
 async def test_the_repositories_keep_to_the_unit_s_organization_without_row_level_security(
-    identity_db: BoundDatabase,
+    module_database: BoundDatabase,
 ) -> None:
-    company, branch, point = await a_company_with_a_branch_and_a_point(identity_db)
+    company, branch, point = await a_company_with_a_branch_and_a_point(module_database)
 
     async def look(unit: IdentityUnit, connection: AsyncConnection) -> list[object]:
         every_company = select(func.count()).select_from(CompanyRecord)
@@ -541,16 +551,16 @@ async def test_the_repositories_keep_to_the_unit_s_organization_without_row_leve
         ]
 
     seen = await with_the_policies_showing(
-        identity_db, OrganizationScope(STRANGER.organization, None), company.tenant, look
+        module_database, OrganizationScope(STRANGER.organization, None), company.tenant, look
     )
     assert seen == [1, None, None, None, (), None, 0, (), None, (), None, ()]
 
 
 async def test_the_repositories_keep_to_the_unit_s_company_without_row_level_security(
-    identity_db: BoundDatabase,
+    module_database: BoundDatabase,
 ) -> None:
-    company, branch, point = await a_company_with_a_branch_and_a_point(identity_db)
-    sister = await create(identity_db, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
+    company, branch, point = await a_company_with_a_branch_and_a_point(module_database)
+    sister = await create(module_database, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
 
     async def look(unit: IdentityUnit, connection: AsyncConnection) -> list[object]:
         del connection
@@ -563,17 +573,17 @@ async def test_the_repositories_keep_to_the_unit_s_company_without_row_level_sec
 
     nothing: Final = [None, (), None, ()]
     shown = company.tenant
-    assert await with_the_policies_showing(identity_db, sister.tenant, shown, look) == nothing
+    assert await with_the_policies_showing(module_database, sister.tenant, shown, look) == nothing
     whole = OrganizationScope(company.organization, None)
-    assert await with_the_policies_showing(identity_db, whole, shown, look) == nothing
-    own = await with_the_policies_showing(identity_db, company.tenant, shown, look)
+    assert await with_the_policies_showing(module_database, whole, shown, look) == nothing
+    own = await with_the_policies_showing(module_database, company.tenant, shown, look)
     assert own == [branch, (branch,), point, (point,)]  # the same statements, in the company's own unit
 
 
-async def test_a_unit_refuses_to_write_a_row_of_another_tenant(identity_db: BoundDatabase) -> None:
+async def test_a_unit_refuses_to_write_a_row_of_another_tenant(module_database: BoundDatabase) -> None:
     """Row-level security would refuse each of these too: the repositories do not count on it."""
-    company = await create(identity_db)
-    sister = await create(identity_db, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
+    company = await create(module_database)
+    sister = await create(module_database, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
     branch = Branch.open(company, code=parse_code("SUC1"), name=parse_name("S"), now=NOW)
     point = EmissionPoint.open(company, branch, code=parse_code("001"), name=parse_name("Caja"), now=NOW)
     owner, _ = found(company, FOUNDER, now=NOW)
@@ -599,16 +609,16 @@ async def test_a_unit_refuses_to_write_a_row_of_another_tenant(identity_db: Boun
     )
     for scope, write_elsewhere in attempts:
         with pytest.raises(ForeignTenantError) as caught:
-            await in_unit(identity_db, scope, write_elsewhere)
+            await in_unit(module_database, scope, write_elsewhere)
         assert caught.value.code == "foreign_tenant"
-    kept = await in_unit(identity_db, company.tenant, lambda unit: queries.company(unit, company.id))
+    kept = await in_unit(module_database, company.tenant, lambda unit: queries.company(unit, company.id))
     assert kept == company
 
 
 async def test_a_unit_s_time_is_its_transaction_s_for_what_it_records_and_announces(
-    identity_db: BoundDatabase, admin: psycopg.AsyncConnection
+    module_database: BoundDatabase, admin: psycopg.AsyncConnection
 ) -> None:
-    async with identity_db.unit(OrganizationScope(FOUNDER.organization, None)) as transaction:
+    async with module_database.unit(OrganizationScope(FOUNDER.organization, None)) as transaction:
         unit = bind(transaction)
         company = await commands.create_company(
             unit, FOUNDER, tax_id=RNC, legal_name=parse_legal_name("Duarte")
@@ -621,8 +631,8 @@ async def test_a_unit_s_time_is_its_transaction_s_for_what_it_records_and_announ
     assert [row[0] for row in await cursor.fetchall()] == [began, began]
 
 
-async def test_identity_s_state_is_never_read_without_a_scope(identity_db: BoundDatabase) -> None:
-    async with identity_db.unit(None) as transaction:
+async def test_identity_s_state_is_never_read_without_a_scope(module_database: BoundDatabase) -> None:
+    async with module_database.unit(None) as transaction:
         with pytest.raises(UnscopedUnitError) as caught:
             bind(transaction)
     assert caught.value.code == "unscoped_unit"
@@ -632,14 +642,14 @@ async def test_identity_s_state_is_never_read_without_a_scope(identity_db: Bound
 
 
 async def test_roles_are_granted_counted_listed_revoked_and_granted_again(
-    identity_db: BoundDatabase, admin: psycopg.AsyncConnection
+    module_database: BoundDatabase, admin: psycopg.AsyncConnection
 ) -> None:
-    company = await create(identity_db)
+    company = await create(module_database)
     tenant = company.tenant
 
     async def grant(role: Role) -> commands.Granted:
         return await in_unit(
-            identity_db,
+            module_database,
             tenant,
             lambda unit: commands.grant_role(
                 unit, company.id, subject=MEMBER.subject, role=role, actor=OWNER
@@ -651,23 +661,23 @@ async def test_roles_are_granted_counted_listed_revoked_and_granted_again(
     changed = await grant(Role.ISSUER)
     assert (changed.created, changed.membership.version) == (False, 2)
     listed = await in_unit(
-        identity_db, tenant, lambda unit: queries.memberships(unit, company.id, PageRequest(size=1))
+        module_database, tenant, lambda unit: queries.memberships(unit, company.id, PageRequest(size=1))
     )
     assert listed.next_cursor is not None
-    assert await in_unit(identity_db, tenant, lambda unit: unit.memberships.owners(company.id)) == 1
+    assert await in_unit(module_database, tenant, lambda unit: unit.memberships.owners(company.id)) == 1
     await in_unit(
-        identity_db,
+        module_database,
         tenant,
         lambda unit: commands.revoke_role(unit, company.id, subject=MEMBER.subject, actor=OWNER),
     )
     revoked = await in_unit(
-        identity_db, tenant, lambda unit: unit.memberships.get(company.id, MEMBER.subject)
+        module_database, tenant, lambda unit: unit.memberships.get(company.id, MEMBER.subject)
     )
     assert revoked is not None
     assert (revoked.active, revoked.version, revoked.changed_by) == (False, 3, OWNER)
-    assert await MembershipPermissions(identity_db).permissions(MEMBER, company.id) == frozenset()
+    assert await MembershipPermissions(module_database).permissions(MEMBER, company.id) == frozenset()
     remaining = await in_unit(
-        identity_db, tenant, lambda unit: queries.memberships(unit, company.id, PageRequest())
+        module_database, tenant, lambda unit: queries.memberships(unit, company.id, PageRequest())
     )
     assert [membership.subject for membership in remaining.items] == [OWNER]
     again = await grant(Role.VIEWER)
@@ -681,12 +691,12 @@ async def test_roles_are_granted_counted_listed_revoked_and_granted_again(
 
 
 async def test_two_owners_revoking_each_other_at_once_leave_one(
-    identity_db: BoundDatabase, migrated: WorkerDatabase
+    module_database: BoundDatabase, migrated: WorkerDatabase
 ) -> None:
-    company = await create(identity_db)
+    company = await create(module_database)
     tenant = company.tenant
     await in_unit(
-        identity_db,
+        module_database,
         tenant,
         lambda unit: commands.grant_role(
             unit, company.id, subject=PARTNER.subject, role=Role.OWNER, actor=OWNER
@@ -703,25 +713,25 @@ async def test_two_owners_revoking_each_other_at_once_leave_one(
     async def second(unit: IdentityUnit) -> None:
         await commands.revoke_role(unit, company.id, subject=OWNER, actor=PARTNER.subject)
 
-    winner = asyncio.create_task(in_unit(identity_db, tenant, first))
+    winner = asyncio.create_task(in_unit(module_database, tenant, first))
     await holding.wait()
-    loser = asyncio.create_task(in_unit(identity_db, tenant, second))
+    loser = asyncio.create_task(in_unit(module_database, tenant, second))
     await eventually(lambda: waits_for_a_lock(app_url(migrated)))  # the second waits for the company
     assert not loser.done()
     release.set()
     await winner
     with pytest.raises(CompanyNotFoundError):  # its own role went first: it acts in the company no more
         await loser
-    assert await in_unit(identity_db, tenant, lambda unit: unit.memberships.owners(company.id)) == 1
+    assert await in_unit(module_database, tenant, lambda unit: unit.memberships.owners(company.id)) == 1
 
 
 async def test_an_owner_demoted_meanwhile_grants_with_the_role_it_holds_now(
-    identity_db: BoundDatabase, migrated: WorkerDatabase
+    module_database: BoundDatabase, migrated: WorkerDatabase
 ) -> None:
-    company = await create(identity_db)
+    company = await create(module_database)
     tenant = company.tenant
     await in_unit(
-        identity_db,
+        module_database,
         tenant,
         lambda unit: commands.grant_role(
             unit, company.id, subject=PARTNER.subject, role=Role.OWNER, actor=OWNER
@@ -740,36 +750,36 @@ async def test_an_owner_demoted_meanwhile_grants_with_the_role_it_holds_now(
             unit, company.id, subject=MEMBER.subject, role=Role.OWNER, actor=PARTNER.subject
         )
 
-    demotion = asyncio.create_task(in_unit(identity_db, tenant, demote))
+    demotion = asyncio.create_task(in_unit(module_database, tenant, demote))
     await holding.wait()
-    promotion = asyncio.create_task(in_unit(identity_db, tenant, promote))
+    promotion = asyncio.create_task(in_unit(module_database, tenant, promote))
     await eventually(lambda: waits_for_a_lock(app_url(migrated)))  # the promotion waits for the company
     release.set()
     await demotion
     with pytest.raises(OwnersOnlyError):  # checked by the route as an owner, decided as the admin it now is
         await promotion
-    assert await in_unit(identity_db, tenant, lambda unit: unit.memberships.owners(company.id)) == 1
+    assert await in_unit(module_database, tenant, lambda unit: unit.memberships.owners(company.id)) == 1
 
 
 async def test_permissions_come_from_the_membership_in_the_callers_organization(
-    identity_db: BoundDatabase,
+    module_database: BoundDatabase,
 ) -> None:
-    company = await create(identity_db)
-    permissions = MembershipPermissions(identity_db)
+    company = await create(module_database)
+    permissions = MembershipPermissions(module_database)
     assert await permissions.permissions(FOUNDER, company.id) == EVERYTHING
     assert await permissions.permissions(PARTNER, company.id) == frozenset()
     assert await permissions.permissions(FOUNDER, CompanyId(new_id())) == frozenset()
 
 
 async def test_a_deactivated_company_lets_other_modules_read_only_and_identity_still_revoke(
-    identity_db: BoundDatabase, admin: psycopg.AsyncConnection
+    module_database: BoundDatabase, admin: psycopg.AsyncConnection
 ) -> None:
-    company = await create(identity_db)
+    company = await create(module_database)
     tenant = company.tenant
 
     async def grant(role: Role) -> commands.Granted:
         return await in_unit(
-            identity_db,
+            module_database,
             tenant,
             lambda unit: commands.grant_role(
                 unit, company.id, subject=MEMBER.subject, role=role, actor=OWNER
@@ -778,22 +788,22 @@ async def test_a_deactivated_company_lets_other_modules_read_only_and_identity_s
 
     await grant(Role.ISSUER)
     await in_unit(
-        identity_db,
+        module_database,
         tenant,
         lambda unit: commands.deactivate_company(unit, company.id, admits=anything, actor=OWNER),
     )
     for_other_services = await in_unit(
-        identity_db,
+        module_database,
         OrganizationScope(FOUNDER.organization, None),
         lambda unit: queries.permissions_of(unit, company.id, OWNER),
     )
     assert for_other_services == READ_ONLY
-    permissions = MembershipPermissions(identity_db)
+    permissions = MembershipPermissions(module_database)
     assert await permissions.permissions(FOUNDER, company.id) == EVERYTHING
     with pytest.raises(CompanyInactiveError):  # no role is granted there any more ...
         await grant(Role.VIEWER)
     await in_unit(  # ... but one is still taken away
-        identity_db,
+        module_database,
         tenant,
         lambda unit: commands.revoke_role(unit, company.id, subject=MEMBER.subject, actor=OWNER),
     )
@@ -805,14 +815,14 @@ async def test_a_deactivated_company_lets_other_modules_read_only_and_identity_s
 
 
 async def test_branches_and_emission_points_are_paged_in_id_order_by_cursor(
-    identity_db: BoundDatabase,
+    module_database: BoundDatabase,
 ) -> None:
-    company, first_branch, first_point = await a_company_with_a_branch_and_a_point(identity_db)
+    company, first_branch, first_point = await a_company_with_a_branch_and_a_point(module_database)
     tenant = company.tenant
 
     async def open_branch(code: str) -> Branch:
         return await in_unit(
-            identity_db,
+            module_database,
             tenant,
             lambda unit: commands.open_branch(
                 unit, company.id, commands.Opening(parse_code(code), parse_name(code)), actor=OWNER
@@ -821,7 +831,7 @@ async def test_branches_and_emission_points_are_paged_in_id_order_by_cursor(
 
     async def open_point(code: str) -> EmissionPoint:
         return await in_unit(
-            identity_db,
+            module_database,
             tenant,
             lambda unit: commands.open_emission_point(
                 unit,
@@ -833,11 +843,13 @@ async def test_branches_and_emission_points_are_paged_in_id_order_by_cursor(
         )
 
     async def branch_page(request: PageRequest) -> Page[Branch]:
-        return await in_unit(identity_db, tenant, lambda unit: queries.branches(unit, company.id, request))
+        return await in_unit(
+            module_database, tenant, lambda unit: queries.branches(unit, company.id, request)
+        )
 
     async def point_page(request: PageRequest) -> Page[EmissionPoint]:
         return await in_unit(
-            identity_db,
+            module_database,
             tenant,
             lambda unit: queries.emission_points(unit, company.id, first_branch.id, request),
         )

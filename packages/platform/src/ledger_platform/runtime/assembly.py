@@ -20,6 +20,7 @@ lazy from prometheus_client import CollectorRegistry
 
 from ledger_kernel.errors import LedgerError
 from ledger_platform._manifest import MANIFEST as PLATFORM_MANIFEST
+from ledger_platform.config.names import PLATFORM
 from ledger_platform.data.bound import BoundDatabase
 from ledger_platform.data.migrations import platform_migrations
 from ledger_platform.data.unit_of_work import JobPolicy
@@ -59,7 +60,6 @@ lazy from ledger_platform.observability.tracing import Tracing
 lazy from ledger_platform.runtime.contexts import ChannelPack, Module
 lazy from ledger_platform.runtime.registries import Discover
 
-PLATFORM: Final = "platform"
 _CYCLE: Final = TypeAdapter(list[str])
 
 

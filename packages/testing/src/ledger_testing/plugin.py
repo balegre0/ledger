@@ -6,6 +6,10 @@
   ``pytest_ledger_template`` hooks prepare once per server.
 - ``issuer_keys`` (session) and ``local_issuer`` (per test): an OpenID provider whose RSA key is made once.
 - ``clock``: a wall clock the test moves. ``restore_logging`` (autouse): the plain logging baseline.
+- A module's fixtures, for a suite whose conftest returns its ``ModuleUnderTest`` from ``module_under_test``
+  (``ledger_testing.modules``): ``migrated``, ``database``, ``signals``, ``module_database``, ``admin``,
+  ``settings``, ``api``, ``client``, ``fresh_database_name``, ``fresh``, ``fresh_admin_url``. A conftest's own
+  fixture of one of these names wins over the plugin's.
 - A selector event loop: psycopg's async driver cannot run on Windows' proactor loop.
 
 pytest imports this module, and what its hook specification names, before coverage starts: the names it uses
@@ -22,11 +26,22 @@ lazy from contextlib import AbstractContextManager
 
 import pytest
 from pydantic import TypeAdapter
+lazy import httpx
+lazy import psycopg
+lazy from psycopg import sql
 
 from ledger_testing.hooks import LedgerHooks
+lazy from ledger_platform.config.settings import Settings
+lazy from ledger_platform.data.bound import BoundDatabase
+lazy from ledger_platform.data.database import Database
+lazy from ledger_platform.data.notifier import Signals
+lazy from ledger_platform.data.roles import APP, MIGRATOR
+lazy from ledger_platform.runtime.app import App
 lazy from ledger_testing.clock import ManualClock
+lazy from ledger_testing.database import TEST_LOGINS, app_url, fresh_database, migrator_url
 lazy from ledger_testing.issuer import IssuerKeys, LocalIssuer
 lazy from ledger_testing.logs import restored_logging
+lazy from ledger_testing.modules import ModuleUnderTest, QuietSignals, app_settings
 lazy from ledger_testing.postgres import (
     TEMPLATE,
     PostgresServer,
@@ -148,3 +163,103 @@ async def local_issuer(issuer_keys: IssuerKeys) -> AsyncGenerator[LocalIssuer]:
 def clock() -> ManualClock:
     """A wall clock the test moves (``Clock``)."""
     return ManualClock()
+
+
+# ── A module's fixtures (``ledger_testing.modules``) ────────────────────────────
+
+
+@pytest.fixture
+def migrated(worker_database: WorkerDatabase, module_under_test: ModuleUnderTest) -> Iterator[WorkerDatabase]:
+    """This worker's database; every row a test left in the module's schema is removed after it."""
+    yield worker_database
+    worker_database.truncate((module_under_test.schema,))
+
+
+@pytest.fixture
+async def database(migrated: WorkerDatabase) -> AsyncGenerator[Database]:
+    """A pool of four connections as ``ledger_app``."""
+    opened = Database.create(app_url(migrated), pool_size=4)
+    try:
+        yield opened
+    finally:
+        await opened.aclose()
+
+
+@pytest.fixture
+def signals() -> Signals:
+    """Where the module's units signal their commits: nobody (a test may record them with its own)."""
+    return QuietSignals()
+
+
+@pytest.fixture
+def module_database(
+    database: Database, signals: Signals, module_under_test: ModuleUnderTest
+) -> BoundDatabase:
+    """The module's units, as the apps make them from its manifest."""
+    return BoundDatabase(
+        database,
+        schema=module_under_test.schema,
+        source=module_under_test.manifest.package.name,
+        signals=signals,
+        publishes=module_under_test.publishes,
+    )
+
+
+@pytest.fixture
+async def admin(migrated: WorkerDatabase) -> AsyncGenerator[psycopg.AsyncConnection]:
+    """A superuser session, for what a test reads past row-level security."""
+    async with await psycopg.AsyncConnection.connect(migrated.admin_url(), autocommit=True) as connection:
+        yield connection
+
+
+@pytest.fixture
+def settings(migrated: WorkerDatabase, local_issuer: LocalIssuer) -> Settings:
+    """The apps' settings on the worker's database and the test's identity provider."""
+    return app_settings(
+        database_url=app_url(migrated), direct_url=migrator_url(migrated), issuer=local_issuer
+    )
+
+
+@pytest.fixture
+def api(settings: Settings) -> App:
+    """The ``api`` app, every installed module mounted in it (found by their entry points)."""
+    return App("api", settings=settings)
+
+
+@pytest.fixture
+async def client(api: App, database: Database) -> AsyncGenerator[httpx.AsyncClient]:
+    """A client of the ``api`` app, started; ``migrated`` empties the module's tables once it has stopped."""
+    del database  # requested so that it closes after the app: the tables are emptied last
+    served = api.asgi()
+    async with served.router.lifespan_context(served):
+        transport = httpx.ASGITransport(app=served, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://ledger.test") as opened:
+            yield opened
+
+
+@pytest.fixture
+def fresh_database_name(
+    worker_database: WorkerDatabase, postgres: PostgresServer, module_under_test: ModuleUnderTest
+) -> Iterator[str]:
+    """A database of the test's own with the module's schemas, empty, as a first rollout finds it; dropped."""
+    del worker_database  # its template made the roles a fresh database's schemas are owned by
+    name = fresh_database(postgres, module_under_test.schemas)
+    yield name
+    with psycopg.connect(postgres.libpq(), autocommit=True) as connection:
+        connection.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+
+
+@pytest.fixture
+def fresh(fresh_database_name: str, postgres: PostgresServer, local_issuer: LocalIssuer) -> Settings:
+    """The apps' settings on a fresh database: units as ``ledger_app``, migrate as ``ledger_migrator``."""
+    return app_settings(
+        database_url=postgres.sqlalchemy(fresh_database_name, role=APP, password=TEST_LOGINS.app),
+        direct_url=postgres.sqlalchemy(fresh_database_name, role=MIGRATOR, password=TEST_LOGINS.migrator),
+        issuer=local_issuer,
+    )
+
+
+@pytest.fixture
+def fresh_admin_url(fresh_database_name: str, postgres: PostgresServer) -> str:
+    """The fresh database as the superuser (SQLAlchemy URL), for what a test reads of its catalog."""
+    return postgres.sqlalchemy(fresh_database_name, role=postgres.user, password=postgres.password)

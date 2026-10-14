@@ -66,8 +66,8 @@ class Health:
     A check left behind is cancelled again by every later probe and is not started again while it lives, so a
     hung dependency cannot pile up one stuck task per probe. One that outlives ``wedge_after`` seconds
     (by default ten timeouts) means the process cannot be trusted to recover: ``wedged`` names it, for the
-    liveness probe to ask for a restart. Only checks that ``run`` has started can be found wedged: a
-    service whose readiness is never probed is never told that a check hangs. ``clock`` is the monotonic
+    liveness probe to ask for a restart. Only checks that ``run`` has started can be found wedged: an
+    app whose readiness is never probed is never told that a check hangs. ``clock`` is the monotonic
     time that ages a stuck check, and a test moves its own.
 
     ``timeout`` and ``wedge_after`` are positive, finite numbers of seconds, and ``wedge_after`` is at least

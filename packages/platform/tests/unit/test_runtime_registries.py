@@ -98,7 +98,6 @@ def channel_entry(key: str) -> ChannelEntry:
         {
             "key": key,
             "entry_point": "ledger_country_us.channels.probe:PACK",
-            "assembly": "ledger_country_us.channels.probe.assembly:assemble",
             "schema": "us_probe",
             "valid_from": date(2026, 1, 1),
             "environments": ["test"],

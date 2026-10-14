@@ -707,7 +707,6 @@ dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
     { name = "ledger-kernel" },
-    { name = "ledger-platform" },
     { name = "lxml" },
     { name = "pydantic" },
 ]
@@ -717,7 +716,6 @@ requires-dist = [
     { name = "cryptography", specifier = ">=50.0.2" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "ledger-kernel", editable = "packages/kernel" },
-    { name = "ledger-platform", editable = "packages/platform" },
     { name = "lxml", specifier = ">=6.1.3" },
     { name = "pydantic", specifier = ">=2.14.1" },
 ]
@@ -859,6 +857,7 @@ dependencies = [
     { name = "alembic" },
     { name = "httpx" },
     { name = "joserfc" },
+    { name = "ledger-kernel" },
     { name = "ledger-platform" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
@@ -873,6 +872,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.20.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "joserfc", specifier = ">=1.7.5" },
+    { name = "ledger-kernel", editable = "packages/kernel" },
     { name = "ledger-platform", editable = "packages/platform" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.6" },
     { name = "pydantic", specifier = ">=2.14.1" },

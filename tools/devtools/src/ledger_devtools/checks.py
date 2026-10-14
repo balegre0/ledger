@@ -2,7 +2,8 @@
 
 A single manifest is validated by the platform's model when the workspace is loaded; what is checked here is
 how manifests agree: names and directories, unique values, dependencies that exist, an acyclic module graph,
-consumers with a producer, schedules with a job kind, modules made of layers only.
+consumers with a producer, schedules with a job kind, modules made of layers only, countries named by their
+directories, settings sections apart.
 """
 
 from dataclasses import dataclass
@@ -262,6 +263,24 @@ def _modules_are_layers(workspace: Workspace) -> Iterator[Problem]:
                 )
 
 
+def _countries_are_their_directories(workspace: Workspace) -> Iterator[Problem]:
+    """A country's ISO code is its directory's, in capitals; each regime's key starts with that code."""
+    for package in workspace.countries:
+        country = package.manifest.country
+        code = package.directory.name
+        if country is not None and country.iso != code.upper():
+            yield Problem(
+                package.manifest_path,
+                f"[country] iso '{country.iso}' is not the directory's code, '{code.upper()}'",
+            )
+        for regime in package.manifest.regimes:
+            if regime.key.split("-", 1)[0] != code:
+                rule = "its key starts with the country's code"
+                yield Problem(
+                    package.manifest_path, f"regime '{regime.key}' is not of country '{code}': {rule}"
+                )
+
+
 def _settings_sections_are_apart(workspace: Workspace) -> Iterator[Problem]:
     """A section's prefix holds no platform variable and no other section's: each variable has one reader."""
     platform = sorted(f"LEDGER_{name.upper()}" for name in Settings.model_fields)
@@ -300,6 +319,7 @@ _RULES: Final[tuple[Callable[[Workspace], Iterator[Problem]], ...]] = (
     _packages_are_acyclic,
     _schedules_enqueue_declared_jobs,
     _modules_are_layers,
+    _countries_are_their_directories,
     _settings_sections_are_apart,
 )
 

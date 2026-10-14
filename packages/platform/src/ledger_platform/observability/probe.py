@@ -1,6 +1,6 @@
 """``ledger-probe URL``: exit 0 when ``URL`` answers 200 within two seconds, 1 when not, 2 when misused.
 
-A service's runtime image has no shell, curl or wget, only the service's Python: its container health check is
+An app's runtime image has no shell, curl or wget, only the app's Python: its container health check is
 this console script. Plain HTTP to the container itself, standard library only.
 """
 

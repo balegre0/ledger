@@ -1,12 +1,15 @@
+"""``ledger-migrate`` on fresh databases: every installed schema, named by the manifests, ends at its head."""
+
 import psycopg
 import pytest
 from psycopg import sql
 from pydantic import TypeAdapter
 
 from ledger_app_migrate import main
-from ledger_identity.adapters.postgres.schema import MIGRATIONS
-from ledger_platform.data.migrations import PLATFORM_MIGRATIONS
-from ledger_platform.runtime.app import DirectUrlMissingError
+from ledger_platform._manifest import MANIFEST as PLATFORM
+from ledger_platform.config.settings import Settings
+from ledger_platform.runtime.app import App, DirectUrlMissingError
+from ledger_platform.runtime.packs import load_modules
 lazy from ledger_testing.postgres import PostgresServer
 
 _VERSION = TypeAdapter(tuple[str])
@@ -20,17 +23,26 @@ def version(postgres: PostgresServer, database: str, schema: str) -> str:
     return _VERSION.validate_python(row)[0]
 
 
+def heads() -> dict[str, str]:
+    """Each installed schema's head, as the app that migrates assembles them (no I/O)."""
+    return {
+        migrations.schema: migrations.head for migrations in App("migrate", settings=Settings()).migrations
+    }
+
+
 @pytest.mark.usefixtures("environment")
 def test_migrate_brings_every_installed_schema_to_head(fresh: str, postgres: PostgresServer) -> None:
+    expected = heads()
+    named = {PLATFORM.schema_name, *(module.manifest.schema_name for module in load_modules())}
+    assert set(expected) == named  # every schema a manifest names, none more
     assert main.main() == 0
-    assert version(postgres, fresh, "platform") == PLATFORM_MIGRATIONS.head
-    assert version(postgres, fresh, "identity") == MIGRATIONS.head
+    assert {schema: version(postgres, fresh, schema) for schema in expected} == expected
 
 
 @pytest.mark.usefixtures("environment")
 def test_migrate_twice_finds_head_and_changes_nothing(fresh: str, postgres: PostgresServer) -> None:
     assert (main.main(), main.main()) == (0, 0)
-    assert version(postgres, fresh, "identity") == MIGRATIONS.head
+    assert {schema: version(postgres, fresh, schema) for schema in heads()} == heads()
 
 
 @pytest.mark.usefixtures("environment")

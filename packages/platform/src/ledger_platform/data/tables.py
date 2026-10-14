@@ -34,7 +34,8 @@ from sqlalchemy.orm import DeclarativeBase
 lazy from sqlalchemy.schema import SchemaItem
 
 from ledger_kernel.errors import LedgerError
-from ledger_platform.data.roles import PLATFORM, SchemaRoles
+from ledger_platform.config.names import PLATFORM
+from ledger_platform.data.roles import SchemaRoles
 lazy from ledger_platform.data.database import AnyTable
 
 

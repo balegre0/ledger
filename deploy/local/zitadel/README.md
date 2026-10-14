@@ -18,6 +18,11 @@ curl -X POST "http://127.0.0.1:${LEDGER_API_PORT:-8100}/v1/companies" \
 
 The local stack does not start Zitadel: run the first command (compose's profile `zitadel`) beside it.
 
+`bootstrap.sh` and `reset.sh` reach the containers through compose's project: `ledger` (`compose.yaml`'s
+`name`) unless `COMPOSE_PROJECT_NAME` is set. If the stack runs under a project of its own
+(`docker compose -p ledger-me ...`), give the scripts the same name:
+`COMPOSE_PROJECT_NAME=ledger-me sh deploy/local/zitadel/bootstrap.sh`.
+
 `bootstrap.sh` makes sure the project `ledger` (its id is the tokens' audience) with its role
 `ledger.organization.admin`, the API application `ledger-api` and the machine user `ledger-dev`, whose access
 tokens are JWTs, exist, and that `ledger-dev` is granted the role (identity registers companies for an

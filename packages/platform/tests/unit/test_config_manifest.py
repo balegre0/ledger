@@ -82,7 +82,6 @@ entry_point = "ledger_country_do.regime:REGIME"
 [[channels]]
 key = "do-ecf-v1"
 entry_point = "ledger_country_do.channels.ecf_v1:CHANNEL"
-assembly = "ledger_country_do.channels.ecf_v1.assembly"
 schema = "do_ecf"
 valid_from = 2019-01-01
 environments = ["testecf", "certecf", "ecf"]
@@ -260,3 +259,33 @@ def test_only_a_module_declares_a_settings_section_of_its_package(text: str) -> 
     assert caught.value.problems == (
         "package.settings: only a module declares a settings section of its own",
     )
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "location"),
+    [
+        ('schema = "invoicing"', 'schema = "public"', "data.schema"),
+        ('schema = "invoicing"', 'schema = "select"', "data.schema"),
+        ('type = "invoicing.invoice.issued"', 'type = "invoicing.issued"', "events.publishes.0.type"),
+        ('prefix = "inv"', 'prefix = "i1"', "ids.0.prefix"),
+        ('code = "invoicing.invoices.read"', 'code = "invoicing.invoices.peek"', "permissions.0.code"),
+    ],
+)
+def test_names_are_read_with_the_kernel_s_and_the_roles_rules(old: str, new: str, location: str) -> None:
+    with pytest.raises(InvalidManifestError) as caught:
+        load_manifest(MODULE.replace(old, new))
+    assert caught.value.problems[0].startswith(f"{location}: ")
+    assert new.split('"')[1] not in str(caught.value)
+
+
+def test_extension_points_name_protocols_and_qualified_implementations() -> None:
+    good = MODULE + '[extension_points]\ndeclares = ["IssuePolicy"]\nimplements = ["fiscal.IssuePolicy"]\n'
+    assert load_manifest(good).extension_points.implements == ("fiscal.IssuePolicy",)
+    for bad, location in (
+        ('declares = ["issue policy"]', "extension_points.declares.0"),
+        ('implements = ["IssuePolicy"]', "extension_points.implements.0"),
+        ('provides = ["signer-port"]', "extension_points.provides.0"),
+    ):
+        with pytest.raises(InvalidManifestError) as caught:
+            load_manifest(MODULE + f"[extension_points]\n{bad}\n")
+        assert caught.value.problems[0].startswith(f"{location}: ")

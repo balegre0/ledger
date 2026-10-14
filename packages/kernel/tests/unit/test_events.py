@@ -4,7 +4,7 @@ from uuid import uuid7
 
 import pytest
 
-from ledger_kernel.events import Event, InvalidEventClassError
+from ledger_kernel.events import Event, InvalidEventClassError, InvalidEventTypeError, parse_event_type
 
 
 @final
@@ -99,3 +99,10 @@ def test_being_abstract_is_not_inherited() -> None:
         type("Forgotten", (ThingEvent,), {"VERSION": 1, "__annotations__": {}})
     with pytest.raises(InvalidEventClassError, match="Concrete"):
         type("Concrete", (ThingEvent,), {"ABSTRACT": False, "VERSION": 1, "__annotations__": {}})
+
+
+def test_an_event_type_has_three_dotted_lower_case_parts() -> None:
+    assert parse_event_type("identity.company.registered") == "identity.company.registered"
+    for text in ("identity.company", "Identity.company.registered", "a.b.c.d", "a.b.c "):
+        with pytest.raises(InvalidEventTypeError, match=r"<module>\.<aggregate>\.<past_participle>"):
+            parse_event_type(text)

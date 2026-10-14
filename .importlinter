@@ -134,6 +134,7 @@ forbidden_modules =
     ledger_country_do_testing
     ledger_devtools
     ledger_identity
+    ledger_platform
     ledger_testing
 allow_indirect_imports = True
 
@@ -228,7 +229,6 @@ forbidden_modules =
     ledger_country_do_testing
     ledger_devtools
     ledger_identity
-    ledger_kernel
 allow_indirect_imports = True
 
 [importlinter:contract:do-regime-is-pure]
@@ -247,7 +247,6 @@ forbidden_modules =
     ledger_app_api
     ledger_app_migrate
     ledger_app_worker
-    ledger_country_do._manifest
     ledger_country_do.channels
     ledger_country_do_testing
     ledger_devtools

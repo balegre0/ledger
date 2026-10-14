@@ -3,7 +3,7 @@
 Spans leave the process and cannot be recalled, so what a span may carry is decided here, once: the type of an
 exception, never its message or its traceback (they can quote personal data), and never the path or the query
 string a client sent (a path carries the values of its parameters). The platform's own spans record no more
-than that; every exporter is given the spans of others (a service's code, FastAPI's instrumentation) through
+than that; every exporter is given the spans of others (an app's code, FastAPI's instrumentation) through
 ``RedactingSpanExporter``.
 """
 
@@ -140,7 +140,7 @@ def _carrier(traceparent: str | None) -> dict[str, str]:
 
 @final
 class Tracing:
-    """A tracer provider of the service's own, and the propagation of traces through events."""
+    """A tracer provider of the app's own, and the propagation of traces through events."""
 
     __slots__ = ("_provider", "_stopped", "_tracer")
 
@@ -166,8 +166,8 @@ class Tracing:
         """Make this provider the process-wide one, unless one already is.
 
         Instrumentation that is given no provider uses the process-wide one, which OpenTelemetry takes once,
-        warning about every later attempt. A process runs one service, so the first is the only one; a second
-        service of the same process (a test) keeps its provider to itself, without the warning.
+        warning about every later attempt. A process runs one app, so the first is the only one; a second
+        app of the same process (a test) keeps its provider to itself, without the warning.
         """
         if isinstance(trace.get_tracer_provider(), ProxyTracerProvider):
             trace.set_tracer_provider(self._provider)
@@ -217,7 +217,7 @@ class Tracing:
         ``tracing.shutdown_timed_out`` and left behind, and never holds up the process's exit.
 
         Only the first call does anything. An exporter that fails to flush or to stop (a collector that is
-        gone) is logged and does not fail the shutdown: telemetry must not keep a service from stopping.
+        gone) is logged and does not fail the shutdown: telemetry must not keep an app from stopping.
         """
         if self._stopped:
             return

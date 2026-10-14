@@ -18,6 +18,7 @@ from ledger_devtools.root import ROOT_PYPROJECT, root_text
 from ledger_devtools.sql import init_sql_text
 from ledger_devtools.workspace import MANIFEST_GLOBS, MODULE_LAYERS
 from ledger_platform.config.manifest import PackageKind
+from ledger_platform.config.names import PLATFORM
 from ledger_platform.config.settings import SETTINGS_GROUP
 lazy from ledger_devtools.openapi import api_document, openapi_text, require_installed
 lazy from ledger_devtools.workspace import Package, Workspace
@@ -85,10 +86,14 @@ def _list(values: Sequence[str]) -> str:
 
 
 def has_manifest_module(package: Package) -> bool:
-    """Whether ``package`` gets ``_manifest.py``: modules (their assembly reads it), countries, schemas."""
-    return (
-        package.kind in {PackageKind.MODULE, PackageKind.COUNTRY} or package.manifest.schema_name is not None
-    )
+    """Whether ``package`` gets ``_manifest.py``, which imports the platform's model to validate its data.
+
+    A module does (its assembly reads it), a package with a schema does, and a country with a channel does (a
+    ``ChannelPack`` holds its manifest entry). A country without one gets none: its regime is data the kernel
+    types, and the pack then depends on the kernel alone, nothing heavier.
+    """
+    manifest = package.manifest
+    return package.kind is PackageKind.MODULE or manifest.schema_name is not None or bool(manifest.channels)
 
 
 def _migrations_directory(package: Package) -> str | None:
@@ -116,8 +121,8 @@ def workspace_dependencies(package: Package, workspace: Workspace) -> tuple[Pack
     """
     dependencies = package.manifest.dependencies
     names = dict.fromkeys((*dependencies.packages, *dependencies.modules))
-    if has_manifest_module(package) and package.name != "platform":
-        names.setdefault("platform")
+    if has_manifest_module(package) and package.name != PLATFORM:
+        names.setdefault(PLATFORM)
     return tuple(workspace.by_name(name) for name in names)
 
 
@@ -392,8 +397,8 @@ def _workspace_contracts(facts: _Facts) -> Iterator[str | None]:
             ("source_modules", ["ledger_kernel"]),
             ("forbidden_modules", sorted({*facts.third_party, *TEST_TOOLING})),
         )
-    if facts.source_exists("platform"):
-        present = facts.layers["platform"]
+    if facts.source_exists(PLATFORM):
+        present = facts.layers[PLATFORM]
         platform_layers = (
             " | ".join(name for name in layer.split(" | ") if name in present) for layer in PLATFORM_LAYERS
         )
@@ -565,7 +570,7 @@ def _closing_contracts(facts: _Facts) -> Iterator[str | None]:
     below_runtime = [
         name
         for platform in workspace.packages
-        if platform.name == "platform"
+        if platform.name == PLATFORM
         for name in facts.submodules(platform, sorted(facts.layers[platform.name] - {"runtime"}))
     ]
     yield _contract(

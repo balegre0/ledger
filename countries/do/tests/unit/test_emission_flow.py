@@ -37,9 +37,9 @@ from ledger_country_do.channels.ecf_v1.domain.routing import Route
 from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage, EcfState, NumberFate
 from ledger_country_do.regime import REGIME
 from ledger_country_do.regime.rounding import ROUNDING
-from ledger_country_do_testing.clock import ManualClock
 from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
 from ledger_kernel.money import RoundingMode
+from ledger_testing.clock import ManualClock
 lazy from ledger_country_do.channels.ecf_v1.application.emission import Signed
 lazy from ledger_country_do.channels.ecf_v1.application.ports import Reception
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf

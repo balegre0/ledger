@@ -5,7 +5,7 @@ request that breaks the schema with its problems listed, an ``HTTPException`` (t
 405 included) with the code of its status, and anything else as a bare ``internal``. A client reads no more
 than the code and the title unless the error was written to be read: the ``detail`` of an ``HTTPException``
 is boilerplate the title already says, or whatever its author typed (possibly built from the request), so it
-stays out (a server error a route raises is logged with it, cut); a service that has something to tell a
+stays out (a server error a route raises is logged with it, cut); an app that has something to tell a
 client raises a ``LedgerError``, whose message is built inside its class.
 
 A ``LedgerError`` answers the status of its kind (§9.6), except a ``BadRequestError``: a request the HTTP
@@ -290,7 +290,7 @@ def install_problem_handlers(app: FastAPI, *, route_of: RouteOf = declared_route
         # Starlette's class, not FastAPI's subclass: the router's own 404 and 405 are the former.
         code = _describe(error.status_code).code
         if error.status_code >= HTTPStatus.INTERNAL_SERVER_ERROR:
-            # The client is told nothing but the code; whoever runs the service is told why, once, bounded.
+            # The client is told nothing but the code; whoever runs the app is told why, once, bounded.
             _logger.error(
                 "http.server_error",
                 method=request.method,

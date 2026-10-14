@@ -4,7 +4,7 @@ A list is read with ``limit`` (1 to 100) and at most one opaque cursor: ``starti
 or ``ending_before`` (the page before it). A page answers its items in id order, whether more follow in the
 direction it was read (``has_more``), and the cursors of the pages on either side: ``next_cursor`` (for
 ``starting_after``) and ``previous_cursor`` (for ``ending_before``), each ``null`` when there is none. A
-cursor is only ever one the service handed out: anything else is 422 ``invalid_cursor``, and both cursors at
+cursor is only ever one the app handed out: anything else is 422 ``invalid_cursor``, and both cursors at
 once 422 ``page_cursors_conflict``.
 """
 

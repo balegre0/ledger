@@ -1,7 +1,7 @@
 # Runbook: the DGII spike against TesteCF
 
 Runs the spike's emission (`ledger-dgii-spike`) against DGII's pre-certification environment, TesteCF, and
-records what DGII's documentation left open (`../spike-findings.md`, rows F1-F16). Nothing here reaches
+records what DGII's documentation left open ([`countries/do/docs/spike-findings.md`](../../../countries/do/docs/spike-findings.md), rows F1-F16). Nothing here reaches
 production: the CLI refuses the `ecf` environment whatever hosts it is given, and DGII's client refuses the
 live environment on any host but DGII's.
 
@@ -228,7 +228,7 @@ A document still pending after the polling schedule (`DGII: still pending ...`) 
 
 ## 9. Record, then clean up
 
-Fill in `../spike-findings.md` (one line per F row: settled, how, DGII's words) and commit it. Copy no secret
+Fill in [`countries/do/docs/spike-findings.md`](../../../countries/do/docs/spike-findings.md) (one line per F row: settled, how, DGII's words) and commit it. Copy no secret
 into it: no token, no password, no certificate, no cédula, no full XML (DGII's messages and codes are fine).
 `.dgii/out` keeps the signed documents, DGII's answers and the journal of every e-NCF signed: keep it, never
 delete it (a later run would otherwise sign a sequence TesteCF already holds). Never commit `.dgii/`.

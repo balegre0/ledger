@@ -33,7 +33,6 @@ entry_point = "ledger_country_do.regime:REGIME"
 [[channels]]
 key = "do-ecf-v1"
 entry_point = "ledger_country_do.channels.ecf_v1:CHANNEL"
-assembly = "ledger_country_do.channels.ecf_v1.assembly"
 schema = "do_ecf"
 valid_from = 2019-01-01
 environments = ["testecf", "certecf", "ecf"]
@@ -145,7 +144,12 @@ def test_schemas_prefixes_permissions_events_consumers_jobs_and_http_prefixes_ar
 
 def test_what_a_channel_declares_is_unique_too(tree: Path, write: Writer) -> None:
     write("countries/do", COUNTRY, ())
-    copy = COUNTRY.replace('name = "do"', 'name = "dx"').replace('key = "do-ecf-v1"', 'key = "dx-ecf-v1"')
+    copy = (
+        COUNTRY.replace('name = "do"', 'name = "dx"')
+        .replace('key = "do-ecf-v1"', 'key = "dx-ecf-v1"')
+        .replace('iso = "DO"', 'iso = "DX"')
+        .replace('key = "do"', 'key = "dx"')
+    )
     write("countries/dx", copy, ())
     where = "countries/dx/manifest.toml"
     assert messages(tree) == [
@@ -376,4 +380,19 @@ def test_a_channel_s_section_is_checked_like_a_module_s(tree: Path, write: Write
     write("countries/do", country, ("regime",))
     assert [line for line in messages(tree) if "settings section" in line] == [
         "modules/do_ecf/manifest.toml: settings section 'do_ecf' (LEDGER_DO_ECF_*) is declared twice"
+    ]
+
+
+def test_a_country_s_code_is_its_directory_and_its_regimes_are_its_own(tree: Path, write: Writer) -> None:
+    write(
+        "countries/do",
+        COUNTRY.replace('iso = "DO"', 'iso = "DM"').replace('key = "do"\n', 'key = "dm"\n'),
+        ("regime",),
+    )
+    assert [line for line in messages(tree) if "[country]" in line or "regime" in line] == [
+        "countries/do/manifest.toml: [country] iso 'DM' is not the directory's code, 'DO'",
+        (
+            "countries/do/manifest.toml: regime 'dm' is not of country 'do': "
+            "its key starts with the country's code"
+        ),
     ]

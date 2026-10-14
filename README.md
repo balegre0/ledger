@@ -61,9 +61,10 @@ docker compose -f deploy/local/compose.yaml down -v                 # stop and d
 | PostgreSQL 18.6 | `127.0.0.1:5432` (`LEDGER_POSTGRES_PORT`), database `ledger`, login `ledger_app` |
 
 Port 8000 is never used on the host. `/livez` and `/readyz` answer on both apps. To call the api with real
-tokens, start the local Zitadel (compose profile `zitadel`): [deploy/local/zitadel/README.md](deploy/local/zitadel/README.md).
+tokens, start the local Zitadel (compose profile `zitadel`): [deploy/local/zitadel/README.md](deploy/local/zitadel/README.md);
+a stack started under its own project (`-p <name>`) gives its scripts the same `COMPOSE_PROJECT_NAME`.
 An app run on the host takes `LEDGER_*` variables (see `deploy/local/compose.yaml`'s header) and sets
-`LEDGER_HTTP_PORT=8100` or `8101`.
+`LEDGER_HTTP_PORT=8101` for the worker (8100, the api's, is the default).
 
 ## Decisions and operations
 

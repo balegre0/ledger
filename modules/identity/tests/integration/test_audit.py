@@ -46,7 +46,7 @@ async def test_every_change_through_the_api_is_audited_as_its_caller_in_its_requ
     client: httpx.AsyncClient,
     owner: TestPrincipal,
     admin: psycopg.AsyncConnection,
-    identity_db: BoundDatabase,
+    module_database: BoundDatabase,
 ) -> None:
     registered = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("c-1"))
     company = str(document(registered)["id"])
@@ -94,7 +94,7 @@ async def test_every_change_through_the_api_is_audited_as_its_caller_in_its_requ
     assert by_action["branch.open"][5] == branch_id
     assert by_action["emission_point.open"][5] == str(document(point)["id"])
     tenant = Tenant(ORGANIZATION, CompanyId(UUID(company)), None)
-    async with identity_db.unit(tenant) as unit:
+    async with module_database.unit(tenant) as unit:
         inactive = await queries.company(bind(unit), tenant.company)
     register, rename, deactivate = (
         by_action[a] for a in ("company.register", "company.rename", "company.deactivate")

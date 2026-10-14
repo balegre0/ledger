@@ -28,9 +28,9 @@ from ledger_country_do_testing.fake_dgii.state import Scripted, Status
 from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
 from ledger_country_do_testing.transports import FAKE_HOSTS, BreaksAfterSending, Counting
 lazy from ledger_country_do.channels.ecf_v1.application.emission import Emitted
-lazy from ledger_country_do_testing.clock import ManualClock
 lazy from ledger_country_do_testing.fake_dgii.app import FakeDgii
 lazy from ledger_country_do_testing.local_signer import KeyPairSigner
+lazy from ledger_testing.clock import ManualClock
 
 QR_HOSTS: Final = FAKE_HOSTS.qr
 RECEPTION: Final = "facturaselectronicas"

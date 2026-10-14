@@ -1,4 +1,4 @@
-"""The identity service's errors: each with its kind and a stable code clients match on (§4.2, §10).
+"""identity's errors: each with its kind and a stable code clients match on (§4.2, §10).
 
 Messages name ids, fields and limits, never text a client typed: a legal name or tax id is the client's data.
 The refusals every module shares are the kernel's, one class per code: ``CompanyNotFoundError`` and

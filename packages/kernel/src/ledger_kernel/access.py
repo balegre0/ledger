@@ -1,4 +1,4 @@
-"""Who acts and what they may do: the vocabulary of authorization every service shares.
+"""Who acts and what they may do: the vocabulary of authorization every app shares.
 
 A ``Principal`` is a caller whose token was verified: the identity provider's id of the user or machine
 (``subject``), the organization it acts in, and the roles the provider granted it there. What it may do in a

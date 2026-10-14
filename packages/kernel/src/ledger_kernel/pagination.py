@@ -25,7 +25,7 @@ _CURSOR: Final = re.compile(r"[A-Za-z0-9_-]{23}", re.ASCII)
 
 
 class InvalidCursorError(InvalidInputError):
-    """Text that is not a cursor this service handed out."""
+    """Text that is not a cursor this app handed out."""
 
     code: ClassVar[str] = "invalid_cursor"
 

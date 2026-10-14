@@ -17,7 +17,6 @@ nor an error report can show it. The verifier is an escape-string literal outsid
 import base64
 import hashlib
 import hmac
-import re
 import secrets
 from dataclasses import dataclass, field
 from typing import ClassVar, Final, final
@@ -26,123 +25,12 @@ lazy from collections.abc import Callable, Sequence
 from psycopg import sql
 
 from ledger_kernel.errors import LedgerError, excerpt
+from ledger_platform.config.names import PLATFORM, is_schema_name
 
 APP: Final = "ledger_app"
 MIGRATOR: Final = "ledger_migrator"
 SIGNER: Final = "ledger_signer"
 RELAY: Final = "ledger_relay"
-PLATFORM: Final = "platform"
-"""The platform's own schema: its ``rw`` role is the signer's too (schedule leases); the relay reads its
-``routing``."""
-_SCHEMA: Final = re.compile(r"[a-z][a-z0-9_]{1,30}", re.ASCII)
-"""2 to 31 characters, so that ``<schema>_owner`` stays a short identifier."""
-RESERVED_WORDS: Final = frozenset(
-    [
-        "all",
-        "analyse",
-        "analyze",
-        "and",
-        "any",
-        "array",
-        "as",
-        "asc",
-        "asymmetric",
-        "authorization",
-        "binary",
-        "both",
-        "case",
-        "cast",
-        "check",
-        "collate",
-        "collation",
-        "column",
-        "concurrently",
-        "constraint",
-        "create",
-        "cross",
-        "current_catalog",
-        "current_date",
-        "current_role",
-        "current_schema",
-        "current_time",
-        "current_timestamp",
-        "current_user",
-        "default",
-        "deferrable",
-        "desc",
-        "distinct",
-        "do",
-        "else",
-        "end",
-        "except",
-        "false",
-        "fetch",
-        "for",
-        "foreign",
-        "freeze",
-        "from",
-        "full",
-        "grant",
-        "group",
-        "having",
-        "ilike",
-        "in",
-        "initially",
-        "inner",
-        "intersect",
-        "into",
-        "is",
-        "isnull",
-        "join",
-        "lateral",
-        "leading",
-        "left",
-        "like",
-        "limit",
-        "localtime",
-        "localtimestamp",
-        "natural",
-        "not",
-        "notnull",
-        "null",
-        "offset",
-        "on",
-        "only",
-        "or",
-        "order",
-        "outer",
-        "overlaps",
-        "placing",
-        "primary",
-        "references",
-        "returning",
-        "right",
-        "select",
-        "session_user",
-        "similar",
-        "some",
-        "symmetric",
-        "system_user",
-        "table",
-        "tablesample",
-        "then",
-        "to",
-        "trailing",
-        "true",
-        "union",
-        "unique",
-        "user",
-        "using",
-        "variadic",
-        "verbose",
-        "when",
-        "where",
-        "window",
-        "with",
-    ]
-)
-"""PostgreSQL's reserved key words (``pg_get_keywords()``, categories R and T; a test keeps them equal)."""
-_REFUSED: Final = RESERVED_WORDS | {"pg", "public", "information_schema"}
 _UNLIMITED: Final = "CONNECTION LIMIT -1 VALID UNTIL 'infinity'"
 """A limit or an expiry someone set on a role is taken off: the apps' pools size the connections."""
 _GROUP: Final = (
@@ -247,7 +135,7 @@ class SchemaRoles:
     signer: bool = False
 
     def __post_init__(self) -> None:
-        if _SCHEMA.fullmatch(self.schema) is None or self.schema in _REFUSED or self.schema.startswith("pg_"):
+        if not is_schema_name(self.schema):
             raise InvalidSchemaNameError(self.schema)
 
     @property

@@ -20,6 +20,22 @@ lazy from ledger_kernel.tenancy import Scope
 _TYPE: Final = re.compile(r"[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*", re.ASCII)
 
 
+class InvalidEventTypeError(LedgerError):
+    """Text that is not an event type: a defect of the code or the manifest naming it."""
+
+    code: ClassVar[str] = "invalid_event_type"
+
+    def __init__(self) -> None:
+        super().__init__("an event type is <module>.<aggregate>.<past_participle>, lower case")
+
+
+def parse_event_type(text: str) -> str:
+    """Read an event type: three dotted lower-case parts (letters, digits, ``_``), each led by a letter."""
+    if _TYPE.fullmatch(text) is None:
+        raise InvalidEventTypeError
+    return text
+
+
 class InvalidEventClassError(LedgerError):
     """An event class without its own well-formed ``TYPE`` or without an ``int`` ``VERSION`` from 1.
 

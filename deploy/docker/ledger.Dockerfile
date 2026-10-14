@@ -13,7 +13,8 @@
 #   a grace period of at least 40 s (compose `stop_grace_period`, Kubernetes `terminationGracePeriodSeconds`,
 #   whose default of 30 is too short).
 # - Scaling: by replicas, never by Granian workers: each process is sized for one app and its database pools.
-# - Listening: on 0.0.0.0:8000 in the container (LEDGER_HTTP_HOST below; a host-side run binds loopback only).
+# - Listening: on 0.0.0.0:8000 in the container (LEDGER_HTTP_HOST and LEDGER_HTTP_PORT below; a host-side run
+#   binds loopback only, on 8100 by default).
 
 # Pinned by digest (the multi-platform index of the tag, as deploy/local/images.toml pins it): a re-pushed tag
 # cannot change what is built.
@@ -60,7 +61,8 @@ COPY --from=build /app/.venv /app/.venv
 ENV PATH=/app/.venv/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    LEDGER_HTTP_HOST=0.0.0.0
+    LEDGER_HTTP_HOST=0.0.0.0 \
+    LEDGER_HTTP_PORT=8000
 USER nonroot
 EXPOSE 8000
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \

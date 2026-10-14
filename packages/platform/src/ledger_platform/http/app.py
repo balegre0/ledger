@@ -1,4 +1,4 @@
-"""The HTTP application of a service: its routers, probes, metrics and RFC 9457 errors.
+"""The HTTP application of an app: its routers, probes, metrics and RFC 9457 errors.
 
 The operational routes are ``probes``'s, the duration of every request ``metrics``'s and the answers to
 failures ``problems``'s; ``create_app`` composes them.
@@ -66,7 +66,7 @@ _logger = structlog.stdlib.get_logger(__name__)
 @final
 @dataclass(frozen=True, slots=True)
 class ApiInfo:
-    """What the OpenAPI document says about the service."""
+    """What the OpenAPI document says about the app."""
 
     title: str
     version: str
@@ -82,7 +82,7 @@ class Observability:
     registry: CollectorRegistry
     """What ``/metrics`` exports; the app adds the duration of every request to it."""
     tracer_provider: TracerProvider
-    """Where the span of every request goes: the service's own provider, never whichever is process-wide."""
+    """Where the span of every request goes: the app's own provider, never whichever is process-wide."""
     caller_trace: CallerTrace = "link"
     """``link`` at a public edge (the default): a caller's trace is linked to, never continued (see the
     module); ``adopt`` behind a trusted one."""
@@ -207,7 +207,7 @@ class _ChassisApp(FastAPI):
 def _telemetry(provider: TracerProvider) -> TelemetryConfig:
     """FastAPI's own OpenTelemetry, kept to the one thing the chassis wants of it: the span of each request.
 
-    Into ``provider``, so that a service's spans never depend on which provider is process-wide. FastAPI's
+    Into ``provider``, so that an app's spans never depend on which provider is process-wide. FastAPI's
     logs stay off: they would record every unhandled exception a second time, its message and traceback
     included, beside the chassis's own log line. Its metrics stay off: Prometheus measures every request
     already. It never adds exporters from the environment (``FASTAPI_OTEL_AUTO_CONFIGURE``): they would

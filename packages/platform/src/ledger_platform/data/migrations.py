@@ -30,9 +30,10 @@ from sqlalchemy.pool import NullPool
 lazy from sqlalchemy import Connection, MetaData
 
 from ledger_kernel.errors import LedgerError, UnavailableError
+from ledger_platform.config.names import PLATFORM
 from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.data.database import LONGEST_TIMEOUT, MILLISECOND
-from ledger_platform.data.roles import PLATFORM, SchemaRoles, identifier, migrated_statements
+from ledger_platform.data.roles import SchemaRoles, identifier, migrated_statements
 lazy from ledger_platform.data.database import Database
 
 _COMPONENT: Final = "migrations"

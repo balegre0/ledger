@@ -25,7 +25,7 @@ _ROLES: Final = TypeAdapter(dict[str, dict[str, str]])
 
 
 def organization_of(provider_organization: str) -> OrganizationId:
-    """The ledger id of the provider's organization: derived, so every service computes the same one."""
+    """The ledger id of the provider's organization: derived, so every app computes the same one."""
     return OrganizationId(uuid5(_ORGANIZATIONS, provider_organization))
 
 

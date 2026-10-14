@@ -64,14 +64,16 @@ class InvalidPublicIdError(InvalidInputError):
         super().__init__(f"not a {prefix}_ id: {excerpt(text)}")
 
 
-def _require_prefix(prefix: str) -> None:
-    if _PREFIX.fullmatch(prefix) is None:
-        raise InvalidIdPrefixError(prefix)
+def parse_id_prefix(text: str) -> str:
+    """Read a public id prefix: 2 to 5 lower-case ASCII letters (``cmp``, ``inv``)."""
+    if _PREFIX.fullmatch(text) is None:
+        raise InvalidIdPrefixError(text)
+    return text
 
 
 def format_id(prefix: str, value: UUID) -> str:
     """The public id (TypeID) of ``value`` with ``prefix``: ``inv_01h455vb4pex5vsknk084sn02q``."""
-    _require_prefix(prefix)
+    parse_id_prefix(prefix)
     number = value.int
     characters = [""] * _SUFFIX_LENGTH
     for index in range(_SUFFIX_LENGTH - 1, -1, -1):
@@ -82,7 +84,7 @@ def format_id(prefix: str, value: UUID) -> str:
 
 def parse_id(prefix: str, text: str) -> UUID:
     """The UUID inside a public id of type ``prefix``; anything else is an ``InvalidPublicIdError``."""
-    _require_prefix(prefix)
+    parse_id_prefix(prefix)
     head = f"{prefix}_"
     suffix = text.removeprefix(head)
     if (

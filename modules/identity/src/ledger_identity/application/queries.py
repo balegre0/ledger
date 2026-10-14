@@ -78,7 +78,7 @@ async def memberships(unit: IdentityUnit, company_id: CompanyId, request: PageRe
 async def permissions_of(
     unit: IdentityUnit, company_id: CompanyId, subject: SubjectId
 ) -> frozenset[Permission]:
-    """What other services may let ``subject`` do in the company, which they cannot see deactivated.
+    """What other modules may let ``subject`` do in the company, which they cannot see deactivated.
 
     Its role's permissions; the reading ones only while the company is deactivated; none without an active
     membership, or in a company the organization does not have.

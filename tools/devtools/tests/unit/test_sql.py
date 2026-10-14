@@ -28,7 +28,6 @@ authority = { name = "DGII", short = "DGII", url = "https://dgii.gov.do" }
 [[channels]]
 key = "do-ecf-v1"
 entry_point = "ledger_country_do.channels.ecf_v1:CHANNEL"
-assembly = "ledger_country_do.channels.ecf_v1.assembly"
 schema = "do_ecf"
 valid_from = 2019-01-01
 environments = ["testecf"]

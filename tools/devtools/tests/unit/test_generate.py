@@ -69,7 +69,6 @@ entry_point = "ledger_country_do.regime:REGIME"
 [[channels]]
 key = "do-ecf-v1"
 entry_point = "ledger_country_do.channels.ecf_v1:CHANNEL"
-assembly = "ledger_country_do.channels.ecf_v1.assembly"
 schema = "do_ecf"
 valid_from = 2019-01-01
 environments = ["testecf", "certecf", "ecf"]
@@ -364,13 +363,12 @@ def test_targets_cover_every_generated_file(tree: Path, write: Writer) -> None:
         Path("modules/identity/pyproject.toml"),
         Path("modules/identity/src/ledger_identity/_manifest.py"),
         Path("packages/platform/src/ledger_platform/_manifest.py"),
-        Path("countries/mx/src/ledger_country_mx/_manifest.py"),
         Path("modules/billing/src/ledger_billing/_manifest.py"),  # every module: its assembly reads it
         Path("apps/api/pyproject.toml"),
     } <= set(generated)
-    assert (
-        Path("packages/kernel/src/ledger_kernel/_manifest.py") not in generated
-    )  # the runtime never reads it
+    # the runtime never reads these: the kernel's, a country's without a channel
+    assert Path("packages/kernel/src/ledger_kernel/_manifest.py") not in generated
+    assert Path("countries/mx/src/ledger_country_mx/_manifest.py") not in generated
     assert all(text.endswith("\n") for text in generated.values())
 
 
@@ -521,3 +519,17 @@ def test_each_declared_settings_section_is_an_entry_point(tree: Path, write: Wri
         "do_ecf": "ledger_country_do.channels.ecf_v1:CHANNEL"
     }
     assert "ledger.settings" not in pyproject_text(workspace.by_name("platform"), workspace)
+
+
+def test_a_country_gets_its_manifest_module_and_the_platform_only_with_a_channel(
+    tree: Path, write: Writer
+) -> None:
+    own = COUNTRY.replace('packages = ["kernel", "platform"]', 'packages = ["kernel"]')
+    write("countries/do", own.split("[[channels]]", 1)[0], ("regime",))
+    write("countries/zz", own.replace('"do"', '"zz"').replace('"DO"', '"ZZ"'), ("regime",))
+    workspace = Workspace.load(tree)
+    generated = targets(workspace, document=dict)
+    assert Path("countries/do/src/ledger_country_do/_manifest.py") not in generated
+    assert Path("countries/zz/src/ledger_country_zz/_manifest.py") in generated
+    assert '"ledger-platform"' not in pyproject_text(workspace.by_name("do"), workspace)
+    assert '"ledger-platform"' in pyproject_text(workspace.by_name("zz"), workspace)

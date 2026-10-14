@@ -59,7 +59,7 @@ class PostgresServer:
         """A new database ``name`` owned by a new login role ``role`` (no superuser, no BYPASSRLS): its URL.
 
         A superuser bypasses row-level security, and so does a table's owner unless the table forces it: tests
-        connect as the kind of role a service connects as, never as the administrator.
+        connect as the kind of role an app connects as, never as the administrator.
         """
         with psycopg.connect(self.libpq(), autocommit=True) as admin:
             admin.execute(

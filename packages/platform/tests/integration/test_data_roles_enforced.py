@@ -10,12 +10,12 @@ import pytest
 from psycopg import sql
 from pydantic import TypeAdapter
 
+from ledger_platform.config.names import RESERVED_WORDS
 from ledger_platform.data.rls import RlsScope, policy
 from ledger_platform.data.roles import (
     APP,
     MIGRATOR,
     RELAY,
-    RESERVED_WORDS,
     Logins,
     SchemaRoles,
     cluster_statements,

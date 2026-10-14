@@ -28,8 +28,8 @@ from ledger_country_do_testing.local_signer import KeyPairSigner
 from ledger_country_do_testing.pki import Authority, person
 from ledger_country_do_testing.samples import SIGNED_AT, SIGNER_VALID_FROM, consumer_invoice, credit_invoice
 from ledger_country_do_testing.signatures import forge
-lazy from ledger_country_do_testing.clock import ManualClock
 lazy from ledger_country_do_testing.pki import Issued
+lazy from ledger_testing.clock import ManualClock
 
 AUTH: Final = "/testecf/autenticacion/api/autenticacion"
 RECEPTION: Final = "/testecf/recepcion/api/facturaselectronicas"

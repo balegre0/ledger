@@ -187,8 +187,9 @@ class Settings(_ClosedSettings):
     """
     http_host: str = Field(default="127.0.0.1", min_length=1, max_length=255)
     """The address the HTTP server binds: loopback for a run on a host; the image sets every interface."""
-    http_port: Annotated[int, Field(ge=1, le=65535)] = 8000
-    """The container's port. A run on a host sets another (8100 for ``api``, 8101 for ``worker``)."""
+    http_port: Annotated[int, Field(ge=1, le=65535)] = 8100
+    """The api's port on a host; the worker run on a host sets 8101, and the image sets 8000 (inside a
+    container). Never 8000 on the host: another project's."""
     otlp_endpoint: str | None = None
     """OTLP/gRPC collector, e.g. ``http://otel-collector:4317``; traces are not exported without it."""
     token_issuer: str | None = Field(default=None, min_length=1, max_length=2048)

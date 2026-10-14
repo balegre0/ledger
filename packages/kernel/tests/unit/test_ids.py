@@ -11,6 +11,7 @@ from ledger_kernel.ids import (
     format_id,
     new_id,
     parse_id,
+    parse_id_prefix,
     parse_uuid,
 )
 
@@ -96,3 +97,10 @@ def test_a_prefix_outside_the_naming_rule_is_a_defect(prefix: str) -> None:
 def test_a_uuid_in_canonical_form_still_reads() -> None:
     value = uuid7()
     assert parse_uuid(str(value)) == value
+
+
+def test_an_id_prefix_is_two_to_five_lower_case_letters() -> None:
+    assert parse_id_prefix("cmp") == "cmp"
+    for text in ("c", "toolong", "Cmp", "c1"):
+        with pytest.raises(InvalidIdPrefixError):
+            parse_id_prefix(text)

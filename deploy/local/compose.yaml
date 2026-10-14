@@ -2,7 +2,7 @@
 #
 # What an app running on the host is configured with (the LEDGER_* variables of Settings), beside ledger.env's:
 #   LEDGER_DATABASE_URL=postgresql+psycopg://ledger_app:ledger_app@127.0.0.1:5432/ledger (or LEDGER_POSTGRES_PORT)
-#   LEDGER_HTTP_PORT=8100 (api) or 8101 (worker): never 8000, another project's on this machine
+#   LEDGER_HTTP_PORT=8101 for the worker (the api's 8100 is the default): never 8000, another project's here
 # An app that runs inside this network uses the same URL with the host name `postgres` in place of 127.0.0.1.
 #
 # PostgreSQL's administrator is `postgres`. A service never connects as that role: a superuser bypasses

@@ -16,8 +16,8 @@ which none of them can cancel by going away. When a refresh fails (including a d
 usable key), the keys already held keep working; with none at all a token cannot be checked and the request
 gets a 503.
 
-A service fetches with ``HttpKeys``: one HTTP client for the service's run, a resource the service opens at
-start and closes at stop. ``fetch_keys``, a client per fetch, is for tools and tests that run no service.
+An app fetches with ``HttpKeys``: one HTTP client for the app's run, a resource the app opens at
+start and closes at stop. ``fetch_keys``, a client per fetch, is for tools and tests that run no app.
 Either way the environment cannot steer the fetch (no proxy, CA bundle or ``.netrc`` from it), no redirect
 is followed (the keys are where the configuration says), and the document is asked for uncompressed and
 refused compressed, so ``MAX_KEYS_SIZE`` bounds the bytes received, not a bomb they would inflate to.
@@ -88,7 +88,7 @@ class TokenKeysUnavailableError(UnavailableError):
 
 
 class KeysClientClosedError(LedgerError):
-    """``HttpKeys`` was asked to fetch while its client was not open: a service that never opened it."""
+    """``HttpKeys`` was asked to fetch while its client was not open: an app that never opened it."""
 
     code: ClassVar[str] = "keys_client_closed"
 
@@ -137,14 +137,14 @@ async def _fetch(client: httpx.AsyncClient, url: str) -> bytes:
 
 
 async def fetch_keys(url: str) -> bytes:
-    """The JWKS document at ``url``, with a client of its own: for tools and tests that run no service."""
+    """The JWKS document at ``url``, with a client of its own: for tools and tests that run no app."""
     async with _client() as client:
         return await _fetch(client, url)
 
 
 @final
 class HttpKeys:
-    """Fetches JWKS documents with one HTTP client, open for a service's run: a resource of the service.
+    """Fetches JWKS documents with one HTTP client, open for an app's run: a resource of the app.
 
     The service enters ``opened()`` when it starts and leaves it when it stops (``Service``'s resources hook),
     which closes the client and its connections in order. A fetch while it is not open raises
@@ -221,7 +221,7 @@ class PublishedKeys:
         clock: Callable[[], float] = monotonic,
         registry: CollectorRegistry | None = None,
     ) -> None:
-        """``registry``: where the age of the keys is exported (a service's); ``None``, nowhere."""
+        """``registry``: where the age of the keys is exported (an app's); ``None``, nowhere."""
         self._policy = policy
         self._fetch = fetch
         self._clock = clock

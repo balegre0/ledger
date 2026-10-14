@@ -15,7 +15,7 @@ htmlcov/
 .env
 deploy/local/zitadel/.local/
 
-# DGII spike: the owner's certificate and password file, spike outputs (countries/do/docs/runbooks/testecf-spike.md)
+# DGII spike: the owner's certificate and password file, spike outputs (docs/runbooks/do/testecf-spike.md)
 /.dgii/
 *.p12
 *.pfx

@@ -241,7 +241,6 @@ def channel_entry(schema: str = "us_probe", *, settings: bool = False) -> Channe
             "settings": settings,
             "key": "us-probe-v1",
             "entry_point": "ledger_country_us.channels.probe:PACK",
-            "assembly": "ledger_country_us.channels.probe.assembly:assemble",
             "schema": schema,
             "valid_from": date(2026, 1, 1),
             "environments": ["test"],
@@ -798,3 +797,20 @@ def test_the_api_and_migrate_need_the_headroom_only() -> None:
     App("migrate", settings=sized(SETTINGS, 2), discover=discover)
     with pytest.raises(PoolTooSmallError, match="the api's pool of 1 connections"):
         App("api", settings=sized(TOKENS, 1), discover=discover)
+
+
+def test_an_app_names_every_schema_s_revisions_in_migration_order() -> None:
+    app = App(
+        "migrate", settings=SETTINGS, discover=discovering(module("alpha", depends=["beta"]), module("beta"))
+    )
+    assert [migrations.schema for migrations in app.migrations] == ["platform", "beta", "alpha"]
+
+
+def test_an_app_that_assembles_no_module_says_so(capsys: pytest.CaptureFixture[str]) -> None:
+    """Its logs are configured as it is made: the warning is a line of the app's own output."""
+    App("worker", settings=SETTINGS, discover=discovering(module("alpha")))
+    assert "app.no_modules" not in capsys.readouterr().out
+    App("worker", settings=SETTINGS, discover=discovering())
+    [line] = [line for line in capsys.readouterr().out.splitlines() if "app.no_modules" in line]
+    assert "warning" in line
+    assert "role=worker" in line
