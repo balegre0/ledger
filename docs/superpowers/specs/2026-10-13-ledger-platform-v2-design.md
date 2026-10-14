@@ -7,6 +7,7 @@
 | Supersedes | [`2026-10-11-ledger-platform-design.md`](2026-10-11-ledger-platform-design.md) (v1). v1 stays in the tree as history; where the two disagree, this document wins. The milestone plans 3, 4 and 5 written against v1 are superseded (§16.3) |
 | Binding inputs | `.superpowers/research/00-controller-rulings.md` (R1-R6); evidence in `01-localization`, `02-modularity`, `03-layout-tooling`, `04-saas-platforms`, `05-audit`, `06-dgii-facts` (cited as **[01]**...**[06]**, rulings as **R1**...**R6**) |
 | Decisions recorded as | `docs/adr/0001`...`0010` (§17) |
+| As built (v2-M1) | Reconciled with the code at the end of v2-M1: the manifest model is `ledger_platform.config.manifest`; the root's package lists are a block `sync` generates; settings sections per package (§3.10); the pool sized by settings and checked (§6.7); `serve(role)`; four RLS scopes and the purge role (§6.3); the route guards (§5.2); devtools `gate` deferred (§4.7) |
 
 > **Supersedes v1.** v1 chose seven microservices on NATS JetStream and Temporal with one database per service.
 > v2 keeps v1's product, its DGII requirements, its security, observability and SLO rules, and the chassis
@@ -184,8 +185,8 @@ apps compose them (R1, ADR 0001).
 | `accounting` | journal, accounts, periods (§7.9) | — | — | invoicing and fiscal events | later |
 
 `platform` also owns a schema (`platform`: routing version, schedule leases) and declares its own manifest
-(`packages/platform/manifest.toml`: schema, role `platform_rw`, the `evt` id prefix, schedules
-`platform.purge_inbox`, `platform.purge_idempotency_keys`).
+(`packages/platform/manifest.toml`: schema, role `platform_rw`, the `evt` id prefix, the jobs and hourly and
+daily schedules `platform.purge_idempotency_keys` and `platform.purge_done_jobs`, one at a time each).
 
 Channels (`countries/<cc>/…/channels/<channel>`) also own a schema (`do_ecf`) and run inside the `api`,
 `worker` and `receiver` apps. They are not modules: they depend on `fiscal-kit`, `platform` and `kernel` only,
@@ -477,9 +478,9 @@ type AppRole = Literal["api", "worker", "signer", "receiver", "migrate"]
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModuleContext:
-    manifest: ModuleManifest            # generated, typed
+    manifest: PackageManifest           # generated, typed (its _manifest.py)
     role: AppRole
-    settings: Settings                  # this module's validated settings section (LEDGER_<MODULE>_*)
+    settings: PackageSettings | None    # this module's own section (LEDGER_<MODULE>_*), validated; never the app's
     database: BoundDatabase             # units in this module's role and schema only; no role argument exists
     clock: Clock
     regimes: Regimes
@@ -507,7 +508,7 @@ class ChannelContext:
     definition: ChannelDef
     regime: RegimeDef
     role: AppRole
-    settings: Settings                  # LEDGER_<CHANNEL>_* (e.g. LEDGER_DO_ECF_*)
+    settings: PackageSettings | None    # its own section, LEDGER_<SCHEMA>_* (e.g. LEDGER_DO_ECF_*)
     database: BoundDatabase             # role do_ecf_rw, schema do_ecf
     clock: Clock
     signer: SignerPort
@@ -532,6 +533,24 @@ class ChannelParts:
 `ledger-devtools` treats each `[[channels]]` entry like a module for schemas, roles, grants, id prefixes,
 permissions, subscriptions and job kinds.
 
+**Settings sections (as built).** A module (`[package] settings = true`) or a channel (`settings = true` on its
+entry) declares a section: its variables are `LEDGER_<SECTION>_*`, the section named after the module or the
+channel's schema. Its assembly hands over the model that reads them (`Module.settings`, `ChannelPack.settings`, a
+`PackageSettings` subclass whose `env_prefix` is `section_prefix(section)`). The app reads every declared section
+when it is made, before any package assembles: a declared section without a model, a model for an undeclared one
+or of another prefix is the package's defect; values that cannot work are listed together, never echoed. A
+context holds its own section (`context.section(Model)`), never the app's `Settings`, and `BoundDatabase` keeps its
+pool private: no package reads the database URLs or another's secrets. `sync` registers each section as an entry
+point of group `ledger.settings`; the platform's `Settings` reads those names (it imports nothing), stays closed
+for its own names and leaves the variables under the declared prefixes to their sections; every other unknown
+`LEDGER_*` name is refused. `check` refuses a section whose prefix holds a platform variable or another
+section's.
+
+**Serving (as built).** `ledger_platform.runtime.serve(role)` holds the one Granian setup (`api`, `worker`): one
+worker per replica, no respawn, the server's logs in the app's format, and a kill timeout that follows from the
+stop budget (`WORKER_KILL_TIMEOUT` = `STOP_BUDGET` + 5 s < the orchestrator's 40 s grace). An app's `main` calls
+it and nothing else.
+
 Assembly fails the start, never a later call, when: two packages claim one schema (or a module claims
 `platform`); a module or channel has no schema or no migrations, or hands over migrations of another schema;
 a consumer or job kind is declared without a handler or handed over undeclared; a declared extension point
@@ -548,7 +567,7 @@ provider per port; a point that needs several (a chain of policies) gets a direc
 
 ```
 ledger/
-├── pyproject.toml            workspace root: tool config only; members by glob; no per-package lists
+├── pyproject.toml            workspace root: tool config; members by glob; the lists naming packages are a block `sync` writes
 ├── uv.lock
 ├── README.md                 ~80 lines: what, layout, develop, run (no chassis manual; [05] §7.2)
 ├── AGENTS.md                 conventions for coding agents (points at this spec and the ADRs)
@@ -571,14 +590,14 @@ ledger/
 │   ├── buf.yaml              one buf module; protos for cross-process surfaces only
 │   └── proto/ledger/signer/v1/signer.proto
 ├── tools/
-│   └── devtools/             ledger-devtools: sync, check, gate (§4.7)
+│   └── devtools/             ledger-devtools: sync, check (§4.7; gate deferred)
 ├── deploy/
 │   ├── docker/ledger.Dockerfile     the one image (every app in it; no dev-only distributions)
 │   ├── local/                compose.yaml, images.toml, postgres/init.sql (GENERATED roles), zitadel/, localstack/
 │   └── helm/ledger/          one chart, one values block per app (v2-M6)
 ├── docs/
 │   ├── adr/NNNN-kebab-title.md       MADR; immutable once accepted; superseded-by links
-│   ├── runbooks/<package>/<incident>.md
+│   ├── runbooks/<area>/<incident>.md   one place for every runbook (identity/, do/, ...)
 │   └── superpowers/specs/            design specs (plans live in .superpowers/, untracked)
 └── tests/                    whole-repo tests only (architecture invariants no tool expresses)
 ```
@@ -608,8 +627,10 @@ modules/invoicing/
 
 ### 4.2 Manifest schema: modules and platform (`manifest.toml`)
 
-Validated by `ledger-devtools check` against a typed model (`ledger_devtools.manifests`); unknown keys are
-errors. Every key below is defined; nothing else exists.
+Validated by `ledger-devtools check` against a typed model (`ledger_platform.config.manifest`, which every
+generated `_manifest.py` imports too); unknown keys are errors. Names are read with one rule each: permission
+codes, event types and id prefixes with the kernel's parsers, schema names with the roles' rule
+(`ledger_platform.config.names`), extension points as Protocol names. Every key below is defined; nothing else exists.
 
 ```toml
 [package]
@@ -618,11 +639,13 @@ kind = "module"                     # required; "module" | "country" | "app" | "
 summary = "Commercial documents: invoices, credit and debit notes, their lines and totals."
 owners = ["@balegre0"]              # required (kept for CODEOWNERS generation later)
 status = "active"                   # "active" | "suspended" (suspended: not assembled by any app, not migrated)
+settings = true                     # optional: a settings section LEDGER_INVOICING_* (§3.10); modules only
 
 [dependencies]
 packages = ["kernel", "platform"]                 # workspace packages (not modules)
 modules = ["identity"]                            # modules whose api/events this one imports or consumes; a DAG
 python = ["fastapi>=0.143", "sqlalchemy>=2.1.4"]  # third-party, with floors; deptry checks usage
+test = ["hypothesis>=6.168.5"]                    # what its tests and type checks need besides: the root's dev group
 
 [data]
 schema = "invoicing"                # PostgreSQL schema == role prefix; unique across the repo
@@ -700,8 +723,7 @@ entry_point = "ledger_country_do.regime:REGIME"
 
 [[channels]]                        # treated like a module by devtools (schema, roles, grants, routing)
 key = "do-ecf-v1"                   # <cc>-<format>-v<N>; one key per format major version
-entry_point = "ledger_country_do.channels.ecf_v1:CHANNEL"
-assembly = "ledger_country_do.channels.ecf_v1.assembly"
+entry_point = "ledger_country_do.channels.ecf_v1:CHANNEL"   # its ChannelPack: entry, regime, assembly
 schema = "do_ecf"                   # one schema per channel family; v2 of the format shares it
 valid_from = "2019-01-01"           # legal window of this format version; valid_until optional
 environments = ["testecf", "certecf", "ecf"]
@@ -710,6 +732,7 @@ document_kinds = ["invoice", "credit_note", "debit_note"]   # commercial kinds i
 directions = ["sales", "purchase"]
 http_prefixes = ["/v1/do"]          # public API (api app); receiver routes under /do-ecf-v1 (receiver app)
 tier = "bronze"                     # claimed quality tier (§8.8); checked by review until tier machinery exists
+settings = true                     # optional: a settings section LEDGER_DO_ECF_* (§3.10)
 
 [[channels.ids]]                    # same shape as a module's [[ids]]
 prefix = "rng"
@@ -817,14 +840,16 @@ metric ([02] Kraken).
 
 ### 4.7 devtools (`tools/devtools`, `ledger-devtools`)
 
-A workspace member under the full gate. Built now: `sync`, `check`, `gate`. Deferred (§16.4): `affected`
-and the CI matrix, `scaffold` (copier templates), CODEOWNERS and generated reference docs.
+A workspace member under the full gate. Built now: `sync` and `check`. Deferred (§16.4): `gate` (`uv run poe
+check` is the gate, §14.3), `affected` and the CI matrix, `scaffold` (copier templates), CODEOWNERS, generated
+reference docs, identity's generated role table (v2-M2; a workspace test holds identity's hand table equal to
+every manifest's permissions) and event schema snapshots.
 
 | Command | Does |
 |---|---|
-| `sync` | From manifests: each package's `pyproject.toml` (dependencies, entry points `ledger.modules`, `ledger.countries.regimes`, `ledger.countries.channels`, console scripts); `_manifest.py` per package; `.importlinter`; per-package coverage targets; `deploy/local/postgres/init.sql` (schemas, roles, grants, for modules, channels and platform); identity's generated role → permission table (§7.7); event JSON Schema snapshots |
-| `check` | Validates every manifest (schema, name == directory, unique schema/prefix/permission/event type/consumer/job kind/http prefix, module DAG including subscription edges, declared deps == imports via deptry, event schema snapshots additive within a version, channel `valid_from` ordering); fails if `sync` would change any file |
-| `gate` | Runs per package: ruff, basedpyright, mypy, pytest with that package's coverage target, deptry, vulture; then repo-wide: import-linter, typos, buf lint/breaking, `check`. `poe check` wraps it |
+| `sync` | From manifests: each package's `pyproject.toml` (dependencies, entry points `ledger.modules`, `ledger.countries.regimes`, `ledger.countries.channels`, `ledger.settings`, console scripts, coverage targets, deptry's module map read from the installed distributions' metadata); `_manifest.py` for a module, a package with a schema and a country with a channel; `.importlinter`; `deploy/local/postgres/init.sql` (schemas, roles, grants, for modules, channels and platform); each module's `openapi.json`; the root `pyproject.toml`'s generated block (the `workspace` dependency group with every dev-only package and every manifest's test dependencies, `[tool.uv.sources]`, ruff's `known-first-party`), so adding a package touches only its directory and generated files |
+| `check` | Validates every manifest (schema, name == directory, a country's `iso` == its directory and its regimes' keys its own, unique schema/prefix/permission/event type/consumer/job kind/schedule/http prefix, module and package DAGs including subscription edges, schedules enqueuing declared kinds, modules made of layers, settings sections apart from the platform's names and each other); fails if `sync` would change or delete any file; checks the repository around the manifests (the root's block, members without a manifest, image pins with digests, the build context). Deferred: event schema snapshots, channel `valid_from` ordering (deptry runs in the gate) |
+| `gate` | Deferred: `uv run poe check` runs the gate (§14.3) |
 
 ---
 
@@ -857,15 +882,15 @@ outbox, inbox and jobs under `data`; v2 keeps their **tables** in `data` (`chass
 
 | Subpackage | Public surface | From v1 (`libs/platform`) |
 |---|---|---|
-| `config` | `Settings` (base, `LEDGER_*`, fail-closed on unknown variables), `InvalidOptionError(component, option, requirement, value)` (one code, `invalid_option`); the manifest model `config.manifest` (what devtools validates `manifest.toml` with and every generated `_manifest.py` imports, hence below every other layer but `_manifest`'s data) | `settings.py` (kept), `options.py` (12 subclasses collapsed into one, [05] D7) |
+| `config` | `Settings` (base, `LEDGER_*`, fail-closed on unknown variables, the declared sections' prefixes left to them), `PackageSettings` and `section_prefix` (a package's section, §3.10), `InvalidOptionError(component, option, requirement, value)` (one code, `invalid_option`); `config.names` (`PLATFORM`, the schema-name rule); the manifest model `config.manifest` (what devtools validates `manifest.toml` with and every generated `_manifest.py` imports, hence below every other layer but `_manifest`'s data) | `settings.py` (kept), `options.py` (12 subclasses collapsed into one, [05] D7) |
 | `observability` | `configure_logging`, `Tracing`, `Health`, `Check`, metrics helpers (`Telemetry`, the per-package logger and tracer, is `runtime`'s: it lives in `runtime.contexts`) | `logs.py`, `tracing.py`, `health.py`, `probe.py` (kept, moved); validation-issue rendering shared with `http` ([05] D10) |
-| `runtime` | `App`, `AppRole`, `ModuleContext`, `ModuleParts`, `ChannelContext`, `ChannelParts`, `Call`, `SystemCall`, `facade` (decorator with the open-unit guard), `UnitOpenError`, `Supervisor`, `Telemetry`, `registries.Regimes`, `packs.Channels`, `run(app)` | `service.py` split, `supervision.py` kept, `lifecycle.py` merged into `AsyncExitStack` use, `interruptions.py` deleted |
-| `data` | `Database`, `BoundDatabase` (`unit(scope)`), `UnitOfWork` (`uow.publish(event)`, `uow.jobs`, `uow.audit(...)`), `tenant_table`/`organization_table`/`moded_organization_table` (scope columns, tenant-carrying FKs, RLS), `chassis_schema_v1(op, schema)`, `Migrations` | `database.py` split, `migrations.py` kept (data-migration helpers deleted until needed), `schema.py` merged |
+| `runtime` | `App`, `AppRole`, `ModuleContext`, `ModuleParts`, `ChannelContext`, `ChannelParts`, `Call`, `SystemCall`, `facade` (decorator with the open-unit guard), `UnitOpenError`, `Supervisor`, `Telemetry`, `registries.Regimes`, `packs.Channels`, `serve(role)` (Granian, §3.10) | `service.py` split, `supervision.py` kept, `lifecycle.py` merged into `AsyncExitStack` use, `interruptions.py` deleted |
+| `data` | `Database` (`Pooling`: overflow, through a pooler), `BoundDatabase` (`unit(scope)`; its pool private), `UnitOfWork` (`uow.publish(event)`, `uow.jobs`, `uow.audit(...)`), `ModuleTable` (the base of every package's tables: `class IdentityTable(ModuleTable, schema="identity")`, the one class ruff is told SQLAlchemy reads), `RlsScope` and `policy(table, scope)`, `chassis_schema_v1(op, schema)`, `SchemaMigrations` | `database.py` split, `migrations.py` kept (data-migration helpers deleted until needed), `schema.py` merged |
 | `data.queue` | the claim/lease/fencing/retry engine shared by inbox and jobs (`claim`, `Backoff`, `Lease`), and where a stopped worker's loop ends (`parked`, `being_cancelled`), below `events` and `jobs` | new; replaces the relay half of `outbox.py` and the delivery loop of `consumer.py` |
 | `events` | `Event`, `RawEvent` (generic envelope, for webhooks), `EventBus`, `PostgresEventBus`, `ConsumerSpec`, `Dispatcher` (fan-out), codec | `outbox.py` writer kept, `consumer.py` inbox part kept; JetStream parts deleted |
 | `jobs` | `Jobs` (enqueue, wake, wake_all), `JobSpec`, `ScheduleSpec`, `Done`, `RunAgain`, `Park` | new |
 | `auth` | `TokenVerifier`, `PublishedKeys`, `ClaimsProfile` port + `zitadel` profile, `Access`, `PermissionDeniedError`, `CompanyNotFoundError` | `authentication.py` split ([05] §4.1), `authorization.py` minus `CachedPermissions` |
-| `http` | `create_app`, `Problem`, `Page[T]`, dependencies (`authenticated`, `in_company`, `in_organization`, `requires(permission)`, `page_request`, `if_match`, `idempotency_key`, `api_version`), `etag`, `precondition_checked`, `problems()`/`success()` OpenAPI helpers | `web.py` split, `routes.py` split into deps, `idempotency.py` and `request_fields.py` moved here; identity's `api/context.py` helpers moved in ([05] D22-D25) |
+| `http` | `create_app`, `Problem`, `Page[T]`, route guards (`authenticated`; the company from the path, `company_in_path`, or from the `Ledger-Company` header, `company_in_header`; `allowed(in_company, permission)`; `holding(caller, role)`, a provider role in the caller's organization; `in_organization`; `unguarded_routes` for the test that every route is guarded), `page_query`, `if_match`, `idempotency_key`, `ledger_mode`, `etag`, `precondition_checked`, `problems()`/`success()` OpenAPI helpers; `api_version` arrives with dated versions | `web.py` split, `routes.py` split into deps, `idempotency.py` and `request_fields.py` moved here; identity's `api/context.py` helpers moved in ([05] D22-D25) |
 | `grpc` | `serve`, `GuardInterceptor` (per-caller token + method allowlist), `call_unary`, `RemoteError` family | `grpc_server.py`, `grpc_client.py` (kept, signer only); one kind → status table shared with `http` ([05] D5) |
 | `blobs` | `ImmutableStore` (`put_once(key, bytes, retain_until)`, `get`), `S3ImmutableStore` (object lock, compliance mode, `If-None-Match: *`, SHA-256 checksums); also the `ArchivePort` implementation handed to channels | new (from M4 plan's archive adapter) |
 
@@ -927,7 +952,7 @@ new functions. Generated by `ledger-devtools sync` into `init.sql` (local) and t
 
 ### 6.3 Row-level security
 
-Three scopes, one builder (`platform.data.rls.policy(table, scope)`, [05] D13), one policy per command; the
+Four scopes, one builder (`platform.data.rls.policy(table, scope)`, [05] D13), one policy per command; the
 settings are read through `NULLIF(…, '')` because `current_setting(…, true)` returns `''` (not `NULL`) once a
 pooled connection has seen the setting, and `''::uuid` would raise:
 
@@ -936,6 +961,7 @@ pooled connection has seen the setting, and `''::uuid` would raise:
 USING (organization_id = (SELECT NULLIF(current_setting('ledger.organization_id', true), '')::uuid)
    AND company_id      = (SELECT NULLIF(current_setting('ledger.company_id', true), '')::uuid)
    AND mode            = (SELECT NULLIF(current_setting('ledger.mode', true), '')))
+-- scope "company": organization_id, company_id; a company's rows shared by both modes (establishments, branches)
 -- scope "organization": organization_id only (organizations, companies, memberships); visible to the
 --   organization's transactions and to those of its companies
 -- scope "moded_organization": organization_id + mode (API clients, organization-level idempotency keys)
@@ -1073,6 +1099,11 @@ session advisory locks. Two things connect **directly** to PostgreSQL (`LEDGER_D
 worker's `LISTEN` connection, and `ledger-migrate` (session advisory locks, DDL). `LEDGER_DATABASE_POOLED=true` says
 `LEDGER_DATABASE_URL` goes through a transaction pooler: psycopg then prepares no statement on it. The worker
 refuses to start without the direct URL.
+
+The pool is sized by `LEDGER_DATABASE_POOL_SIZE` (default 20) and grows by `LEDGER_DATABASE_POOL_OVERFLOW`
+(default 10) for a burst. An app refuses to start with a pool smaller than its role may hold at once
+(`PoolTooSmallError`, with the numbers): for the worker, every job kind's `concurrency`, one connection per inbox
+runner, per job runner, the fan-out and the scheduler, and a headroom of 2; for the others, the headroom.
 
 ### 6.8 Legal archive and backups
 
@@ -1709,7 +1740,7 @@ v1 §9 holds except where noted.
 - **Operator controls** (`ledger-worker` subcommands, audited): list stuck documents by company/state, wake a
   parked job or all parked jobs of a kind and company, replay a dead inbox row, re-route or delete an unrouted
   outbox event, record an enrollment's authority evidence.
-- Dashboards as code; a runbook linked from every alert (`docs/runbooks/<package>/`).
+- Dashboards as code; a runbook linked from every alert (`docs/runbooks/<area>/`).
 
 ## 12. Performance targets and SLOs
 
@@ -1780,8 +1811,9 @@ v1 §9 holds except where noted.
 ### 14.3 Gate (R6)
 
 ruff (ALL), basedpyright `all` + mypy `--strict` (warnings fail), import-linter (generated), deptry, vulture on
-`src` only, typos, `buf lint`/`buf breaking`, `ledger-devtools check`, pytest per package with 100 % branch,
-pip-audit; zero `type: ignore`/`noqa`/`pragma: no cover`/tool directives (the `suppressions` step).
+`src` and tests (`poe dead-src` reports code only tests use), typos, `buf lint` (`buf breaking` in CI),
+`ledger-devtools check`, pytest per package with 100 % branch; zero `type: ignore`/`noqa`/`pragma: no
+cover`/tool directives (the `suppressions` step). As built: `uv run poe check`; pip-audit is not in it yet.
 
 ### 14.4 CI
 
@@ -1821,7 +1853,7 @@ brackets.
 
 | v1 item | Verdict | v2 target / reason |
 |---|---|---|
-| `pyproject.toml` | R | members by glob; per-package lists generated or removed; one `gate` task [05 §7.1, D32] |
+| `pyproject.toml` | R | members by glob; the lists naming packages a generated block; `poe check` is the gate [05 §7.1, D32] |
 | `tests/test_workspace.py` | D | lists are generated and checked by `ledger-devtools check` [05 §7.1] |
 | `conftest.py` (root, Windows selector loop) | Mv | `ledger_testing` pytest plugin |
 | `.github/workflows/ci.yml` | R | one job running `poe check` (matrix later, §16.4); buf image from one variable [05 D31] |
@@ -1950,7 +1982,7 @@ owner's review.
 
 | # | Milestone | Done when | Runs |
 |---|---|---|---|
-| v2-M1a | **Chassis-lite** (week 1) | new tree (packages, modules, countries, apps, tools); `ledger-devtools sync/check/gate`; kernel v2; platform `config`, `observability`, `runtime` (App, contexts, parts, facade guard, registries), `data` (units with `SET LOCAL ROLE`, RLS builder with NULLIF, `chassis_schema_v1`, migrations), `events` (outbox, subscriptions, fan-out, inbox runner), `jobs` (enqueue, claim with fencing, schedules on lease rows), `http` basics; `api`/`worker`/`migrate` apps; testing plugin, xdist; one image; compose without NATS | in parallel with M1b |
+| v2-M1a | **Chassis-lite** (week 1) | new tree (packages, modules, countries, apps, tools); `ledger-devtools sync/check`; kernel v2; platform `config`, `observability`, `runtime` (App, contexts, parts, facade guard, registries), `data` (units with `SET LOCAL ROLE`, RLS builder with NULLIF, `chassis_schema_v1`, migrations), `events` (outbox, subscriptions, fan-out, inbox runner), `jobs` (enqueue, claim with fencing, schedules on lease rows), `http` basics; `api`/`worker`/`migrate` apps; testing plugin, xdist; one image; compose without NATS | in parallel with M1b |
 | v2-M1b | **DGII spike** (week 1) | seed → signed seed → token → sign → submit → poll for a type 31, and an RFCE for a type 32, against `TesteCF`; until access exists (Q2), against the fake DGII written from DGII's documentation (`ledger-country-do-testing`). Throwaway code allowed outside the gate in `.superpowers/spikes/`; findings recorded; XSDs vendored and pinned (kept) | in parallel with M1a |
 | v2-M2 | **Identity v2 ∥ Signer** | identity moved and adapted (jurisdiction, currency, qualified tax ids + registry, modes, TypeIDs, `Ledger-Version` pin storage/echo, permissions from manifests, minimal establishments with time zone, API clients, Zitadel claims profile, `GET /v1/countries`); signer module + app: gRPC contract, local backend (KMS envelope, LocalStack) **and** the remote-backend port with a fake entity, import/describe/sign XML/sign seed, audit, per-caller tokens, expiry schedule | two tracks |
 | v2-M3 | **`do-ecf-v1` emission with thin invoicing and fiscal** | fiscal-kit minimal (§8.4); regime `do`; builders for 10 types + RFCE; ranges with released numbers; e-CF state machine on jobs; DGII client with breaker; archive; thin invoicing (`/v1/invoices`, `external_reference`, `IssuePolicy`, `apply_fiscal_status`); thin fiscal (enrollments, routing, synchronous numbering and signing, recovery consumer); webhooks minimal; every type accepted on the fake DGII, then on `TesteCF` | critical path |
@@ -1965,7 +1997,7 @@ items in the header note are **not** on this list.
 
 | Deferred | Until | What remains now |
 |---|---|---|
-| devtools `affected`, CI matrix, `scaffold` (copier templates), CODEOWNERS, generated reference docs | > 8 packages or a second contributor | `sync`, `check`, `gate`; one CI job |
+| devtools `gate`, `affected`, CI matrix, `scaffold` (copier templates), CODEOWNERS, generated reference docs | > 8 packages or a second contributor | `sync`, `check`; `poe check` as the gate; one CI job |
 | `countries/zz` synthetic country | second country work | review rule on country diffs |
 | Quality-tier rule catalogue and its automated check | second channel | tier claim in the manifest, checked in review |
 | Dated-version transforms (`VersionChange`, changelog generation) | first breaking change | header parsing, pin storage (organization, API client), precedence header > API client > organization, echo |
@@ -2000,7 +2032,7 @@ Written as `docs/adr/NNNN-*.md` (MADR, short), status *Proposed* until the owner
 | [0006](../../adr/0006-qualified-tax-ids.md) | Tax identifiers are `(scheme, value)` validated by regimes, check digits reported unless enforced, one global registry of active taxpayers |
 | [0007](../../adr/0007-test-and-live-modes.md) | Test vs live mode is a tenancy dimension on every moded row, credential and RLS policy; live mode gated on authority authorization |
 | [0008](../../adr/0008-dated-api-versions.md) | `/v1` path major plus pinned dated versions (transforms deferred); TypeID public ids; thin Standard Webhooks |
-| [0009](../../adr/0009-manifest-driven-workspace.md) | A uv workspace with one package per unit, `manifest.toml` as the source of truth, generated lists and contracts, devtools sync/check/gate |
+| [0009](../../adr/0009-manifest-driven-workspace.md) | A uv workspace with one package per unit, `manifest.toml` as the source of truth, generated lists and contracts, devtools sync/check (gate deferred) |
 | [0010](../../adr/0010-signer-isolation.md) | Private keys only in a separate signer process, reached over gRPC with per-caller allowlists; two signing backends (local key, remote INDOTEL-authorized entity) |
 
 ## 18. Risks

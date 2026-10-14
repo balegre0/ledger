@@ -114,7 +114,8 @@ of the workspace. Both plans merge into `main`; these rules keep them compatible
 
 1. **Root `pyproject.toml`.** The spike adds its two distributions to v1's hand lists. If it merges before Task 1,
    Task 1 moves its paths with everything else (`countries/` is already at its v2 place); if after, the merge adds
-   them to the lists as they are then. From Task 19 the lists are generated and the spike's packages get manifests.
+   them to the lists as they are then. From Task 19 the spike's packages get manifests; as built (final review),
+   the lists are generated: `ledger-devtools sync` writes them as the root `pyproject.toml`'s marked block.
 2. **Nested member** (the spike's verified uv finding): `countries/<cc>/testing` must not declare
    `[tool.uv.sources]` of its own. Task 7's generator writes no sources for a nested member, and its naming rule
    maps `countries/<cc>/testing` to the name `<cc>-testing` and the distribution `ledger-country-<cc>-testing`
