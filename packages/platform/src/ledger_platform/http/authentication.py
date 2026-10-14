@@ -60,11 +60,6 @@ class Authentication:
         verifier = TokenVerifier(policy, keys=PublishedKeys(policy, fetch=keys, registry=registry))
         return cls(authenticated(verifier), keys)
 
-    @property
-    def configured(self) -> bool:
-        """Whether tokens can be proven (every token setting is set)."""
-        return self._keys is not None
-
     def resources(self) -> tuple[AbstractAsyncContextManager[object], ...]:
         """What the app opens while it runs: the client that fetches the provider's keys, if any."""
         return () if self._keys is None else (self._keys.opened(),)

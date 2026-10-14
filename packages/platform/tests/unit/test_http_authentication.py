@@ -39,7 +39,7 @@ async def test_configured_from_the_token_settings_it_proves_callers(local_issuer
     )
     registry = CollectorRegistry()
     authentication = Authentication.of(settings, registry)
-    assert authentication.configured
+    assert len(authentication.resources()) == 1  # the client that fetches the provider's keys
     transport = httpx.ASGITransport(served(authentication))
     async with AsyncExitStack() as stack:
         for resource in authentication.resources():
@@ -52,7 +52,6 @@ async def test_configured_from_the_token_settings_it_proves_callers(local_issuer
 
 async def test_without_token_settings_it_proves_nobody() -> None:
     authentication = Authentication.of(SETTINGS)
-    assert not authentication.configured
     assert authentication.resources() == ()
     transport = httpx.ASGITransport(served(authentication))
     async with httpx.AsyncClient(transport=transport, base_url="http://ledger.test") as client:
