@@ -10,6 +10,7 @@ packages = ["kernel"]
 python = [
     "alembic>=1.20.0",
     "fastapi>=0.143.0",
+    "granian[uvloop]>=2.8.4",
     "grpcio>=1.84.0",
     "httpx>=0.28.1",
     "joserfc>=1.7.5",

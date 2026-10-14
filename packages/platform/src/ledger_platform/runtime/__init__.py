@@ -1,4 +1,4 @@
-"""Running an app: assembling its modules and channels, calls, facades, typed directories, supervision."""
+"""Running an app: assembly of modules and channels, serving, calls, facades, directories, supervision."""
 
 from ledger_platform.config.manifest import AppRole
 from ledger_platform.config.settings import Settings
@@ -15,7 +15,7 @@ from ledger_platform.runtime.contexts import (
 )
 from ledger_platform.runtime.facade import UnitOpenError, facade
 from ledger_platform.runtime.keys import Key
-from ledger_platform.runtime.serving import SERVER_LOGGERS, serving_logs
+from ledger_platform.runtime.serving import SERVER_LOGGERS, serve, serving_logs
 from ledger_platform.runtime.supervision import Supervisor
 
 __all__ = [
@@ -36,5 +36,6 @@ __all__ = [
     "Telemetry",
     "UnitOpenError",
     "facade",
+    "serve",
     "serving_logs",
 ]

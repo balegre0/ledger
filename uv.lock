@@ -671,17 +671,11 @@ name = "ledger-app-api"
 version = "0.1.0"
 source = { editable = "apps/api" }
 dependencies = [
-    { name = "fastapi" },
-    { name = "granian", extra = ["uvloop"] },
     { name = "ledger-platform" },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "fastapi", specifier = ">=0.143.0" },
-    { name = "granian", extras = ["uvloop"], specifier = ">=2.8.4" },
-    { name = "ledger-platform", editable = "packages/platform" },
-]
+requires-dist = [{ name = "ledger-platform", editable = "packages/platform" }]
 
 [[package]]
 name = "ledger-app-migrate"
@@ -699,17 +693,11 @@ name = "ledger-app-worker"
 version = "0.1.0"
 source = { editable = "apps/worker" }
 dependencies = [
-    { name = "fastapi" },
-    { name = "granian", extra = ["uvloop"] },
     { name = "ledger-platform" },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "fastapi", specifier = ">=0.143.0" },
-    { name = "granian", extras = ["uvloop"], specifier = ">=2.8.4" },
-    { name = "ledger-platform", editable = "packages/platform" },
-]
+requires-dist = [{ name = "ledger-platform", editable = "packages/platform" }]
 
 [[package]]
 name = "ledger-country-do"
@@ -823,6 +811,7 @@ source = { editable = "packages/platform" }
 dependencies = [
     { name = "alembic" },
     { name = "fastapi" },
+    { name = "granian", extra = ["uvloop"] },
     { name = "grpcio" },
     { name = "httpx" },
     { name = "joserfc" },
@@ -844,6 +833,7 @@ dependencies = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.20.0" },
     { name = "fastapi", specifier = ">=0.143.0" },
+    { name = "granian", extras = ["uvloop"], specifier = ">=2.8.4" },
     { name = "grpcio", specifier = ">=1.84.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "joserfc", specifier = ">=1.7.5" },
