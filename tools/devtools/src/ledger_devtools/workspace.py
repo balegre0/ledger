@@ -7,6 +7,7 @@ from typing import ClassVar, Final, Self, final
 lazy from collections.abc import Mapping
 lazy from pathlib import Path
 
+from ledger_devtools.tree import Scan, scan
 from ledger_kernel.errors import LedgerError
 from ledger_platform.config.manifest import InvalidManifestError, PackageKind, load_manifest
 from ledger_platform.config.names import PLATFORM
@@ -97,11 +98,14 @@ class Workspace:
 
     root: Path
     packages: tuple[Package, ...]
+    seen: Scan = field(default=Scan((), ()), compare=False)
+    """What git would see under ``root`` (``ledger_devtools.tree``): all devtools ever reads or deletes."""
 
     @classmethod
     def load(cls, root: Path) -> Self:
         """Read every manifest under ``root``; every problem is reported at once, with its path."""
-        found = sorted({path for pattern in MANIFEST_GLOBS for path in root.glob(pattern)})
+        seen = scan(root)
+        found = [root / path for path in seen.files if any(path.full_match(glob) for glob in MANIFEST_GLOBS)]
         if not found:
             raise WorkspaceError((f"no manifest.toml under {root}",))
         packages: list[Package] = []
@@ -117,7 +121,7 @@ class Workspace:
             packages.append(Package(path.parent.relative_to(root), manifest, tomllib.loads(text)))
         if problems:
             raise WorkspaceError(tuple(problems))
-        return cls(root, tuple(sorted(packages, key=lambda package: package.distribution)))
+        return cls(root, tuple(sorted(packages, key=lambda package: package.distribution)), seen)
 
     def by_name(self, name: str) -> Package:
         """The package named ``name`` (``KeyError`` if none)."""
@@ -160,16 +164,21 @@ class Workspace:
 
     def children(self, package: Package) -> tuple[str, ...]:
         """The top-level submodules and subpackages of ``package``'s import package on disk, sorted."""
-        source = self.root / package.source
-        if not source.is_dir():
-            return ()
-        names = (
-            entry.stem if entry.is_file() else entry.name
-            for entry in source.iterdir()
-            if (entry.is_dir() and entry.name != "__pycache__")
-            or (entry.suffix == ".py" and entry.name != "__init__.py")
-        )
-        return tuple(sorted(names))
+        return self.entries(package.source)
+
+    def entries(self, directory: Path) -> tuple[str, ...]:
+        """The modules and packages git sees directly in ``directory`` (relative to the root), sorted."""
+        packages = {path.name for path in self.seen.directories if path.parent == directory}
+        modules = {
+            path.stem
+            for path in self.seen.files
+            if path.parent == directory and path.suffix == ".py" and path.name != "__init__.py"
+        }
+        return tuple(sorted((packages - {"__pycache__"}) | modules))
+
+    def matching(self, pattern: str) -> tuple[Path, ...]:
+        """The visible files whose path relative to the root matches ``pattern``."""
+        return tuple(path for path in self.seen.files if path.full_match(pattern))
 
     def schemas(self) -> tuple[str, ...]:
         """Every schema in migration order: the platform's, then each module's, then each channel's."""

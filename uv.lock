@@ -762,6 +762,7 @@ source = { editable = "tools/devtools" }
 dependencies = [
     { name = "ledger-kernel" },
     { name = "ledger-platform" },
+    { name = "pathspec" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
 ]
@@ -770,6 +771,7 @@ dependencies = [
 requires-dist = [
     { name = "ledger-kernel", editable = "packages/kernel" },
     { name = "ledger-platform", editable = "packages/platform" },
+    { name = "pathspec", specifier = ">=1.1.1" },
     { name = "pydantic", specifier = ">=2.14.1" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
 ]

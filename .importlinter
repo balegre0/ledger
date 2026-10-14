@@ -42,6 +42,7 @@ forbidden_modules =
     lxml
     multipart
     opentelemetry
+    pathspec
     prometheus_client
     psycopg
     py
@@ -256,6 +257,7 @@ forbidden_modules =
     lxml
     multipart
     opentelemetry
+    pathspec
     prometheus_client
     psycopg
     py
@@ -307,6 +309,7 @@ forbidden_modules =
     lxml
     multipart
     opentelemetry
+    pathspec
     prometheus_client
     psycopg
     py
@@ -392,6 +395,7 @@ forbidden_modules =
     lxml
     multipart
     opentelemetry
+    pathspec
     prometheus_client
     psycopg
     py
@@ -425,6 +429,7 @@ forbidden_modules =
     lxml
     multipart
     opentelemetry
+    pathspec
     prometheus_client
     psycopg
     py
@@ -458,6 +463,7 @@ forbidden_modules =
     ledger_devtools
     ledger_testing
     multipart
+    pathspec
     py
     pytest
     python_multipart

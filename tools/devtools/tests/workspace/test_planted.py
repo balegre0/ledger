@@ -15,15 +15,20 @@ import pytest
 from ledger_devtools.cli import main
 from ledger_devtools.generate import targets
 from ledger_devtools.root import BEGIN, END
+from ledger_devtools.tree import visible_files
 from ledger_devtools.workspace import Workspace
 
 ROOT: Final = Path(__file__).resolve().parents[4]
 COPIED: Final = ("packages", "modules", "countries", "apps", "tools", "deploy")
-ROOT_FILES: Final = ("pyproject.toml", ".importlinter", ".dockerignore")
-LEFT_OUT: Final = shutil.ignore_patterns(
-    "tests", "__pycache__", ".*cache*", ".env*", ".dgii", "*.p12", "*.pfx", ".local", "node_modules"
-)
-"""Tests, caches and every local secret stay behind: devtools reads none of them."""
+ROOT_FILES: Final = ("pyproject.toml", ".importlinter", ".dockerignore", ".gitignore")
+UNREADABLE: Final = b"TZif2\x00\x00\xff\xfe\x80 not UTF-8"
+IGNORED: Final = {
+    "deploy/local/.venv/lib/python3.15/site-packages/tzdata/zoneinfo/UTC": UNREADABLE,
+    "libs/platform/build/lib/__pycache__/x.cpython-315.pyc": UNREADABLE,
+    "tools/build/manifest.toml": UNREADABLE,
+    "packages/.venv/manifest.toml": UNREADABLE,
+}
+"""What a working copy holds besides the repository (a virtual environment, build leftovers), all ignored."""
 PLANTED: Final = ("modules/books", "countries/zz")
 BOOKS: Final = """[package]
 name = "books"
@@ -89,22 +94,26 @@ SOURCES: Final = {
 
 @pytest.fixture
 def repository(tmp_path: Path) -> Path:
-    """What devtools reads of the repository, copied."""
-    for directory in COPIED:
-        shutil.copytree(ROOT / directory, tmp_path / directory, ignore=LEFT_OUT)
-    for name in ROOT_FILES:
-        shutil.copyfile(ROOT / name, tmp_path / name)
+    """What devtools reads of the repository (no test, nothing ignored), then what git would ignore."""
+    for relative in visible_files(ROOT):
+        if (
+            relative.parts[0] in COPIED and "tests" not in relative.parts
+        ) or relative.as_posix() in ROOT_FILES:
+            (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / relative, tmp_path / relative)
+    for ignored, content in IGNORED.items():
+        (tmp_path / ignored).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / ignored).write_bytes(content)
     return tmp_path
 
 
 def snapshot(root: Path) -> dict[Path, str]:
-    """Every file of ``root`` outside the planted directories, by path, as text."""
+    """Every file of ``root`` git would see, outside the planted directories, by path, as text."""
     return {
-        path.relative_to(root): path.read_text(encoding="utf-8")
-        for path in root.rglob("*")
-        if path.is_file()
-        and path.suffix in {".toml", ".py", ".json", ".sql", ".yaml", ""}
-        and not any(path.relative_to(root).as_posix().startswith(f"{planted}/") for planted in PLANTED)
+        relative: (root / relative).read_text(encoding="utf-8")
+        for relative in visible_files(root)
+        if relative.suffix in {".toml", ".py", ".json", ".sql", ".yaml", ""}
+        and not any(relative.as_posix().startswith(f"{planted}/") for planted in PLANTED)
     }
 
 
