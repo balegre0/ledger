@@ -2,11 +2,12 @@
 
 A test whose progress depends on a task of its own (a relay, a consumer, a transaction held behind a lock)
 cannot await that progress: it waits until something it can observe says so. ``eventually`` polls a check;
-``waits_for_a_lock`` is the check that a racing transaction is now held behind another one.
+``waits_for_a_lock`` is the check that a racing transaction is now held behind another one. ``Watched`` waits
+for tasks that code under test started and keeps no handle on: a test never lets them run with ``sleep(0)``.
 """
 
 import asyncio
-from typing import Final
+from typing import Final, final
 lazy from collections.abc import Awaitable, Callable
 
 import psycopg
@@ -42,3 +43,40 @@ async def waits_for_a_lock(url: str) -> bool:
         cursor = connection.cursor(row_factory=args_row(bool))
         await cursor.execute(_LOCK_WAITS)
         return await cursor.fetchone() is True
+
+
+class NoTaskError(AssertionError):
+    """``Watched.enter`` called outside any task (from a callback): there is no task to wait for."""
+
+    def __init__(self) -> None:
+        super().__init__("Watched.enter is called from the task to watch, not from a callback")
+
+
+@final
+class Watched:
+    """The tasks some code ran in, for a test to wait until every one has ended and been seen to end.
+
+    The code a test hands over (a check, a worker) calls ``enter`` first. A task runs its done callbacks in
+    the order they were added, so once ``ended`` returns, every callback the code under test hooked on the end
+    of those tasks has run. ``ended`` must be awaited before the last of them ends.
+    """
+
+    __slots__ = ("_tasks",)
+
+    def __init__(self) -> None:
+        self._tasks: list[asyncio.Task[object]] = []
+
+    def enter(self) -> None:
+        """Watch the task this is called from; ``NoTaskError`` outside any task."""
+        task = asyncio.current_task()
+        if task is None:
+            raise NoTaskError
+        self._tasks.append(task)
+
+    async def ended(self) -> None:
+        """Return once every watched task has ended and the done callbacks added before this call have run.
+
+        The tasks are forgotten then: what they ended with (an exception and its traceback) is not kept alive.
+        """
+        tasks, self._tasks = self._tasks, []
+        await asyncio.wait(tasks)

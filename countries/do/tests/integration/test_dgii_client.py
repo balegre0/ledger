@@ -872,7 +872,7 @@ async def test_a_document_refused_401_is_not_sent_again_once_too_little_time_is_
         sent.append(request.url.path.rsplit("/", 1)[-1])
         if (found := seeded(request.url.path)) is not None:
             return found
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(1.0)  # a slow server: its refusal comes a second after the request
         return reply(401)
 
     tight = DgiiTimeouts(connect=5, total=2, call=2.5)

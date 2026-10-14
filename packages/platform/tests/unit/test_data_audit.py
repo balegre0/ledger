@@ -32,7 +32,7 @@ def test_the_actor_is_restored_when_the_block_raises() -> None:
 
 
 async def test_an_actor_bound_in_a_task_is_not_seen_by_a_sibling_started_before_it() -> None:
-    bound = asyncio.Event()
+    bound, looked = asyncio.Event(), asyncio.Event()
 
     async def sibling() -> Actor | None:
         await bound.wait()
@@ -40,11 +40,13 @@ async def test_an_actor_bound_in_a_task_is_not_seen_by_a_sibling_started_before_
             return current_actor()
         except MissingActorError:
             return None
+        finally:
+            looked.set()
 
     async def acting() -> None:
         with acting_as(USER):
             bound.set()
-            await asyncio.sleep(0)
+            await looked.wait()  # still bound while the sibling looks
 
     async with asyncio.TaskGroup() as group:
         seen = group.create_task(sibling())

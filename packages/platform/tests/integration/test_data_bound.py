@@ -44,6 +44,7 @@ from ledger_platform.data.unit_of_work import (
     open_unit,
 )
 from ledger_testing.database import app_url
+from ledger_testing.waiting import eventually
 lazy from ledger_kernel.tenancy import Scope
 lazy from ledger_platform.data.notifier import Channel
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
@@ -132,6 +133,11 @@ INSERT_KEY: Final = text(
     """
 )
 OUTBOX_COUNT: Final = text("SELECT count(*) FROM probe.outbox")
+SLEEPING: Final = """
+    SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                   WHERE datname = current_database() AND state = 'active' AND query LIKE '%%pg_sleep(30)%%'
+                     AND pid <> pg_backend_pid())
+"""
 PURGE: Final = text("DELETE FROM probe.idempotency_keys WHERE expires_at < now()")
 """What the purge runs: a plain ``DELETE``, never ``RETURNING`` the stored responses (ruling 1)."""
 REFUSE_JOBS: Final = """
@@ -363,8 +369,14 @@ async def test_a_pooled_connection_is_clean_after_every_way_a_unit_can_end(
     assert len({state[-1] for state in states}) == 1
 
 
+async def sleeping_in_postgres(admin: psycopg.AsyncConnection) -> bool:
+    """Whether a session of the database runs ``pg_sleep`` now: the statement has reached the server."""
+    (running,) = await rows(admin, SLEEPING)
+    return running == (True,)
+
+
 async def test_a_unit_cancelled_inside_a_statement_leaves_nothing_to_the_next(
-    database: Database, probe: BoundDatabase
+    database: Database, probe: BoundDatabase, admin: psycopg.AsyncConnection
 ) -> None:
     """A cancellation while PostgreSQL works: the session is rolled back or replaced, never handed on."""
     entered = asyncio.Event()
@@ -376,7 +388,7 @@ async def test_a_unit_cancelled_inside_a_statement_leaves_nothing_to_the_next(
 
     task = asyncio.create_task(sleeping())
     await entered.wait()
-    await asyncio.sleep(0.2)  # let the statement reach the server: the cancellation must interrupt it
+    await eventually(lambda: sleeping_in_postgres(admin))  # the cancellation must interrupt the statement
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=10)
@@ -744,17 +756,19 @@ async def test_an_audit_needs_an_acting_call_and_an_organization(probe: BoundDat
     assert raised.value.code == "audit_scope_missing"
 
 
-async def seen_later() -> object:
-    await asyncio.sleep(0.05)
+async def seen_once(closed: asyncio.Event) -> object:
+    await closed.wait()
     return open_unit()
 
 
 async def test_the_open_unit_is_known_to_the_task_and_forgotten_after(probe: BoundDatabase) -> None:
     assert open_unit() is None
+    closed = asyncio.Event()
     async with probe.unit(None) as uow:
         assert open_unit() is uow
-        inherited = asyncio.create_task(seen_later())
+        inherited = asyncio.create_task(seen_once(closed))
     assert open_unit() is None
+    closed.set()
     assert await inherited is None  # its copied context still holds the unit, which is closed
 
 

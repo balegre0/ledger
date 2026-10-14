@@ -19,6 +19,7 @@ from ledger_platform.runtime.supervision import (
     restart_delay,
 )
 from ledger_testing.clock import Moment
+lazy from ledger_platform.runtime.supervision import Work
 
 NAME: Final = "inbox payments-ledger"
 NO_JITTER: Final = 0.0
@@ -46,7 +47,7 @@ class Pause:
     async def __call__(self, seconds: float) -> None:
         self.delays.append(seconds)
         self._clock.now += seconds
-        await asyncio.sleep(0)
+        await asyncio.sleep(0)  # a sleep gives the loop a turn, however short: so does this one
 
 
 @final
@@ -80,6 +81,19 @@ async def stubborn() -> Never:
     with contextlib.suppress(asyncio.CancelledError):
         await forever()
     await forever()
+
+
+@final
+class Running:
+    """A worker, and an event set once its run has begun: a test stops it inside its body, never before."""
+
+    def __init__(self, work: Work) -> None:
+        self.running = asyncio.Event()
+        self._work = work
+
+    async def __call__(self) -> Never:
+        self.running.set()
+        await self._work()
 
 
 @pytest.fixture
@@ -256,8 +270,9 @@ async def test_a_stop_during_the_delay_before_a_restart_restarts_nothing(
 
 
 async def test_a_worker_that_will_not_stop_is_left_after_its_grace_and_named(supervisor: Supervisor) -> None:
-    worker = supervisor.start(NAME, stubborn)
-    await asyncio.sleep(0)
+    work = Running(stubborn)
+    worker = supervisor.start(NAME, work)
+    await work.running.wait()
     with capture_logs() as logs:
         async with asyncio.timeout(5):
             await supervisor.stop(grace=0.05)
@@ -289,8 +304,9 @@ async def test_a_worker_whose_stop_ends_in_another_error_is_not_started_again(
     supervisor: Supervisor, registry: CollectorRegistry, pause: Pause
 ) -> None:
     """Being stopped, it is stopped, whatever it raises on the way out; what it raised is logged, once."""
-    worker = supervisor.start(NAME, stops_badly)
-    await asyncio.sleep(0)
+    work = Running(stops_badly)
+    worker = supervisor.start(NAME, work)
+    await work.running.wait()
     with capture_logs() as logs:
         await supervisor.stop(grace=5)
     assert isinstance(worker.exception(), BlipError)
@@ -305,9 +321,12 @@ async def test_workers_stop_together_within_one_grace_and_each_that_did_not_is_n
 ) -> None:
     """Three stuck workers do not take three graces: the stop waits for all of them at once."""
     grace = 0.3
-    stuck = [supervisor.start(f"consumer {number}", stubborn) for number in range(3)]
-    polite = supervisor.start("outbox relay", Flaky(clock))
-    await asyncio.sleep(0)
+    works = [Running(stubborn) for _ in range(3)]
+    stuck = [supervisor.start(f"consumer {number}", work) for number, work in enumerate(works)]
+    relay = Flaky(clock)
+    polite = supervisor.start("outbox relay", relay)
+    for running in (*(work.running for work in works), relay.running):
+        await running.wait()
     loop = asyncio.get_running_loop()
     started = loop.time()
     with capture_logs() as logs:

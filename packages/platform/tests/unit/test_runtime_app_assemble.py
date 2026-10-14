@@ -60,6 +60,7 @@ from ledger_platform.runtime.contexts import (
 from ledger_platform.runtime.facade import UnguardedFacadeError, facade
 from ledger_platform.runtime.keys import BindingMissingError, Key, UndeclaredDependencyError
 from ledger_platform.runtime.registries import CHANNELS, MODULES, REGIMES, Discovered
+from ledger_testing.waiting import Watched
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
 lazy from ledger_platform.events.consumers import RawEvent
 lazy from ledger_platform.jobs.outcomes import Job, JobOutcome
@@ -549,9 +550,13 @@ async def recorded(log: list[str], name: str) -> AsyncGenerator[None]:
 
 
 @asynccontextmanager
-async def hanging(free: asyncio.Event) -> AsyncGenerator[None]:
-    """Its close waits for ``free``, through the stop's cancellation: the stop must leave it behind."""
+async def hanging(free: asyncio.Event, closing: Watched) -> AsyncGenerator[None]:
+    """Its close waits for ``free``, through the stop's cancellation: the stop must leave it behind.
+
+    ``closing`` watches the task its close runs in.
+    """
     yield
+    closing.enter()
     while not free.is_set():
         with contextlib.suppress(asyncio.CancelledError):
             await free.wait()
@@ -592,10 +597,10 @@ async def test_a_stop_step_that_hangs_or_fails_never_holds_the_rest(monkeypatch:
     quick = StopTimes(drain=0.1, workers=0.1, resources=0.4, notifications=0.1, pools=0.5, spans=0.5)
     monkeypatch.setattr(runtime_app, "STOP", quick)
     log: list[str] = []
-    free = asyncio.Event()
+    free, closing = asyncio.Event(), Watched()
 
     def alpha(context: ModuleContext) -> ModuleParts:
-        resources = (recorded(log, "first"), hanging(free), failing(), recorded(log, "last"))
+        resources = (recorded(log, "first"), hanging(free, closing), failing(), recorded(log, "last"))
         return ModuleParts(resources=resources, migrations=migrations(context.database.schema))
 
     served = App("api", settings=TOKENS, discover=discovering(module("alpha", alpha))).asgi()
@@ -608,8 +613,7 @@ async def test_a_stop_step_that_hangs_or_fails_never_holds_the_rest(monkeypatch:
     events = {entry["event"] for entry in logs}
     assert {"app.stop_step_timed_out", "app.stop_step_failed"} <= events
     free.set()
-    for _ in range(3):  # the close left behind ends now
-        await asyncio.sleep(0)
+    await closing.ended()  # the close left behind ends now
     with pytest.raises(AppAlreadyStartedError):
         async with served.router.lifespan_context(served):
             pass

@@ -41,6 +41,7 @@ from ledger_platform.http.problems import PROBLEM_JSON
 from ledger_platform.observability.health import Health
 from ledger_platform.observability.logs import configure_logging
 from ledger_testing.clock import Moment
+from ledger_testing.waiting import Watched
 lazy from ledger_kernel.tenancy import Mode
 lazy from ledger_platform.observability.tracing import Tracing
 
@@ -445,14 +446,14 @@ async def test_liveness_needs_nothing(client: httpx.AsyncClient) -> None:
 async def test_liveness_fails_while_a_check_is_wedged_and_recovers_when_it_ends(
     registry: CollectorRegistry, tracing: Tracing
 ) -> None:
-    release, ended = asyncio.Event(), asyncio.Event()
+    release, watched = asyncio.Event(), Watched()
     moment = Moment()
 
     async def stubborn() -> None:
+        watched.enter()
         while not release.is_set():
             with contextlib.suppress(asyncio.CancelledError):
                 await release.wait()
-        ended.set()
 
     health = Health(timeout=0.02, wedge_after=30, clock=moment)
     health.add("broker", stubborn)
@@ -468,8 +469,7 @@ async def test_liveness_fails_while_a_check_is_wedged_and_recovers_when_it_ends(
                 {"status": "unrecoverable", "wedged": ["broker"], "dead": []},
             )
             release.set()
-            await ended.wait()
-            await asyncio.sleep(0)
+            await watched.ended()
             assert (await client.get("/livez")).status_code == 200
     finally:
         release.set()

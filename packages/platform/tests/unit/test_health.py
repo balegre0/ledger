@@ -12,6 +12,7 @@ from ledger_kernel.errors import ErrorKind
 from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.observability.health import DuplicateCheckError, Health
 from ledger_testing.clock import Moment
+from ledger_testing.waiting import Watched
 
 
 async def healthy() -> None:
@@ -23,7 +24,8 @@ async def broken() -> None:
 
 
 async def stuck() -> None:
-    await asyncio.sleep(10)
+    """Hangs until cancelled: an event nobody sets."""
+    await asyncio.Event().wait()
 
 
 async def test_every_check_is_reported() -> None:
@@ -57,7 +59,7 @@ async def test_a_check_that_swallows_its_cancellation_is_unhealthy() -> None:
 
     async def gives_up_quietly() -> None:
         with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.sleep(10)
+            await asyncio.Event().wait()
 
     health = Health(timeout=0.05)
     health.add("quiet", gives_up_quietly)
@@ -74,15 +76,15 @@ async def test_a_check_that_raises_cancelled_by_itself_is_unhealthy() -> None:
 
 
 async def test_a_check_that_ignores_cancellation_does_not_hold_up_the_probe() -> None:
-    release, finished = asyncio.Event(), asyncio.Event()
+    release, watched = asyncio.Event(), Watched()
     started: list[str] = []
 
     async def stubborn() -> None:
+        watched.enter()
         started.append("stubborn")
         while not release.is_set():
             with contextlib.suppress(asyncio.CancelledError):
                 await release.wait()
-        finished.set()
 
     health = Health(timeout=0.05)
     health.add("stubborn", stubborn)
@@ -95,21 +97,18 @@ async def test_a_check_that_ignores_cancellation_does_not_hold_up_the_probe() ->
         assert started == ["stubborn"], "a check still running is not started again"
     finally:
         release.set()
-    await finished.wait()
-    await asyncio.sleep(0)
+    await watched.ended()
     assert await health.run() == {"stubborn": True, "database": True}
     assert started == ["stubborn", "stubborn"]
 
 
 async def test_cancelling_a_run_propagates_and_the_check_stops_at_its_own_deadline() -> None:
-    running, cancelled = asyncio.Event(), asyncio.Event()
+    running, watched = asyncio.Event(), Watched()
 
     async def waits() -> None:
+        watched.enter()
         running.set()
-        try:
-            await asyncio.sleep(10)
-        finally:
-            cancelled.set()
+        await asyncio.Event().wait()
 
     health = Health(timeout=0.05)
     health.add("slow", waits)
@@ -119,8 +118,7 @@ async def test_cancelling_a_run_propagates_and_the_check_stops_at_its_own_deadli
     with pytest.raises(asyncio.CancelledError):
         await probe
     async with asyncio.timeout(2):
-        await cancelled.wait()
-    await asyncio.sleep(0)
+        await watched.ended()
 
 
 async def test_a_prober_that_gives_up_does_not_cancel_the_check_for_the_others() -> None:
@@ -164,12 +162,13 @@ def record_into(
 
 async def test_overlapping_runs_put_one_probe_of_a_check_in_flight_and_no_callback_fails() -> None:
     """Two probes at once (kubelet and a load balancer) while a check hangs: one probe, nothing raised."""
-    release, ended = asyncio.Event(), asyncio.Event()
+    release, watched = asyncio.Event(), Watched()
     running = peak = 0
     problems: list[dict[str, object]] = []
 
     async def stubborn() -> None:
         nonlocal running, peak
+        watched.enter()
         running += 1
         peak = max(peak, running)
         try:
@@ -178,7 +177,6 @@ async def test_overlapping_runs_put_one_probe_of_a_check_in_flight_and_no_callba
                     await release.wait()
         finally:
             running -= 1
-            ended.set()
 
     loop = asyncio.get_running_loop()
     loop.set_exception_handler(record_into(problems))
@@ -190,8 +188,7 @@ async def test_overlapping_runs_put_one_probe_of_a_check_in_flight_and_no_callba
             later = await health.run()
     finally:
         release.set()
-    await ended.wait()
-    await asyncio.sleep(0)
+    await watched.ended()
     loop.set_exception_handler(None)
     first, second = overlapping
     assert first == second == {"stubborn": False}
@@ -201,17 +198,18 @@ async def test_overlapping_runs_put_one_probe_of_a_check_in_flight_and_no_callba
 
 
 async def test_a_stuck_check_is_cancelled_again_by_every_later_run() -> None:
-    release, ended = asyncio.Event(), asyncio.Event()
+    release, cancelled, watched = asyncio.Event(), asyncio.Event(), Watched()
     cancellations = 0
 
     async def stubborn() -> None:
         nonlocal cancellations
+        watched.enter()
         while not release.is_set():
             try:
                 await release.wait()
             except asyncio.CancelledError:
                 cancellations += 1
-        ended.set()
+                cancelled.set()
 
     health = Health(timeout=0.02)
     health.add("stubborn", stubborn)
@@ -220,23 +218,24 @@ async def test_a_stuck_check_is_cancelled_again_by_every_later_run() -> None:
         async with asyncio.timeout(3):
             for _ in range(3):
                 await health.run()
-                await asyncio.sleep(0)
+                await cancelled.wait()
+                cancelled.clear()
                 seen.append(cancellations)
     finally:
         release.set()
-    await ended.wait()
+    await watched.ended()
     assert seen == [1, 2, 3]
 
 
 async def test_a_check_stuck_past_the_limit_is_wedged_until_it_ends() -> None:
-    release, ended = asyncio.Event(), asyncio.Event()
+    release, watched = asyncio.Event(), Watched()
     moment = Moment(100.0)
 
     async def stubborn() -> None:
+        watched.enter()
         while not release.is_set():
             with contextlib.suppress(asyncio.CancelledError):
                 await release.wait()
-        ended.set()
 
     health = Health(timeout=0.02, wedge_after=30, clock=moment)
     health.add("stubborn", stubborn)
@@ -250,17 +249,17 @@ async def test_a_check_stuck_past_the_limit_is_wedged_until_it_ends() -> None:
         assert health.wedged() == ("stubborn",)
     finally:
         release.set()
-    await ended.wait()
-    await asyncio.sleep(0)
+    await watched.ended()
     assert health.wedged() == ()
     assert await health.run() == {"stubborn": True, "database": True}
 
 
 async def test_the_limit_for_a_wedge_is_ten_timeouts_unless_chosen() -> None:
-    release = asyncio.Event()
+    release, watched = asyncio.Event(), Watched()
     moment = Moment()
 
     async def stubborn() -> None:
+        watched.enter()
         while not release.is_set():
             with contextlib.suppress(asyncio.CancelledError):
                 await release.wait()
@@ -275,7 +274,7 @@ async def test_the_limit_for_a_wedge_is_ten_timeouts_unless_chosen() -> None:
         assert health.wedged() == ("stubborn",)
     finally:
         release.set()
-        await asyncio.sleep(0)
+        await watched.ended()
 
 
 class LateError(Exception):
@@ -284,16 +283,16 @@ class LateError(Exception):
 
 @pytest.mark.parametrize("noticed_by", ["a run", "a liveness check"])
 async def test_a_stuck_check_that_ended_is_forgotten_with_its_traceback(noticed_by: str) -> None:
-    release, ended = asyncio.Event(), asyncio.Event()
+    release, watched = asyncio.Event(), Watched()
     errors: list[weakref.ref[LateError]] = []
 
     async def fails_when_released() -> None:
+        watched.enter()
         while not release.is_set():
             with contextlib.suppress(asyncio.CancelledError):
                 await release.wait()
         error = LateError()
         errors.append(weakref.ref(error))
-        ended.set()
         raise error
 
     health = Health(timeout=0.02)
@@ -302,8 +301,7 @@ async def test_a_stuck_check_that_ended_is_forgotten_with_its_traceback(noticed_
         await health.run()
     finally:
         release.set()
-    await ended.wait()
-    await asyncio.sleep(0)
+    await watched.ended()
     (late,) = errors
     gc.collect()
     assert late() is not None, "kept until a probe or a liveness check notices that it ended"
@@ -385,9 +383,10 @@ async def test_a_failing_check_is_logged_in_full_when_it_starts_failing_and_brie
 
 
 async def test_a_check_that_hangs_is_logged_once_as_timed_out_and_then_only_in_passing() -> None:
-    release = asyncio.Event()
+    release, watched = asyncio.Event(), Watched()
 
     async def hangs() -> None:
+        watched.enter()
         await release.wait()
 
     health = Health(timeout=0.02)
@@ -398,7 +397,7 @@ async def test_a_check_that_hangs_is_logged_once_as_timed_out_and_then_only_in_p
                 await health.run()
     finally:
         release.set()
-        await asyncio.sleep(0)
+        await watched.ended()
     assert [(entry["event"], entry["log_level"]) for entry in logs] == [
         ("health.check_timed_out", "error"),
         ("health.check_timed_out", "debug"),
