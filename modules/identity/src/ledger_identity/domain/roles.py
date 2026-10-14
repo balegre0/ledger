@@ -1,16 +1,16 @@
-"""Roles granted per company, and what each allows (§7.7).
+"""What each role allows in its company (§7.7): the role table every manifest's permissions are granted by.
 
-The permissions are the codes identity's manifest declares (``[[permissions]]``), each with the roles that
-hold it; this table says the same, and a test holds the two together until the table is generated (v2-M2).
-The invoice permissions arrive with invoicing's manifest.
+The roles are the kernel's (``ledger_kernel.access.Role``). The permissions are the codes manifests declare
+(``[[permissions]]``), each with the roles that hold it; this table says the same, and a workspace test holds
+it equal to every manifest until the table is generated (v2-M2). The invoice permissions arrive with
+invoicing's manifest.
 """
 
-from enum import StrEnum
 from types import MappingProxyType
 from typing import Final
 lazy from collections.abc import Mapping
 
-from ledger_kernel.access import parse_permission
+from ledger_kernel.access import Role, parse_permission
 lazy from ledger_kernel.access import Permission
 
 COMPANIES_READ: Final = parse_permission("identity.companies.read")
@@ -27,21 +27,6 @@ EVERYTHING: Final = frozenset(
     {COMPANIES_READ, COMPANIES_MANAGE, MEMBERSHIPS_READ, MEMBERSHIPS_MANAGE, OWNERSHIP_MANAGE}
 )
 """Every permission identity declares."""
-
-
-class Role(StrEnum):
-    """A principal's role in one company."""
-
-    OWNER = "owner"
-    """Everything, including who else owns the company."""
-    ADMIN = "admin"
-    """Everything but the owner role."""
-    ACCOUNTANT = "accountant"
-    """Reads the company and its memberships (and, with invoicing, its documents)."""
-    ISSUER = "issuer"
-    """Reads the company (and, with invoicing, issues documents)."""
-    VIEWER = "viewer"
-    """Reads."""
 
 
 PERMISSIONS: Final[Mapping[Role, frozenset[Permission]]] = MappingProxyType(

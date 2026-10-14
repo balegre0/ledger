@@ -29,9 +29,8 @@ from sqlalchemy.sql.schema import SchemaItem
 
 from ledger_identity.domain.company import CompanyStatus
 from ledger_identity.domain.membership import MembershipStatus
-from ledger_identity.domain.roles import Role
 from ledger_identity.domain.text import MAX_CODE, MAX_LEGAL_NAME, MAX_NAME
-from ledger_kernel.access import MAX_PROVIDER_ORGANIZATION_LENGTH, MAX_SUBJECT_LENGTH
+from ledger_kernel.access import MAX_PROVIDER_ORGANIZATION_LENGTH, MAX_SUBJECT_LENGTH, Role
 from ledger_kernel.tax_ids import MAX_TAX_ID_LENGTH
 from ledger_platform.data import ModuleTable
 

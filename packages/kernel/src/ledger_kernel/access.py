@@ -3,12 +3,14 @@
 A ``Principal`` is a caller whose token was verified: the identity provider's id of the user or machine
 (``subject``), the organization it acts in, and the roles the provider granted it there. What it may do in a
 company is a set of ``Permission``s, codes a module declares in its manifest, which identity derives from
-the principal's role there. Refusals are one class per code: ``PermissionDeniedError`` and
-``CompanyNotFoundError`` are raised by the platform's access checks and by the modules alike.
+the principal's ``Role`` there: one of the built-in roles every manifest grants its permissions to (§7.7).
+Refusals are one class per code: ``PermissionDeniedError`` and ``CompanyNotFoundError`` are raised by the
+platform's access checks and by the modules alike.
 """
 
 import re
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import ClassVar, Final, NewType, final
 
 from ledger_kernel.errors import ForbiddenError, InvalidInputError, InvalidValueError, NotFoundError, excerpt
@@ -36,6 +38,24 @@ def parse_subject(text: str) -> SubjectId:
     if _SUBJECT.fullmatch(text) is None:
         raise InvalidSubjectError(text)
     return SubjectId(text)
+
+
+class Role(StrEnum):
+    """A principal's role in one company."""
+
+    # The one list of the built-in roles (§7.7): identity's memberships hold one, and the manifest model reads
+    # ``[[permissions]] roles`` with it. Its docstring is the public API's description of the type.
+
+    OWNER = "owner"
+    """Everything, including who else owns the company."""
+    ADMIN = "admin"
+    """Everything but the owner role."""
+    ACCOUNTANT = "accountant"
+    """Reads the company and its memberships (and, with invoicing, its documents)."""
+    ISSUER = "issuer"
+    """Reads the company (and, with invoicing, issues documents)."""
+    VIEWER = "viewer"
+    """Reads."""
 
 
 Permission = NewType("Permission", str)

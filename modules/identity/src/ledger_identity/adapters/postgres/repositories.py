@@ -36,9 +36,8 @@ from ledger_identity.domain.company import Company, CompanyStatus
 from ledger_identity.domain.ids import BranchId, EmissionPointId, MembershipId
 from ledger_identity.domain.membership import Membership, MembershipStatus
 from ledger_identity.domain.organization import Organization
-from ledger_identity.domain.roles import Role
 from ledger_identity.domain.text import Code, LegalName, Name
-from ledger_kernel.access import SubjectId
+from ledger_kernel.access import Role, SubjectId
 from ledger_kernel.errors import LedgerError
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.pagination import page_of

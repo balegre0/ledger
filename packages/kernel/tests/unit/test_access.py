@@ -14,6 +14,7 @@ from ledger_kernel.access import (
     Permission,
     PermissionDeniedError,
     Principal,
+    Role,
     SubjectId,
     parse_permission,
     parse_subject,
@@ -178,3 +179,10 @@ def test_a_provider_organization_that_is_empty_too_long_or_not_text_is_refused(
 def test_a_provider_organization_of_the_longest_length_is_accepted() -> None:
     longest = "9" * MAX_PROVIDER_ORGANIZATION_LENGTH
     assert build(provider_organization=longest).provider_organization == longest
+
+
+def test_the_built_in_roles_are_one_closed_list_of_words() -> None:
+    assert [role.value for role in Role] == ["owner", "admin", "accountant", "issuer", "viewer"]
+    assert Role("viewer") is Role.VIEWER
+    with pytest.raises(ValueError, match="root"):
+        Role("root")

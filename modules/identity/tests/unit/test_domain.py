@@ -45,7 +45,6 @@ from ledger_identity.domain.roles import (
     OWNERSHIP_MANAGE,
     PERMISSIONS,
     READ_ONLY,
-    Role,
     permissions_of,
 )
 from ledger_identity.domain.text import (
@@ -64,7 +63,7 @@ from ledger_identity.events import (
     MembershipGranted,
     MembershipRevoked,
 )
-from ledger_kernel.access import CompanyNotFoundError, PermissionDeniedError, Principal, SubjectId
+from ledger_kernel.access import CompanyNotFoundError, PermissionDeniedError, Principal, Role, SubjectId
 from ledger_kernel.errors import ErrorKind, InvalidValueError
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme

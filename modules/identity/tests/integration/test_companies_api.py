@@ -13,8 +13,7 @@ lazy import httpx
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import commands
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN
-from ledger_identity.domain.roles import Role
-from ledger_kernel.access import SubjectId
+from ledger_kernel.access import Role, SubjectId
 from ledger_kernel.ids import CompanyId, new_id
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.providers.zitadel import organization_of

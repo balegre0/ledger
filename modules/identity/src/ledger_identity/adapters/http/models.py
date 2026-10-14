@@ -11,8 +11,8 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from ledger_identity.domain.company import CompanyStatus
-from ledger_identity.domain.roles import Role
 from ledger_identity.domain.text import MAX_LEGAL_NAME
+from ledger_kernel.access import Role
 from ledger_kernel.tax_ids import MAX_TAX_ID_LENGTH
 lazy from ledger_identity.domain.branches import Branch, EmissionPoint
 lazy from ledger_identity.domain.company import Company

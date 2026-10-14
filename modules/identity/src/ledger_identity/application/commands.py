@@ -20,9 +20,8 @@ from ledger_kernel.access import CompanyNotFoundError
 lazy from ledger_identity.application.ports import AuditAction, IdentityUnit
 lazy from ledger_identity.domain.ids import BranchId
 lazy from ledger_identity.domain.membership import Membership
-lazy from ledger_identity.domain.roles import Role
 lazy from ledger_identity.domain.text import Code, LegalName, Name
-lazy from ledger_kernel.access import Principal, SubjectId
+lazy from ledger_kernel.access import Principal, Role, SubjectId
 lazy from ledger_kernel.ids import CompanyId
 lazy from ledger_kernel.tax_ids import TaxId
 

@@ -37,9 +37,9 @@ from ledger_identity.domain.errors import (
 )
 from ledger_identity.domain.membership import found
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN, Organization
-from ledger_identity.domain.roles import EVERYTHING, READ_ONLY, Role
+from ledger_identity.domain.roles import EVERYTHING, READ_ONLY
 from ledger_identity.domain.text import parse_code, parse_legal_name, parse_name
-from ledger_kernel.access import CompanyNotFoundError, Principal, SubjectId
+from ledger_kernel.access import CompanyNotFoundError, Principal, Role, SubjectId
 from ledger_kernel.ids import CompanyId, new_id
 from ledger_kernel.pagination import PageRequest, decode_cursor
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme

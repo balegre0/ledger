@@ -26,12 +26,11 @@ from pydantic import (
     model_validator,
 )
 
+from ledger_kernel.access import Role
 from ledger_kernel.errors import LedgerError
 
 type AppRole = Literal["api", "worker", "signer", "receiver", "migrate"]
 """What an app process runs (§3.3)."""
-type BuiltInRole = Literal["owner", "admin", "accountant", "issuer", "viewer"]
-"""The roles a permission may be granted to by default (§7.7)."""
 type Tier = Literal["bronze", "silver", "gold"]
 
 _FROZEN: Final = ConfigDict(extra="forbid", frozen=True)
@@ -147,7 +146,8 @@ class PermissionDecl(_Section):
 
     code: PermissionCode
     summary: str = Field(min_length=1, max_length=200)
-    roles: tuple[BuiltInRole, ...] = ()
+    roles: tuple[Role, ...] = ()
+    """The built-in roles granted it (§7.7): the kernel's one list."""
 
 
 class PublishedEvent(_Section):

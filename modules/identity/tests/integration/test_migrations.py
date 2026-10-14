@@ -15,7 +15,7 @@ from ledger_identity.adapters.postgres.schema import MIGRATIONS
 from ledger_identity.adapters.postgres.tables import IdentityTable
 from ledger_identity.domain.company import CompanyStatus
 from ledger_identity.domain.membership import MembershipStatus
-from ledger_identity.domain.roles import Role
+from ledger_kernel.access import Role
 from ledger_platform.data.tables import chassis_tables
 from ledger_platform.runtime.app import App
 from ledger_testing.migrations import (

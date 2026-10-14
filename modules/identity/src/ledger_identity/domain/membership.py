@@ -19,9 +19,9 @@ lazy from datetime import datetime
 from ledger_identity.domain.company import CompanyStatus
 from ledger_identity.domain.errors import LastOwnerError, MembershipNotFoundError, OwnersOnlyError
 from ledger_identity.domain.ids import MembershipId
-from ledger_identity.domain.roles import MEMBERSHIPS_MANAGE, OWNERSHIP_MANAGE, READ_ONLY, Role, permissions_of
+from ledger_identity.domain.roles import MEMBERSHIPS_MANAGE, OWNERSHIP_MANAGE, READ_ONLY, permissions_of
 from ledger_identity.events import MembershipGranted, MembershipRevoked
-from ledger_kernel.access import PermissionDeniedError
+from ledger_kernel.access import PermissionDeniedError, Role
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.ids import new_id
 lazy from ledger_identity.domain.company import Company
