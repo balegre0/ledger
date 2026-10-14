@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from typing import Annotated, Final, TypedDict, final, override
+from uuid import UUID
 lazy from collections.abc import AsyncGenerator
 
 import httpx
@@ -9,6 +10,7 @@ from fastapi import APIRouter, Depends
 from fastapi.exceptions import HTTPException
 from hypothesis import given
 from hypothesis import strategies as st
+from opentelemetry.trace import NoOpTracerProvider
 from pydantic import TypeAdapter
 from structlog.testing import capture_logs
 lazy from fastapi import FastAPI
@@ -20,6 +22,7 @@ from ledger_kernel.ids import CompanyId, new_id
 from ledger_platform.auth.access import PermissionSource
 from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_platform.auth.tokens import TokenPolicy, TokenVerifier
+from ledger_platform.data.audit import MissingActorError, current_actor
 from ledger_platform.http.app import ApiInfo, Observability, create_app
 from ledger_platform.http.deps import (
     COMPANY_HEADER,
@@ -176,6 +179,12 @@ def router(verifier: TokenVerifier, grants: Grants) -> APIRouter:
     async def whoami(principal: Annotated[Principal, Depends(caller)]) -> dict[str, object]:
         return {"subject": principal.subject, "context": structlog.contextvars.get_contextvars()}
 
+    @routes.get("/acting")
+    async def acting(principal: Annotated[Principal, Depends(caller)]) -> dict[str, str]:
+        del principal
+        actor = current_actor()
+        return {"name": actor.name, "call_id": actor.call_id}
+
     @routes.get("/companies/{company_id}/things")
     async def things(access: Annotated[CompanyAccess, Depends(in_path)]) -> dict[str, object]:
         access.require(COMPANY_READ)
@@ -296,6 +305,39 @@ async def test_the_bound_fields_do_not_outlive_the_request(
     refused = await client.get(f"/companies/{COMPANY}/things", headers=bearer(local_issuer.token()))
     assert refused.status_code == 403  # raised by the route, after every field was bound
     assert structlog.contextvars.get_contextvars() == {}
+    with pytest.raises(MissingActorError):
+        current_actor()
+
+
+async def test_the_caller_acts_in_the_request_named_by_its_request_id(
+    client: httpx.AsyncClient, local_issuer: LocalIssuer
+) -> None:
+    """What a route audits names the principal and the request (Decision 10): its ``Request-Id``."""
+    response = await client.get("/acting", headers=bearer(local_issuer.token(subject="2001")))
+    assert response.status_code == 200
+    assert BODY.validate_json(response.content) == {"name": "2001", "call_id": response.headers["request-id"]}
+
+
+async def test_an_untraced_request_acts_in_a_call_of_its_own(
+    local_issuer: LocalIssuer, grants: Grants, registry: CollectorRegistry
+) -> None:
+    """Without a trace there is no request id: each request is a fresh call (a UUIDv7)."""
+    verifier = TokenVerifier(TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=local_issuer.keys_url))
+    untraced = create_app(
+        info=ApiInfo(title="routes", version="1.0"),
+        observability=Observability(health=Health(), registry=registry, tracer_provider=NoOpTracerProvider()),
+        lifespan=nothing_to_start,
+        routers=(router(verifier, grants),),
+    )
+    transport = httpx.ASGITransport(app=untraced)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        first, second = [
+            BODY.validate_json((await client.get("/acting", headers=bearer(local_issuer.token()))).content)
+            for _ in range(2)
+        ]
+    calls = [UUID(str(answer["call_id"])) for answer in (first, second)]
+    assert [call.version for call in calls] == [7, 7]
+    assert calls[0] != calls[1]
 
 
 async def test_the_api_document_declares_bearer_tokens(client: httpx.AsyncClient) -> None:

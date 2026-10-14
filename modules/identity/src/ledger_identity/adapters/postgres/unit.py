@@ -1,6 +1,8 @@
-"""identity's unit of work over a chassis unit: repositories bound to the unit's tenant, and its events."""
+"""identity's unit of work over a chassis unit: repositories bound to the unit's tenant, events and audit."""
 
 from typing import ClassVar, final, override
+lazy from collections.abc import Mapping
+lazy from uuid import UUID
 
 from ledger_identity.adapters.postgres.repositories import (
     PgBranches,
@@ -9,8 +11,9 @@ from ledger_identity.adapters.postgres.repositories import (
     PgMemberships,
     PgOrganizations,
 )
-from ledger_identity.application.ports import Events, IdentityUnit
+from ledger_identity.application.ports import Audit, Events, IdentityUnit
 from ledger_kernel.errors import LedgerError
+lazy from ledger_identity.application.ports import AuditAction
 lazy from ledger_identity.events import IdentityEvent
 lazy from ledger_platform.data import UnitOfWork
 
@@ -38,6 +41,28 @@ class UnitEvents(Events):
         self._unit.publish(event)
 
 
+@final
+class UnitAudit(Audit):
+    """identity's audit rows, in the unit's ``audit_events``: the acting call is the actor (Decision 10)."""
+
+    __slots__ = ("_unit",)
+
+    def __init__(self, unit: UnitOfWork) -> None:
+        self._unit = unit
+
+    @override
+    def record(
+        self,
+        action: AuditAction,
+        subject: UUID,
+        *,
+        before: object,
+        after: object,
+        detail: Mapping[str, str] | None = None,
+    ) -> None:
+        self._unit.audit(action=action, subject=subject, before=before, after=after, detail=detail)
+
+
 def bind(unit: UnitOfWork) -> IdentityUnit:
     """The identity view of ``unit``: what its use cases read, change and announce.
 
@@ -57,5 +82,6 @@ def bind(unit: UnitOfWork) -> IdentityUnit:
         emission_points=PgEmissionPoints(connection, organization, company),
         memberships=PgMemberships(connection, organization),
         events=UnitEvents(unit),
+        audit=UnitAudit(unit),
         now=unit.now,
     )

@@ -1,15 +1,16 @@
 """The identity use cases over in-memory ports: what they change, announce and refuse."""
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Final, final, override
-lazy from collections.abc import Callable, Iterable
+lazy from collections.abc import Callable, Iterable, Mapping
 lazy from uuid import UUID
 
 import pytest
 
 from ledger_identity.application import commands, queries
 from ledger_identity.application.ports import (
+    Audit,
     Branches,
     Companies,
     EmissionPoints,
@@ -50,6 +51,7 @@ from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.pagination import PageRequest, page_of
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Tenant
+lazy from ledger_identity.application.ports import AuditAction
 lazy from ledger_identity.domain.branches import Branch, EmissionPoint
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_identity.domain.membership import Membership
@@ -111,6 +113,7 @@ class State:
         self.points: dict[EmissionPointId, EmissionPoint] = {}
         self.memberships: dict[tuple[CompanyId, SubjectId], Membership] = {}
         self.events: list[IdentityEvent] = []
+        self.audited: list[Audited] = []
         self.while_waiting: Callable[[], None] = _nothing_happens
         """What other units commit while a unit waits for a company's lock."""
         self.races_lost = False
@@ -124,8 +127,21 @@ class State:
             emission_points=MemoryEmissionPoints(self, organization),
             memberships=MemoryMemberships(self, organization),
             events=MemoryEvents(self),
+            audit=MemoryAudit(self),
             now=now,
         )
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class Audited:
+    """One change a unit recorded: what was done to which subject, from what to what, with which ids."""
+
+    action: AuditAction
+    subject: UUID
+    before: object
+    after: object
+    detail: Mapping[str, str]
 
 
 @final
@@ -295,6 +311,24 @@ class MemoryEvents(Events):
         self._state.events.append(event)
 
 
+@final
+class MemoryAudit(Audit):
+    def __init__(self, state: State) -> None:
+        self._state = state
+
+    @override
+    def record(
+        self,
+        action: AuditAction,
+        subject: UUID,
+        *,
+        before: object,
+        after: object,
+        detail: Mapping[str, str] | None = None,
+    ) -> None:
+        self._state.audited.append(Audited(action, subject, before, after, dict(detail or {})))
+
+
 @pytest.fixture
 def state() -> State:
     return State()
@@ -436,6 +470,100 @@ async def test_a_company_that_does_not_exist_is_not_found(state: State) -> None:
         )
     with pytest.raises(CompanyNotFoundError):
         await queries.company(state.unit(), missing)
+
+
+# ── Audit ───────────────────────────────────────────────────────────────────────
+
+
+async def test_a_new_company_and_its_owner_are_audited_as_created(state: State) -> None:
+    company = await created(state)
+    owner = state.memberships[company.id, OWNER]
+    assert state.audited == [
+        Audited("company.register", company.id, None, company, {}),
+        Audited("membership.grant", owner.id, None, owner, {"member": OWNER, "role": "owner"}),
+    ]
+
+
+async def test_a_change_of_a_company_is_audited_from_what_it_was_to_what_it_is(state: State) -> None:
+    company = await created(state)
+    renamed = await commands.rename_company(
+        state.unit(LATER),
+        company.id,
+        legal_name=parse_legal_name("Duarte Hermanos"),
+        admits=anything,
+        actor=OWNER,
+    )
+    inactive = await commands.deactivate_company(state.unit(LATER), company.id, admits=anything, actor=OWNER)
+    assert state.audited[2:] == [
+        Audited("company.rename", company.id, company, renamed, {}),
+        Audited("company.deactivate", company.id, renamed, inactive, {}),
+    ]
+
+
+async def test_what_changes_nothing_or_is_refused_is_not_audited(state: State) -> None:
+    company = await created(state)
+    await commands.rename_company(
+        state.unit(LATER), company.id, legal_name=company.legal_name, admits=anything, actor=OWNER
+    )
+    with pytest.raises(StaleVersionError):
+        await commands.deactivate_company(state.unit(LATER), company.id, admits=nothing, actor=OWNER)
+    await commands.grant_role(state.unit(), company.id, subject=VIEWER, role=Role.VIEWER, actor=OWNER)
+    await commands.grant_role(state.unit(), company.id, subject=VIEWER, role=Role.VIEWER, actor=OWNER)
+    await commands.revoke_role(state.unit(), company.id, subject=VIEWER, actor=OWNER)
+    await commands.revoke_role(state.unit(), company.id, subject=VIEWER, actor=OWNER)
+    opening = commands.Opening(parse_code("SUC1"), parse_name("A"))
+    await commands.open_branch(state.unit(), company.id, opening, actor=OWNER)
+    with pytest.raises(BranchCodeTakenError):
+        await commands.open_branch(state.unit(), company.id, opening, actor=OWNER)
+    assert [entry.action for entry in state.audited] == [
+        "company.register",
+        "membership.grant",
+        "membership.grant",
+        "membership.revoke",
+        "branch.open",
+    ]
+
+
+async def test_a_grant_and_a_revocation_are_audited_with_the_member_and_its_role(state: State) -> None:
+    company = await created(state)
+    first = await commands.grant_role(state.unit(), company.id, subject=VIEWER, role=Role.VIEWER, actor=OWNER)
+    changed = await commands.grant_role(
+        state.unit(LATER), company.id, subject=VIEWER, role=Role.ISSUER, actor=OWNER
+    )
+    await commands.revoke_role(state.unit(LATER), company.id, subject=VIEWER, actor=OWNER)
+    revoked = state.memberships[company.id, VIEWER]
+    member = first.membership.id
+    assert state.audited[2:] == [
+        Audited("membership.grant", member, None, first.membership, {"member": VIEWER, "role": "viewer"}),
+        Audited(
+            "membership.grant",
+            member,
+            first.membership,
+            changed.membership,
+            {"member": VIEWER, "role": "issuer"},
+        ),
+        Audited(
+            "membership.revoke", member, changed.membership, revoked, {"member": VIEWER, "role": "issuer"}
+        ),
+    ]
+
+
+async def test_an_opened_branch_and_emission_point_are_audited_with_their_codes(state: State) -> None:
+    company = await created(state)
+    branch = await commands.open_branch(
+        state.unit(), company.id, commands.Opening(parse_code("SUC1"), parse_name("Santiago")), actor=OWNER
+    )
+    point = await commands.open_emission_point(
+        state.unit(),
+        company.id,
+        branch.id,
+        commands.Opening(parse_code("001"), parse_name("Caja")),
+        actor=OWNER,
+    )
+    assert state.audited[2:] == [
+        Audited("branch.open", branch.id, None, branch, {"code": "SUC1"}),
+        Audited("emission_point.open", point.id, None, point, {"branch_id": str(branch.id), "code": "001"}),
+    ]
 
 
 # ── Branches and emission points ───────────────────────────────────────────────

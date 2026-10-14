@@ -17,7 +17,7 @@ from ledger_identity.domain.membership import Actor, Roster, found, grant, revok
 from ledger_identity.domain.organization import Organization, require_organization_admin
 from ledger_identity.domain.roles import COMPANIES_MANAGE
 from ledger_kernel.access import CompanyNotFoundError
-lazy from ledger_identity.application.ports import IdentityUnit
+lazy from ledger_identity.application.ports import AuditAction, IdentityUnit
 lazy from ledger_identity.domain.ids import BranchId
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_identity.domain.roles import Role
@@ -66,7 +66,17 @@ async def create_company(
     await unit.memberships.put(owner)
     unit.events.publish(created)
     unit.events.publish(granted)
+    unit.audit.record("company.register", registered.id, before=None, after=registered)
+    _audit_membership(unit, "membership.grant", None, owner)
     return registered
+
+
+def _audit_membership(
+    unit: IdentityUnit, action: AuditAction, before: Membership | None, after: Membership
+) -> None:
+    """Record a change of a membership, naming its member and the role it holds (or held) after it."""
+    detail = {"member": after.subject, "role": after.role.value}
+    unit.audit.record(action, after.id, before=before, after=after, detail=detail)
 
 
 async def _admitted(unit: IdentityUnit, company_id: CompanyId, admits: Admits, actor: SubjectId) -> Company:
@@ -95,6 +105,7 @@ async def rename_company(
     if updated is not None:
         await _replace(unit, current, renamed)
         unit.events.publish(updated)
+        unit.audit.record("company.rename", current.id, before=current, after=renamed)
     return renamed
 
 
@@ -106,6 +117,7 @@ async def deactivate_company(
     inactive, deactivated = current.deactivate(now=unit.now)
     await _replace(unit, current, inactive)
     unit.events.publish(deactivated)
+    unit.audit.record("company.deactivate", current.id, before=current, after=inactive)
     return inactive
 
 
@@ -117,6 +129,7 @@ async def open_branch(
     opened = Branch.open(company, code=opening.code, name=opening.name, now=unit.now)
     if not await unit.branches.add(opened):
         raise BranchCodeTakenError
+    unit.audit.record("branch.open", opened.id, before=None, after=opened, detail={"code": opened.code})
     return opened
 
 
@@ -129,6 +142,8 @@ async def open_emission_point(
     opened = EmissionPoint.open(company, within, code=opening.code, name=opening.name, now=unit.now)
     if not await unit.emission_points.add(opened):
         raise EmissionPointCodeTakenError
+    detail = {"branch_id": str(within.id), "code": opened.code}
+    unit.audit.record("emission_point.open", opened.id, before=None, after=opened, detail=detail)
     return opened
 
 
@@ -173,10 +188,11 @@ async def grant_role(
     roster = await _roster(unit, company_id, subject)
     acting = await _actor(unit, company_id, actor)
     membership, granted = grant(roster, role=role, actor=acting, now=unit.now)
+    current = roster.current
     if granted is not None:
         await unit.memberships.put(membership)
         unit.events.publish(granted)
-    current = roster.current
+        _audit_membership(unit, "membership.grant", current, membership)
     return Granted(membership, created=current is None or not current.active)
 
 
@@ -193,3 +209,4 @@ async def revoke_role(
     if event is not None:
         await unit.memberships.put(revoked)
         unit.events.publish(event)
+        _audit_membership(unit, "membership.revoke", roster.current, revoked)

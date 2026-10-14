@@ -23,6 +23,8 @@
 The dependencies bind what they learn (``organization_id``, ``subject``, ``company_id``) to the log context
 for the rest of the request, and unbind it when the request ends. They also leave it in the request
 (``request_fields``), for the log line of a failure the chassis reports once they have ended.
+``authenticated`` also makes the caller the actor of what the request audits (``acting_as``, Decision 10):
+its subject, in the call its request id names, or in a call of its own (a UUIDv7) where it is not traced.
 """
 
 from abc import ABCMeta, abstractmethod
@@ -44,10 +46,12 @@ lazy from starlette.routing import BaseRoute
 
 from ledger_kernel.access import CompanyNotFoundError
 from ledger_kernel.errors import ForbiddenError, InvalidInputError, LedgerError
-from ledger_kernel.ids import CompanyId, parse_uuid
+from ledger_kernel.ids import CompanyId, new_id, parse_uuid
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.access import CompanyAccess
 from ledger_platform.auth.tokens import MissingTokenError
+from ledger_platform.data.audit import Actor, acting_as
+from ledger_platform.http.problems import current_request_id
 from ledger_platform.http.request_fields import remember
 lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_platform.auth.access import PermissionSource
@@ -139,7 +143,11 @@ def authenticated(verifier: Verifier) -> Caller:
         if credentials is None:
             raise MissingTokenError
         principal = await verifier.verify(credentials.credentials)
-        with _bound(request, organization_id=str(principal.organization), subject=principal.subject):
+        call = current_request_id() or str(new_id())
+        with (
+            _bound(request, organization_id=str(principal.organization), subject=principal.subject),
+            acting_as(Actor(principal.subject, call)),
+        ):
             yield principal
 
     return caller

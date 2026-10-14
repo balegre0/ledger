@@ -19,6 +19,7 @@ from ledger_identity._manifest import MANIFEST
 from ledger_identity.adapters.postgres.schema import MIGRATIONS
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN
 from ledger_platform.config.settings import Settings
+from ledger_platform.data.audit import Actor, acting_as
 from ledger_platform.data.bound import BoundDatabase
 from ledger_platform.data.database import Database
 from ledger_platform.data.migrations import PLATFORM_MIGRATIONS
@@ -31,6 +32,8 @@ lazy from ledger_testing.issuer import LocalIssuer
 lazy from ledger_testing.postgres import PostgresServer, Template, WorkerDatabase
 
 SCHEMAS: Final = ("platform", "identity")
+TEST_ACTOR: Final = Actor("system:test", "identity-tests")
+"""Who the use cases a test calls itself act as; a request through the app acts as its caller instead."""
 COMPANY: Final = {"tax_id": {"scheme": "do.rnc", "value": "101850043"}, "legal_name": "Duarte"}
 """What the ``company`` fixture registers."""
 PUBLISHES: Final = frozenset(event.type for event in MANIFEST.events.publishes)
@@ -50,6 +53,13 @@ class _Quiet:
 
     def signal(self, channel: Channel) -> None:
         del channel
+
+
+@pytest.fixture(autouse=True)
+def acting() -> Iterator[None]:
+    """Every test acts as ``TEST_ACTOR``: what its own calls of the use cases audit needs an actor."""
+    with acting_as(TEST_ACTOR):
+        yield
 
 
 @pytest.fixture

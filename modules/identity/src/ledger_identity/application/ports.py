@@ -8,8 +8,10 @@ are abstract so that they need no body: a ``...`` is a statement no test could r
 
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
-from typing import Protocol, final
+from typing import Literal, Protocol, final
+lazy from collections.abc import Mapping
 lazy from datetime import datetime
+lazy from uuid import UUID
 
 lazy from ledger_identity.domain.branches import Branch, EmissionPoint
 lazy from ledger_identity.domain.company import Company
@@ -122,6 +124,41 @@ class Events(Protocol, metaclass=ABCMeta):
         """Announce ``event`` when, and only if, the unit commits (the outbox, written with the unit)."""
 
 
+type AuditAction = Literal[
+    "company.register",
+    "company.rename",
+    "company.deactivate",
+    "membership.grant",
+    "membership.revoke",
+    "branch.open",
+    "emission_point.open",
+]
+"""What a use case records it did (§10: identity's changes are audited); the part before the dot names the
+kind of subject."""
+
+
+class Audit(Protocol, metaclass=ABCMeta):
+    """Who changed what, recorded with the change (``audit_events``, §6.4): it commits with the unit, or not.
+
+    The actor is the call the unit runs in, not the use case's to name.
+    """
+
+    @abstractmethod
+    def record(
+        self,
+        action: AuditAction,
+        subject: UUID,
+        *,
+        before: object,
+        after: object,
+        detail: Mapping[str, str] | None = None,
+    ) -> None:
+        """Record that ``action`` changed ``subject`` from ``before`` to ``after`` (``None``: not there).
+
+        Only hashes of the two are kept; ``detail`` holds ids and codes only.
+        """
+
+
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class IdentityUnit:
@@ -133,5 +170,6 @@ class IdentityUnit:
     emission_points: EmissionPoints
     memberships: Memberships
     events: Events
+    audit: Audit
     now: datetime
     """The unit's time: everything it records and announces happened then, as one transaction does."""
