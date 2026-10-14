@@ -68,9 +68,17 @@ def _module(found: Discovered, seen: set[str]) -> Module:
     return value
 
 
-def load_modules(discover: Discover = installed) -> tuple[Module, ...]:
-    """The modules of group ``ledger.modules``, by name; a suspended one is neither assembled nor migrated."""
+def installed_modules(discover: Discover = installed) -> tuple[Module, ...]:
+    """Every module of group ``ledger.modules``, suspended ones included, by name."""
     seen: set[str] = set()
     modules = [_module(found, seen) for found in discover(MODULES)]
-    active = (module for module in modules if module.manifest.package.status is not PackageStatus.SUSPENDED)
-    return tuple(sorted(active, key=lambda module: module.manifest.package.name))
+    return tuple(sorted(modules, key=lambda module: module.manifest.package.name))
+
+
+def load_modules(discover: Discover = installed) -> tuple[Module, ...]:
+    """The modules of group ``ledger.modules``, by name; a suspended one is neither assembled nor migrated."""
+    return tuple(
+        module
+        for module in installed_modules(discover)
+        if module.manifest.package.status is not PackageStatus.SUSPENDED
+    )

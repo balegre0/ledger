@@ -153,7 +153,8 @@ class PoolTooSmallError(LedgerError):
 
     def __init__(self, role: str, size: int, need: PoolNeed) -> None:
         pool = f"the {role}'s pool of {size} connections (LEDGER_DATABASE_POOL_SIZE)"
-        parts = f"{need.jobs} for jobs (their concurrency), {need.runners} for its runners, {need.headroom}"
+        jobs = f"{need.jobs} for jobs (their concurrency), {need.renewals} for their lease renewals"
+        parts = f"{jobs}, {need.runners} for its runners, {need.headroom}"
         super().__init__(f"{pool} is smaller than the {need.total} it may hold at once: {parts} of headroom")
 
 
@@ -164,6 +165,8 @@ class PoolNeed:
 
     jobs: int = 0
     """Every job kind's ``concurrency``: a running job holds its unit's connection."""
+    renewals: int = 0
+    """One per running job too: its lease is renewed in a unit of its own while its handler holds one."""
     runners: int = 0
     """One per inbox runner and per job runner (claims, outcomes), the fan-out's and the scheduler's."""
     headroom: int = POOL_HEADROOM
@@ -171,15 +174,17 @@ class PoolNeed:
     @property
     def total(self) -> int:
         """The pool's size, at least."""
-        return self.jobs + self.runners + self.headroom
+        return self.jobs + self.renewals + self.runners + self.headroom
 
 
 def pool_need(role: AppRole, members: Sequence[Member]) -> PoolNeed:
     """What ``role`` holds at once: the worker runs every member's jobs and runners; the others, requests."""
     if role != "worker":
         return PoolNeed()
+    jobs = sum(decl.concurrency for member in members for decl, _ in member.kinds.values())
     return PoolNeed(
-        jobs=sum(decl.concurrency for member in members for decl, _ in member.kinds.values()),
+        jobs=jobs,
+        renewals=jobs,
         runners=sum(len(member.consumers) + bool(member.kinds) for member in members) + WORKER_LOOPS,
     )
 

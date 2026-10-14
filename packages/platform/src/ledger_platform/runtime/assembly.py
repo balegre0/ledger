@@ -20,6 +20,7 @@ lazy from prometheus_client import CollectorRegistry
 
 from ledger_kernel.errors import LedgerError
 from ledger_platform._manifest import MANIFEST as PLATFORM_MANIFEST
+from ledger_platform.config.manifest import PackageStatus
 from ledger_platform.config.names import PLATFORM
 from ledger_platform.data.bound import BoundDatabase
 from ledger_platform.data.migrations import platform_migrations
@@ -37,7 +38,7 @@ from ledger_platform.runtime.contexts import (
     extension_view,
 )
 from ledger_platform.runtime.keys import Directory
-from ledger_platform.runtime.packs import Channels, load_modules
+from ledger_platform.runtime.packs import Channels, installed_modules
 from ledger_platform.runtime.registries import Regimes
 from ledger_platform.runtime.sections import Declared, read_sections
 lazy from ledger_kernel.clock import Clock
@@ -483,12 +484,15 @@ def assemble(shared: Shared, discover: Discover) -> Assembled:
     """Load, assemble and check every package (see the module)."""
     regimes = Regimes.load(discover)
     packs = Channels.load(regimes, discover).packs
-    modules = _ordered(load_modules(discover))
+    every = installed_modules(discover)
+    modules = _ordered(
+        module for module in every if module.manifest.package.status is not PackageStatus.SUSPENDED
+    )
     sections = read_sections(
         (
             *(
                 Declared(module.manifest.package.name, module.manifest.settings_section, module.settings)
-                for module in modules
+                for module in every  # a suspended module's section too: its variables are read all the same
             ),
             *(Declared(pack.key, pack.entry.settings_section, pack.settings) for pack in packs),
         )

@@ -1100,10 +1100,12 @@ worker's `LISTEN` connection, and `ledger-migrate` (session advisory locks, DDL)
 `LEDGER_DATABASE_URL` goes through a transaction pooler: psycopg then prepares no statement on it. The worker
 refuses to start without the direct URL.
 
-The pool is sized by `LEDGER_DATABASE_POOL_SIZE` (default 20) and grows by `LEDGER_DATABASE_POOL_OVERFLOW`
-(default 10) for a burst. An app refuses to start with a pool smaller than its role may hold at once
-(`PoolTooSmallError`, with the numbers): for the worker, every job kind's `concurrency`, one connection per inbox
-runner, per job runner, the fan-out and the scheduler, and a headroom of 2; for the others, the headroom.
+The pool is sized by `LEDGER_DATABASE_POOL_SIZE` (default 30) and grows by `LEDGER_DATABASE_POOL_OVERFLOW`
+(default 10) for a burst; the check counts on no overflow. An app refuses to start with a pool smaller than its
+role may hold at once (`PoolTooSmallError`, with the numbers): for the worker, every job kind's `concurrency`
+twice (a running job's handler holds a unit while its lease is renewed in another), one connection per inbox
+runner, per job runner, the fan-out and the scheduler, and a headroom of 2; for the others, the headroom. A
+suspended module's settings section is validated too: its variables are read all the same.
 
 ### 6.8 Legal archive and backups
 

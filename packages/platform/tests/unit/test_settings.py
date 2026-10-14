@@ -81,7 +81,7 @@ def test_a_pooled_database_url_is_said_so(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_the_pool_is_sized_by_two_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     environment(monkeypatch, REQUIRED)
-    assert (Settings().database_pool_size, Settings().database_pool_overflow) == (20, 10)
+    assert (Settings().database_pool_size, Settings().database_pool_overflow) == (30, 10)
     environment(monkeypatch, {"LEDGER_DATABASE_POOL_SIZE": "24", "LEDGER_DATABASE_POOL_OVERFLOW": "0"})
     assert (Settings().database_pool_size, Settings().database_pool_overflow) == (24, 0)
 

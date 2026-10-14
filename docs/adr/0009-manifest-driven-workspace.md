@@ -32,6 +32,9 @@ tool that generates and validates everything derived from it.
   `scaffold`, CODEOWNERS, reference docs, identity's generated role grants and event schema snapshots.
 - Devtools treats each channel like a module for schemas, roles, grants, id prefixes, permissions,
   subscriptions and job kinds.
+- Until v2-M2 generates identity's role table from the manifests, a module or channel that declares permissions
+  also adds them to that table (`ledger_identity.domain.roles`), granted to the roles its manifest names; the
+  gate catches an omission (a workspace test holds the table equal to every manifest's permissions).
 - Coverage is 100 % branch per package; vulture, deptry, typos and buf complete the gate.
 
 ## Consequences

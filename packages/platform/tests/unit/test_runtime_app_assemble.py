@@ -777,16 +777,18 @@ def busy(context: ModuleContext) -> ModuleParts:
     )
 
 
-def test_a_worker_s_pool_holds_every_job_it_may_run_its_runners_and_headroom() -> None:
-    """Jobs 6 (probe) + 1 + 1 (the platform's purges); runners 1 inbox + 2 job runners + fan-out + scheduler;
-    headroom 2: 15."""
+def test_a_worker_s_pool_holds_every_job_its_renewals_its_runners_and_headroom() -> None:
+    """Jobs 6 (probe) + 1 + 1 (the platform's purges), each with a lease renewal of its own while it runs;
+    runners 1 inbox + 2 job runners + fan-out + scheduler; headroom 2: 23. No overflow is counted on."""
     discover = discovering(module("probe", busy, BUSY))
-    App("worker", settings=sized(SETTINGS, 15), discover=discover)
+    no_overflow = SETTINGS.model_copy(update={"database_pool_overflow": 0})
+    App("worker", settings=sized(no_overflow, 23), discover=discover)
     with pytest.raises(PoolTooSmallError) as caught:
-        App("worker", settings=sized(SETTINGS, 14), discover=discover)
+        App("worker", settings=sized(no_overflow, 15), discover=discover)  # the need without the renewals
     assert str(caught.value) == (
-        "the worker's pool of 14 connections (LEDGER_DATABASE_POOL_SIZE) is smaller than the 15 it may hold "
-        "at once: 8 for jobs (their concurrency), 5 for its runners, 2 of headroom"
+        "the worker's pool of 15 connections (LEDGER_DATABASE_POOL_SIZE) is smaller than the 23 it may hold "
+        "at once: 8 for jobs (their concurrency), 8 for their lease renewals, 5 for its runners, "
+        "2 of headroom"
     )
     assert caught.value.code == "pool_too_small"
 
@@ -814,3 +816,16 @@ def test_an_app_that_assembles_no_module_says_so(capsys: pytest.CaptureFixture[s
     [line] = [line for line in capsys.readouterr().out.splitlines() if "app.no_modules" in line]
     assert "warning" in line
     assert "role=worker" in line
+
+
+def test_a_suspended_module_s_section_is_validated_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It is neither assembled nor migrated, but its variables are read: a mistake there fails the start."""
+    suspended = sectioned(BooksSettings)
+    text = manifest_text("books").replace(
+        'owners = ["@o"]\n', 'owners = ["@o"]\nsettings = true\nstatus = "suspended"\n'
+    )
+    module_of = Module(manifest=load_manifest(text), assemble=suspended.assemble, settings=BooksSettings)
+    assert App("worker", settings=SETTINGS, discover=discovering(module_of)).modules == ()
+    monkeypatch.setenv("LEDGER_BOOKS_LIMIT", "many")
+    with pytest.raises(InvalidSettingsError, match="books: limit"):
+        App("worker", settings=SETTINGS, discover=discovering(module_of))

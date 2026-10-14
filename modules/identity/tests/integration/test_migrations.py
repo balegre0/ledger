@@ -4,8 +4,10 @@ How migrations run (the lock, the owner role, offline mode, readiness) is the pl
 the migrate app runs identity's revisions on fresh databases and the worker's template database.
 """
 
+import os
 import re
-from concurrent.futures import ThreadPoolExecutor
+import subprocess
+import sys
 from typing import Final
 
 from sqlalchemy import CheckConstraint, String, column, create_engine, select, table, text
@@ -83,10 +85,23 @@ def test_migrating_again_changes_nothing(fresh: Settings, fresh_admin_url: str) 
 
 
 def test_two_migrations_started_at_once_both_succeed(fresh: Settings, fresh_admin_url: str) -> None:
-    """Two rollouts that migrate at once: one waits for the other's lock, then finds nothing to do."""
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        runs = [pool.submit(App("migrate", settings=fresh).migrate) for _ in range(2)]
-        assert [run.result(timeout=120) for run in runs] == [None, None]
+    """Two rollouts that migrate at once: one waits for the other's lock, then finds nothing to do.
+
+    Each in a process of its own, as two rollouts run: Alembic's ``op`` and ``context`` are one per process,
+    so two migrations in two threads of one process would share them.
+    """
+    assert fresh.database_direct_url is not None
+    environment = {
+        name: value for name, value in os.environ.items() if not name.upper().startswith("LEDGER_")
+    }
+    environment |= {
+        "LEDGER_ENVIRONMENT": "test",
+        "LEDGER_DATABASE_URL": fresh.database_url.get_secret_value(),
+        "LEDGER_DATABASE_DIRECT_URL": fresh.database_direct_url.get_secret_value(),
+    }
+    command = [sys.executable, "-c", "from ledger_app_migrate.main import main; raise SystemExit(main())"]
+    runs = [subprocess.Popen(command, env=environment) for _ in range(2)]
+    assert [run.wait(timeout=120) for run in runs] == [0, 0]
     assert tables_of(fresh_admin_url, schema=S) == {*IDENTITY_TABLES, *CHASSIS_TABLES, "alembic_version"}
 
 
