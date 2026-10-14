@@ -12,9 +12,12 @@ its own check-digit algorithms (python-stdnum keeps hundreds of such cédulas).
 
 ## Decision
 
-- `TaxId(scheme, value)` with scheme keys `<cc>.<name>` (`do.rnc`, `do.cedula`, `mx.rfc`, `eu.vat`), declared by
+- `TaxId(scheme, value)` with scheme keys `<cc>.<name>` (`do.rnc`, `do.cedula`, `mx.rfc`, `es.nif`), declared by
   regimes as `TaxIdSchemeDef` with normalization, a check returning `valid | checksum_mismatch |
   invalid_format`, and `check_digit_enforced`.
+- `<cc>` is one assigned ISO 3166-1 country, never a group of countries: there are no multi-country scheme
+  groups. EU VAT ids are issued per member state, so each is its own scheme of that country's regime (`es.nif`,
+  `fr.tva`, …), not one `eu.vat`. The kernel refuses a scheme key whose `<cc>` is not an assigned country.
 - A format error refuses; a checksum mismatch refuses only where the scheme enforces it (not for `do.rnc` or
   `do.cedula`) and is otherwise reported as a warning.
 - A company holds one or more tax ids. Identity's `tax_registrations` keeps `(scheme, normalized value)` unique

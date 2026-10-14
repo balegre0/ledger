@@ -1,7 +1,7 @@
 import asyncio
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
-from decimal import ROUND_DOWN, Decimal
+from decimal import Decimal
 from typing import Final, final, override
 
 import pytest
@@ -37,8 +37,9 @@ from ledger_country_do.channels.ecf_v1.domain.routing import Route
 from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage, EcfState, NumberFate
 from ledger_country_do.regime import REGIME
 from ledger_country_do.regime.rounding import ROUNDING
-from ledger_country_do_testing.clock import ManualClock
 from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
+from ledger_kernel.money import RoundingMode
+from ledger_testing.clock import ManualClock
 lazy from ledger_country_do.channels.ecf_v1.application.emission import Signed
 lazy from ledger_country_do.channels.ecf_v1.application.ports import Reception
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
@@ -485,7 +486,7 @@ async def test_the_emitter_totals_and_rounds_with_the_regime_it_was_given(signer
     async def sleep(seconds: float) -> None:
         del seconds
 
-    down = replace(REGIME, rounding=replace(ROUNDING, mode=ROUND_DOWN))
+    down = replace(REGIME, rounding=replace(ROUNDING, mode=RoundingMode.DOWN))
     line = Line(
         name="ITEM", quantity=Decimal(1), unit_price=Decimal("10.0099"), billing=BillingIndicator.EXEMPT
     )

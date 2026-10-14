@@ -4,13 +4,19 @@ DGII accepts a cédula wherever an RNC is asked for, and has issued numbers whos
 (python-stdnum keeps hundreds of such cédulas), so the check digit is reported, never enforced
 (``check_digit_enforced = False``, ADR 0006): whether a number exists is for DGII's registry to say. Hyphens
 and spaces are ignored; anything else that is not an ASCII digit is a format error. A check never repeats the
-text it read.
+text it read. The schemes are the kernel's ``TaxIdSchemeDef``: the kernel's ``TaxIdSchemes`` reads a client's
+``{"scheme": "do.rnc", "value": ...}`` with them.
 """
 
+from types import MappingProxyType
 from typing import Final
+lazy from collections.abc import Mapping
 
-from ledger_country_do.regime.definitions import TaxIdCheck, TaxIdSchemeDef
 from ledger_country_do.regime.sources import STDNUM_CEDULA, STDNUM_RNC
+from ledger_kernel.jurisdiction import CountryCode
+from ledger_kernel.regimes import Locale, TaxIdSchemeDef
+from ledger_kernel.tax_ids import TaxIdCheck, TaxIdScheme
+lazy from ledger_kernel.regimes import Source
 
 MAX_TEXT: Final = 20
 """The longest text read: eleven digits and their separators, with room to spare."""
@@ -27,6 +33,11 @@ def normalize(text: str) -> str | None:
         return None
     digits = text.translate(_SEPARATORS)
     return digits if digits.isascii() and digits.isdigit() else None
+
+
+def _digits(text: str) -> str:
+    """What a scheme stores: ``text``'s digits, or nothing (a format error) unless ``normalize`` reads it."""
+    return normalize(text) or ""
 
 
 def _rnc_matches(digits: str) -> bool:
@@ -59,22 +70,28 @@ def check_cedula(text: str) -> TaxIdCheck:
 
 
 RNC: Final = TaxIdSchemeDef(
-    key="do.rnc",
-    label="RNC",
-    digits=RNC_DIGITS,
-    check_digit_enforced=False,
+    key=TaxIdScheme("do.rnc"),
+    country=CountryCode("DO"),
+    labels={Locale("es"): "RNC", Locale("en"): "Taxpayer number (RNC)"},
+    normalize=_digits,
     check=check_rnc,
-    source=STDNUM_RNC,
+    check_digit_enforced=False,
 )
 CEDULA: Final = TaxIdSchemeDef(
-    key="do.cedula",
-    label="Cédula",
-    digits=CEDULA_DIGITS,
-    check_digit_enforced=False,
+    key=TaxIdScheme("do.cedula"),
+    country=CountryCode("DO"),
+    labels={Locale("es"): "Cédula", Locale("en"): "National identity card"},
+    normalize=_digits,
     check=check_cedula,
-    source=STDNUM_CEDULA,
+    check_digit_enforced=False,
 )
 SCHEMES: Final = (RNC, CEDULA)
+DIGITS: Final[Mapping[TaxIdScheme, int]] = MappingProxyType({RNC.key: RNC_DIGITS, CEDULA.key: CEDULA_DIGITS})
+"""How many digits each scheme's numbers have."""
+SCHEME_SOURCES: Final[Mapping[TaxIdScheme, Source]] = MappingProxyType(
+    {RNC.key: STDNUM_RNC, CEDULA.key: STDNUM_CEDULA}
+)
+"""Where each scheme's check comes from."""
 
 
 def scheme_of(text: str) -> TaxIdSchemeDef | None:
@@ -82,4 +99,4 @@ def scheme_of(text: str) -> TaxIdSchemeDef | None:
     digits = normalize(text)
     if digits is None:
         return None
-    return next((scheme for scheme in SCHEMES if scheme.digits == len(digits)), None)
+    return next((scheme for scheme in SCHEMES if DIGITS[scheme.key] == len(digits)), None)

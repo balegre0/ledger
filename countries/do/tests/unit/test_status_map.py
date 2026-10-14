@@ -88,4 +88,14 @@ def test_dgii_s_messages_are_kept_verbatim_within_bounds() -> None:
     many = tuple(DgiiMessage(str(number), "x" * 900) for number in range(30))
     outcome = decide(4, sequence_used=True, messages=many)
     assert len(outcome.messages) == MAX_MESSAGES
-    assert all(len(message.text) == MAX_MESSAGE_TEXT for message in outcome.messages)
+    assert all(message.text == "x" * MAX_MESSAGE_TEXT + "..." for message in outcome.messages)
+
+
+def test_the_fiscal_statuses_are_the_spec_s_names() -> None:
+    assert {status: status.value for status in FiscalStatus} == {
+        FiscalStatus.PENDING: "pending",
+        FiscalStatus.ACCEPTED: "accepted",
+        FiscalStatus.ACCEPTED_WITH_OBSERVATIONS: "accepted_with_observations",
+        FiscalStatus.REJECTED: "rejected",
+        FiscalStatus.VOIDED: "voided",
+    }

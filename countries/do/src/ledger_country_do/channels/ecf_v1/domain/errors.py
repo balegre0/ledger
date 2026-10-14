@@ -1,51 +1,41 @@
-"""The errors do-ecf-v1 raises on purpose.
+"""The errors do-ecf-v1 raises on purpose: the kernel's, one hierarchy with every other error of the platform.
 
-Each has a ``kind`` (how it crosses a boundary: invalid, conflict, unavailable, internal) and a stable
-``code``, mirroring ``ledger_kernel.errors``; the integration milestone makes these bases subclasses of the
-kernel's (the spike imports nothing of the workspace). A message is built inside its class and never quotes a
-document, an amount, a token or a tax id.
+``EcfError`` is a ``LedgerError`` (an internal defect unless a subclass says otherwise); the invalid, conflict
+and unavailable bases are also the kernel's bases of those kinds, so a boundary that answers the kernel's
+errors answers the channel's alike. Each has a stable ``code`` (``do_ecf_*``). A message is built inside its
+class and never quotes a document, an amount, a token or a tax id.
 """
 
-from typing import ClassVar, Final, Literal
+from typing import ClassVar
 lazy from collections.abc import Callable
 
-from ledger_country_do.regime.definitions import NotInForceError, UnknownEntryError
+from ledger_country_do.regime.entries import RegimeEntryError
+from ledger_kernel.dated import NotInEffectError
+from ledger_kernel.errors import ConflictError, InvalidInputError, LedgerError, UnavailableError
 
-type ErrorKind = Literal["invalid", "conflict", "unavailable", "internal"]
-_ELLIPSIS: Final = "…"
 
-
-class EcfError(Exception):
+class EcfError(LedgerError):
     """Base of every error do-ecf-v1 raises on purpose: a defect unless a subclass says otherwise."""
 
-    kind: ClassVar[ErrorKind] = "internal"
     code: ClassVar[str] = "do_ecf_internal"
 
 
-class EcfInvalidError(EcfError):
+class EcfInvalidError(EcfError, InvalidInputError):
     """The input breaks a rule: sending it again cannot work."""
 
-    kind: ClassVar[ErrorKind] = "invalid"
     code: ClassVar[str] = "do_ecf_invalid"
 
 
-class EcfConflictError(EcfError):
+class EcfConflictError(EcfError, ConflictError):
     """The current state forbids it."""
 
-    kind: ClassVar[ErrorKind] = "conflict"
     code: ClassVar[str] = "do_ecf_conflict"
 
 
-class EcfUnavailableError(EcfError):
+class EcfUnavailableError(EcfError, UnavailableError):
     """Something outside failed; the same call may succeed later."""
 
-    kind: ClassVar[ErrorKind] = "unavailable"
     code: ClassVar[str] = "do_ecf_unavailable"
-
-
-def truncate(text: str, limit: int) -> str:
-    """``text`` cut to at most ``limit`` characters, an ellipsis marking the cut."""
-    return text if len(text) <= limit else text[: limit - 1] + _ELLIPSIS
 
 
 class RegimeNotInForceError(EcfInvalidError):
@@ -53,7 +43,7 @@ class RegimeNotInForceError(EcfInvalidError):
 
     code: ClassVar[str] = "do_ecf_regime_not_in_force"
 
-    def __init__(self, cause: NotInForceError) -> None:
+    def __init__(self, cause: NotInEffectError) -> None:
         super().__init__(f"the regime cannot decide this document: {cause}")
 
 
@@ -70,7 +60,7 @@ def from_regime[T](lookup: Callable[[], T]) -> T:
     """``lookup``'s value; the regime's lookup errors raised as pack errors (``EcfError``)."""
     try:
         return lookup()
-    except NotInForceError as error:
+    except NotInEffectError as error:
         raise RegimeNotInForceError(error) from error
-    except UnknownEntryError as error:
+    except RegimeEntryError as error:
         raise RegimeDefectError(str(error)) from error

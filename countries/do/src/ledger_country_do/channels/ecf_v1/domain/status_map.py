@@ -18,7 +18,8 @@ from types import MappingProxyType
 from typing import ClassVar, Final, final
 lazy from collections.abc import Mapping, Sequence
 
-from ledger_country_do.channels.ecf_v1.domain.errors import EcfUnavailableError, truncate
+from ledger_country_do.channels.ecf_v1.domain.errors import EcfUnavailableError
+from ledger_kernel.errors import truncate
 
 MAX_MESSAGES: Final = 20
 MAX_MESSAGE_TEXT: Final = 500

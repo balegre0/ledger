@@ -7,7 +7,7 @@ DGII's documents were fetched on 2026-10-12 from https://dgii.gov.do (index: "Do
 from datetime import date
 from typing import Final
 
-from ledger_country_do.regime.definitions import Source
+from ledger_kernel.regimes import Source
 
 RETRIEVED: Final = date(2026, 10, 13)
 COVERED_FROM: Final = date(2019, 1, 1)

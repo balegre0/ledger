@@ -1,13 +1,18 @@
 from dataclasses import replace
 from datetime import date
-from decimal import ROUND_DOWN, Decimal
+from decimal import Decimal
 lazy import random
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from ledger_country_do.channels.ecf_v1.domain.drafts import BillingIndicator, DraftInvalidError, Line
+from ledger_country_do.channels.ecf_v1.domain.drafts import (
+    CATEGORY_OF,
+    BillingIndicator,
+    DraftInvalidError,
+    Line,
+)
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError, RegimeNotInForceError
 from ledger_country_do.channels.ecf_v1.domain.routing import route
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
@@ -15,6 +20,8 @@ from ledger_country_do.regime import REGIME
 from ledger_country_do.regime.rounding import ROUNDING
 from ledger_country_do.regime.taxes import STANDARD
 from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
+from ledger_kernel.money import Currency, Money, RoundingMode
+from ledger_kernel.regimes import TaxCalculator, TaxCategoryKey, TaxLine
 
 D = Decimal
 
@@ -62,9 +69,11 @@ def test_the_zero_rate_is_a_taxed_group_with_no_itbis() -> None:
     assert (group.percent, group.itbis, totals.exempt, totals.total) == (D(0), D("0.00"), None, D("100.00"))
 
 
-def test_a_taxed_category_without_a_rate_is_a_defect_of_the_regime() -> None:
-    broken = replace(REGIME, tax_categories=(replace(STANDARD, rates=None), *REGIME.tax_categories[1:]))
-    with pytest.raises(EcfError, match=r"do.itbis.standard has no rate") as caught:
+def test_a_taxed_category_the_regime_lacks_is_a_defect_of_the_regime() -> None:
+    broken = replace(
+        REGIME, tax_categories=tuple(each for each in REGIME.tax_categories if each is not STANDARD)
+    )
+    with pytest.raises(EcfError, match=r"tax category 'do\.itbis\.standard' is not declared") as caught:
         compute_totals(consumer_invoice(), broken)
     assert (caught.value.kind, caught.value.code) == ("internal", "do_ecf_regime_defect")
 
@@ -87,7 +96,7 @@ def test_an_entry_the_regime_does_not_declare_is_a_defect_of_the_pack() -> None:
 
 
 def test_amounts_round_by_the_regime_s_own_rule() -> None:
-    down = replace(REGIME, rounding=replace(ROUNDING, mode=ROUND_DOWN))
+    down = replace(REGIME, rounding=replace(ROUNDING, mode=RoundingMode.DOWN))
     line = Line(name="ITEM", quantity=D(1), unit_price=D("10.0099"), billing=BillingIndicator.EXEMPT)
     draft = replace(consumer_invoice(), lines=(line,))
     assert compute_totals(draft).line_amounts == (D("10.01"),)
@@ -154,3 +163,35 @@ def test_a_total_of_seventeen_integer_digits_is_refused(lines: tuple[Line, ...])
     with pytest.raises(DraftInvalidError, match=r"^total ") as caught:
         compute_totals(replace(consumer_invoice(), lines=lines))
     assert caught.value.field == "total"
+
+
+_PESO = Currency.of("DOP")
+
+
+@given(_LINES)
+def test_the_kernel_s_calculator_totals_the_lines_as_dgii_does(lines: list[Line]) -> None:
+    # The regime's rounding rule is the one the channel computes with: the kernel's one calculator, given each
+    # line's amount, finds the channel's ITBIS and total.
+    draft = replace(consumer_invoice(), lines=tuple(lines))
+    totals = compute_totals(draft)
+    taxed = [
+        TaxLine(base=Money.of(amount, _PESO), category=TaxCategoryKey(CATEGORY_OF[line.billing]))
+        for line, amount in zip(draft.lines, totals.line_amounts, strict=True)
+    ]
+    kernel = TaxCalculator(REGIME).totals(taxed, draft.issued_on)
+    assert kernel.tax.amount == (totals.itbis_total or D(0))
+    assert kernel.gross.amount == totals.total
+    by_category = {category.category: category for category in kernel.categories}
+    for group in totals.groups:
+        found = by_category.pop(TaxCategoryKey(CATEGORY_OF[group.indicator]))
+        assert (found.base.amount, found.percent, found.tax.amount) == (
+            group.base,
+            group.percent,
+            group.itbis,
+        )
+    exempt = by_category.pop(TaxCategoryKey(CATEGORY_OF[BillingIndicator.EXEMPT]), None)
+    assert by_category == {}
+    if exempt is None:
+        assert totals.exempt is None
+    else:
+        assert (exempt.base.amount, exempt.tax.amount) == (totals.exempt, D(0))

@@ -7,8 +7,11 @@ checks the table against DGII's vendored schemas. Corrections (which types a not
 
 from typing import Final
 
-from ledger_country_do.regime.definitions import Direction, DocumentKind, DocumentTypeDef
 from ledger_country_do.regime.sources import FORMAT_ECF
+from ledger_kernel.regimes import Direction, DocumentKind, DocumentTypeDef, Locale
+
+TYPES_SOURCE: Final = FORMAT_ECF
+"""Where the table comes from (the kernel's ``DocumentTypeDef`` cites none of its own)."""
 
 _I, _C, _D = DocumentKind.INVOICE, DocumentKind.CREDIT_NOTE, DocumentKind.DEBIT_NOTE
 _S, _P = Direction.SALES, Direction.PURCHASE
@@ -16,7 +19,11 @@ _S, _P = Direction.SALES, Direction.PURCHASE
 
 def _type(code: str, label: str, kind: DocumentKind, direction: Direction, *, buyer: bool) -> DocumentTypeDef:
     return DocumentTypeDef(
-        code=code, label=label, kind=kind, direction=direction, requires_buyer_tax_id=buyer, source=FORMAT_ECF
+        code=code,
+        labels={Locale("es"): label},
+        kind=kind,
+        direction=direction,
+        requires_buyer_tax_id=buyer,
     )
 
 

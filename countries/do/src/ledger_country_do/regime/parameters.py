@@ -6,9 +6,12 @@ from types import MappingProxyType
 from typing import Final
 lazy from collections.abc import Mapping
 
-from ledger_country_do.regime.definitions import Since, Timeline
 from ledger_country_do.regime.sources import COVERED_FROM, DECREE_587_24, FORMAT_ECF, SERVICES_DGII
-lazy from ledger_country_do.regime.definitions import ParameterValue, Source
+from ledger_kernel.dated import Since, Timeline
+lazy from ledger_kernel.regimes import Source
+
+type ParameterValue = Decimal | int | str
+"""What a dated parameter of a regime holds (the kernel's ``RegimeDef.parameters``)."""
 
 RFCE_THRESHOLD: Final = "rfce_threshold"
 """A type-32 invoice whose total is below it is sent as a summary (RFCE); from it, in full (DT-DGII)."""
@@ -27,19 +30,19 @@ which limit holds (the plan's open fact F7)."""
 _DECREE_DATE: Final = date(2024, 10, 10)
 
 
-def _since(name: str, day: date, value: ParameterValue) -> Timeline[ParameterValue]:
-    return Timeline(name, (Since(day, value),))
+def _since(day: date, value: ParameterValue) -> Timeline[ParameterValue]:
+    return Timeline(Since(day, value))
 
 
 PARAMETERS: Final[Mapping[str, Timeline[ParameterValue]]] = MappingProxyType(
     {
-        RFCE_THRESHOLD: _since(RFCE_THRESHOLD, COVERED_FROM, Decimal("250000.00")),
-        CONTINGENCY_CONNECTIVITY_HOURS: _since(CONTINGENCY_CONNECTIVITY_HOURS, _DECREE_DATE, 72),
-        CONTINGENCY_PAPER_MAX_DAYS: _since(CONTINGENCY_PAPER_MAX_DAYS, _DECREE_DATE, 15),
-        CONTINGENCY_REPLACEMENT_DAYS: _since(CONTINGENCY_REPLACEMENT_DAYS, _DECREE_DATE, 30),
-        LEGAL_NAME_MAX: _since(LEGAL_NAME_MAX, COVERED_FROM, 150),
-        LINES_MAX: _since(LINES_MAX, COVERED_FROM, 1000),
-        RFCE_LINES_MAX: _since(RFCE_LINES_MAX, COVERED_FROM, 10000),
+        RFCE_THRESHOLD: _since(COVERED_FROM, Decimal("250000.00")),
+        CONTINGENCY_CONNECTIVITY_HOURS: _since(_DECREE_DATE, 72),
+        CONTINGENCY_PAPER_MAX_DAYS: _since(_DECREE_DATE, 15),
+        CONTINGENCY_REPLACEMENT_DAYS: _since(_DECREE_DATE, 30),
+        LEGAL_NAME_MAX: _since(COVERED_FROM, 150),
+        LINES_MAX: _since(COVERED_FROM, 1000),
+        RFCE_LINES_MAX: _since(COVERED_FROM, 10000),
     }
 )
 PARAMETER_SOURCES: Final[Mapping[str, Source]] = MappingProxyType(

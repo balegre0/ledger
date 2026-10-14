@@ -76,8 +76,8 @@ The spec is authoritative; where it is silent or contradicts itself, this plan d
 3. **A fourth RLS scope, `company`** (`organization_id` and `company_id`, no mode), for company rows shared by both modes (identity's branches and emission points now, establishments in v2-M2). §6.3 lists three scopes and no home for those rows.
 4. **An idempotent route is a moded route.** `idempotency_keys` is under the `moded_organization` scope (§6.4) with `mode NOT NULL` in its primary key, so a key can only be stored in a moded unit: every route that takes `Idempotency-Key` requires `Ledger-Mode` (400 `mode_required` without it, §9.7). In this milestone identity's `POST`s therefore require the header; API-client credentials that carry their mode come with v2-M2.
 5. **400 answers.** The kind table (§9.6) has no 400, but `mode_required` and `version_unknown` are 400 (§9.2, §9.7). The platform's HTTP layer gets `BadRequestError(InvalidInputError)`, answered 400; the kind stays `INVALID`.
-6. **Expired idempotency keys are purged under forced RLS** by a dedicated setting: the `SELECT` and `DELETE` policies of `idempotency_keys` also admit rows with `expires_at < now()` when the unit set `ledger.purge = 'on'`, which only `BoundDatabase.purging()` does. Nothing else can see another organization's keys, and what a purge can see is expired by definition.
-7. **Per-table grants to `ledger_relay` are applied by `ledger-migrate`** after each schema's revisions (`GRANT SELECT, UPDATE, DELETE ON <s>.outbox`, `INSERT ON <s>.inbox`, `SELECT ON <s>.subscriptions`, and `SELECT ON platform.routing`): the tables do not exist when `init.sql` runs. `init.sql` makes roles, schemas, schema `USAGE` and default privileges.
+6. **Expired idempotency keys are purged under forced RLS** by a dedicated role, never a setting (Task 8 review): each schema has a `NOLOGIN` role `<s>_purge`, granted to its login like `<s>_rw` (`INHERIT FALSE, SET TRUE`), with `SELECT, DELETE` on `<s>.idempotency_keys` only, and two extra policies `TO <s>_purge` (`FOR SELECT` and `FOR DELETE`, `USING (expires_at < now())`). `BoundDatabase.purging()` enters it with `SET LOCAL ROLE <s>_purge`. The `rw` role sees nothing more whatever it sets (`ledger.purge` means nothing); what the purge role can see is expired by definition, and it can neither insert nor update.
+7. **Per-table grants to `ledger_relay` are applied by `ledger-migrate`** as the schema's owner after each schema's revisions (`SchemaMigrations.upgrade` runs `roles.migrated_statements`: `GRANT SELECT, DELETE ON <s>.outbox`, `UPDATE (attempts, unrouted_since) ON <s>.outbox`, `INSERT ON <s>.inbox`, `SELECT ON <s>.subscriptions`, `SELECT ON platform.routing`, and `REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON <s>.alembic_version FROM <s>_rw`): the tables do not exist when `init.sql` runs. `init.sql` makes roles (created if missing, then `ALTER ROLE` to exactly their options), schemas, schema `USAGE`, default privileges, and closes the database to `PUBLIC` (`CONNECT`, `TEMPORARY`, schema `public`, `EXECUTE` on the owners' functions).
 8. **The `platform` schema runs `chassis_schema_v1` too** (its schedules enqueue jobs into `platform.jobs`), then adds `routing` and `schedule_leases`.
 9. **Platform schedules are `platform.purge_idempotency_keys` and `platform.purge_done_jobs`.** §3.2 names `platform.purge_inbox`, but §6.4 says handled inbox rows are deleted by their handler and dead ones are kept; the purges §6.4 asks for are idempotency keys and done jobs.
 10. **Audit rows take their actor from the running call.** `uow.audit(...)` (§5.3) receives neither actor nor call id, so the runtime binds an `Actor(name, call_id)` in a context variable (`ledger_platform.data.audit.acting_as`) wherever it makes a `Call` or `SystemCall`; an audit without one raises `MissingActorError`.
@@ -114,7 +114,8 @@ of the workspace. Both plans merge into `main`; these rules keep them compatible
 
 1. **Root `pyproject.toml`.** The spike adds its two distributions to v1's hand lists. If it merges before Task 1,
    Task 1 moves its paths with everything else (`countries/` is already at its v2 place); if after, the merge adds
-   them to the lists as they are then. From Task 19 the lists are generated and the spike's packages get manifests.
+   them to the lists as they are then. From Task 19 the spike's packages get manifests; as built (final review),
+   the lists are generated: `ledger-devtools sync` writes them as the root `pyproject.toml`'s marked block.
 2. **Nested member** (the spike's verified uv finding): `countries/<cc>/testing` must not declare
    `[tool.uv.sources]` of its own. Task 7's generator writes no sources for a nested member, and its naming rule
    maps `countries/<cc>/testing` to the name `<cc>-testing` and the distribution `ledger-country-<cc>-testing`
@@ -4994,6 +4995,28 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 Spec §5.3, §3.4 (rule 13 guard), §3.5 (publish, NOTIFY), §3.6 (enqueue, wake, wake_all), §6.4 (audit), §6.7; Decisions 6, 10. After Task 8. New modules; v1's `Database.transaction` and `UnitOfWork` stay in `data/database.py` for identity until Task 16.
 
+**Amended by the Task 9 review (binding; the code in the steps below predates it, the implementation follows this):**
+- **One clock, the database's.** A unit's `now` is its transaction's `now()` (read with the scope settings);
+  `BoundDatabase` takes no `clock`. Every time a unit writes (`occurred_at`, `run_at`, `deadline_at`,
+  `created_at`) and every due or lease comparison in SQL (`run_at <= now()`, `lease_until < now()`) is on that
+  clock. `claim` takes no `now`: leases run from `now()` (`lease_until = now() + lease`), and callers' `due`
+  predicates use `func.now()`. Injectable clocks stay only where the database is not involved.
+- `publish` refuses an event outside the unit's scope (`EventScopeMismatchError`, `event_scope_mismatch`): same
+  organization; the company and the mode too where the unit names them; an unscoped unit publishes for anyone.
+  (Task 15 relaxed the mode: compared only where the event names one too. A mode-less event is about data both
+  modes share, which a moded unit changes when an idempotent route acts on a company: Decision 4.)
+- Job keys are unique per kind across tenants, so a key embeds a globally unique id. Enqueue restarts a done or
+  dead job only when the existing row's scope columns are the enqueuer's (`IS NOT DISTINCT FROM`); `wake` and
+  `wake_all` touch only jobs inside the unit's scope (organization, and company and mode where named).
+- A unit or a purge opened while the task holds a unit raises `NestedUnitError` (`unit_nested`).
+- `audit` needs an organization scope (`MissingAuditScopeError`, `audit_scope_missing`); `purging()` makes no
+  tenant setting and the purge deletes without `RETURNING`.
+- The codec refuses floats (amounts are `Decimal`) and text or keys with NUL; aware datetimes are written in UTC
+  (equal instants, equal bytes); a mapping key appears in an error path only when it looks like a name.
+- `Notifier`: one sender per channel with a dirty mark (no pile-up when the pool is busy); `aclose` gathers with
+  `return_exceptions=True`. A dedicated small connection for it is Task 14's.
+- The pool resets every returned connection (`RESET ROLE`, `RESET ALL`: `Database`'s `reset` hook).
+
 **Files:**
 - Create: `packages/platform/src/ledger_platform/data/{codec,audit,notifier,unit_of_work,bound,queue,scopes}.py`
 - Modify: `packages/platform/src/ledger_platform/data/database.py` (`Database.create`, `Database.aclose`, `open` built on them; `_is_committable` → public `is_committable`), `packages/platform/src/ledger_platform/observability/tracing.py` (module function `current_traceparent() -> str | None`)
@@ -5006,8 +5029,8 @@ Spec §5.3, §3.4 (rule 13 guard), §3.5 (publish, NOTIFY), §3.6 (enqueue, wake
   - `data.audit`: `Actor(name: str, call_id: str)`; `acting_as(actor) -> ContextManager[None]`; `current_actor() -> Actor` (`MissingActorError`, internal, `missing_actor`).
   - `data.notifier`: `type Channel = Literal["ledger_outbox", "ledger_inbox"]`; `OUTBOX`, `INBOX`; `Signals` (Protocol: `signal(channel: Channel) -> None`); `Notifier(database, *, window: float = 0.01)` implementing it, with `async aclose()`.
   - `data.unit_of_work`: `JobPolicy(*, max_attempts: int, deadline: timedelta | None)`; `UnitOfWork` with `connection: AsyncConnection`, `scope: Scope | None`, `now: datetime`, `is_open: bool`, `publish(event) -> None`, `jobs: UnitJobs` (`enqueue(kind, key, *, run_at=None, payload=None) -> None`, `wake(kind, key) -> None`, `wake_all(kind, company: CompanyId, reason: str) -> None`), `audit(*, action, subject, before=None, after=None, detail=None) -> None`, `after_commit(callback) -> None`; `open_unit() -> UnitOfWork | None`; errors `EventTooLargeError` (`event_too_large`), `UndeclaredEventTypeError` (`event_type_undeclared`), `UndeclaredJobKindError` (`job_kind_undeclared`), all internal.
-  - `data.bound`: `BoundDatabase(database, *, schema: str, source: str, publishes: frozenset[str] = frozenset(), jobs: Mapping[str, JobPolicy] = {}, signals: Signals, clock: Clock = utc_now)` with `schema`, `database`, `tables -> ChassisTables`, `unit(scope: Scope | None) -> AsyncContextManager[UnitOfWork]`, `purging() -> AsyncContextManager[AsyncConnection]`.
-  - `data.queue`: `Backoff(steps: tuple[timedelta, ...], then: timedelta)` with `after(attempts: int) -> timedelta`; `DEFAULT_BACKOFF` (1 s, 10 s, 1 min, 5 min, then 10 min); `async claim(connection, table, *, keys, due, order_by, limit, now, lease, extra=None) -> Sequence[RowMapping]`.
+  - `data.bound`: `BoundDatabase(database, *, schema: str, source: str, publishes: frozenset[str] = frozenset(), jobs: Mapping[str, JobPolicy] = {}, signals: Signals)` (a unit's `now` is the database's) with `schema`, `database`, `tables -> ChassisTables`, `unit(scope: Scope | None) -> AsyncContextManager[UnitOfWork]`, `purging() -> AsyncContextManager[AsyncConnection]`.
+  - `data.queue`: `Backoff(steps: tuple[timedelta, ...], then: timedelta)` with `after(attempts: int) -> timedelta`; `DEFAULT_BACKOFF` (1 s, 10 s, 1 min, 5 min, then 10 min); `async claim(connection, table, *, keys, due, order_by, limit, lease, extra=None) -> Sequence[RowMapping]` (leases from the database's `now()`).
   - `Database.create(url, *, pool_size=10, application_name="ledger", limits=DEFAULT_LIMITS) -> Database` (no I/O), `async Database.aclose()`.
   - `data.scopes.scope_of(organization: UUID | None, company: UUID | None, mode: str | None) -> Scope | None` (the scope a queue row's envelope columns name; Tasks 10 and 11 use it).
 
@@ -5163,7 +5186,7 @@ Tests (each a behaviour; write them in full):
 - `test_audit_writes_who_did_what_with_hashes_never_data` — within `acting_as(Actor("user:2001", "req-1"))`: the row's `actor`, `call_id`, `action="probe.rename"`, `subject_type="probe"`, `subject_id`, `before_hash == sha256(canonical_json(encode(old)))`, `after_hash` likewise, `detail == {"field": "name"}`; without an actor, `MissingActorError` at `audit`.
 - `test_the_open_unit_is_known_to_the_task_and_forgotten_after` — `open_unit()` is the unit inside; `None` after; a task created inside and awaited after the block sees `None` (the unit is closed even though the context variable was copied).
 - `test_a_caught_statement_failure_never_commits` — inside a unit, a failing statement caught without a savepoint: the block's exit raises `AbortedTransactionError` and nothing commits.
-- `test_a_purging_connection_sees_expired_keys_of_every_organization_only` — Decision 6, through `probe.purging()`.
+- `test_a_purging_connection_sees_expired_keys_of_every_organization_only` — Decision 6, through `probe.purging()` (role `probe_purge`): expired keys of A and B, never a live one; it cannot insert or update; a `probe.unit(None)` that sets `ledger.purge = 'on'` sees nothing.
 
 `packages/platform/tests/integration/test_data_notifier.py`:
 
@@ -5834,7 +5857,6 @@ lazy from ledger_platform.data.notifier import Signals
 lazy from ledger_platform.data.tables import ChassisTables
 lazy from ledger_platform.data.unit_of_work import JobPolicy
 
-_PURGE: Final = text("SELECT set_config('ledger.purge', 'on', true)")
 _logger = structlog.stdlib.get_logger(__name__)
 
 
@@ -5858,7 +5880,8 @@ class BoundDatabase:
         roles = SchemaRoles(schema=schema)
         self.database = database
         self.schema = roles.schema
-        self._role = text(f"SET LOCAL ROLE {roles.rw}")
+        self._role = text(f"SET LOCAL ROLE {identifier(roles.rw)}")
+        self._purge = text(f"SET LOCAL ROLE {identifier(roles.purge)}")
         self._source = source
         self._signals = signals
         self._publishes = publishes
@@ -5899,10 +5922,9 @@ class BoundDatabase:
 
     @asynccontextmanager
     async def purging(self) -> AsyncGenerator[AsyncConnection]:
-        """A transaction in this module's role that may read and delete expired idempotency keys (Decision 6)."""
+        """A transaction in this schema's ``purge`` role: it reads and deletes expired idempotency keys only."""
         async with self.database.engine.begin() as connection:
-            await connection.execute(self._role)
-            await connection.execute(_PURGE)
+            await connection.execute(self._purge)
             yield connection
 ```
 
@@ -5924,6 +5946,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 10: Events — subscriptions, routing, the fan-out, the inbox runner, wake-ups (∥ Tasks 11, 13)
 
 Spec §3.5 (all of it), §2 rules 2-4, ADR 0002; Decisions 7, 16, 17, 18. After Task 9. Files only under `packages/platform/src/ledger_platform/events/` and its tests (the root `pyproject.toml` contract line is the one shared edit: add `events` to the layer `"outbox | idempotency | auth | grpc"`, which Task 11 extends with `jobs`).
+
+**Amended by the Task 9 review:** the database's clock. Claims call `claim(..., order_by=..., limit=...,
+lease=...)` without `now`; due predicates compare with `func.now()` (`next_attempt_at <= now()`,
+`lease_until < now()`), and retries set `next_attempt_at = now() + backoff`. A runner's `now=` parameters below
+are dropped; tests make rows due by moving their columns (as admin), not a clock. A bound unit's `now` is its
+transaction's `now()`.
 
 **Files:**
 - Create: `packages/platform/src/ledger_platform/events/{__init__,consumers,subscriptions,routing,dispatcher,inbox,wakeups,bus}.py`
@@ -6558,6 +6586,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 11: Jobs — the runner with leases and fencing, schedules on lease rows, the platform's purges (∥ Tasks 10, 13)
 
 Spec §3.6 (all of it), §6.4 (purges), §2 rule 4, ADR 0003; Decisions 8, 9, 15. After Task 9. Files only under `packages/platform/src/ledger_platform/jobs/` and its tests (the shared root edit: add `jobs` to the layer that Task 10 gave `events`).
+
+**Amended by the Task 9 review:** the database's clock. `claim` takes no `now`; job due predicates are
+`run_at <= now()` and `lease_until < now()`, outcomes write `now()`-based times (`RunAgain`, backoff,
+`deadline_at < now()`), and schedule leases compare `next_run_at` and `leased_until` with `now()`. The
+`now=` parameters of `run_due`, `claim_now` and `handle` below, and the scheduler's and `maintenance_jobs`'
+`clock`, are dropped; tests make rows due by moving their columns (as admin), not a `ManualClock`.
 
 **Files:**
 - Create: `packages/platform/src/ledger_platform/jobs/{__init__,outcomes,runner,schedules,maintenance}.py`
@@ -7721,7 +7755,7 @@ Write `App` in full following the docstring. The construction steps, in code ord
 2. `configure_logging(settings, service=f"ledger-{role}")`; `registry = CollectorRegistry()` (+ process, platform, GC collectors); `tracing = Tracing.create(service_name=f"ledger-{role}", exporter=<OTLP when settings.otlp_endpoint>)`.
 3. `database = Database.create(settings.database_url, application_name=f"ledger-{role}")`; `signals = Notifier(database)`.
 4. `regimes = Regimes.load(discover)`; `channel_packs = Channels.load(regimes, discover)`; `modules = load_modules(discover)` ordered with `graphlib.TopologicalSorter` over `dependencies.modules`.
-5. `self._bound = {"platform": BoundDatabase(database, schema="platform", source="platform", signals=signals, publishes=..., jobs=..., clock=clock)}` and one per module schema (`source` = module name; `publishes` = its event types; `jobs` = `{decl.kind: JobPolicy(max_attempts=decl.max_attempts, deadline=decl.deadline)}`).
+5. `self._bound = {"platform": BoundDatabase(database, schema="platform", source="platform", signals=signals, publishes=..., jobs=...)}` and one per module schema (`source` = module name; `publishes` = its event types; `jobs` = `{decl.kind: JobPolicy(max_attempts=decl.max_attempts, deadline=decl.deadline)}`).
 6. `apis, extensions, ports = Directory("api"), Directory("extension"), Directory("port")`; `assembled = AssembledChannels()`; for each module: `ModuleContext(manifest, role, settings, database=self._bound[schema], clock, regimes, channels=assembled, apis=apis.view(frozenset(manifest.dependencies.modules)), extensions=extensions.view(frozenset(manifest.extension_points.declares)), telemetry=Telemetry.of(name, tracing, registry), auth=authentication)`; `parts = module.assemble(context)`; an `api` binding must be named after the module (`BindingTypeError` otherwise); add `parts.api`, `parts.implements`, `parts.provides`.
 7. For each channel pack: a `BoundDatabase` for `pack.entry.schema_name` (source = channel key); `ChannelContext(definition=pack.entry, regime=regimes.get(pack.regime), role, settings, database, clock, ports=ports.view(<every provided name>), telemetry)`; `assembled.add(pack.key, pack.assemble(context).channel)`; then `assembled.seal()`.
 8. Merge: for each module, `Consumer.of(spec, decl)` for every spec (declared names from `manifest.events.consumes`; a spec without a declaration or a declaration without a spec raises), `{decl.kind: (decl, spec.handler)}` likewise for jobs; schedules: `Schedule(name, every, enqueues, target=self._bound[<owner schema>])` from every manifest (platform's included); the platform's own job handlers are `maintenance_jobs(tuple(self._bound.values()), clock=clock)`.
@@ -7746,6 +7780,19 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ---
 
 ### Task 15: Identity cutover to the v2 chassis
+
+**Amended by the Task 15 implementation and review (binding; the code in the steps below predates it):**
+- The snapshot switch is `UPDATE_SNAPSHOTS=1` (`uv run poe openapi`), not `LEDGER_UPDATE_SNAPSHOTS`:
+  `Settings` fails closed on any unknown `LEDGER_*` variable (Decision 14), so that name stops every app.
+- identity's template hook migrates with `ledger_testing.database.migrate(PLATFORM_MIGRATIONS, MIGRATIONS)`, not
+  `App("migrate")`: the template is shared by every package's hook, and the app's routing bump would leak into
+  the platform's tests. `App("migrate")` is tested on fresh databases (`test_migrations.py`, `test_readiness.py`).
+- `adapters/postgres/schema.py` has `migrations()`, one `SchemaMigrations` per app (its readiness, once met, is
+  remembered per instance); `MIGRATIONS` stays for tests and tools, as `platform_migrations()` does.
+- A moded unit may publish a mode-less event (spec §3.5): identity's events have no mode, and its idempotent
+  `POST`s run in moded units (Decision 4). `r0001` omits `uq_companies_tax_id` (v1's r0002 dropped it).
+- `Ledger-Mode` is documented required (the app's OpenAPI document, `http.mode.require_mode_header`); FastAPI
+  still reads it as optional so that a missing header is 400 `mode_required`.
 
 Spec §3.10 (assembly), §4.1 (module layout), §4.5, §5.3, §6.3-§6.5 (schema `identity`, roles, squashed `r0001`), §9.5, §9.7, §16.1 (`services/identity` table: rows marked for this milestone); Decisions 3, 4, 13, 26; "Deferred" list (what stays as it is). After Tasks 14 and 7. Identity keeps its domain, use cases, routes and API shapes; it changes how it is composed, stored, announced and tested. The old kernel `TaxId` (DO) and `Permission` enum stay until Task 18.
 
@@ -8296,7 +8343,7 @@ The test modules:
 - `test_rpc.py` is deleted with the gRPC service.
 - API tests: `Caller.posting(key)` now also sends `Ledger-Mode: test` (`packages/testing/src/ledger_testing/api.py`: `def posting(self, key: str, mode: str = "test") -> dict[str, str]: return self.bearer() | {"Idempotency-Key": key, "Ledger-Mode": mode}`). Add to `test_companies_api.py`: a `POST /v1/companies` without `Ledger-Mode` is 400 `mode_required`; the same body under the same key, first in `test` then in `live`, is not replayed in `live` (the key is new there): the request runs and answers 409 `tax_id_taken` (one active company per tax id, whatever the mode), proving keys are kept per mode.
 - `test_readiness.py`: `/readyz` names `schema:platform` and `schema:identity` and answers 200 on the migrated worker database.
-- `tests/contract/test_openapi.py`: the document of `App("api", settings=<placeholders>).asgi().openapi()`, restricted to identity's prefixes and serialized as before (`json.dumps(..., indent=2, sort_keys=True, ensure_ascii=False) + "\n"`), equals `modules/identity/openapi.json`; with `LEDGER_UPDATE_SNAPSHOTS=1` in the environment the test writes the file instead and fails with "snapshot updated" (Task 19 moves the writing into `ledger-devtools sync` and removes the switch). Regenerate it now and review the diff: `Ledger-Mode` on the four `POST`s, 400 in their answers, `Page_*` schemas, no gRPC.
+- `tests/contract/test_openapi.py`: the document of `App("api", settings=<placeholders>).asgi().openapi()`, restricted to identity's prefixes and serialized as before (`json.dumps(..., indent=2, sort_keys=True, ensure_ascii=False) + "\n"`), equals `modules/identity/openapi.json`; with `UPDATE_SNAPSHOTS=1` in the environment (`uv run poe openapi`) the test writes the file instead and fails with "snapshot updated" (Task 19 moves the writing into `ledger-devtools sync` and removes the switch). Regenerate it now and review the diff: `Ledger-Mode` on the four `POST`s, 400 in their answers, `Page_*` schemas, no gRPC.
 
 - [ ] **Step 6: Compose, Tilt and CI follow**
 
@@ -8406,6 +8453,24 @@ git commit -m "refactor: delete the v1 chassis, NATS and the Python contracts; c
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+
+> **As built (Task 16), binding on Tasks 17-21.** The final contract of Step 4 could not hold as written: the
+> generated `_manifest.py` (bottom layer), `events.consumers` and `jobs.runner` import the manifest model, which
+> lived in `runtime`. So:
+> - the manifest model is `ledger_platform.config.manifest` (was `runtime/manifest.py`; `AppRole` is re-exported by
+>   `ledger_platform.runtime`), and every `runtime.manifest` / `runtime/manifest` in this plan from here on means
+>   `config.manifest`; devtools' generator writes `from ledger_platform.config.manifest import PackageManifest`;
+> - the platform layers are `["runtime", "http | grpc", "events | jobs", "auth", "data", "observability",
+>   "_manifest", "config"]` (`_manifest` above `config`), in the root contract and in devtools' `PLATFORM_LAYERS`
+>   (Task 19 generates exactly this);
+> - `parked` and `being_cancelled` (where a worker's loop ends) live in `ledger_platform.data.queue`, not in
+>   `runtime.supervision`;
+> - `Telemetry` is exported by `ledger_platform.runtime` (it lives in `runtime.contexts`), not by `observability`;
+> - `http` exports `page_query` (v2) instead of `page_request`; `precondition_failed` is gone (use
+>   `precondition_checked`); `InvalidOptionError(*, component, option, requirement, value)` has the one code
+>   `invalid_option`; `tests/test_errors.py` keeps codes unique across every exception class of the workspace
+>   (Task 18 empties its `SHARED_UNTIL_THE_VOCABULARY_CUTOVER`).
+> - For Task 20: `deploy/docker/ledger.Dockerfile` still `COPY`s `contracts/pyproject.toml`, which no longer exists.
 
 ---
 
@@ -8773,7 +8838,7 @@ Identity:
 - `adapters/http/companies.py`: the route parses with `context.tax_ids.parse(body.tax_id.scheme, body.tax_id.value).tax_id`, where `ApiContext.tax_ids` is `context.regimes.tax_id_schemes` handed in by `assembly.py` (`ApiContext.build(..., tax_ids=context.regimes.tax_id_schemes)`).
 - `platform/auth/access.py` and `http/deps.py` name `Permission` (the type is the same name, now a `NewType`: only `frozenset(Permission)` uses of the enum need a change).
 - Duplicated errors (audit D1, D2, D4): move `PermissionDeniedError` and `CompanyNotFoundError` into `ledger_kernel.access` with the messages the tests pin today (`git grep -n "permission_denied\|company_not_found"` lists the assertions: codes and messages stay); delete platform `auth.access.PermissionDeniedError`/`NoCompanyAccessError` and identity `domain/errors.py`'s `ActorNotAllowedError`/`CompanyNotFoundError`/`InvalidStateError`, and point every raiser and `pytest.raises` at the survivors. `Actor.require` in `domain/membership.py` raises the kernel's error, as `CompanyAccess.require` does.
-- Regenerate `modules/identity/openapi.json` (`LEDGER_UPDATE_SNAPSHOTS=1 uv run pytest modules/identity/tests/contract`) and review: `tax_id` is an object; `legal_name` max length 300.
+- Regenerate `modules/identity/openapi.json` (`uv run poe openapi`, which runs the contract tests with `UPDATE_SNAPSHOTS=1`) and review: `tax_id` is an object; `legal_name` max length 300.
 
 - [ ] **Step 4: Run, then the gate**
 

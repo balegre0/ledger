@@ -1,8 +1,10 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
+from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePrivateKey
 from cryptography.hazmat.primitives.serialization import pkcs12
-from cryptography.x509.oid import NameOID
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from ledger_country_do_testing.pki import (
     OPENING_PHRASE,
@@ -50,3 +52,13 @@ def test_the_fixture_hierarchy_is_dated_from_a_fixed_moment_not_from_today(
 ) -> None:
     for certificate in (authority.certificate, issued.certificate, receiver_identity.certificate):
         assert certificate.not_valid_before_utc <= SIGNER_VALID_FROM
+
+
+def test_an_extended_key_usage_is_written_only_when_asked_for() -> None:
+    root = Authority.root(now=datetime.now(UTC))
+    usages = (ExtendedKeyUsageOID.EMAIL_PROTECTION,)
+    usage = root.issue(organization(), extended_usage=usages).certificate.extensions
+    assert list(usage.get_extension_for_class(x509.ExtendedKeyUsage).value) == list(usages)
+    plain = root.issue(organization()).certificate.extensions
+    with pytest.raises(x509.ExtensionNotFound):
+        plain.get_extension_for_class(x509.ExtendedKeyUsage)

@@ -14,11 +14,11 @@ import pytest
 from cryptography.hazmat.primitives.serialization import BestAvailableEncryption, pkcs12
 
 from ledger_country_do_testing import spike
-from ledger_country_do_testing.clock import ManualClock
 from ledger_country_do_testing.fake_dgii.app import DEFAULT_PUBLIC_URL, FakeDgii
 from ledger_country_do_testing.fake_dgii.state import DirectoryEntry, Scripted, Status, dgii_check
 from ledger_country_do_testing.pki import bundle, pem
 from ledger_country_do_testing.transports import FAKE_HOSTS, BreaksAfterSending
+from ledger_testing.clock import ManualClock
 lazy from ledger_country_do_testing.pki import Authority, Issued
 
 PASSWORD: Final = "a password nobody prints"

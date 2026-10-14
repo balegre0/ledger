@@ -44,7 +44,7 @@ def test_a_violation_says_where_and_cuts_what_libxml2_quotes() -> None:
     wrong = SEED.replace(b"2026-10-12T09:00:00-04:00", b"x" * 400)
     (violation,) = violations(Format.SEED, wrong, unsigned=True)
     assert (violation.line, violation.path) == (1, "/SemillaModel/fecha")
-    assert len(violation.message) <= 160
+    assert len(violation.message) <= 160 + len("...")  # cut by the kernel's truncate
 
 
 def test_checked_returns_the_document_or_refuses_it_with_its_violations() -> None:

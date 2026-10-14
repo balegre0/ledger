@@ -1,0 +1,79 @@
+from typing import Protocol, TypeIs, runtime_checkable
+
+import pytest
+
+from ledger_platform.runtime.keys import (
+    BindingMissingError,
+    BindingTypeError,
+    Directory,
+    DuplicateBindingError,
+    Key,
+    UndeclaredBindingError,
+    UndeclaredDependencyError,
+)
+
+
+@runtime_checkable
+class Greeter(Protocol):
+    def greet(self) -> str: ...
+
+
+def is_greeter(value: object) -> TypeIs[Greeter]:
+    return isinstance(value, Greeter)
+
+
+def anything(value: object) -> TypeIs[object]:
+    del value
+    return True
+
+
+GREETER = Key[Greeter]("greeter", is_greeter)
+GREETERS = frozenset({"greeter"})
+
+
+class English:
+    def greet(self) -> str:
+        return "hello"
+
+
+def test_a_bound_value_is_read_typed_through_a_declared_dependency() -> None:
+    directory = Directory("apis")
+    directory.add(GREETER.bind(English()), by="greeter", declared=GREETERS)
+    assert directory.view(frozenset({"greeter"})).get(GREETER).greet() == "hello"
+
+
+def test_an_undeclared_dependency_is_refused_even_when_bound() -> None:
+    directory = Directory("apis")
+    directory.add(GREETER.bind(English()), by="greeter", declared=GREETERS)
+    with pytest.raises(UndeclaredDependencyError, match="greeter"):
+        directory.view(frozenset()).get(GREETER)
+
+
+def test_a_missing_or_doubled_binding_is_a_defect() -> None:
+    directory = Directory("apis")
+    with pytest.raises(BindingMissingError, match="apis 'greeter'"):
+        directory.view(frozenset({"greeter"})).get(GREETER)
+    directory.add(GREETER.bind(English()), by="greeter", declared=GREETERS)
+    with pytest.raises(DuplicateBindingError, match="apis 'greeter'"):
+        directory.add(GREETER.bind(English()), by="greeter", declared=GREETERS)
+
+
+def test_a_value_of_the_wrong_type_under_a_name_is_a_defect() -> None:
+    directory = Directory("apis")
+    directory.add(Key[object]("greeter", anything).bind(42), by="greeter", declared=GREETERS)
+    with pytest.raises(BindingTypeError, match="greeter"):
+        directory.view(frozenset({"greeter"})).get(GREETER)
+
+
+def test_a_key_names_what_it_binds() -> None:
+    binding = GREETER.bind(English())
+    assert binding.name == GREETER.name == "greeter"
+    assert isinstance(binding.value, English)
+
+
+def test_a_binder_binds_only_what_it_declares() -> None:
+    directory = Directory("ports")
+    with pytest.raises(UndeclaredBindingError, match="ports 'greeter' is bound by 'invoicing'"):
+        directory.add(GREETER.bind(English()), by="invoicing", declared=frozenset({"other"}))
+    with pytest.raises(BindingMissingError):
+        directory.view(GREETERS).get(GREETER)

@@ -1,0 +1,19 @@
+[package]
+name = "testing"
+kind = "package"
+summary = "The shared test harness: a pytest plugin, PostgreSQL, a local OpenID provider, clocks. Dev-only."
+owners = ["@balegre0"]
+
+[dependencies]
+packages = ["kernel", "platform"]
+python = [
+    "alembic>=1.20.0",
+    "httpx>=0.28.1",
+    "joserfc>=1.7.5",
+    "psycopg[binary]>=3.3.6",
+    "pydantic>=2.14.1",
+    "pytest>=9.1.1",
+    "sqlalchemy>=2.1.4",
+    "structlog>=26.1.0",
+    "testcontainers>=4.15.0",
+]

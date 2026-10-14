@@ -34,7 +34,7 @@ from decimal import Decimal, InvalidOperation
 from functools import cache
 from http import HTTPStatus
 from types import MappingProxyType
-from typing import Final, final
+from typing import ClassVar, Final, final
 lazy from collections.abc import Awaitable, Callable, Mapping
 lazy from datetime import datetime
 
@@ -53,6 +53,7 @@ from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import corrected
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.notation import SANTO_DOMINGO
 from ledger_country_do_testing.fake_dgii.state import STATUS_WORDS, Received, Status
+from ledger_kernel.errors import InvalidInputError
 lazy from ledger_country_do_testing.fake_dgii.state import Credentials, FakeState, SignatureCheck
 
 type Handler = Callable[[Request, str], Awaitable[Response]]
@@ -137,8 +138,10 @@ def query(request: Request, name: str) -> str:
     return next((value for key, value in request.query_params.multi_items() if key.lower() == wanted), "")
 
 
-class UploadTooLargeError(Exception):
+class UploadTooLargeError(InvalidInputError):
     """A request body over ``MAX_UPLOAD``, or an uploaded file over ``MAX_DOCUMENT``: refused unread."""
+
+    code: ClassVar[str] = "do_fake_dgii_upload_too_large"
 
     def __init__(self) -> None:
         super().__init__(f"an upload is at most {MAX_DOCUMENT} bytes")

@@ -42,7 +42,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import ClassVar, Final, Required, TypedDict, Unpack, final
-lazy from collections.abc import Awaitable, Callable
+lazy from collections.abc import Awaitable
 lazy from datetime import datetime
 
 from ledger_country_do.channels.ecf_v1.application.ports import (
@@ -77,7 +77,8 @@ lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environme
 lazy from ledger_country_do.channels.ecf_v1.domain.printed import QrHosts
 lazy from ledger_country_do.channels.ecf_v1.domain.status_map import Outcome
 lazy from ledger_country_do.channels.ecf_v1.domain.totals import Totals
-lazy from ledger_country_do.regime.definitions import RegimeDef
+lazy from ledger_kernel.clock import Clock, Sleep
+lazy from ledger_kernel.regimes import RegimeDef
 
 POLL_SCHEDULE: Final = (1.0, 2.0, 5.0, 10.0, 30.0, 60.0)
 MAX_SIGNING_SKEW: Final = timedelta(minutes=5)
@@ -89,9 +90,6 @@ RECEIPT_TOLERANCE: Final = timedelta(minutes=2)
 """How long before the moment of signing DGII's reception time of our document may read (clocks differ)."""
 SEND_BUDGET: Final = 300.0
 """Seconds one ``send`` may take in all: the schedule (108 s), the settle delay and the calls' own limits."""
-
-type Clock = Callable[[], datetime]
-type Sleep = Callable[[float], Awaitable[None]]
 
 
 class CertificateNotValidError(EcfConflictError):
@@ -142,8 +140,8 @@ class EmitterOptions(TypedDict, total=False):
     """``Emitter``'s keywords beyond its ports: three required, the rest with defaults.
 
     The environment, a clock (``FechaHoraFirma``) and a sleep (the settle delay, between polls); the poll
-    schedule (``POLL_SCHEDULE``), the settle delay (``SETTLE_DELAY``), the send budget (``SEND_BUDGET``), the
-    QR's hosts (``OFFICIAL_QR``) and the regime (``REGIME``).
+    schedule (``POLL_SCHEDULE``), the settle delay (``SETTLE_DELAY``), the send budget (``SEND_BUDGET``) and
+    the regime (``REGIME``). The QR's hosts are ``Emitter``'s own keyword (``OFFICIAL_QR`` by default).
     """
 
     environment: Required[Environment]
@@ -152,7 +150,6 @@ class EmitterOptions(TypedDict, total=False):
     schedule: tuple[float, ...]
     settle: float
     budget: float
-    qr_hosts: QrHosts
     regime: RegimeDef
 
 
@@ -255,7 +252,13 @@ class Emitter:
     )
 
     def __init__(
-        self, *, xml: EcfFormat, signer: XmlSigner, authority: Authority, **options: Unpack[EmitterOptions]
+        self,
+        *,
+        xml: EcfFormat,
+        signer: XmlSigner,
+        authority: Authority,
+        qr_hosts: QrHosts = OFFICIAL_QR,
+        **options: Unpack[EmitterOptions],
     ) -> None:
         self._xml = xml
         self._signer = signer
@@ -266,7 +269,7 @@ class Emitter:
         self._schedule = options.get("schedule", POLL_SCHEDULE)
         self._settle = options.get("settle", SETTLE_DELAY)
         self._budget = options.get("budget", SEND_BUDGET)
-        self._qr_hosts = options.get("qr_hosts", OFFICIAL_QR)
+        self._qr_hosts = qr_hosts
         self._regime = options.get("regime", REGIME)
         if self._settle < authority.attempt_limit():
             raise SettleTooShortError

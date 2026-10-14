@@ -1,6 +1,6 @@
 """``ledger-dgii-spike``: the spike's emission, run by hand against DGII's TesteCF or CerteCF, or the fake.
 
-Read ``countries/do/docs/runbooks/testecf-spike.md`` first. Settings come from ``LEDGER_DO_ECF_SPIKE_*``
+Read ``docs/runbooks/do/testecf-spike.md`` first. Settings come from ``LEDGER_DO_ECF_SPIKE_*``
 environment variables. The certificate (``P12``) and its password (``P12_PASSWORD_FILE``) are read from files
 inside the project's ``.dgii`` directory (git-ignored), and so are the documents written (``OUT``): the
 project is the directory the CLI runs in (the repository's root, as the runbook runs it), and a path anywhere
@@ -35,7 +35,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum, auto
 from pathlib import Path
-from typing import Final, TextIO, final
+from typing import ClassVar, Final, TextIO, final
 lazy from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
 lazy from datetime import date
 
@@ -63,6 +63,7 @@ from ledger_country_do.channels.ecf_v1.domain.routing import Route
 from ledger_country_do.channels.ecf_v1.domain.status_map import DOCUMENTED, FiscalStatus
 from ledger_country_do_testing.local_signer import BundleIncompleteError, KeyPairSigner
 from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
+from ledger_kernel.errors import ConflictError, InvalidInputError
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import Resolve
 lazy from ledger_country_do.channels.ecf_v1.application.emission import Emitted, Signed
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
@@ -142,11 +143,13 @@ _PARTIES: Final = (Setting.RNC, Setting.LEGAL_NAME, Setting.ADDRESS, Setting.BUY
 _HOSTS: Final = (Setting.ECF_HOST, Setting.FC_HOST)
 
 
-class SettingsError(Exception):
+class SettingsError(InvalidInputError):
     """A setting refused; the message names the variable, never its value (a pack error's message may follow).
 
     ``refused``: the setting, or the settings one of which is refused; ``reason`` what is wrong.
     """
+
+    code: ClassVar[str] = "do_spike_setting_refused"
 
     def __init__(
         self, refused: Setting | tuple[Setting, ...], reason: str, cause: EcfError | None = None
@@ -157,8 +160,10 @@ class SettingsError(Exception):
         super().__init__(f"{which} {reason}{detail}")
 
 
-class JournalError(Exception):
+class JournalError(ConflictError):
     """The e-NCF journal (``used-encf.txt``) cannot be used safely: locked by another run, or unreadable."""
+
+    code: ClassVar[str] = "do_spike_journal_unusable"
 
     def __init__(self, reason: str) -> None:
         super().__init__(f"{Setting.OUT.variable}: {reason}")

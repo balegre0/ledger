@@ -1,0 +1,13 @@
+[package]
+name = "worker"
+kind = "app"
+summary = "Fan-out, consumers, jobs and schedules."
+owners = ["@balegre0"]
+
+[dependencies]
+packages = ["platform"]
+python = []
+
+[app]
+script = "ledger-worker"
+role = "worker"

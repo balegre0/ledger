@@ -1,0 +1,21 @@
+[package]
+name = "do-testing"
+kind = "package"
+summary = "Dev-only tools of the DO pack: a fake DGII from DGII's documentation, a test PKI, samples, the spike CLI."
+owners = ["@balegre0"]
+scripts = { "ledger-fake-dgii" = "ledger_country_do_testing.fake_dgii.serve:main", "ledger-dgii-spike" = "ledger_country_do_testing.spike:main" }
+
+[dependencies]
+packages = ["kernel", "do"]
+python = [
+    "cryptography>=50.0.2",
+    "granian>=2.8.4",
+    "httpx>=0.28.1",
+    "lxml>=6.1.3",
+    "pydantic>=2.14.1",
+    "python-multipart>=0.0.32",
+    "signxml>=5.1.0",
+    "starlette>=1.7.0",
+    "testcontainers>=4.15.0",
+    "xmlschema>=4.3.2",
+]

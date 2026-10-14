@@ -25,7 +25,8 @@ from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import (
     require_readable,
 )
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import CORRECTIONS, PUBLISHED
-from ledger_country_do.channels.ecf_v1.domain.errors import EcfError, EcfInvalidError, truncate
+from ledger_country_do.channels.ecf_v1.domain.errors import EcfError, EcfInvalidError
+from ledger_kernel.errors import truncate
 lazy from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 
 MAX_VIOLATIONS: Final = 20

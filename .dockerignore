@@ -13,7 +13,21 @@
 .hypothesis
 .coverage
 htmlcov
-.tilt-dev
 docs
 deploy
 **/tests
+# The dev-only tooling is never installed, but uv checks the lockfile against every workspace member: its
+# pyproject.toml stays in the context.
+tools/**
+!tools/*/pyproject.toml
+# Secrets never enter the build context (`ledger-devtools check` asks for each pattern): env files, the DGII
+# certificate and its password, PKCS #12 key stores.
+.env
+**/.env
+**/.env.*
+.dgii
+**/.dgii
+*.p12
+**/*.p12
+*.pfx
+**/*.pfx

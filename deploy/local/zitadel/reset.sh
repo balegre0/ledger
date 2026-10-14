@@ -1,6 +1,6 @@
 #!/bin/sh
 # Starts the local Zitadel over and nothing else: its container, its database and the volume of its bootstrap
-# token go, the files bootstrap.sh wrote too; identity's database, the other services' and NATS's streams stay.
+# token go, the files bootstrap.sh wrote too; identity's database and the others stay.
 # (`docker compose ... down -v` would delete every volume of the stack.) Honours COMPOSE_PROJECT_NAME.
 set -eu
 
@@ -19,4 +19,4 @@ fi
 rm -rf "$HERE/.local"
 
 echo "Zitadel starts over at its next start: docker compose -f deploy/local/compose.yaml --profile zitadel up -d --wait"
-echo "then run bootstrap.sh and restart identity (until then it expects the audience of deploy/local/identity.env)"
+echo "then run bootstrap.sh and restart the api (until then it expects the audience of deploy/local/ledger.env)"

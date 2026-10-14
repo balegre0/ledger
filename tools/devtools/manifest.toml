@@ -1,0 +1,10 @@
+[package]
+name = "devtools"
+kind = "tool"
+summary = "Generates and checks what the manifests imply."
+owners = ["@balegre0"]
+scripts = { "ledger-devtools" = "ledger_devtools.cli:main" }
+
+[dependencies]
+packages = ["kernel", "platform"]
+python = ["pydantic>=2.14.1", "pydantic-settings>=2.15.0"]

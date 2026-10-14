@@ -30,9 +30,9 @@ from ledger_country_do_testing.fake_dgii.state import Scripted, Status
 from ledger_country_do_testing.samples import SIGNED_AT, consumer_invoice, credit_invoice
 from ledger_country_do_testing.transports import FAKE_HOSTS, BreaksAfterSending, Counting
 lazy from ledger_country_do.channels.ecf_v1.application.ports import CertificateValidity
-lazy from ledger_country_do_testing.clock import ManualClock
 lazy from ledger_country_do_testing.fake_dgii.app import FakeDgii
 lazy from ledger_country_do_testing.local_signer import KeyPairSigner
+lazy from ledger_testing.clock import ManualClock
 
 T: Final = Environment.TESTECF
 ISSUER: Final = "101850043"
@@ -872,7 +872,7 @@ async def test_a_document_refused_401_is_not_sent_again_once_too_little_time_is_
         sent.append(request.url.path.rsplit("/", 1)[-1])
         if (found := seeded(request.url.path)) is not None:
             return found
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(1.0)  # a slow server: its refusal comes a second after the request
         return reply(401)
 
     tight = DgiiTimeouts(connect=5, total=2, call=2.5)

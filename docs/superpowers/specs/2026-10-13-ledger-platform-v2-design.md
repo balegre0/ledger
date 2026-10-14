@@ -7,6 +7,7 @@
 | Supersedes | [`2026-10-11-ledger-platform-design.md`](2026-10-11-ledger-platform-design.md) (v1). v1 stays in the tree as history; where the two disagree, this document wins. The milestone plans 3, 4 and 5 written against v1 are superseded (§16.3) |
 | Binding inputs | `.superpowers/research/00-controller-rulings.md` (R1-R6); evidence in `01-localization`, `02-modularity`, `03-layout-tooling`, `04-saas-platforms`, `05-audit`, `06-dgii-facts` (cited as **[01]**...**[06]**, rulings as **R1**...**R6**) |
 | Decisions recorded as | `docs/adr/0001`...`0010` (§17) |
+| As built (v2-M1) | Reconciled with the code at the end of v2-M1: the manifest model is `ledger_platform.config.manifest`; the root's package lists are a block `sync` generates; settings sections per package (§3.10); the pool sized by settings and checked (§6.7); `serve(role)`; four RLS scopes and the purge role (§6.3); the route guards (§5.2); devtools `gate` deferred (§4.7) |
 
 > **Supersedes v1.** v1 chose seven microservices on NATS JetStream and Temporal with one database per service.
 > v2 keeps v1's product, its DGII requirements, its security, observability and SLO rules, and the chassis
@@ -184,8 +185,8 @@ apps compose them (R1, ADR 0001).
 | `accounting` | journal, accounts, periods (§7.9) | — | — | invoicing and fiscal events | later |
 
 `platform` also owns a schema (`platform`: routing version, schedule leases) and declares its own manifest
-(`packages/platform/manifest.toml`: schema, role `platform_rw`, the `evt` id prefix, schedules
-`platform.purge_inbox`, `platform.purge_idempotency_keys`).
+(`packages/platform/manifest.toml`: schema, role `platform_rw`, the `evt` id prefix, the jobs and hourly and
+daily schedules `platform.purge_idempotency_keys` and `platform.purge_done_jobs`, one at a time each).
 
 Channels (`countries/<cc>/…/channels/<channel>`) also own a schema (`do_ecf`) and run inside the `api`,
 `worker` and `receiver` apps. They are not modules: they depend on `fiscal-kit`, `platform` and `kernel` only,
@@ -272,9 +273,15 @@ class InvoiceIssued(Event):
 
 **Envelope** (columns, CloudEvents-shaped so a broker adapter maps 1:1): `id` (UUIDv7, public `evt_`),
 `type`, `version`, `source` (producing module or channel key), `organization_id`, `company_id` (nullable for
-organization-wide events), `mode`, `subject` (aggregate id), `aggregate_version`, `occurred_at`, `traceparent`,
-`payload` (JSON by the platform codec: `Decimal` as string, ids as UUID strings, dates ISO 8601). Payload ≤ 64
-KiB, refused at `publish`.
+organization-wide events), `mode` (nullable: `null` for an event about data both modes share), `subject`
+(aggregate id), `aggregate_version`, `occurred_at`, `traceparent`, `payload` (JSON by the platform codec:
+`Decimal` as string, ids as UUID strings, dates ISO 8601). Payload ≤ 64 KiB, refused at `publish`.
+
+- **An event's scope lies inside its unit's** (`publish` refuses any other, `event_scope_mismatch`): the unit's
+  organization; its company where the unit names one; its mode where both name one. `mode` is `null` for an
+  event about data both modes share (a company, its memberships, §7.1), and a moded unit may publish such an
+  event (an idempotent route acts in a moded unit, §9.5); an event of the other mode is refused. A unit without
+  a scope (the platform's own) publishes for anyone.
 
 **Subscriptions** (C3, ADR 0002). Manifests declare consumers and their event types. `ledger-migrate`, before a
 rollout and after the schema migrations, upserts each consumer's rows into its own schema's `subscriptions`
@@ -315,13 +322,28 @@ type wait in the inbox for the next roll forward (alerted by age), never fail.
 - **An event with no subscriber is never deleted**: it is marked `unrouted_since`, counted by
   `ledger_outbox_unrouted` and alerted; it is fanned out when a routing version adds a subscriber, or deleted by
   an operator.
+- **A row that cannot be fanned out never holds back the others**: a failed batch is redone one row at a time
+  (savepoints of the pass), the failing row's `attempts` is counted (`ledger_outbox_failed`, logged with the
+  error's type only) only when the error is the row's own (unreadable, a constraint, a trigger's refusal), and
+  at 10 it is set aside, kept and alerted until an operator resets `attempts`. Any other error (a revoked grant,
+  a lost connection) blames no row: the row is skipped uncounted, a pass where every row failed so rolls back
+  and is logged (`outbox.pass_failed`, counted per schema), the other schemas still go, and only when every
+  schema failed does the fan-out raise for the worker's supervisor to back off.
 - **Ordering.** None promised across aggregates. Default for projections: **version-monotonic upserts** (a
   handler writes only when the event's `aggregate_version` is above the stored one, so order does not matter).
   Opt-in per consumer (`ordered = true` in the manifest): **head-of-line claim per (consumer, subject)**: the
-  runner claims only the oldest unhandled row of each subject, so a subject's events run in order and a failing
-  one blocks only its own subject.
+  runner claims only the first row of each subject that is not dead, in the order (`aggregate_version`, event
+  id) (an event published without a version is stored with 0), so a subject's events run in their aggregate's
+  order even when their ids are not, and a failing one blocks only its own subject. The heads are read once per
+  claim from `inbox_head` (`DISTINCT ON (subject)`). Known limit: that costs O(the consumer's live rows) per
+  claim; a skip scan (a recursive CTE from one subject's head to the next) is the fix when a backlog needs it. One dispatcher fans out a schema at a time (a
+  transaction-level advisory lock per schema), so a subject's rows reach the inbox in id order. A dead row no
+  longer blocks its subject (the rows behind it go on); replaying it is refused while an earlier live row of its
+  subject waits. Events without a subject are not ordered.
 - **Retries**: backoff 1 s, 10 s, 1 min, 5 min, then every 10 min; `max_attempts` 10 (overridable per
-  consumer); then `dead`. Operators replay with `ledger-worker replay --consumer X --event evt_…`.
+  consumer); then `dead`. A row whose worker died (its lease ran out) is retried the same way, a backoff after
+  the lease ran out, and is `dead` with `worker_lost` once its attempts are spent (one rule for inboxes and
+  jobs). Operators replay with `ledger-worker replay --consumer X --event evt_…`.
 - **Wake-ups**: one `LISTEN ledger_outbox, ledger_inbox` connection per worker process, opened **directly**
   to PostgreSQL (never through a transaction pooler, §6.7); NOTIFYs are coalesced per process (at most one per
   channel per 10 ms). The poll safety net is 1 s per worker for all schemas together (one `UNION ALL` probe of
@@ -342,6 +364,11 @@ state machines** (ADR 0003).
 - **Enqueue** `uow.jobs.enqueue(kind, key, *, run_at, payload)` inside the transaction that decides the work.
   On an existing `(kind, key)`: ignored when the job is `ready`, `running` or `parked`; reset to `ready`
   (attempts 0, new payload) when `done` or `dead`.
+- **Time** is the database's: a unit's `now` is its transaction's `now()`, and every due, lease and
+  deadline comparison is made in SQL against `now()`, so workers on hosts with drifting clocks agree.
+- **Keys** are unique per kind across tenants: a key embeds a globally unique id (a document's, an
+  event's). A job belongs to the scope that enqueued it; another scope's enqueue never restarts it, and a
+  unit wakes only jobs inside its own scope.
 - **Claim**: `status = 'ready' AND run_at <= now()`, `FOR UPDATE SKIP LOCKED`, sets `status = 'running'`,
   `lease_until = now() + lease` (per kind, default 60 s), a fresh `lease_token` (fencing token), and
   `attempts += 1` (counted on claim, so a crash mid-run still counts).
@@ -435,8 +462,8 @@ The signer is the worked example from day one.
 
 1. Load manifests (entry point group `ledger.modules`, generated `_manifest.py`), regimes
    (`ledger.countries.regimes`) and channels (`ledger.countries.channels`) through `Regimes.load()` and
-   `Channels.load()` (both in `platform.runtime.registries`; validated and frozen; a duplicate or invalid pack
-   fails the start).
+   `Channels.load()` (`Regimes` in `platform.runtime.registries`, `Channels` and the modules' loader in
+   `platform.runtime.packs`; validated and frozen; a duplicate or invalid pack fails the start).
 2. Assemble modules in topological order. Each gets a `ModuleContext`; its `ModuleParts` add its API
    implementation to the API directory (for later modules), its extension-point implementations, and the ports
    it provides to channels.
@@ -451,9 +478,9 @@ type AppRole = Literal["api", "worker", "signer", "receiver", "migrate"]
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModuleContext:
-    manifest: ModuleManifest            # generated, typed
+    manifest: PackageManifest           # generated, typed (its _manifest.py)
     role: AppRole
-    settings: Settings                  # this module's validated settings section (LEDGER_<MODULE>_*)
+    settings: PackageSettings | None    # this module's own section (LEDGER_<MODULE>_*), validated; never the app's
     database: BoundDatabase             # units in this module's role and schema only; no role argument exists
     clock: Clock
     regimes: Regimes
@@ -481,7 +508,7 @@ class ChannelContext:
     definition: ChannelDef
     regime: RegimeDef
     role: AppRole
-    settings: Settings                  # LEDGER_<CHANNEL>_* (e.g. LEDGER_DO_ECF_*)
+    settings: PackageSettings | None    # its own section, LEDGER_<SCHEMA>_* (e.g. LEDGER_DO_ECF_*)
     database: BoundDatabase             # role do_ecf_rw, schema do_ecf
     clock: Clock
     signer: SignerPort
@@ -506,6 +533,32 @@ class ChannelParts:
 `ledger-devtools` treats each `[[channels]]` entry like a module for schemas, roles, grants, id prefixes,
 permissions, subscriptions and job kinds.
 
+**Settings sections (as built).** A module (`[package] settings = true`) or a channel (`settings = true` on its
+entry) declares a section: its variables are `LEDGER_<SECTION>_*`, the section named after the module or the
+channel's schema. Its assembly hands over the model that reads them (`Module.settings`, `ChannelPack.settings`, a
+`PackageSettings` subclass whose `env_prefix` is `section_prefix(section)`). The app reads every declared section
+when it is made, before any package assembles: a declared section without a model, a model for an undeclared one
+or of another prefix is the package's defect; values that cannot work are listed together, never echoed. A
+context holds its own section (`context.section(Model)`), never the app's `Settings`, and `BoundDatabase` keeps its
+pool private: no package reads the database URLs or another's secrets. `sync` registers each section as an entry
+point of group `ledger.settings`; the platform's `Settings` reads those names (it imports nothing), stays closed
+for its own names and leaves the variables under the declared prefixes to their sections; every other unknown
+`LEDGER_*` name is refused. `check` refuses a section whose prefix holds a platform variable or another
+section's.
+
+**Serving (as built).** `ledger_platform.runtime.serve(role)` holds the one Granian setup (`api`, `worker`): one
+worker per replica, no respawn, the server's logs in the app's format, and a kill timeout that follows from the
+stop budget (`WORKER_KILL_TIMEOUT` = `STOP_BUDGET` + 5 s < the orchestrator's 40 s grace). An app's `main` calls
+it and nothing else.
+
+Assembly fails the start, never a later call, when: two packages claim one schema (or a module claims
+`platform`); a module or channel has no schema or no migrations, or hands over migrations of another schema;
+a consumer or job kind is declared without a handler or handed over undeclared; a declared extension point
+has no implementation or a declared port no provider after every module assembled (a channel reads its ports
+while it assembles, so a missing one fails there); an API, extension point implementation or port has a public
+coroutine that is not a `@facade`. A name is bound once: **one implementation per extension point** and one
+provider per port; a point that needs several (a chain of policies) gets a directory of its own when one does.
+
 ---
 
 ## 4. Repository layout and tooling
@@ -514,7 +567,7 @@ permissions, subscriptions and job kinds.
 
 ```
 ledger/
-├── pyproject.toml            workspace root: tool config only; members by glob; no per-package lists
+├── pyproject.toml            workspace root: tool config; members by glob; the lists naming packages are a block `sync` writes
 ├── uv.lock
 ├── README.md                 ~80 lines: what, layout, develop, run (no chassis manual; [05] §7.2)
 ├── AGENTS.md                 conventions for coding agents (points at this spec and the ADRs)
@@ -537,14 +590,14 @@ ledger/
 │   ├── buf.yaml              one buf module; protos for cross-process surfaces only
 │   └── proto/ledger/signer/v1/signer.proto
 ├── tools/
-│   └── devtools/             ledger-devtools: sync, check, gate (§4.7)
+│   └── devtools/             ledger-devtools: sync, check (§4.7; gate deferred)
 ├── deploy/
 │   ├── docker/ledger.Dockerfile     the one image (every app in it; no dev-only distributions)
 │   ├── local/                compose.yaml, images.toml, postgres/init.sql (GENERATED roles), zitadel/, localstack/
 │   └── helm/ledger/          one chart, one values block per app (v2-M6)
 ├── docs/
 │   ├── adr/NNNN-kebab-title.md       MADR; immutable once accepted; superseded-by links
-│   ├── runbooks/<package>/<incident>.md
+│   ├── runbooks/<area>/<incident>.md   one place for every runbook (identity/, do/, ...)
 │   └── superpowers/specs/            design specs (plans live in .superpowers/, untracked)
 └── tests/                    whole-repo tests only (architecture invariants no tool expresses)
 ```
@@ -574,8 +627,10 @@ modules/invoicing/
 
 ### 4.2 Manifest schema: modules and platform (`manifest.toml`)
 
-Validated by `ledger-devtools check` against a typed model (`ledger_devtools.manifests`); unknown keys are
-errors. Every key below is defined; nothing else exists.
+Validated by `ledger-devtools check` against a typed model (`ledger_platform.config.manifest`, which every
+generated `_manifest.py` imports too); unknown keys are errors. Names are read with one rule each: permission
+codes, event types and id prefixes with the kernel's parsers, schema names with the roles' rule
+(`ledger_platform.config.names`), extension points as Protocol names. Every key below is defined; nothing else exists.
 
 ```toml
 [package]
@@ -584,11 +639,13 @@ kind = "module"                     # required; "module" | "country" | "app" | "
 summary = "Commercial documents: invoices, credit and debit notes, their lines and totals."
 owners = ["@balegre0"]              # required (kept for CODEOWNERS generation later)
 status = "active"                   # "active" | "suspended" (suspended: not assembled by any app, not migrated)
+settings = true                     # optional: a settings section LEDGER_INVOICING_* (§3.10); modules only
 
 [dependencies]
 packages = ["kernel", "platform"]                 # workspace packages (not modules)
 modules = ["identity"]                            # modules whose api/events this one imports or consumes; a DAG
 python = ["fastapi>=0.143", "sqlalchemy>=2.1.4"]  # third-party, with floors; deptry checks usage
+test = ["hypothesis>=6.168.5"]                    # what its tests and type checks need besides: the root's dev group
 
 [data]
 schema = "invoicing"                # PostgreSQL schema == role prefix; unique across the repo
@@ -666,8 +723,7 @@ entry_point = "ledger_country_do.regime:REGIME"
 
 [[channels]]                        # treated like a module by devtools (schema, roles, grants, routing)
 key = "do-ecf-v1"                   # <cc>-<format>-v<N>; one key per format major version
-entry_point = "ledger_country_do.channels.ecf_v1:CHANNEL"
-assembly = "ledger_country_do.channels.ecf_v1.assembly"
+entry_point = "ledger_country_do.channels.ecf_v1:CHANNEL"   # its ChannelPack: entry, regime, assembly
 schema = "do_ecf"                   # one schema per channel family; v2 of the format shares it
 valid_from = "2019-01-01"           # legal window of this format version; valid_until optional
 environments = ["testecf", "certecf", "ecf"]
@@ -676,6 +732,7 @@ document_kinds = ["invoice", "credit_note", "debit_note"]   # commercial kinds i
 directions = ["sales", "purchase"]
 http_prefixes = ["/v1/do"]          # public API (api app); receiver routes under /do-ecf-v1 (receiver app)
 tier = "bronze"                     # claimed quality tier (§8.8); checked by review until tier machinery exists
+settings = true                     # optional: a settings section LEDGER_DO_ECF_* (§3.10)
 
 [[channels.ids]]                    # same shape as a module's [[ids]]
 prefix = "rng"
@@ -732,7 +789,7 @@ enqueues = "do_ecf.range_watch"
 | Job kind / schedule | `<module or channel>.<verb_or_noun>` | `do_ecf.advance` |
 | Public id prefix | 2-5 lowercase letters, unique, declared in a manifest | `inv_01jc5...` |
 | Regime key / channel key | `<cc>` or `<cc>-<sub>` / `<cc>-<format>-v<N>` | `do`, `do-ecf-v1` |
-| Tax-id scheme | `<cc>.<scheme>` | `do.rnc`, `mx.rfc`, `eu.vat` |
+| Tax-id scheme | `<cc>.<scheme>`, `<cc>` one assigned ISO 3166-1 country, never a group (EU VAT ids are per member state) | `do.rnc`, `mx.rfc`, `es.nif`, `fr.tva` |
 | Country field (wire) | `fiscal.<regime>.<field>` (regime law-level fields and channel format fields share the regime namespace) | `fiscal.do.income_type` |
 | Error code | `<thing>_<problem>`, snake_case, unique across the repo | `range_exhausted` |
 | Env var | `LEDGER_<SETTING>`; module or channel settings `LEDGER_<MODULE>_<SETTING>` | `LEDGER_DO_ECF_DGII_TIMEOUT_SECONDS` |
@@ -783,14 +840,16 @@ metric ([02] Kraken).
 
 ### 4.7 devtools (`tools/devtools`, `ledger-devtools`)
 
-A workspace member under the full gate. Built now: `sync`, `check`, `gate`. Deferred (§16.4): `affected`
-and the CI matrix, `scaffold` (copier templates), CODEOWNERS and generated reference docs.
+A workspace member under the full gate. Built now: `sync` and `check`. Deferred (§16.4): `gate` (`uv run poe
+check` is the gate, §14.3), `affected` and the CI matrix, `scaffold` (copier templates), CODEOWNERS, generated
+reference docs, identity's generated role table (v2-M2; a workspace test holds identity's hand table equal to
+every manifest's permissions) and event schema snapshots.
 
 | Command | Does |
 |---|---|
-| `sync` | From manifests: each package's `pyproject.toml` (dependencies, entry points `ledger.modules`, `ledger.countries.regimes`, `ledger.countries.channels`, console scripts); `_manifest.py` per package; `.importlinter`; per-package coverage targets; `deploy/local/postgres/init.sql` (schemas, roles, grants, for modules, channels and platform); identity's generated role → permission table (§7.7); event JSON Schema snapshots |
-| `check` | Validates every manifest (schema, name == directory, unique schema/prefix/permission/event type/consumer/job kind/http prefix, module DAG including subscription edges, declared deps == imports via deptry, event schema snapshots additive within a version, channel `valid_from` ordering); fails if `sync` would change any file |
-| `gate` | Runs per package: ruff, basedpyright, mypy, pytest with that package's coverage target, deptry, vulture; then repo-wide: import-linter, typos, buf lint/breaking, `check`. `poe check` wraps it |
+| `sync` | From manifests: each package's `pyproject.toml` (dependencies, entry points `ledger.modules`, `ledger.countries.regimes`, `ledger.countries.channels`, `ledger.settings`, console scripts, coverage targets, deptry's module map read from the installed distributions' metadata); `_manifest.py` for a module, a package with a schema and a country with a channel; `.importlinter`; `deploy/local/postgres/init.sql` (schemas, roles, grants, for modules, channels and platform); each module's `openapi.json`; the root `pyproject.toml`'s generated block (the `workspace` dependency group with every dev-only package and every manifest's test dependencies, `[tool.uv.sources]`, ruff's `known-first-party`), so adding a package touches only its directory and generated files |
+| `check` | Validates every manifest (schema, name == directory, a country's `iso` == its directory and its regimes' keys its own, unique schema/prefix/permission/event type/consumer/job kind/schedule/http prefix, module and package DAGs including subscription edges, schedules enqueuing declared kinds, modules made of layers, settings sections apart from the platform's names and each other); fails if `sync` would change or delete any file; checks the repository around the manifests (the root's block, members without a manifest, image pins with digests, the build context). Deferred: event schema snapshots, channel `valid_from` ordering (deptry runs in the gate) |
+| `gate` | Deferred: `uv run poe check` runs the gate (§14.3) |
 
 ---
 
@@ -823,15 +882,15 @@ outbox, inbox and jobs under `data`; v2 keeps their **tables** in `data` (`chass
 
 | Subpackage | Public surface | From v1 (`libs/platform`) |
 |---|---|---|
-| `config` | `Settings` (base, `LEDGER_*`, fail-closed on unknown variables), `InvalidOptionError(component, option, requirement)` | `settings.py` (kept), `options.py` (12 subclasses collapsed into one, [05] D7) |
-| `observability` | `configure_logging`, `Tracing`, `Health`, `Check`, `Telemetry`, metrics helpers | `logs.py`, `tracing.py`, `health.py`, `probe.py` (kept, moved); validation-issue rendering shared with `http` ([05] D10) |
-| `runtime` | `App`, `AppRole`, `ModuleContext`, `ModuleParts`, `ChannelContext`, `ChannelParts`, `Call`, `SystemCall`, `facade` (decorator with the open-unit guard), `UnitOpenError`, `Supervisor`, `registries.Regimes`, `registries.Channels`, `run(app)` | `service.py` split, `supervision.py` kept, `lifecycle.py` merged into `AsyncExitStack` use, `interruptions.py` deleted |
-| `data` | `Database`, `BoundDatabase` (`unit(scope)`), `UnitOfWork` (`uow.publish(event)`, `uow.jobs`, `uow.audit(...)`), `tenant_table`/`organization_table`/`moded_organization_table` (scope columns, tenant-carrying FKs, RLS), `chassis_schema_v1(op, schema)`, `Migrations` | `database.py` split, `migrations.py` kept (data-migration helpers deleted until needed), `schema.py` merged |
-| `data.queue` | the claim/lease/fencing/retry engine shared by inbox and jobs (`claim`, `Backoff`, `Lease`) | new; replaces the relay half of `outbox.py` and the delivery loop of `consumer.py` |
+| `config` | `Settings` (base, `LEDGER_*`, fail-closed on unknown variables, the declared sections' prefixes left to them), `PackageSettings` and `section_prefix` (a package's section, §3.10), `InvalidOptionError(component, option, requirement, value)` (one code, `invalid_option`); `config.names` (`PLATFORM`, the schema-name rule); the manifest model `config.manifest` (what devtools validates `manifest.toml` with and every generated `_manifest.py` imports, hence below every other layer but `_manifest`'s data) | `settings.py` (kept), `options.py` (12 subclasses collapsed into one, [05] D7) |
+| `observability` | `configure_logging`, `Tracing`, `Health`, `Check`, metrics helpers (`Telemetry`, the per-package logger and tracer, is `runtime`'s: it lives in `runtime.contexts`) | `logs.py`, `tracing.py`, `health.py`, `probe.py` (kept, moved); validation-issue rendering shared with `http` ([05] D10) |
+| `runtime` | `App`, `AppRole`, `ModuleContext`, `ModuleParts`, `ChannelContext`, `ChannelParts`, `Call`, `SystemCall`, `facade` (decorator with the open-unit guard), `UnitOpenError`, `Supervisor`, `Telemetry`, `registries.Regimes`, `packs.Channels`, `serve(role)` (Granian, §3.10) | `service.py` split, `supervision.py` kept, `lifecycle.py` merged into `AsyncExitStack` use, `interruptions.py` deleted |
+| `data` | `Database` (`Pooling`: overflow, through a pooler), `BoundDatabase` (`unit(scope)`; its pool private), `UnitOfWork` (`uow.publish(event)`, `uow.jobs`, `uow.audit(...)`), `ModuleTable` (the base of every package's tables: `class IdentityTable(ModuleTable, schema="identity")`, the one class ruff is told SQLAlchemy reads), `RlsScope` and `policy(table, scope)`, `chassis_schema_v1(op, schema)`, `SchemaMigrations` | `database.py` split, `migrations.py` kept (data-migration helpers deleted until needed), `schema.py` merged |
+| `data.queue` | the claim/lease/fencing/retry engine shared by inbox and jobs (`claim`, `Backoff`, `Lease`), and where a stopped worker's loop ends (`parked`, `being_cancelled`), below `events` and `jobs` | new; replaces the relay half of `outbox.py` and the delivery loop of `consumer.py` |
 | `events` | `Event`, `RawEvent` (generic envelope, for webhooks), `EventBus`, `PostgresEventBus`, `ConsumerSpec`, `Dispatcher` (fan-out), codec | `outbox.py` writer kept, `consumer.py` inbox part kept; JetStream parts deleted |
 | `jobs` | `Jobs` (enqueue, wake, wake_all), `JobSpec`, `ScheduleSpec`, `Done`, `RunAgain`, `Park` | new |
 | `auth` | `TokenVerifier`, `PublishedKeys`, `ClaimsProfile` port + `zitadel` profile, `Access`, `PermissionDeniedError`, `CompanyNotFoundError` | `authentication.py` split ([05] §4.1), `authorization.py` minus `CachedPermissions` |
-| `http` | `create_app`, `Problem`, `Page[T]`, dependencies (`authenticated`, `in_company`, `in_organization`, `requires(permission)`, `page_request`, `if_match`, `idempotency_key`, `api_version`), `etag`, `precondition_checked`, `problems()`/`success()` OpenAPI helpers | `web.py` split, `routes.py` split into deps, `idempotency.py` and `request_fields.py` moved here; identity's `api/context.py` helpers moved in ([05] D22-D25) |
+| `http` | `create_app`, `Problem`, `Page[T]`, route guards (`authenticated`; the company from the path, `company_in_path`, or from the `Ledger-Company` header, `company_in_header`; `allowed(in_company, permission)`; `holding(caller, role)`, a provider role in the caller's organization; `in_organization`; `unguarded_routes` for the test that every route is guarded), `page_query`, `if_match`, `idempotency_key`, `ledger_mode`, `etag`, `precondition_checked`, `problems()`/`success()` OpenAPI helpers; `api_version` arrives with dated versions | `web.py` split, `routes.py` split into deps, `idempotency.py` and `request_fields.py` moved here; identity's `api/context.py` helpers moved in ([05] D22-D25) |
 | `grpc` | `serve`, `GuardInterceptor` (per-caller token + method allowlist), `call_unary`, `RemoteError` family | `grpc_server.py`, `grpc_client.py` (kept, signer only); one kind → status table shared with `http` ([05] D5) |
 | `blobs` | `ImmutableStore` (`put_once(key, bytes, retain_until)`, `get`), `S3ImmutableStore` (object lock, compliance mode, `If-None-Match: *`, SHA-256 checksums); also the `ArchivePort` implementation handed to channels | new (from M4 plan's archive adapter) |
 
@@ -853,7 +912,10 @@ async with context.database.unit(call.scope) as uow:     # role and schema bound
   `BoundDatabase` is created by the runtime from the manifest's schema; each unit begins with
   `SET LOCAL ROLE <schema>_rw` and `set_config('ledger.organization_id' | 'ledger.company_id' | 'ledger.mode',
   …, true)`. Tables are **schema-qualified** in their SQLAlchemy definitions; there is no `search_path`
-  setting. A module's transaction therefore cannot read or write another schema even through a bug (ADR 0004).
+  setting. A module's transaction therefore cannot read or write another schema even through a bug (ADR
+  0004) — a mistake, not hostile SQL: the login is a member of every `_rw` role, so code that runs its own
+  `SET ROLE` can switch; isolation against hostile code would need a login per module. The pool also
+  resets every connection it takes back (`RESET ROLE`, `RESET ALL`).
 - The unit marks itself open on the task (`ContextVar`) for the facade guard (§3.4).
 - Commit only if every statement succeeded; after-commit callbacks (coalesced NOTIFY) never run after a rollback
   (v1 §7 kept). Connection limits as v1 (connect 5 s, statement 30 s, lock 5 s, idle-in-transaction 60 s, pool
@@ -875,18 +937,22 @@ reads go through facades or event-fed read models. A schema can move to its own 
 | Role | Login | Privileges |
 |---|---|---|
 | `<schema>_owner` | no | owns schema `<schema>` and its objects; `FORCE ROW LEVEL SECURITY` on tenant tables |
-| `<schema>_rw` | no | `USAGE` on its schema; DML on its tables; no DDL; not `BYPASSRLS` |
+| `<schema>_rw` | no | `USAGE` on its schema; DML on its tables; no DDL; not `BYPASSRLS`; read-only on `alembic_version` |
+| `<schema>_purge` | no | `USAGE` on its schema; `SELECT, DELETE` on `idempotency_keys`, whose policies `TO <schema>_purge` admit expired rows only |
 | `ledger_migrator` | yes | member of every `_owner`; used only by `migrate` (`SET ROLE <schema>_owner` per schema) |
-| `ledger_app` | yes | `NOINHERIT` member of every `_rw` except `signer_rw`, and of `ledger_relay`; used by `api`, `worker`, `receiver` |
-| `ledger_relay` | no | `SELECT, UPDATE, DELETE` on every `<schema>.outbox`; `INSERT` on every `<schema>.inbox`; `SELECT` on every `<schema>.subscriptions` and `platform.routing` — the signer's two queue tables included; nothing else |
-| `ledger_signer` | yes | member of `signer_rw` and `platform_rw` (schedule leases) only; used only by `signer` |
+| `ledger_app` | yes | `NOINHERIT` member of every `_rw` and `_purge` except the signer's, and of `ledger_relay`; used by `api`, `worker`, `receiver` |
+| `ledger_relay` | no | `SELECT, DELETE` and `UPDATE (attempts, unrouted_since)` on every `<schema>.outbox`; `INSERT` on every `<schema>.inbox`; `SELECT` on every `<schema>.subscriptions` and `platform.routing` — the signer's two queue tables included; nothing else |
+| `ledger_signer` | yes | member of `signer_rw`, `signer_purge` and `platform_rw` (schedule leases) only; used only by `signer` |
 
-No role is a superuser or `BYPASSRLS`. Generated by `ledger-devtools sync` into `init.sql` (local) and the
-chart's bootstrap job (production).
+No role is a superuser or `BYPASSRLS`. Each role is created if missing and then altered to exactly its
+options; memberships are granted `WITH ADMIN FALSE, INHERIT FALSE, SET TRUE`. Each database revokes `CONNECT`
+and `TEMPORARY` from `PUBLIC` (the logins get `CONNECT`), all on schema `public`, and `EXECUTE` on the owners'
+new functions. Generated by `ledger-devtools sync` into `init.sql` (local) and the chart's bootstrap job
+(production).
 
 ### 6.3 Row-level security
 
-Three scopes, one builder (`platform.data.rls.policy(table, scope)`, [05] D13), one policy per command; the
+Four scopes, one builder (`platform.data.rls.policy(table, scope)`, [05] D13), one policy per command; the
 settings are read through `NULLIF(…, '')` because `current_setting(…, true)` returns `''` (not `NULL`) once a
 pooled connection has seen the setting, and `''::uuid` would raise:
 
@@ -895,6 +961,7 @@ pooled connection has seen the setting, and `''::uuid` would raise:
 USING (organization_id = (SELECT NULLIF(current_setting('ledger.organization_id', true), '')::uuid)
    AND company_id      = (SELECT NULLIF(current_setting('ledger.company_id', true), '')::uuid)
    AND mode            = (SELECT NULLIF(current_setting('ledger.mode', true), '')))
+-- scope "company": organization_id, company_id; a company's rows shared by both modes (establishments, branches)
 -- scope "organization": organization_id only (organizations, companies, memberships); visible to the
 --   organization's transactions and to those of its companies
 -- scope "moded_organization": organization_id + mode (API clients, organization-level idempotency keys)
@@ -904,6 +971,11 @@ USING (organization_id = (SELECT NULLIF(current_setting('ledger.organization_id'
   `(organization_id, company_id, mode)` or `(company_id, mode)`.
 - Foreign keys carry the tenant (`(organization_id, company_id, mode, x_id)`), so a row cannot point at another
   tenant's (v1 kept).
+- Every ordinary policy is `TO <schema>_rw, <schema>_owner`; the purge policies are `TO <schema>_purge` only,
+  so no other role sees a protected row whatever settings it sets.
+- **Chassis tables under RLS**: `idempotency_keys` (`moded_organization`; expired rows also visible to the
+  `<schema>_purge` role, for the purge) and `audit_events` (`organization`, append-only: `SELECT` and `INSERT`
+  policies only, `UPDATE`/`DELETE`/`TRUNCATE` revoked).
 - **Outside RLS by design**: `outbox`, `inbox`, `jobs`, `subscriptions`, `platform.*`, identity's
   `tax_registrations`, `do_ecf.receiver_seeds`/`receiver_tokens`. They hold ids, states, dates, hashes and event
   payloads; only platform or receiver code reads them.
@@ -921,10 +993,10 @@ CREATE TABLE {s}.outbox (
   id               uuid PRIMARY KEY,                 -- event id (UUIDv7: time-ordered)
   type             text NOT NULL, version smallint NOT NULL, source text NOT NULL,
   organization_id  uuid, company_id uuid, mode text CHECK (mode IN ('test','live')),
-  subject          uuid, aggregate_version bigint,
+  subject          uuid, aggregate_version bigint NOT NULL DEFAULT 0,   -- 0: the producer gave none
   occurred_at      timestamptz NOT NULL, traceparent text,
   payload          jsonb NOT NULL CHECK (octet_length(payload::text) <= 65536),
-  attempts         int NOT NULL DEFAULT 0,          -- fan-out passes that failed on this row
+  attempts         int NOT NULL DEFAULT 0,          -- failed fan-outs of this row; set aside at 10
   unrouted_since   timestamptz                       -- no subscriber at fan-out time (kept, alerted)
 ) WITH (fillfactor = 90, autovacuum_vacuum_scale_factor = 0.0, autovacuum_vacuum_threshold = 1000,
         autovacuum_vacuum_cost_delay = 0);
@@ -934,7 +1006,7 @@ CREATE TABLE {s}.inbox (
   consumer text NOT NULL, event_id uuid NOT NULL,
   type text NOT NULL, version smallint NOT NULL, source text NOT NULL,
   organization_id uuid, company_id uuid, mode text,
-  subject uuid, aggregate_version bigint, occurred_at timestamptz NOT NULL, traceparent text,
+  subject uuid, aggregate_version bigint NOT NULL DEFAULT 0, occurred_at timestamptz NOT NULL, traceparent text,
   payload jsonb NOT NULL,
   status text NOT NULL DEFAULT 'ready' CHECK (status IN ('ready','running','dead')),
   attempts int NOT NULL DEFAULT 0, next_attempt_at timestamptz NOT NULL DEFAULT now(),
@@ -944,7 +1016,8 @@ CREATE TABLE {s}.inbox (
         autovacuum_vacuum_cost_delay = 0);
 CREATE INDEX inbox_due     ON {s}.inbox (consumer, next_attempt_at) WHERE status = 'ready';
 CREATE INDEX inbox_expired ON {s}.inbox (consumer, lease_until)     WHERE status = 'running';
-CREATE INDEX inbox_head    ON {s}.inbox (consumer, subject, event_id) WHERE status <> 'dead';   -- ordered consumers
+CREATE INDEX inbox_head    ON {s}.inbox (consumer, subject, aggregate_version, event_id)
+  WHERE status <> 'dead';                                     -- ordered consumers: head of each subject
 
 CREATE TABLE {s}.jobs (
   kind text NOT NULL, key text NOT NULL,
@@ -974,7 +1047,7 @@ CREATE TABLE {s}.idempotency_keys (
   created_at timestamptz NOT NULL, expires_at timestamptz NOT NULL,
   PRIMARY KEY (organization_id, mode, principal, route, key));
 CREATE INDEX idempotency_expiry ON {s}.idempotency_keys (expires_at);
--- RLS scope "moded_organization"
+-- RLS scope "moded_organization"; expired rows also visible to <s>_purge (SELECT, DELETE only)
 
 CREATE TABLE {s}.audit_events (                     -- append-only
   id uuid PRIMARY KEY, occurred_at timestamptz NOT NULL,
@@ -984,6 +1057,7 @@ CREATE TABLE {s}.audit_events (                     -- append-only
   action text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL,
   before_hash bytea, after_hash bytea,               -- SHA-256 of the canonical before/after, never the data
   detail jsonb NOT NULL DEFAULT '{}');               -- ids and codes only
+-- RLS scope "organization", SELECT and INSERT policies only
 REVOKE UPDATE, DELETE, TRUNCATE ON {s}.audit_events FROM {s}_rw;   -- the rw role may only INSERT and SELECT
 ```
 
@@ -1022,7 +1096,16 @@ operator acts.
 Application traffic may go through a transaction-mode pooler (PgBouncer or the managed equivalent): every unit
 uses only transaction-scoped state (`SET LOCAL ROLE`, `set_config(…, true)`), and schedules use lease rows, not
 session advisory locks. Two things connect **directly** to PostgreSQL (`LEDGER_DATABASE_DIRECT_URL`): each
-worker's `LISTEN` connection, and `ledger-migrate` (session advisory locks, DDL).
+worker's `LISTEN` connection, and `ledger-migrate` (session advisory locks, DDL). `LEDGER_DATABASE_POOLED=true` says
+`LEDGER_DATABASE_URL` goes through a transaction pooler: psycopg then prepares no statement on it. The worker
+refuses to start without the direct URL.
+
+The pool is sized by `LEDGER_DATABASE_POOL_SIZE` (default 30) and grows by `LEDGER_DATABASE_POOL_OVERFLOW`
+(default 10) for a burst; the check counts on no overflow. An app refuses to start with a pool smaller than its
+role may hold at once (`PoolTooSmallError`, with the numbers): for the worker, every job kind's `concurrency`
+twice (a running job's handler holds a unit while its lease is renewed in another), one connection per inbox
+runner, per job runner, the fan-out and the scheduler, and a headroom of 2; for the others, the headroom. A
+suspended module's settings section is validated too: its variables are read all the same.
 
 ### 6.8 Legal archive and backups
 
@@ -1073,7 +1156,9 @@ name `party: pty_…`.
 ### 7.3 Qualified tax identifiers
 
 - `TaxId(scheme, value)`; scheme keys `<cc>.<name>` declared by regimes as `TaxIdSchemeDef(key, country, labels,
-  normalize, check, check_digit_enforced, peppol_icd)` (ADR 0006).
+  normalize, check, check_digit_enforced, peppol_icd)` (ADR 0006). `<cc>` is one assigned ISO 3166-1 country:
+  no multi-country scheme groups. A VAT id is issued by one EU member state, so each state's is its own scheme
+  (`es.nif`, `fr.tva`, …) declared by that country's regime; `eu.vat` is not a scheme.
 - Validation through the regime registry: `invalid_format` refuses; `checksum_mismatch` refuses only where the
   scheme enforces check digits (not `do.rnc`/`do.cedula`, [01] A7) and is otherwise a warning on the response.
 - **Global registry** (`identity.tax_registrations`): unique `(scheme, normalized_value)` among active
@@ -1176,7 +1261,7 @@ their language (`{"code": "...", "message": "...", "lang": "es"}`), never transl
 | Content | currency, time zone, tax-id schemes, tax categories with dated rates, document types and correction rules, rounding, law-level fields, dated parameters, sources | builders, vendored schemas + pins, signing profile, gateway, numbering, status map, state machine, contingency, delivery, printed representation, receiver routes, requirements, format-level fields |
 | Code shape | pure typed data + pure functions; imports `ledger_kernel` only | layered like a module; imports `ledger_fiscal_kit`, `ledger_platform`, `ledger_kernel` |
 | Used by | any module through `Regimes` | `fiscal` through `ChannelRegistry`; the `receiver` app |
-| Registry | entry points `ledger.countries.regimes`, loaded by `platform.runtime.registries.Regimes` | `ledger.countries.channels`, loaded by `platform.runtime.registries.Channels` |
+| Registry | entry points `ledger.countries.regimes`, loaded by `platform.runtime.registries.Regimes` | `ledger.countries.channels`, loaded by `platform.runtime.packs.Channels` |
 
 A fiscal document records the regime and channel keys it was produced with (ADR 0005, [01] R1).
 
@@ -1508,6 +1593,14 @@ cannot be probed by type. Internal UUIDs never appear in the API.
   principal, **route**), stored **7 days** with the response in the owning module's `idempotency_keys` table in the
   same transaction as the work (v1 semantics: a failed request keeps nothing; a concurrent twin waits and replays
   with `Idempotent-Replayed: true`; same key with another body → 422 `idempotency_key_reused`).
+- What "the same request" is: the route, the concrete path, the canonical query and the canonical body, each
+  length-prefixed. The canonical query is the `(name, value)` pairs **sorted**, so parameters sent in another
+  order are the same request, and so are the values of a repeated name sent in another order (`?tag=a&tag=b`
+  equals `?tag=b&tag=a`): a route that reads a repeated parameter as an *ordered* list must not take an
+  `Idempotency-Key` (none does today; `POST`s carry their data in the body), or must put the order in its body.
+  The canonical body is the validated model's JSON, keys sorted, defaults included.
+- A route that takes `Idempotency-Key` requires `Ledger-Mode` (400 `mode_required` without it): the key is kept
+  per mode (Decision 4 of the v2-M1 plan).
 - Routes that forward to the signer (`POST /v1/certificates`) pass the key through `ImportCertificate`; the signer
   stores it in `signer.idempotency_keys`, in the transaction that installs the certificate.
 - `external_reference` (§7.5) is the permanent business key for documents.
@@ -1538,8 +1631,10 @@ README/spec copies of the table are deleted ([05] D36).
 - Company-scoped resources take the company in the header `Ledger-Company: cmp_…` (the ISV seam, §7.1);
   `/v1/companies/{id}` takes it in the path. Mode comes from the credential (API clients) or, for human tokens,
   the **required** header `Ledger-Mode: test|live` (400 `mode_required` without it on moded routes; owner ruling).
-- Cursor pagination (`limit` 1-100, opaque `starting_after`/`ending_before` cursors), `has_more`; one generic
-  `Page[T]` model ([05] D23).
+- Cursor pagination (`limit` 1-100, opaque `starting_after`/`ending_before` cursors, one at a time), `has_more`
+  (in the direction read); one generic `Page[T]` model ([05] D23): `items` in id order, `has_more`,
+  `next_cursor` (for `starting_after`, `null` when nothing follows) and `previous_cursor` (for `ending_before`,
+  `null` on the first page and whenever nothing comes before).
 - `ETag` = resource version; `If-Match` required on updates (428 without, 412 stale), except idempotent set-value
   `PUT`s (v1 kept).
 - Amounts as strings; dates ISO 8601; country codes ISO 3166-1 alpha-2 upper case; currencies ISO 4217.
@@ -1618,7 +1713,10 @@ v1 §9 holds except where noted.
 
 - **Traces**: OpenTelemetry; HTTP, gRPC (signer), SQL, DGII and buyer calls, jobs and consumers. The trace crosses
   the outbox and the job queue: rows store the `traceparent` of the span that wrote them; a consumer or job span
-  continues it (links when one job serves many events). Exporters drop exception messages, stack traces, status
+  continues it (links when one job serves many events). At the public edge a caller's `traceparent` is
+  **linked, never adopted**: each request starts a trace of its own (its id is the `Request-Id` every traced
+  response carries, so a client cannot choose it or share it between requests) with a link to the caller's;
+  an app behind a trusted edge may adopt it instead. Exporters drop exception messages, stack traces, status
   descriptions and raw paths (v1 kept).
 - **Metrics** (Prometheus, `ledger_` prefix, no tenant labels): HTTP and gRPC RED by route template;
   `ledger_outbox_pending{schema}`, `ledger_outbox_oldest_seconds{schema}`, `ledger_outbox_unrouted{schema}`;
@@ -1644,7 +1742,7 @@ v1 §9 holds except where noted.
 - **Operator controls** (`ledger-worker` subcommands, audited): list stuck documents by company/state, wake a
   parked job or all parked jobs of a kind and company, replay a dead inbox row, re-route or delete an unrouted
   outbox event, record an enrollment's authority evidence.
-- Dashboards as code; a runbook linked from every alert (`docs/runbooks/<package>/`).
+- Dashboards as code; a runbook linked from every alert (`docs/runbooks/<area>/`).
 
 ## 12. Performance targets and SLOs
 
@@ -1715,8 +1813,9 @@ v1 §9 holds except where noted.
 ### 14.3 Gate (R6)
 
 ruff (ALL), basedpyright `all` + mypy `--strict` (warnings fail), import-linter (generated), deptry, vulture on
-`src` only, typos, `buf lint`/`buf breaking`, `ledger-devtools check`, pytest per package with 100 % branch,
-pip-audit; zero `type: ignore`/`noqa`/`pragma: no cover`/tool directives (the `suppressions` step).
+`src` and tests (`poe dead-src` reports code only tests use), typos, `buf lint` (`buf breaking` in CI),
+`ledger-devtools check`, pytest per package with 100 % branch; zero `type: ignore`/`noqa`/`pragma: no
+cover`/tool directives (the `suppressions` step). As built: `uv run poe check`; pip-audit is not in it yet.
 
 ### 14.4 CI
 
@@ -1756,7 +1855,7 @@ brackets.
 
 | v1 item | Verdict | v2 target / reason |
 |---|---|---|
-| `pyproject.toml` | R | members by glob; per-package lists generated or removed; one `gate` task [05 §7.1, D32] |
+| `pyproject.toml` | R | members by glob; the lists naming packages a generated block; `poe check` is the gate [05 §7.1, D32] |
 | `tests/test_workspace.py` | D | lists are generated and checked by `ledger-devtools check` [05 §7.1] |
 | `conftest.py` (root, Windows selector loop) | Mv | `ledger_testing` pytest plugin |
 | `.github/workflows/ci.yml` | R | one job running `poe check` (matrix later, §16.4); buf image from one variable [05 D31] |
@@ -1885,7 +1984,7 @@ owner's review.
 
 | # | Milestone | Done when | Runs |
 |---|---|---|---|
-| v2-M1a | **Chassis-lite** (week 1) | new tree (packages, modules, countries, apps, tools); `ledger-devtools sync/check/gate`; kernel v2; platform `config`, `observability`, `runtime` (App, contexts, parts, facade guard, registries), `data` (units with `SET LOCAL ROLE`, RLS builder with NULLIF, `chassis_schema_v1`, migrations), `events` (outbox, subscriptions, fan-out, inbox runner), `jobs` (enqueue, claim with fencing, schedules on lease rows), `http` basics; `api`/`worker`/`migrate` apps; testing plugin, xdist; one image; compose without NATS | in parallel with M1b |
+| v2-M1a | **Chassis-lite** (week 1) | new tree (packages, modules, countries, apps, tools); `ledger-devtools sync/check`; kernel v2; platform `config`, `observability`, `runtime` (App, contexts, parts, facade guard, registries), `data` (units with `SET LOCAL ROLE`, RLS builder with NULLIF, `chassis_schema_v1`, migrations), `events` (outbox, subscriptions, fan-out, inbox runner), `jobs` (enqueue, claim with fencing, schedules on lease rows), `http` basics; `api`/`worker`/`migrate` apps; testing plugin, xdist; one image; compose without NATS | in parallel with M1b |
 | v2-M1b | **DGII spike** (week 1) | seed → signed seed → token → sign → submit → poll for a type 31, and an RFCE for a type 32, against `TesteCF`; until access exists (Q2), against the fake DGII written from DGII's documentation (`ledger-country-do-testing`). Throwaway code allowed outside the gate in `.superpowers/spikes/`; findings recorded; XSDs vendored and pinned (kept) | in parallel with M1a |
 | v2-M2 | **Identity v2 ∥ Signer** | identity moved and adapted (jurisdiction, currency, qualified tax ids + registry, modes, TypeIDs, `Ledger-Version` pin storage/echo, permissions from manifests, minimal establishments with time zone, API clients, Zitadel claims profile, `GET /v1/countries`); signer module + app: gRPC contract, local backend (KMS envelope, LocalStack) **and** the remote-backend port with a fake entity, import/describe/sign XML/sign seed, audit, per-caller tokens, expiry schedule | two tracks |
 | v2-M3 | **`do-ecf-v1` emission with thin invoicing and fiscal** | fiscal-kit minimal (§8.4); regime `do`; builders for 10 types + RFCE; ranges with released numbers; e-CF state machine on jobs; DGII client with breaker; archive; thin invoicing (`/v1/invoices`, `external_reference`, `IssuePolicy`, `apply_fiscal_status`); thin fiscal (enrollments, routing, synchronous numbering and signing, recovery consumer); webhooks minimal; every type accepted on the fake DGII, then on `TesteCF` | critical path |
@@ -1900,7 +1999,7 @@ items in the header note are **not** on this list.
 
 | Deferred | Until | What remains now |
 |---|---|---|
-| devtools `affected`, CI matrix, `scaffold` (copier templates), CODEOWNERS, generated reference docs | > 8 packages or a second contributor | `sync`, `check`, `gate`; one CI job |
+| devtools `gate`, `affected`, CI matrix, `scaffold` (copier templates), CODEOWNERS, generated reference docs | > 8 packages or a second contributor | `sync`, `check`; `poe check` as the gate; one CI job |
 | `countries/zz` synthetic country | second country work | review rule on country diffs |
 | Quality-tier rule catalogue and its automated check | second channel | tier claim in the manifest, checked in review |
 | Dated-version transforms (`VersionChange`, changelog generation) | first breaking change | header parsing, pin storage (organization, API client), precedence header > API client > organization, echo |
@@ -1935,7 +2034,7 @@ Written as `docs/adr/NNNN-*.md` (MADR, short), status *Proposed* until the owner
 | [0006](../../adr/0006-qualified-tax-ids.md) | Tax identifiers are `(scheme, value)` validated by regimes, check digits reported unless enforced, one global registry of active taxpayers |
 | [0007](../../adr/0007-test-and-live-modes.md) | Test vs live mode is a tenancy dimension on every moded row, credential and RLS policy; live mode gated on authority authorization |
 | [0008](../../adr/0008-dated-api-versions.md) | `/v1` path major plus pinned dated versions (transforms deferred); TypeID public ids; thin Standard Webhooks |
-| [0009](../../adr/0009-manifest-driven-workspace.md) | A uv workspace with one package per unit, `manifest.toml` as the source of truth, generated lists and contracts, devtools sync/check/gate |
+| [0009](../../adr/0009-manifest-driven-workspace.md) | A uv workspace with one package per unit, `manifest.toml` as the source of truth, generated lists and contracts, devtools sync/check (gate deferred) |
 | [0010](../../adr/0010-signer-isolation.md) | Private keys only in a separate signer process, reached over gRPC with per-caller allowlists; two signing backends (local key, remote INDOTEL-authorized entity) |
 
 ## 18. Risks

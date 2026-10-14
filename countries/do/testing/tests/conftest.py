@@ -6,12 +6,12 @@ lazy from collections.abc import AsyncIterator
 import httpx
 import pytest
 
-from ledger_country_do_testing.clock import ManualClock
 from ledger_country_do_testing.fake_dgii.app import DEFAULT_PUBLIC_URL, FakeDgii
 from ledger_country_do_testing.fake_dgii.state import dgii_check
 from ledger_country_do_testing.local_signer import KeyPairSigner
 from ledger_country_do_testing.pki import Authority, organization, person
 from ledger_country_do_testing.samples import SIGNER_VALID_FROM
+from ledger_testing.clock import ManualClock
 lazy from ledger_country_do_testing.pki import Issued
 
 

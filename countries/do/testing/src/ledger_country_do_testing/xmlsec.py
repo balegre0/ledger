@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC
 from pathlib import Path
-from typing import Final, final
+from typing import ClassVar, Final, final
 lazy from collections.abc import Generator
 lazy from datetime import datetime
 
@@ -23,6 +23,7 @@ from testcontainers.core.container import DockerContainer
 from testcontainers.core.image import DockerImage
 
 from ledger_country_do.channels.ecf_v1.domain.notation import NaiveMomentError
+from ledger_kernel.errors import LedgerError
 
 XMLSEC_IMAGE: Final = "ledger-do-xmlsec1:1.2.41"
 CONTEXT: Final = Path(__file__).with_name("xmlsec1")
@@ -45,8 +46,10 @@ _CLEAN: Final = "rm -f /verify/*"
 _TIME: Final = "%Y-%m-%d %H:%M:%S"
 
 
-class XmlsecCommandError(RuntimeError):
+class XmlsecCommandError(LedgerError):
     """A command that prepares a verification failed in the container: its exit code and xmlsec's output."""
+
+    code: ClassVar[str] = "do_xmlsec_command_failed"
 
     def __init__(self, exit_code: int | None, output: str) -> None:
         super().__init__(f"a command in the xmlsec1 container exited with {exit_code}: {output}")

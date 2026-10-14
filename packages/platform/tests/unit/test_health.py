@@ -1,0 +1,442 @@
+import asyncio
+import contextlib
+import gc
+import weakref
+from math import inf, nan
+lazy from collections.abc import Callable
+
+import pytest
+from structlog.testing import capture_logs
+
+from ledger_kernel.errors import ErrorKind
+from ledger_platform.config.options import InvalidOptionError
+from ledger_platform.observability.health import DuplicateCheckError, Health
+from ledger_testing.clock import Moment
+from ledger_testing.waiting import Watched
+
+
+async def healthy() -> None:
+    return None
+
+
+async def broken() -> None:
+    raise ConnectionError
+
+
+async def stuck() -> None:
+    """Hangs until cancelled: an event nobody sets."""
+    await asyncio.Event().wait()
+
+
+async def test_every_check_is_reported() -> None:
+    health = Health(timeout=0.05)
+    health.add("database", healthy)
+    health.add("broker", broken)
+    health.add("slow", stuck)
+    assert await health.run() == {"database": True, "broker": False, "slow": False}
+
+
+async def test_checks_run_concurrently() -> None:
+    """Each check waits for the other to have started: one after the other, the first would time out."""
+    first, second = asyncio.Event(), asyncio.Event()
+
+    async def meets_second() -> None:
+        first.set()
+        await second.wait()
+
+    async def meets_first() -> None:
+        second.set()
+        await first.wait()
+
+    health = Health(timeout=5)
+    health.add("first", meets_second)
+    health.add("second", meets_first)
+    assert await health.run() == {"first": True, "second": True}
+
+
+async def test_a_check_that_swallows_its_cancellation_is_unhealthy() -> None:
+    """The deadline cancels the check; one that carries on as if nothing happened has still missed it."""
+
+    async def gives_up_quietly() -> None:
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.Event().wait()
+
+    health = Health(timeout=0.05)
+    health.add("quiet", gives_up_quietly)
+    assert await health.run() == {"quiet": False}
+
+
+async def test_a_check_that_raises_cancelled_by_itself_is_unhealthy() -> None:
+    async def cancels_itself() -> None:
+        raise asyncio.CancelledError
+
+    health = Health()
+    health.add("odd", cancels_itself)
+    assert await health.run() == {"odd": False}
+
+
+async def test_a_check_that_ignores_cancellation_does_not_hold_up_the_probe() -> None:
+    release, watched = asyncio.Event(), Watched()
+    started: list[str] = []
+
+    async def stubborn() -> None:
+        watched.enter()
+        started.append("stubborn")
+        while not release.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await release.wait()
+
+    health = Health(timeout=0.05)
+    health.add("stubborn", stubborn)
+    health.add("database", healthy)
+    try:
+        async with asyncio.timeout(2):
+            first = await health.run()
+            second = await health.run()
+        assert first == second == {"stubborn": False, "database": True}
+        assert started == ["stubborn"], "a check still running is not started again"
+    finally:
+        release.set()
+    await watched.ended()
+    assert await health.run() == {"stubborn": True, "database": True}
+    assert started == ["stubborn", "stubborn"]
+
+
+async def test_cancelling_a_run_propagates_and_the_check_stops_at_its_own_deadline() -> None:
+    running, watched = asyncio.Event(), Watched()
+
+    async def waits() -> None:
+        watched.enter()
+        running.set()
+        await asyncio.Event().wait()
+
+    health = Health(timeout=0.05)
+    health.add("slow", waits)
+    probe = asyncio.create_task(health.run())
+    await running.wait()
+    probe.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await probe
+    async with asyncio.timeout(2):
+        await watched.ended()
+
+
+async def test_a_prober_that_gives_up_does_not_cancel_the_check_for_the_others() -> None:
+    running, release = asyncio.Event(), asyncio.Event()
+    cancelled = False
+
+    async def slow() -> None:
+        nonlocal cancelled
+        running.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    health = Health(timeout=5)
+    health.add("slow", slow)
+    leaving = asyncio.create_task(health.run())
+    staying = asyncio.create_task(health.run())
+    await running.wait()
+    leaving.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await leaving
+    release.set()
+    async with asyncio.timeout(2):
+        assert await staying == {"slow": True}
+    assert not cancelled
+
+
+def record_into(
+    problems: list[dict[str, object]],
+) -> Callable[[asyncio.AbstractEventLoop, dict[str, object]], None]:
+    """An exception handler for the loop: what a callback or a task raised and nobody awaited lands here."""
+
+    def record(loop: asyncio.AbstractEventLoop, context: dict[str, object]) -> None:
+        del loop
+        problems.append(context)
+
+    return record
+
+
+async def test_overlapping_runs_put_one_probe_of_a_check_in_flight_and_no_callback_fails() -> None:
+    """Two probes at once (kubelet and a load balancer) while a check hangs: one probe, nothing raised."""
+    release, watched = asyncio.Event(), Watched()
+    running = peak = 0
+    problems: list[dict[str, object]] = []
+
+    async def stubborn() -> None:
+        nonlocal running, peak
+        watched.enter()
+        running += 1
+        peak = max(peak, running)
+        try:
+            while not release.is_set():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await release.wait()
+        finally:
+            running -= 1
+
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(record_into(problems))
+    health = Health(timeout=0.05)
+    health.add("stubborn", stubborn)
+    try:
+        async with asyncio.timeout(3):
+            overlapping = await asyncio.gather(health.run(), health.run())
+            later = await health.run()
+    finally:
+        release.set()
+    await watched.ended()
+    loop.set_exception_handler(None)
+    first, second = overlapping
+    assert first == second == {"stubborn": False}
+    assert later == {"stubborn": False}
+    assert peak == 1
+    assert problems == []
+
+
+async def test_a_stuck_check_is_cancelled_again_by_every_later_run() -> None:
+    release, cancelled, watched = asyncio.Event(), asyncio.Event(), Watched()
+    cancellations = 0
+
+    async def stubborn() -> None:
+        nonlocal cancellations
+        watched.enter()
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancellations += 1
+                cancelled.set()
+
+    health = Health(timeout=0.02)
+    health.add("stubborn", stubborn)
+    seen: list[int] = []
+    try:
+        async with asyncio.timeout(3):
+            for _ in range(3):
+                await health.run()
+                await cancelled.wait()
+                cancelled.clear()
+                seen.append(cancellations)
+    finally:
+        release.set()
+    await watched.ended()
+    assert seen == [1, 2, 3]
+
+
+async def test_a_check_stuck_past_the_limit_is_wedged_until_it_ends() -> None:
+    release, watched = asyncio.Event(), Watched()
+    moment = Moment(100.0)
+
+    async def stubborn() -> None:
+        watched.enter()
+        while not release.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await release.wait()
+
+    health = Health(timeout=0.02, wedge_after=30, clock=moment)
+    health.add("stubborn", stubborn)
+    health.add("database", healthy)
+    try:
+        await health.run()
+        assert health.wedged() == ()
+        moment.now += 30
+        assert health.wedged() == ()
+        moment.now += 0.5
+        assert health.wedged() == ("stubborn",)
+    finally:
+        release.set()
+    await watched.ended()
+    assert health.wedged() == ()
+    assert await health.run() == {"stubborn": True, "database": True}
+
+
+async def test_the_limit_for_a_wedge_is_ten_timeouts_unless_chosen() -> None:
+    release, watched = asyncio.Event(), Watched()
+    moment = Moment()
+
+    async def stubborn() -> None:
+        watched.enter()
+        while not release.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await release.wait()
+
+    health = Health(timeout=0.01, clock=moment)
+    health.add("stubborn", stubborn)
+    try:
+        await health.run()
+        moment.now = 0.09
+        assert health.wedged() == ()
+        moment.now = 0.11
+        assert health.wedged() == ("stubborn",)
+    finally:
+        release.set()
+        await watched.ended()
+
+
+class LateError(Exception):
+    pass
+
+
+@pytest.mark.parametrize("noticed_by", ["a run", "a liveness check"])
+async def test_a_stuck_check_that_ended_is_forgotten_with_its_traceback(noticed_by: str) -> None:
+    release, watched = asyncio.Event(), Watched()
+    errors: list[weakref.ref[LateError]] = []
+
+    async def fails_when_released() -> None:
+        watched.enter()
+        while not release.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await release.wait()
+        error = LateError()
+        errors.append(weakref.ref(error))
+        raise error
+
+    health = Health(timeout=0.02)
+    health.add("stubborn", fails_when_released)
+    try:
+        await health.run()
+    finally:
+        release.set()
+    await watched.ended()
+    (late,) = errors
+    gc.collect()
+    assert late() is not None, "kept until a probe or a liveness check notices that it ended"
+    if noticed_by == "a run":
+        await health.run()
+    else:
+        assert health.wedged() == ()
+    gc.collect()
+    assert late() is None
+
+
+async def test_no_checks_is_healthy() -> None:
+    assert await Health().run() == {}
+
+
+def test_a_name_is_used_once() -> None:
+    health = Health()
+    health.add("database", healthy)
+    with pytest.raises(DuplicateCheckError, match="database"):
+        health.add("database", healthy)
+
+
+def test_a_part_of_the_process_that_is_gone_is_named_dead_while_it_stays_gone() -> None:
+    gone: list[str] = []
+    health = Health()
+    health.add_liveness("workers", lambda: not gone)
+    health.add_liveness("loop", lambda: True)
+    assert health.dead() == ()
+    gone.append("consumer")
+    assert health.dead() == ("workers",)
+
+
+def test_a_liveness_condition_is_no_readiness_check() -> None:
+    health = Health()
+    health.add_liveness("workers", lambda: False)
+    assert health.wedged() == ()
+
+
+async def test_a_readiness_check_is_no_liveness_condition() -> None:
+    health = Health()
+    health.add("broker", broken)
+    assert await health.run() == {"broker": False}
+    assert health.dead() == ()
+
+
+def test_a_liveness_name_is_used_once() -> None:
+    health = Health()
+    health.add_liveness("workers", lambda: True)
+    with pytest.raises(DuplicateCheckError, match="workers"):
+        health.add_liveness("workers", lambda: True)
+
+
+async def test_a_failing_check_is_logged_in_full_when_it_starts_failing_and_briefly_while_it_stays_so() -> (
+    None
+):
+    """An outage is probed every few seconds by every prober: one traceback says why, not one per probe."""
+    failing = [True]
+
+    async def database() -> None:
+        if failing[0]:
+            raise ConnectionError
+
+    health = Health()
+    health.add("database", database)
+    with capture_logs() as logs:
+        for _ in range(3):
+            await health.run()
+        failing[0] = False
+        await health.run()
+        await health.run()
+        failing[0] = True
+        await health.run()
+    first, *during, recovered, again = logs
+    assert isinstance(first.pop("exc_info"), ConnectionError)
+    assert first == {"event": "health.check_failed", "log_level": "error", "check": "database"}
+    assert during == [{"event": "health.check_failed", "log_level": "debug", "check": "database"}] * 2
+    assert recovered == {"event": "health.check_recovered", "log_level": "info", "check": "database"}
+    assert isinstance(again.pop("exc_info"), ConnectionError)
+
+
+async def test_a_check_that_hangs_is_logged_once_as_timed_out_and_then_only_in_passing() -> None:
+    release, watched = asyncio.Event(), Watched()
+
+    async def hangs() -> None:
+        watched.enter()
+        await release.wait()
+
+    health = Health(timeout=0.02)
+    health.add("broker", hangs)
+    try:
+        with capture_logs() as logs:
+            for _ in range(3):
+                await health.run()
+    finally:
+        release.set()
+        await watched.ended()
+    assert [(entry["event"], entry["log_level"]) for entry in logs] == [
+        ("health.check_timed_out", "error"),
+        ("health.check_timed_out", "debug"),
+        ("health.check_timed_out", "debug"),
+    ]
+
+
+async def test_a_check_that_cancels_itself_is_logged_once_and_then_only_in_passing() -> None:
+    async def cancels_itself() -> None:
+        raise asyncio.CancelledError
+
+    health = Health()
+    health.add("odd", cancels_itself)
+    with capture_logs() as logs:
+        await health.run()
+        await health.run()
+    assert [(entry["event"], entry["log_level"]) for entry in logs] == [
+        ("health.check_cancelled", "error"),
+        ("health.check_cancelled", "debug"),
+    ]
+
+
+@pytest.mark.parametrize("timeout", [0.0, -1.0, nan, inf])
+def test_a_time_limit_that_is_not_a_positive_finite_number_of_seconds_is_refused(timeout: float) -> None:
+    with pytest.raises(InvalidOptionError, match=r"^health option timeout must be a positive, finite"):
+        Health(timeout=timeout)
+
+
+@pytest.mark.parametrize("wedge_after", [0.0, -1.0, nan, inf, 1.9])
+def test_a_wedge_limit_that_is_not_at_least_the_time_limit_is_refused(wedge_after: float) -> None:
+    """A check is left behind only once it outlives its time limit: it cannot be wedged any sooner."""
+    with pytest.raises(InvalidOptionError, match="wedge_after") as refused:
+        Health(timeout=2.0, wedge_after=wedge_after)
+    assert (refused.value.code, refused.value.component, refused.value.kind) == (
+        "invalid_option",
+        "health",
+        ErrorKind.INTERNAL,
+    )
+
+
+def test_a_wedge_limit_of_the_time_limit_itself_is_accepted() -> None:
+    Health(timeout=2.0, wedge_after=2.0)

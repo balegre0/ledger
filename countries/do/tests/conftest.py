@@ -7,13 +7,13 @@ import httpx
 import pytest
 
 from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
-from ledger_country_do_testing.clock import ManualClock
 from ledger_country_do_testing.fake_dgii.app import FakeDgii
 from ledger_country_do_testing.fake_dgii.state import dgii_check
 from ledger_country_do_testing.local_signer import KeyPairSigner
 from ledger_country_do_testing.pki import Authority, organization, person
 from ledger_country_do_testing.samples import SIGNER_VALID_FROM
 from ledger_country_do_testing.transports import FAKE_HOSTS
+from ledger_testing.clock import ManualClock
 lazy from ledger_country_do_testing.pki import Issued
 
 

@@ -7,7 +7,7 @@ in an image. A PKCS#12 bundle is read from bytes the caller loaded (the CLI read
 """
 
 import asyncio
-from typing import final, override
+from typing import ClassVar, final, override
 
 from cryptography.hazmat.primitives.serialization import pkcs12
 lazy from cryptography import x509
@@ -15,11 +15,14 @@ lazy from cryptography.hazmat.primitives.asymmetric.types import PrivateKeyTypes
 
 from ledger_country_do.channels.ecf_v1.adapters.signing.signer import sign_enveloped
 from ledger_country_do.channels.ecf_v1.application.ports import CertificateValidity, XmlSigner
+from ledger_kernel.errors import InvalidInputError
 lazy from ledger_country_do_testing.pki import Issued
 
 
-class BundleIncompleteError(ValueError):
+class BundleIncompleteError(InvalidInputError):
     """A PKCS#12 bundle without a private key and its certificate."""
+
+    code: ClassVar[str] = "do_bundle_incomplete"
 
     def __init__(self) -> None:
         super().__init__("the PKCS#12 bundle holds no private key and certificate pair")

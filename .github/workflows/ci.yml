@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
 
+# Every action is pinned by the commit of its release (the tag in the comment): a re-pointed tag cannot change
+# what runs.
 permissions:
   contents: read
 
@@ -17,59 +19,64 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           enable-cache: true
       - name: Install (locked)
-        run: uv sync --locked
-      - name: Generated code is up to date
-        run: |
-          uv run poe proto
-          git add --intent-to-add libs/contracts/src/ledger
-          git diff --exit-code -- libs/contracts/src/ledger
+        run: uv sync --locked --all-packages
       - name: Protobuf breaking changes against main
-        if: github.event_name == 'pull_request'
-        # Runs as the owner of the checkout, not as root: nothing root-owned lands in the workspace and git never
-        # has to trust a repository owned by someone else. HOME must be writable for buf's cache directory.
+        # Only once contracts/proto holds a .proto (the signer milestone adds the first). Runs as the owner of the
+        # checkout, not as root: nothing root-owned lands in the workspace and git never has to trust a
+        # repository owned by someone else. HOME must be writable for buf's cache directory. The image is the
+        # one deploy/local/images.toml pins.
+        if: github.event_name == 'pull_request' && hashFiles('contracts/proto/**/*.proto') != ''
         run: |
-          if git cat-file -e origin/main:libs/contracts/buf.yaml 2>/dev/null; then
+          buf_image="$(uv run python -c 'import tomllib; print(tomllib.load(open("deploy/local/images.toml", "rb"))["images"]["buf"])')"
+          if git cat-file -e origin/main:contracts/buf.yaml 2>/dev/null; then
             docker run --rm --user "$(id -u):$(id -g)" --env HOME=/tmp \
-              --volume "$PWD:/repo" --workdir /repo/libs/contracts bufbuild/buf:1.73.0@sha256:75d8f756f0919dcded71e67968a91adfe55fe4dd62c4900c57bbfcd7fe625608 \
-              breaking --against '/repo/.git#branch=origin/main,subdir=libs/contracts'
+              --volume "$PWD:/repo" --workdir /repo/contracts "$buf_image" \
+              breaking --against '/repo/.git#branch=origin/main,subdir=contracts'
           fi
-      - name: Format, lint, types x2, architecture, deps, spelling, tests
+      - name: Format, lint, types x2, architecture, deps, spelling, devtools, dead code, tests
+        # The packages' test runs share the runner: LEDGER_TEST_JOBS caps how many run at once (two on a 4-core
+        # runner keeps memory in bounds); each line of a run is prefixed with its package, and pytest-timeout ends
+        # a test past 300 s, so a hang names itself.
+        env:
+          LEDGER_TEST_JOBS: "2"
         run: uv run poe check
       - name: Local infrastructure configuration
         run: |
           docker compose -f deploy/local/compose.yaml config --quiet
           docker compose -f deploy/local/compose.yaml --profile zitadel config --quiet
-      - uses: docker/setup-buildx-action@v4
-      - name: Identity's production image
-        # Built once, with its layers cached in GitHub Actions' cache (the dependencies' layer changes only with the
-        # lockfile or a manifest), and loaded into Docker under the tag compose runs.
-        uses: docker/build-push-action@v7
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+      - name: The image of every app
+        # Built once, with its layers cached in GitHub Actions' cache, and loaded into Docker under the tag compose
+        # runs.
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: .
-          file: services/identity/Dockerfile
-          tags: ledger-identity:local
+          file: deploy/docker/ledger.Dockerfile
+          tags: ledger:local
           load: true
-          cache-from: type=gha,scope=identity
-          cache-to: type=gha,scope=identity,mode=max
-      - name: Local stack starts healthy, identity from its production image
-        # From the image just built: runs the migrations (one-shot service), starts identity and waits for its
-        # health check (/readyz: PostgreSQL, NATS, workers, the chassis's tables, identity's migrations); then
-        # checks that the API refuses an anonymous caller, that gRPC is not published to the host (Decision 14),
-        # that the image runs as nonroot and that migrating again changes nothing. Torn down on any exit.
+          cache-from: type=gha,scope=ledger
+          cache-to: type=gha,scope=ledger,mode=max
+      - name: Local stack starts healthy from the image
+        # From the image just built: the migrate job runs once, the api and the worker start after it and compose
+        # waits for their health checks (/readyz: PostgreSQL, every schema at head, the runners, the regimes).
+        # Then: the API refuses an anonymous caller, the image runs as nonroot and holds no dev-only package, and
+        # migrating again changes nothing. Torn down on any exit.
         run: |
           compose='docker compose -p ledger-ci -f deploy/local/compose.yaml'
           trap '$compose down -v' EXIT
           $compose up -d --wait --no-build || { $compose logs; exit 1; }
-          identity="http://127.0.0.1:${LEDGER_IDENTITY_PORT:-8100}"
-          curl --fail --silent --show-error "$identity/readyz"
-          test "$(curl --silent --output /dev/null --write-out '%{http_code}' "$identity/v1/companies")" = 401
-          test -z "$($compose port identity 50051 2>/dev/null)"
-          test "$(docker image inspect ledger-identity:local --format '{{.Config.User}}')" = nonroot
-          $compose run --rm identity-migrate
+          api="http://127.0.0.1:${LEDGER_API_PORT:-8100}"
+          worker="http://127.0.0.1:${LEDGER_WORKER_PORT:-8101}"
+          curl --fail --silent --show-error "$api/readyz"
+          curl --fail --silent --show-error "$worker/readyz"
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' "$api/v1/companies")" = 401
+          test "$(docker image inspect ledger:local --format '{{.Config.User}}')" = nonroot
+          test "$(docker run --rm --entrypoint /app/.venv/bin/python ledger:local -c             'import importlib.util as u; print(any(u.find_spec(m) for m in ("ledger_testing", "ledger_devtools", "ledger_country_do_testing", "pytest")))')" = False
+          $compose run --rm migrate || { $compose logs migrate; exit 1; }

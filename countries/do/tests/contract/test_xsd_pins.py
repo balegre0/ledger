@@ -19,7 +19,7 @@ from ledger_country_do.channels.ecf_v1.adapters.xsd.published import (
     Published,
 )
 from ledger_country_do.regime import REGIME
-lazy from ledger_country_do.regime.definitions import DocumentTypeDef
+lazy from ledger_kernel.regimes import DocumentTypeDef
 
 XS = "{http://www.w3.org/2001/XMLSchema}"
 NOT_AS_PUBLISHED = frozenset(correction.format for correction in CORRECTIONS)

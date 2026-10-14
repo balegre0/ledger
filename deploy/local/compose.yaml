@@ -1,38 +1,55 @@
-# Infrastructure for local development. Services join it as they are built (milestone 2 onwards).
+# The local stack: PostgreSQL, the migrate job, the api and the worker, and Zitadel behind a profile.
 #
-# What a service running on the host is configured with (the LEDGER_* variables of ServiceSettings):
-#   LEDGER_DATABASE_URL=postgresql+psycopg://ledger_app:ledger_app@127.0.0.1:5432/ledger
-#   LEDGER_NATS_URL=nats://127.0.0.1:4222
-# A service that runs inside this network uses the same URLs with the host names `postgres` and `nats` in
-# place of 127.0.0.1.
+# What an app running on the host is configured with (the LEDGER_* variables of Settings), beside ledger.env's:
+#   LEDGER_DATABASE_URL=postgresql+psycopg://ledger_app:ledger_app@127.0.0.1:5432/ledger (or LEDGER_POSTGRES_PORT)
+#   LEDGER_HTTP_PORT=8101 for the worker (the api's 8100 is the default): never 8000, another project's here
+# An app that runs inside this network uses the same URL with the host name `postgres` in place of 127.0.0.1.
 #
 # PostgreSQL's administrator is `postgres`. A service never connects as that role: a superuser bypasses
 # row-level security, and a database that ignored the policies would hide exactly the bugs they exist to
-# catch. postgres/init.sql creates the role services use, `ledger_app`, which owns the `ledger` database and
-# is no superuser (the platform's tests run as the same role). It runs only when the volume is first
-# created: after editing it, `docker compose down -v` starts over.
+# catch. postgres/init.sql (generated from the manifests by `ledger-devtools sync`) creates the roles, as
+# production makes them: the `ledger_app` and `ledger_migrator` logins, no superuser, and each schema's
+# owner, rw and purge roles; then the `ledger` database and its schemas. postgres/zitadel.sql (by hand) adds
+# Zitadel's role and database. They run only when the volume is first created: after a change,
+# `docker compose down -v` starts over.
 #
-# Every image is pinned to an exact version tag, not to a floating one. A version tag can still be
-# re-pushed (a rebuild on a newer base image keeps it): Zitadel's is pinned by digest too, and pinning the others'
-# digests is a later hardening step.
+# Every image is pinned to an exact version tag and its digest (the tag's multi-platform index), as
+# deploy/local/images.toml pins it: a re-pushed tag cannot change what runs.
 #
-# Services: identity runs from its production image (services/identity/Dockerfile), read-only, as nonroot, with
-# its migrations applied first by the one-shot identity-migrate. Its database and role come from
-# postgres/init.sql; a data volume made before that file listed them needs `docker compose down -v`. The profile
-# `zitadel` adds a local identity provider (zitadel/README.md).
+# Apps, from the one image (deploy/docker/ledger.Dockerfile), each configured by ledger.env (one Settings class for
+# every app) plus what is its own: `migrate` runs once, as the migrator login over a direct connection, and the
+# api and the worker start after it succeeded. The worker listens for wake-ups over a direct connection too. In
+# their containers the apps listen on 8000; on the host the api is published on 127.0.0.1:${LEDGER_API_PORT:-8100}
+# and the worker's probes and metrics on 127.0.0.1:${LEDGER_WORKER_PORT:-8101} (8000 is another project's on this
+# machine). Each runs one Granian worker (scale by replicas); Granian kills one still stopping after 30 s, so
+# compose waits 40 s before its own kill.
+# The profile `zitadel` adds a local identity provider (zitadel/README.md).
 name: ledger
+
+x-ledger: &ledger
+  image: ledger:local
+  build: {context: ../.., dockerfile: deploy/docker/ledger.Dockerfile}
+  env_file:
+    - ledger.env
+    - path: zitadel/.local/ledger.env
+      required: false
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
 
 services:
   postgres:
     # The tag the platform's tests run on: a service meets locally the PostgreSQL it will be tested against.
-    image: postgres:18.6
+    image: postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-    ports: ["127.0.0.1:5432:5432"]
+    ports: ["127.0.0.1:${LEDGER_POSTGRES_PORT:-5432}:5432"]
     volumes:
       - postgres:/var/lib/postgresql
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/10-ledger.sql:ro
+      - ./postgres/zitadel.sql:/docker-entrypoint-initdb.d/20-zitadel.sql:ro
     healthcheck:
       # Healthy when a service could connect: over TCP (while the image runs its init scripts, PostgreSQL
       # listens on a socket only), as the runtime role, to its own database. `pg_isready` would say yes
@@ -42,56 +59,32 @@ services:
       timeout: 3s
       retries: 10
 
-  nats:
-    # The same server version the platform's tests run (nats:2.12.15), in its Alpine variant: the default
-    # image holds nothing but the server binary, and the healthcheck needs a shell and wget.
-    image: nats:2.12.15-alpine
-    command: ["--jetstream", "--store_dir=/data", "--http_port=8222"]
-    ports: ["127.0.0.1:4222:4222", "127.0.0.1:8222:8222"]
-    volumes: ["nats:/data"]
-    healthcheck:
-      # 200 only when the server is up and JetStream is enabled; the monitoring port answers either way.
-      test: ["CMD-SHELL", "wget -q --spider 'http://127.0.0.1:8222/healthz?js-enabled-only=true'"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  identity-migrate:
-    # Brings identity's database to the image's schema, then exits; identity starts only once it has succeeded.
-    image: ledger-identity:local
-    build:
-      context: ../..
-      dockerfile: services/identity/Dockerfile
-    entrypoint: ["/app/.venv/bin/ledger-identity-migrate"]
-    env_file: [identity.env]
-    read_only: true
-    tmpfs: [/tmp]
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
+  migrate:
+    <<: *ledger
+    command: ["/app/.venv/bin/ledger-migrate"]
+    environment:
+      LEDGER_DATABASE_DIRECT_URL: postgresql+psycopg://ledger_migrator:ledger_migrator@postgres:5432/ledger
     restart: "no"
     depends_on:
       postgres: {condition: service_healthy}
 
-  identity:
-    image: ledger-identity:local
-    env_file:
-      - identity.env
-      - path: zitadel/.local/identity.env
-        required: false
-    # HTTP only, on LEDGER_IDENTITY_PORT (8100 by default, so that it does not collide with the many tools that
-    # take 8000). The gRPC port (50051) stays inside this network: IdentityQueryService authenticates no caller
-    # until the mesh does, so nothing outside the services may reach it.
-    ports: ["127.0.0.1:${LEDGER_IDENTITY_PORT:-8100}:8000"]
-    read_only: true
-    tmpfs: [/tmp]
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    # Granian drains HTTP, then the chassis stops within its budget (25 s), and Granian kills a worker still
-    # running after 30 s: Docker's default of 10 s before its SIGKILL would cut that short.
+  api:
+    <<: *ledger
+    command: ["/app/.venv/bin/ledger-api"]
+    ports: ["127.0.0.1:${LEDGER_API_PORT:-8100}:8000"]
     stop_grace_period: 40s
     depends_on:
-      identity-migrate: {condition: service_completed_successfully}
-      nats: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+
+  worker:
+    <<: *ledger
+    command: ["/app/.venv/bin/ledger-worker"]
+    environment:
+      LEDGER_DATABASE_DIRECT_URL: postgresql+psycopg://ledger_app:ledger_app@postgres:5432/ledger
+    ports: ["127.0.0.1:${LEDGER_WORKER_PORT:-8101}:8000"]
+    stop_grace_period: 40s
+    depends_on:
+      migrate: {condition: service_completed_successfully}
 
   zitadel:
     # The identity provider of the local stack, optional: `docker compose --profile zitadel up -d --wait`. It
@@ -137,5 +130,4 @@ services:
 
 volumes:
   postgres: {}
-  nats: {}
   zitadel-bootstrap: {}
