@@ -1,9 +1,10 @@
 """An app's assembly (§3.10 steps 1-3): packages found, schemas claimed, modules then channels assembled.
 
-What every package hands back is checked against its manifest before anything starts: a schema of its own
-with its own migrations, a handler for every consumer and job kind it declares and none it does not, an
-implementation for every extension point declared and a provider for every port declared, facades on what
-other packages call. Every failure is a defect of a package or of the deployment, found at the start
+Every package's settings section is read first (``runtime.sections``). What every package hands back is
+checked against its manifest before anything starts: a schema of its own with its own migrations, a handler
+for every consumer and job kind it declares and none it does not, an implementation for every extension point
+declared and a provider for every port declared, facades on what other packages call. Every failure is a
+defect of a package or of the deployment, found at the start
 (internal errors, never a client's).
 """
 
@@ -37,6 +38,7 @@ from ledger_platform.runtime.contexts import (
 from ledger_platform.runtime.keys import Directory
 from ledger_platform.runtime.packs import Channels, load_modules
 from ledger_platform.runtime.registries import Regimes
+from ledger_platform.runtime.sections import Declared, read_sections
 lazy from ledger_kernel.clock import Clock
 lazy from ledger_platform.config.manifest import (
     AppRole,
@@ -45,7 +47,7 @@ lazy from ledger_platform.config.manifest import (
     PackageManifest,
     ScheduleDecl,
 )
-lazy from ledger_platform.config.settings import Settings
+lazy from ledger_platform.config.settings import PackageSettings
 lazy from ledger_platform.data.database import Database
 lazy from ledger_platform.data.migrations import SchemaMigrations
 lazy from ledger_platform.data.notifier import Signals
@@ -177,7 +179,6 @@ class Shared:
     """What every package's context is made of: the app's own."""
 
     role: AppRole
-    settings: Settings
     clock: Clock
     database: Database
     signals: Signals
@@ -372,12 +373,19 @@ def _member(handed: Handed) -> Member:
 class _Assembly:
     """One assembly's directories and bound databases (see the module)."""
 
-    __slots__ = ("_apis", "_bound", "_channels", "_extensions", "_ports", "_regimes", "_shared")
+    __slots__ = ("_apis", "_bound", "_channels", "_extensions", "_ports", "_regimes", "_sections", "_shared")
 
-    def __init__(self, shared: Shared, regimes: Regimes, bound: Mapping[str, BoundDatabase]) -> None:
+    def __init__(
+        self,
+        shared: Shared,
+        regimes: Regimes,
+        bound: Mapping[str, BoundDatabase],
+        sections: Mapping[str, PackageSettings],
+    ) -> None:
         self._shared = shared
         self._regimes = regimes
         self._bound = bound
+        self._sections = sections
         self._apis = Directory("api")
         self._extensions = Directory("extension")
         self._ports = Directory("port")
@@ -391,7 +399,7 @@ class _Assembly:
         context = ModuleContext(
             manifest=manifest,
             role=shared.role,
-            settings=shared.settings,
+            settings=self._sections.get(name),
             database=database,
             clock=shared.clock,
             regimes=self._regimes,
@@ -434,7 +442,7 @@ class _Assembly:
             definition=entry,
             regime=self._regimes.get(pack.regime),
             role=shared.role,
-            settings=shared.settings,
+            settings=self._sections.get(pack.key),
             database=self._bound[entry.schema_name],
             clock=shared.clock,
             ports=self._ports.view(provided),
@@ -476,8 +484,17 @@ def assemble(shared: Shared, discover: Discover) -> Assembled:
     regimes = Regimes.load(discover)
     packs = Channels.load(regimes, discover).packs
     modules = _ordered(load_modules(discover))
+    sections = read_sections(
+        (
+            *(
+                Declared(module.manifest.package.name, module.manifest.settings_section, module.settings)
+                for module in modules
+            ),
+            *(Declared(pack.key, pack.entry.settings_section, pack.settings) for pack in packs),
+        )
+    )
     bound = {schema: _bound(shared, schema, claim) for schema, claim in _claims(modules, packs).items()}
-    assembly = _Assembly(shared, regimes, bound)
+    assembly = _Assembly(shared, regimes, bound, sections)
     handed = [assembly.module(module) for module in modules]
     assembly.require_bindings(modules)
     provided = frozenset(port for module in modules for port in module.manifest.extension_points.provides)

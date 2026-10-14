@@ -506,3 +506,18 @@ def test_no_document_is_built_when_no_module_mounts_routes_in_the_api(tree: Path
 
     generated = targets(Workspace.load(tree), document=document)
     assert Path("modules/identity/openapi.json") not in generated
+
+
+def test_each_declared_settings_section_is_an_entry_point(tree: Path, write: Writer, edit: Editor) -> None:
+    edit("modules/identity", 'owners = ["@o"]', 'owners = ["@o"]\nsettings = true')
+    write("countries/do", COUNTRY.replace('tier = "bronze"', 'tier = "bronze"\nsettings = true'), ("regime",))
+    workspace = Workspace.load(tree)
+    identity = tomllib.loads(pyproject_text(workspace.by_name("identity"), workspace))
+    assert identity["project"]["entry-points"]["ledger.settings"] == {
+        "identity": "ledger_identity.assembly:MODULE"
+    }
+    country = tomllib.loads(pyproject_text(workspace.by_name("do"), workspace))
+    assert country["project"]["entry-points"]["ledger.settings"] == {
+        "do_ecf": "ledger_country_do.channels.ecf_v1:CHANNEL"
+    }
+    assert "ledger.settings" not in pyproject_text(workspace.by_name("platform"), workspace)

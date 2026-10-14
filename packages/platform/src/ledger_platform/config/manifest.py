@@ -116,6 +116,9 @@ class PackageInfo(_Section):
     status: PackageStatus = PackageStatus.ACTIVE
     scripts: Scripts = Field(default_factory=dict, validate_default=True)
     """Console scripts of a package or tool (``ledger-probe``); an app's is ``[app] script``."""
+    settings: bool = False
+    """A module with a settings section of its own: ``LEDGER_<NAME>_*``, read by the model its assembly hands
+    over (``Module.settings``)."""
 
 
 class Dependencies(_Section):
@@ -267,11 +270,18 @@ class ChannelEntry(_Section):
     directions: tuple[Literal["sales", "purchase"], ...] = Field(min_length=1)
     http_prefixes: tuple[HttpPrefix, ...] = ()
     tier: Tier
+    settings: bool = False
+    """A settings section of its own, ``LEDGER_<SCHEMA>_*``, read by ``ChannelPack.settings``."""
     ids: tuple[IdPrefix, ...] = ()
     permissions: tuple[PermissionDecl, ...] = ()
     events: EventsSection = EventsSection()
     jobs: tuple[JobDecl, ...] = ()
     schedules: tuple[ScheduleDecl, ...] = ()
+
+    @property
+    def settings_section(self) -> str | None:
+        """The channel's settings section, named after its schema, if it declares one."""
+        return self.schema_name if self.settings else None
 
 
 class _KindRule(StrEnum):
@@ -282,6 +292,7 @@ class _KindRule(StrEnum):
     REGIMES = "regimes"
     COUNTRY_MODULES = "dependencies.modules"
     DATA = "data"
+    SETTINGS = "package.settings"
 
 
 _KIND_RULES: Final[Mapping[_KindRule, str]] = {
@@ -290,6 +301,7 @@ _KIND_RULES: Final[Mapping[_KindRule, str]] = {
     _KindRule.REGIMES: "only a country declares regimes and channels",
     _KindRule.COUNTRY_MODULES: "a country may not depend on a module",
     _KindRule.DATA: "only a module or the platform owns a schema, events, jobs or schedules",
+    _KindRule.SETTINGS: "only a module declares a settings section of its own",
 }
 
 
@@ -348,7 +360,14 @@ class PackageManifest(_Section):
         )
         if owns_data and kind not in {PackageKind.MODULE, PackageKind.PACKAGE}:
             raise _KindRuleError(_KindRule.DATA)
+        if self.package.settings and kind is not PackageKind.MODULE:
+            raise _KindRuleError(_KindRule.SETTINGS)
         return self
+
+    @property
+    def settings_section(self) -> str | None:
+        """The module's settings section, named after it (``-`` read as ``_``), if it declares one."""
+        return self.package.name.replace("-", "_") if self.package.settings else None
 
     @property
     def schema_name(self) -> str | None:

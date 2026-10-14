@@ -242,22 +242,26 @@ async def test_each_runner_drains_then_waits_for_its_own_channel_or_the_poll(
     assert seen == [Renamed.TYPE]
 
 
-async def test_a_replay_wakes_the_inbox_runners(
-    wakeups: Wakeups,
-    probe: BoundDatabase,
-    other: BoundDatabase,
-    subscribe: Subscribe,
-    eventually: Eventually,
-) -> None:
+@pytest.fixture
+async def dead_letter(
+    pool: Database, probe: BoundDatabase, other: BoundDatabase, subscribe: Subscribe
+) -> uuid.UUID:
+    """An event fanned out to ``other.renames`` and dead in its inbox: the id of what a replay revives."""
     subscribe("other", {"other.renames": frozenset({Renamed.TYPE})})
     async with probe.unit(TENANT) as uow:
         uow.publish(Renamed(scope=TENANT, subject=uuid.uuid7(), aggregate_version=1, name="x"))
-    await Dispatcher(probe.database, schemas=("probe", "other"), signals=Silent()).run_until_idle()
+    await Dispatcher(pool, schemas=("probe", "other"), signals=Silent()).run_until_idle()
     async with other.unit(None) as uow:
         found = await uow.connection.execute(
             text("UPDATE other.inbox SET status = 'dead' RETURNING event_id")
         )
-        event_id = _ID.validate_python(found.scalar_one())
+        return _ID.validate_python(found.scalar_one())
+
+
+async def test_a_replay_wakes_the_inbox_runners(
+    wakeups: Wakeups, other: BoundDatabase, dead_letter: uuid.UUID, eventually: Eventually
+) -> None:
+    event_id = dead_letter
 
     async def handle(event: RawEvent, unit: UnitOfWork) -> None:
         del event, unit

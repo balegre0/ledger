@@ -118,6 +118,8 @@ class RecordedSignals:
 class Bench:
     """The producer, a dispatcher over every schema, the subscriptions, and a superuser to look."""
 
+    pool: Database
+    """The pool every schema's units share (what a dispatcher runs on)."""
     probe: BoundDatabase
     dispatcher: Dispatcher
     signals: RecordedSignals
@@ -153,7 +155,7 @@ class Bench:
 
     def dispatcher_like(self, registry: CollectorRegistry | None = None) -> Dispatcher:
         """Another dispatcher on the same pool, as a second process or a restart would run."""
-        return Dispatcher(self.probe.database, schemas=SCHEMAS, signals=self.signals, registry=registry)
+        return Dispatcher(self.pool, schemas=SCHEMAS, signals=self.signals, registry=registry)
 
 
 def renamed(name: str = "x") -> Renamed:
@@ -185,15 +187,21 @@ async def poisoned(superuser: psycopg.AsyncConnection) -> AsyncGenerator[None]:
 
 @pytest.fixture
 def bench(
+    pool: Database,
     probe: BoundDatabase,
     subscribe: Subscribe,
     superuser: psycopg.AsyncConnection,
     registry: CollectorRegistry,
 ) -> Bench:
     signals = RecordedSignals()
-    dispatcher = Dispatcher(probe.database, schemas=SCHEMAS, signals=signals, registry=registry)
+    dispatcher = Dispatcher(pool, schemas=SCHEMAS, signals=signals, registry=registry)
     return Bench(
-        probe=probe, dispatcher=dispatcher, signals=signals, subscribe=subscribe, superuser=superuser
+        pool=pool,
+        probe=probe,
+        dispatcher=dispatcher,
+        signals=signals,
+        subscribe=subscribe,
+        superuser=superuser,
     )
 
 
@@ -391,7 +399,7 @@ async def test_a_failure_of_every_row_alike_counts_against_none_and_is_raised(be
     await bench.publish(2)
     await bench.superuser.execute(COPY_TO_OTHER)  # both producers' events go to the inbox it may not write
     await bench.superuser.execute("REVOKE INSERT ON other.inbox FROM ledger_relay")
-    both = Dispatcher(bench.probe.database, schemas=("probe", "other"), signals=bench.signals)
+    both = Dispatcher(bench.pool, schemas=("probe", "other"), signals=bench.signals)
     try:
         with capture_logs() as logs, pytest.raises(ProgrammingError, match="permission denied"):
             await both.run_until_idle()
@@ -449,7 +457,7 @@ async def test_rows_for_a_broken_inbox_never_hold_back_the_rows_behind_them(benc
     await bench.publish(2)
     await bench.publish_created(3)
     await bench.superuser.execute("REVOKE INSERT ON other.inbox FROM ledger_relay")
-    paged = Dispatcher(bench.probe.database, schemas=SCHEMAS, signals=bench.signals, batch=2)
+    paged = Dispatcher(bench.pool, schemas=SCHEMAS, signals=bench.signals, batch=2)
     try:
         assert await paged.run_once() == 2  # past the two skipped rows, then a batch's worth: it stops there
         assert await paged.run_once() == 1
@@ -489,9 +497,7 @@ async def test_a_pass_scans_ten_batches_at_most_and_the_next_resumes_after_them(
 ) -> None:
     """Batch 2: a pass looks at 20 rows at most; the next one resumes after the rows it skipped."""
     del broken_backlog
-    paged = Dispatcher(
-        bench.probe.database, schemas=SCHEMAS, signals=bench.signals, batch=2, registry=registry
-    )
+    paged = Dispatcher(bench.pool, schemas=SCHEMAS, signals=bench.signals, batch=2, registry=registry)
     assert skipped(registry) == 0
     assert await paged.run_once() == 0  # 20 rows looked at, every one skipped: probe's pass fails
     assert skipped(registry) == 20
@@ -509,9 +515,7 @@ async def test_a_new_routing_version_starts_the_scan_over(
     bench: Bench, registry: CollectorRegistry, broken_backlog: None
 ) -> None:
     del broken_backlog
-    paged = Dispatcher(
-        bench.probe.database, schemas=SCHEMAS, signals=bench.signals, batch=2, registry=registry
-    )
+    paged = Dispatcher(bench.pool, schemas=SCHEMAS, signals=bench.signals, batch=2, registry=registry)
     assert await paged.run_once() == 0
     bench.subscribe("other", {**RENAMES, "other.audits": frozenset({"probe.thing.archived"})})
     assert await paged.run_once() == 0  # from the oldest row again: the healthy row is out of reach this pass

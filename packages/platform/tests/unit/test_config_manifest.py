@@ -228,3 +228,35 @@ def test_a_duration_already_read_passes_through() -> None:
 def test_anything_else_is_not_a_duration(text: object) -> None:
     with pytest.raises(ValueError, match="duration"):
         parse_duration(text)
+
+
+def test_a_module_may_declare_a_settings_section_named_after_it() -> None:
+    assert load_manifest(MODULE).settings_section is None
+    declared = load_manifest(
+        MODULE.replace('owners = ["@balegre0"]', 'owners = ["@balegre0"]\nsettings = true')
+    )
+    assert declared.package.settings
+    assert declared.settings_section == "invoicing"
+
+
+def test_a_channel_s_settings_section_is_named_after_its_schema() -> None:
+    channel = load_manifest(COUNTRY).channels[0]
+    assert channel.settings_section is None
+    declared = load_manifest(COUNTRY.replace('tier = "bronze"', 'tier = "bronze"\nsettings = true'))
+    assert declared.channels[0].settings_section == "do_ecf"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        APP_HEAD.replace('owners = ["@o"]', 'owners = ["@o"]\nsettings = true') + APP_SECTION,
+        COUNTRY.replace('owners = ["@balegre0"]', 'owners = ["@balegre0"]\nsettings = true'),
+    ],
+    ids=["app", "country"],
+)
+def test_only_a_module_declares_a_settings_section_of_its_package(text: str) -> None:
+    with pytest.raises(InvalidManifestError) as caught:
+        load_manifest(text)
+    assert caught.value.problems == (
+        "package.settings: only a module declares a settings section of its own",
+    )

@@ -345,3 +345,35 @@ def test_a_workspace_member_without_a_manifest_is_named(tree: Path) -> None:
     assert [line for line in root_messages(tree) if "zzprobe" in line or "notes" in line] == [
         "packages/zzprobe: a workspace member without manifest.toml: the gate would leave it out"
     ]
+
+
+def module_with_settings(name: str) -> str:
+    return (
+        f'[package]\nname = "{name}"\nkind = "module"\nsummary = "A module."\nowners = ["@o"]\n'
+        'settings = true\n\n[dependencies]\npackages = ["kernel", "platform"]\n'
+    )
+
+
+def test_settings_sections_never_shadow_the_platform_s_or_each_other_s(tree: Path, write: Writer) -> None:
+    write("modules/http", module_with_settings("http"), ())
+    write("modules/stock", module_with_settings("stock"), ())
+    write("modules/stock_lots", module_with_settings("stock_lots"), ())
+    assert messages(tree) == [
+        (
+            "modules/http/manifest.toml: settings section 'http' (LEDGER_HTTP_*) would read the platform's "
+            "LEDGER_HTTP_HOST"
+        ),
+        (
+            "modules/stock_lots/manifest.toml: settings section 'stock_lots' (LEDGER_STOCK_LOTS_*) "
+            "lies inside section 'stock' (LEDGER_STOCK_*)"
+        ),
+    ]
+
+
+def test_a_channel_s_section_is_checked_like_a_module_s(tree: Path, write: Writer) -> None:
+    write("modules/do_ecf", module_with_settings("do_ecf"), ())
+    country = COUNTRY.replace('tier = "bronze"', 'tier = "bronze"\nsettings = true')
+    write("countries/do", country, ("regime",))
+    assert [line for line in messages(tree) if "settings section" in line] == [
+        "modules/do_ecf/manifest.toml: settings section 'do_ecf' (LEDGER_DO_ECF_*) is declared twice"
+    ]

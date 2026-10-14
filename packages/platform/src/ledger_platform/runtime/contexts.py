@@ -1,7 +1,9 @@
 """The composition seam (§3.10): what a module or a channel is given to assemble, and what it hands back.
 
 The app gives each module a ``ModuleContext`` and each channel a ``ChannelContext``; their ``assemble``
-returns ``ModuleParts`` or ``ChannelParts``, which the app merges and mounts by its role. Assembly only
+returns ``ModuleParts`` or ``ChannelParts``, which the app merges and mounts by its role. A context holds the
+package's own settings section and units of its own schema: never the app's settings, its pool or another
+package's secrets. Assembly only
 builds: nothing is started, opened or called until every package has assembled. The channels a module reads
 (``AssembledChannels``) are filled after channel assembly, so a module reads them at call time, never while
 it assembles.
@@ -23,7 +25,7 @@ from ledger_platform.runtime.facade import require_facades
 lazy from ledger_kernel.clock import Clock
 lazy from ledger_kernel.regimes import RegimeDef
 lazy from ledger_platform.config.manifest import AppRole, ChannelEntry, PackageManifest
-lazy from ledger_platform.config.settings import Settings
+lazy from ledger_platform.config.settings import PackageSettings
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.migrations import SchemaMigrations
 lazy from ledger_platform.events.consumers import ConsumerSpec
@@ -62,6 +64,23 @@ class DuplicateChannelError(LedgerError):
 
     def __init__(self, key: str) -> None:
         super().__init__(f"channel {key!r} is added twice")
+
+
+class SectionMissingError(LedgerError):
+    """A package that reads a settings section it does not have (or with another model than its own)."""
+
+    code: ClassVar[str] = "section_missing"
+
+    def __init__(self, package: str, model: str) -> None:
+        super().__init__(
+            f"{package!r} has no settings section read by {model}: declare it, hand that model over"
+        )
+
+
+def _section[S: PackageSettings](package: str, settings: PackageSettings | None, model: type[S]) -> S:
+    if not isinstance(settings, model):
+        raise SectionMissingError(package, model.__qualname__)
+    return settings
 
 
 class ChannelUnknownError(LedgerError):
@@ -143,8 +162,8 @@ class ModuleContext:
     """The module's manifest (its generated ``_manifest.py``)."""
     role: AppRole
     """The app assembling it: what it mounts depends on it."""
-    settings: Settings
-    """The app's validated settings."""
+    settings: PackageSettings | None
+    """Its own settings section (``LEDGER_<MODULE>_*``), validated; ``None`` if its manifest declares none."""
     database: BoundDatabase
     """Units in the module's role and schema only: no role argument exists."""
     clock: Clock
@@ -160,6 +179,10 @@ class ModuleContext:
     """Logger, tracer and metrics scoped to the module."""
     auth: Authentication
     """The app's request authentication: its routers declare ``Depends(context.auth.caller)``."""
+
+    def section[S: PackageSettings](self, model: type[S]) -> S:
+        """Its settings section, read by ``model`` (``SectionMissingError`` if it has none of that model)."""
+        return _section(self.manifest.package.name, self.settings, model)
 
 
 @final
@@ -194,6 +217,8 @@ class Module:
 
     manifest: PackageManifest
     assemble: Callable[[ModuleContext], ModuleParts]
+    settings: type[PackageSettings] | None = None
+    """The model of its settings section, if its manifest declares one (``[package] settings``)."""
 
 
 def bind_parts(
@@ -246,13 +271,18 @@ class ChannelContext:
     regime: RegimeDef
     """The regime it serves."""
     role: AppRole
-    settings: Settings
+    settings: PackageSettings | None
+    """Its own settings section (``LEDGER_<SCHEMA>_*``), validated; ``None`` if its entry declares none."""
     database: BoundDatabase
     """Units in the channel's own role and schema."""
     clock: Clock
     ports: Ports
     """What modules provide to channels; fiscal-kit defines the keys."""
     telemetry: Telemetry
+
+    def section[S: PackageSettings](self, model: type[S]) -> S:
+        """Its settings section, read by ``model`` (``SectionMissingError`` if it has none of that model)."""
+        return _section(self.definition.key, self.settings, model)
 
 
 @final
@@ -286,6 +316,8 @@ class ChannelPack:
     regime: str
     """The key of the regime the channel serves."""
     assemble: Callable[[ChannelContext], ChannelParts]
+    settings: type[PackageSettings] | None = None
+    """The model of its settings section, if its entry declares one (``settings = true``)."""
 
     @property
     def key(self) -> str:

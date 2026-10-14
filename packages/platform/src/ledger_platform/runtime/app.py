@@ -307,7 +307,6 @@ class App:
         self._signals = Notifier(self._notifications)
         shared = Shared(
             role=role,
-            settings=settings,
             clock=clock,
             database=self._database,
             signals=self._signals,
@@ -334,6 +333,10 @@ class App:
         if found is None:
             raise SchemaUnknownError(schema)
         return found
+
+    async def aclose(self) -> None:
+        """Close the app's pools, as its lifespan does when it ends: for an app that never started one."""
+        await self._close_pools()
 
     def asgi(self) -> FastAPI:
         """The app to serve (roles ``api`` and ``worker``): its lifespan starts and stops everything else."""

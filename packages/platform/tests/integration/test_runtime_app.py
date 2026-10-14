@@ -321,11 +321,11 @@ async def test_the_api_is_not_ready_on_a_database_never_migrated(
 
 
 async def prepared_statements(app: App) -> int:
-    """How many statements a pooled connection of ``app`` prepared after running one six times."""
-    async with app.bound("probe").database.engine.connect() as connection:
+    """How many statements a unit of ``app`` (a pooled connection) prepared after running one six times."""
+    async with app.bound("probe").unit(TENANT) as unit:
         for _ in range(6):
-            await connection.execute(text("SELECT 1"))
-        prepared = await connection.execute(text("SELECT count(*) FROM pg_prepared_statements"))
+            await unit.connection.execute(text("SELECT 1"))
+        prepared = await unit.connection.execute(text("SELECT count(*) FROM pg_prepared_statements"))
         return TypeAdapter(int).validate_python(prepared.scalar_one())
 
 
@@ -341,8 +341,8 @@ async def test_a_pool_reached_through_a_pooler_prepares_no_statement(
         assert await prepared_statements(direct) > 0
         assert await prepared_statements(pooled) == 0
     finally:
-        await direct.bound("probe").database.aclose()
-        await pooled.bound("probe").database.aclose()
+        await direct.aclose()
+        await pooled.aclose()
 
 
 # ── worker ──────────────────────────────────────────────────────────────────────────────────────────
@@ -403,7 +403,7 @@ async def test_the_worker_is_not_ready_until_it_listens(fresh: Fresh, probe: Pro
         ready = await client.get("/readyz")  # outside the lifespan: nothing listens, no worker runs
     checks = CHECKS.validate_python(ready.json()["checks"])
     assert (checks["listen"], checks["workers"]) == (False, False)
-    await app.bound("probe").database.aclose()
+    await app.aclose()
 
 
 # ── migrate ─────────────────────────────────────────────────────────────────────────────────────────

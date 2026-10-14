@@ -15,6 +15,7 @@ from pydantic import TypeAdapter
 
 from ledger_devtools.workspace import MODULE_LAYERS
 from ledger_platform.config.manifest import PackageKind
+from ledger_platform.config.settings import Settings, section_prefix
 lazy from ledger_devtools.workspace import Package, Workspace
 lazy from ledger_platform.config.manifest import (
     ChannelEntry,
@@ -261,6 +262,34 @@ def _modules_are_layers(workspace: Workspace) -> Iterator[Problem]:
                 )
 
 
+def _settings_sections_are_apart(workspace: Workspace) -> Iterator[Problem]:
+    """A section's prefix holds no platform variable and no other section's: each variable has one reader."""
+    platform = sorted(f"LEDGER_{name.upper()}" for name in Settings.model_fields)
+    seen: dict[str, str] = {}
+    for package in workspace.packages:
+        manifest = package.manifest
+        sections = (
+            manifest.settings_section,
+            *(channel.settings_section for channel in manifest.channels),
+        )
+        for section in (section for section in sections if section is not None):
+            prefix = section_prefix(section)
+            named = f"settings section '{section}' ({prefix}*)"
+            shadowed = [name for name in platform if name.startswith(prefix)]
+            outer = [
+                other for other in seen if prefix.startswith(seen[other]) or seen[other].startswith(prefix)
+            ]
+            if section in seen:
+                yield Problem(package.manifest_path, f"{named} is declared twice")
+            elif shadowed:
+                yield Problem(package.manifest_path, f"{named} would read the platform's {shadowed[0]}")
+            elif outer:
+                yield Problem(
+                    package.manifest_path, f"{named} lies inside section '{outer[0]}' ({seen[outer[0]]}*)"
+                )
+            seen[section] = prefix
+
+
 _RULES: Final[tuple[Callable[[Workspace], Iterator[Problem]], ...]] = (
     _names_are_directories,
     _values_are_unique,
@@ -271,6 +300,7 @@ _RULES: Final[tuple[Callable[[Workspace], Iterator[Problem]], ...]] = (
     _packages_are_acyclic,
     _schedules_enqueue_declared_jobs,
     _modules_are_layers,
+    _settings_sections_are_apart,
 )
 
 

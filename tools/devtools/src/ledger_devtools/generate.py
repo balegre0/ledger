@@ -18,6 +18,7 @@ from ledger_devtools.root import ROOT_PYPROJECT, root_text
 from ledger_devtools.sql import init_sql_text
 from ledger_devtools.workspace import MANIFEST_GLOBS, MODULE_LAYERS
 from ledger_platform.config.manifest import PackageKind
+from ledger_platform.config.settings import SETTINGS_GROUP
 lazy from ledger_devtools.openapi import api_document, openapi_text, require_installed
 lazy from ledger_devtools.workspace import Package, Workspace
 
@@ -120,6 +121,22 @@ def workspace_dependencies(package: Package, workspace: Workspace) -> tuple[Pack
     return tuple(workspace.by_name(name) for name in names)
 
 
+def _sections(package: Package) -> list[tuple[str, str]]:
+    """The settings sections ``package`` declares, each with the entry that hands over its model.
+
+    ``Settings`` reads the names of group ``ledger.settings`` only (it imports nothing): the variables under
+    those prefixes are left to the sections, which the app reads through each package's assembly.
+    """
+    manifest = package.manifest
+    module = manifest.settings_section
+    sections = [] if module is None else [(module, f"{package.import_name}.assembly:MODULE")]
+    return sections + [
+        (channel.settings_section, channel.entry_point)
+        for channel in manifest.channels
+        if channel.settings_section is not None
+    ]
+
+
 def pyproject_text(package: Package, workspace: Workspace) -> str:
     """The ``pyproject.toml`` of ``package``: metadata, dependencies, entry points, coverage, deptry."""
     manifest = package.manifest
@@ -155,6 +172,7 @@ def pyproject_text(package: Package, workspace: Workspace) -> str:
             "ledger.countries.channels",
             [(_string(channel.key), channel.entry_point) for channel in manifest.channels],
         ),
+        _entry_points(SETTINGS_GROUP, _sections(package)),
         # uv refuses a nested member's own workspace sources (Decision 27): the root's serve it.
         "[tool.uv.sources]\n" + "".join(f"{name} = {{ workspace = true }}\n" for name in workspace_deps)
         if workspace_deps and package.nested_country is None

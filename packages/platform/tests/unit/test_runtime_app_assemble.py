@@ -7,11 +7,12 @@ from contextlib import asynccontextmanager
 from datetime import date
 from decimal import Decimal
 from functools import partial
-from typing import Final, Protocol, TypeIs, final, runtime_checkable
+from typing import ClassVar, Final, Protocol, TypeIs, final, runtime_checkable
 lazy from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 
 import pytest
 from pydantic import SecretStr
+from pydantic_settings import SettingsConfigDict
 from structlog.testing import capture_logs
 
 from ledger_kernel.dated import Since, Timeline
@@ -20,7 +21,8 @@ from ledger_kernel.money import Currency, RoundingMode
 from ledger_kernel.regimes import Locale, RegimeDef, RegimeKey, RoundingPoint, RoundingRule, Source
 from ledger_platform.auth.tokens import TokenSettingsMissingError
 from ledger_platform.config.manifest import ChannelEntry, load_manifest
-from ledger_platform.config.settings import Settings
+from ledger_platform.config.settings import PackageSettings, Settings, section_prefix
+from ledger_platform.data.database import Database
 from ledger_platform.data.migrations import SchemaMigrations
 from ledger_platform.events.consumers import ConsumerSpec
 from ledger_platform.jobs.outcomes import Done, JobSpec
@@ -56,10 +58,17 @@ from ledger_platform.runtime.contexts import (
     ChannelsNotAssembledError,
     Module,
     ModuleParts,
+    SectionMissingError,
 )
 from ledger_platform.runtime.facade import UnguardedFacadeError, facade
 from ledger_platform.runtime.keys import BindingMissingError, Key, UndeclaredDependencyError
 from ledger_platform.runtime.registries import CHANNELS, MODULES, REGIMES, Discovered
+from ledger_platform.runtime.sections import (
+    InvalidSettingsError,
+    SettingsNotProvidedError,
+    SettingsPrefixError,
+    SettingsUndeclaredError,
+)
 from ledger_testing.waiting import Watched
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
 lazy from ledger_platform.events.consumers import RawEvent
@@ -225,9 +234,10 @@ def us_regime() -> RegimeDef:
     )
 
 
-def channel_entry(schema: str = "us_probe") -> ChannelEntry:
+def channel_entry(schema: str = "us_probe", *, settings: bool = False) -> ChannelEntry:
     return ChannelEntry.model_validate(
         {
+            "settings": settings,
             "key": "us-probe-v1",
             "entry_point": "ledger_country_us.channels.probe:PACK",
             "assembly": "ledger_country_us.channels.probe.assembly:assemble",
@@ -623,3 +633,127 @@ def test_spans_are_exported_to_the_collector_the_settings_name() -> None:
     """The exporter is made, not connected: assembly does no I/O."""
     traced = SETTINGS.model_copy(update={"otlp_endpoint": "http://collector.invalid:4317"})
     assert App("worker", settings=traced, discover=discovering()).modules == ()
+
+
+# ── Settings sections (§3.10): each package reads its own, validated when the app is made ───────────
+
+
+class BooksSettings(PackageSettings):
+    model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(env_prefix=section_prefix("books"))
+
+    limit: int = 10
+    token: SecretStr | None = None
+
+
+class MisnamedSettings(PackageSettings):
+    model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(env_prefix="LEDGER_BOOK_")
+
+
+class ProbeChannelSettings(PackageSettings):
+    model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(env_prefix=section_prefix("us_probe"))
+
+    timeout_seconds: float = 5.0
+
+
+def sectioned(
+    settings: type[PackageSettings] | None,
+    seen: list[ModuleContext] | None = None,
+    *,
+    declared: bool = True,
+) -> Module:
+    """The module ``books``, its section declared or not, handing over ``settings`` as its model."""
+    contexts: list[ModuleContext] = [] if seen is None else seen
+
+    def assemble(context: ModuleContext) -> ModuleParts:
+        contexts.append(context)
+        return ModuleParts(migrations=migrations(context.database.schema))
+
+    text = manifest_text("books")
+    if declared:
+        text = text.replace('owners = ["@o"]\n', 'owners = ["@o"]\nsettings = true\n')
+    return Module(manifest=load_manifest(text), assemble=assemble, settings=settings)
+
+
+def public_values(value: object) -> list[object]:
+    return [getattr(value, name) for name in dir(value) if not name.startswith("_")]
+
+
+def probe_pack() -> ChannelPack:
+    def channel(context: ChannelContext) -> ChannelParts:
+        return ChannelParts(channel=context, migrations=migrations(context.database.schema))
+
+    return ChannelPack(
+        entry=channel_entry(settings=True), regime="us", assemble=channel, settings=ProbeChannelSettings
+    )
+
+
+def test_a_module_reads_its_own_section_and_no_secret_of_the_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LEDGER_BOOKS_LIMIT", "5")
+    monkeypatch.setenv("LEDGER_BOOKS_TOKEN", "t0ken")
+    seen: list[ModuleContext] = []
+    App("worker", settings=SETTINGS, discover=discovering(sectioned(BooksSettings, seen)))
+    [context] = seen
+    section = context.section(BooksSettings)
+    assert context.settings is section
+    assert section.limit == 5
+    assert section.token is not None
+    assert section.token.get_secret_value() == "t0ken"
+    # nothing of the app's own settings reaches it, nor the pool behind its units (and its URL)
+    assert not any(isinstance(value, Settings) for value in public_values(context))
+    assert not any(isinstance(value, Database) for value in public_values(context.database))
+
+
+def test_a_module_without_a_section_has_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LEDGER_BOOKS_LIMIT", "5")  # what the platform's Settings left to a section
+    seen: list[ModuleContext] = []
+    App("worker", settings=SETTINGS, discover=discovering(sectioned(None, seen, declared=False)))
+    [context] = seen
+    assert context.settings is None
+    with pytest.raises(SectionMissingError, match="books"):
+        context.section(BooksSettings)
+
+
+def test_a_section_is_read_by_the_model_of_its_own_prefix_only() -> None:
+    with pytest.raises(SettingsNotProvidedError, match="'books' declares a settings section"):
+        App("worker", settings=SETTINGS, discover=discovering(sectioned(None)))
+    with pytest.raises(SettingsUndeclaredError, match="'books' hands over a settings model"):
+        App("worker", settings=SETTINGS, discover=discovering(sectioned(BooksSettings, declared=False)))
+    with pytest.raises(SettingsPrefixError, match="LEDGER_BOOK_, not LEDGER_BOOKS_"):
+        App("worker", settings=SETTINGS, discover=discovering(sectioned(MisnamedSettings)))
+
+
+def test_a_channel_reads_its_own_section(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LEDGER_US_PROBE_TIMEOUT_SECONDS", "2.5")
+    seen: list[ChannelContext] = []
+
+    def channel(context: ChannelContext) -> ChannelParts:
+        seen.append(context)
+        return ChannelParts(channel="probe", migrations=migrations(context.database.schema))
+
+    pack = ChannelPack(
+        entry=channel_entry(settings=True), regime="us", assemble=channel, settings=ProbeChannelSettings
+    )
+    App("worker", settings=SETTINGS, discover=discovering(regimes=(us_regime(),), packs=(pack,)))
+    [context] = seen
+    assert context.section(ProbeChannelSettings).timeout_seconds == 2.5
+    assert not any(isinstance(value, Settings) for value in public_values(context))
+
+
+def test_every_section_s_problems_are_listed_at_once_and_no_value_is_echoed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LEDGER_BOOKS_LIMIT", "many")
+    monkeypatch.setenv("LEDGER_BOOKS_CEILING", "1")
+    monkeypatch.setenv("LEDGER_US_PROBE_TIMEOUT_SECONDS", "soon")
+    discover = discovering(sectioned(BooksSettings), regimes=(us_regime(),), packs=(probe_pack(),))
+    with pytest.raises(InvalidSettingsError) as caught:
+        App("worker", settings=SETTINGS, discover=discover)
+    assert [problem.split(": ")[:2] for problem in caught.value.problems] == [
+        ["books", "limit"],
+        ["books", "LEDGER_BOOKS_CEILING"],
+        ["us-probe-v1", "timeout_seconds"],
+    ]
+    assert "many" not in str(caught.value)
+    assert "soon" not in str(caught.value)

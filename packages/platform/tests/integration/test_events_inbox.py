@@ -144,6 +144,8 @@ class Handler:
 class Bench:
     """The producer, the consuming module, a recording handler, and a superuser to look and move rows."""
 
+    pool: Database
+    """The pool every schema's units share (what a dispatcher runs on)."""
     probe: BoundDatabase
     other: BoundDatabase
     superuser: psycopg.AsyncConnection
@@ -171,7 +173,7 @@ class Bench:
         async with self.probe.unit(None) as uow:
             found = (await uow.connection.execute(text("SELECT id FROM probe.outbox ORDER BY id"))).scalars()
             ids = _IDS.validate_python(found.all())
-        dispatcher = Dispatcher(self.probe.database, schemas=SCHEMAS, signals=Silent())
+        dispatcher = Dispatcher(self.pool, schemas=SCHEMAS, signals=Silent())
         assert await dispatcher.run_until_idle() == len(events)
         return ids
 
@@ -219,14 +221,22 @@ def renamed(subject: uuid.UUID | None = S, name: str = "x", version: int | None 
 
 @pytest.fixture
 def bench(
+    pool: Database,
     probe: BoundDatabase,
     other: BoundDatabase,
     superuser: psycopg.AsyncConnection,
-    registry: CollectorRegistry,
     subscribe: Subscribe,
 ) -> Bench:
+    """The bench of a test, with a metrics registry of its own."""
     subscribe("other", {NAME: frozenset({RENAMED, CREATED})})
-    return Bench(probe=probe, other=other, superuser=superuser, registry=registry, subscribe=subscribe)
+    return Bench(
+        pool=pool,
+        probe=probe,
+        other=other,
+        superuser=superuser,
+        registry=CollectorRegistry(),
+        subscribe=subscribe,
+    )
 
 
 async def test_a_handler_runs_once_in_its_modules_role_and_scope_and_its_row_goes_with_its_writes(

@@ -79,7 +79,7 @@ def _run(callbacks: tuple[Callback, ...]) -> None:
 class BoundDatabase:
     """One module's units (see the module)."""
 
-    __slots__ = ("_binding", "_enter_purge", "_enter_rw", "_signals", "database", "schema")
+    __slots__ = ("_binding", "_database", "_enter_purge", "_enter_rw", "_signals", "schema")
 
     def __init__(
         self,
@@ -91,7 +91,7 @@ class BoundDatabase:
         **declared: Unpack[Declared],
     ) -> None:
         roles = SchemaRoles(schema=schema)
-        self.database = database
+        self._database = database
         self.schema = roles.schema
         self._enter_rw = text(f"SET LOCAL ROLE {identifier(roles.rw)}")
         self._enter_purge = text(f"SET LOCAL ROLE {identifier(roles.purge)}")
@@ -117,7 +117,7 @@ class BoundDatabase:
         once if the unit published, and the after-commit callbacks run.
         """
         self._refuse_nesting()
-        async with self.database.engine.begin() as connection:
+        async with self._database.engine.begin() as connection:
             await connection.execute(self._enter_rw)
             began = (await connection.execute(_BEGIN, scope_settings(scope))).one()
             unit = UnitOfWork(
@@ -148,7 +148,7 @@ class BoundDatabase:
         purge = Purge()
         token = purge.mark_open()
         try:
-            async with self.database.engine.begin() as connection:
+            async with self._database.engine.begin() as connection:
                 await connection.execute(self._enter_purge)
                 yield connection
         finally:

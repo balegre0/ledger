@@ -1,12 +1,24 @@
 """``Settings``: the one class every app reads its ``LEDGER_*`` environment with."""
 
-from typing import Final
+from importlib.metadata import EntryPoint
+from typing import ClassVar, Final
 lazy from collections.abc import Mapping
 
 import pytest
 from pydantic import ValidationError
+from pydantic_settings import SettingsConfigDict
+lazy from pydantic import SecretStr
 
-from ledger_platform.config.settings import DATABASE_URL_SCHEME, LogFormat, Settings
+from ledger_platform.config import settings as settings_module
+from ledger_platform.config.settings import (
+    DATABASE_URL_SCHEME,
+    SETTINGS_GROUP,
+    LogFormat,
+    PackageSettings,
+    Settings,
+    declared_sections,
+    section_prefix,
+)
 
 URL: Final = "postgresql+psycopg://ledger_app:s3cret@pooler:5432/ledger"
 DIRECT: Final = "postgresql+psycopg://ledger_app:d1rect@db:5432/ledger"
@@ -243,3 +255,86 @@ def test_secrets_never_show(monkeypatch: pytest.MonkeyPatch) -> None:
     for shown in (repr(settings), str(settings), settings.model_dump_json()):
         assert "s3cret" not in shown
         assert "d1rect" not in shown
+
+
+# ── Package sections (LEDGER_<SECTION>_*) ───────────────────────────────────────
+
+
+class BooksSettings(PackageSettings):
+    """A module's section: ``LEDGER_BOOKS_*``."""
+
+    model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(env_prefix=section_prefix("books"))
+
+    limit: int = 10
+    token: SecretStr | None = None
+
+
+@pytest.fixture
+def books_declared(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An installed package declares the section ``books`` (entry point group ``ledger.settings``)."""
+
+    def installed(*, group: str) -> tuple[EntryPoint, ...]:
+        assert group == SETTINGS_GROUP
+        return (EntryPoint(name="books", value="ledger_books.assembly:MODULE", group=group),)
+
+    monkeypatch.setattr(settings_module, "entry_points", installed)
+
+
+def test_a_section_s_prefix_is_its_name_in_capitals() -> None:
+    assert section_prefix("books") == "LEDGER_BOOKS_"
+    assert section_prefix("do_ecf") == "LEDGER_DO_ECF_"
+
+
+@pytest.mark.usefixtures("books_declared")
+def test_the_installed_packages_declare_the_sections() -> None:
+    assert declared_sections() == frozenset({"books"})
+
+
+@pytest.mark.usefixtures("books_declared")
+def test_settings_leave_a_declared_section_s_variables_to_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    environment(monkeypatch, REQUIRED | {"LEDGER_BOOKS_LIMIT": "5", "LEDGER_BOOKS_ANYTHING": "x"})
+    assert Settings().environment == "local"
+
+
+@pytest.mark.usefixtures("books_declared")
+def test_a_variable_under_no_declared_section_is_still_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    environment(monkeypatch, REQUIRED | {"LEDGER_BOOK_LIMIT": "5", "LEDGER_STOCK_LIMIT": "1"})
+    with pytest.raises(ValidationError) as caught:
+        Settings()
+    assert problems(caught.value) == {"LEDGER_BOOK_LIMIT", "LEDGER_STOCK_LIMIT"}
+
+
+def nothing_installed(*, group: str) -> tuple[EntryPoint, ...]:
+    del group
+    return ()
+
+
+def test_without_installed_sections_every_unknown_name_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings_module, "entry_points", nothing_installed)
+    environment(monkeypatch, REQUIRED | {"LEDGER_BOOKS_LIMIT": "5"})
+    with pytest.raises(ValidationError) as caught:
+        Settings()
+    assert problems(caught.value) == {"LEDGER_BOOKS_LIMIT"}
+
+
+def test_a_section_reads_its_own_variables_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    environment(monkeypatch, REQUIRED | {"LEDGER_BOOKS_LIMIT": "5", "LEDGER_BOOKS_TOKEN": "t0ken"})
+    books = BooksSettings()
+    assert books.limit == 5
+    assert books.token is not None
+    assert books.token.get_secret_value() == "t0ken"
+    assert "t0ken" not in repr(books)
+
+
+def test_a_section_refuses_a_name_of_its_prefix_it_does_not_declare(monkeypatch: pytest.MonkeyPatch) -> None:
+    environment(monkeypatch, {"LEDGER_BOOKS_CEILING": "5", "LEDGER_BOOKS_LIMIT": "many"})
+    with pytest.raises(ValidationError) as caught:
+        BooksSettings()
+    assert problems(caught.value) == {"LEDGER_BOOKS_CEILING", "limit"}
+    assert "many" not in str(caught.value)
+
+
+def test_a_section_is_frozen() -> None:
+    field = "limit"  # a variable: the type checkers rightly refuse a plain assignment
+    with pytest.raises(ValidationError):
+        setattr(BooksSettings(), field, 1)
