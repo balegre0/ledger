@@ -914,6 +914,14 @@ dev = [
     { name = "vulture" },
     { name = "xmlschema" },
 ]
+workspace = [
+    { name = "ledger-country-do-testing" },
+    { name = "ledger-devtools" },
+    { name = "ledger-testing" },
+    { name = "signxml" },
+    { name = "types-lxml" },
+    { name = "xmlschema" },
+]
 
 [package.metadata]
 
@@ -942,6 +950,14 @@ dev = [
     { name = "types-lxml", specifier = ">=2026.2.16" },
     { name = "typos", specifier = ">=1.51.1" },
     { name = "vulture", specifier = ">=2.14" },
+    { name = "xmlschema", specifier = ">=4.3.2" },
+]
+workspace = [
+    { name = "ledger-country-do-testing", editable = "countries/do/testing" },
+    { name = "ledger-devtools", editable = "tools/devtools" },
+    { name = "ledger-testing", editable = "packages/testing" },
+    { name = "signxml", specifier = ">=5.1.0" },
+    { name = "types-lxml", specifier = ">=2026.2.16" },
     { name = "xmlschema", specifier = ">=4.3.2" },
 ]
 

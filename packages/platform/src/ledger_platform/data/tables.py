@@ -1,11 +1,17 @@
-"""The chassis's tables as SQLAlchemy Core tables, one set per schema (the DDL is ``chassis_schema``'s).
+"""The chassis's tables, one set per schema (the DDL is ``chassis_schema``'s); the base of each package's own.
 
-For the engines that read and write them and for the test that keeps them equal to what the migration built.
+The chassis's are SQLAlchemy Core tables, for the engines that read and write them and for the test that keeps
+them equal to what the migration built. A package declares its own tables on a base of its own, named with its
+schema: ``class IdentityTable(ModuleTable, schema="identity")``; its tables subclass that base, so they share
+one ``MetaData`` of the schema (what its migrations compare with), apart from every other package's.
+``ledger_platform.data.ModuleTable`` is the one base the root names to ruff (its
+``runtime-evaluated-base-classes``: SQLAlchemy reads the annotations of tables at runtime); no package's own
+base is named there.
 """
 
 from dataclasses import dataclass
 from functools import cache
-from typing import final
+from typing import ClassVar, final, override
 lazy from datetime import datetime
 
 from sqlalchemy import (
@@ -24,10 +30,43 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import DeclarativeBase
 lazy from sqlalchemy.schema import SchemaItem
 
+from ledger_kernel.errors import LedgerError
 from ledger_platform.data.roles import PLATFORM, SchemaRoles
 lazy from ledger_platform.data.database import AnyTable
+
+
+class UnscopedTableError(LedgerError):
+    """A table declared on ``ModuleTable`` itself: it would share no package's schema and metadata."""
+
+    code: ClassVar[str] = "table_unscoped"
+
+    def __init__(self, name: str) -> None:
+        base = 'class <Package>Table(ModuleTable, schema="<schema>")'
+        super().__init__(
+            f"table class {name} subclasses ModuleTable: tables subclass their package's base, {base}"
+        )
+
+
+class ModuleTable(DeclarativeBase):
+    """The base of every package's typed tables (see the module)."""
+
+    __abstract__: ClassVar[bool]
+    """Set on a package's base: SQLAlchemy maps no table of its own (it reads a class's own value only)."""
+    metadata: ClassVar[MetaData]
+    """A package's base has its schema's own; its tables read it from there."""
+
+    @override
+    def __init_subclass__(cls, *, schema: str | None = None, **kw: object) -> None:
+        """A subclass named with ``schema`` is a package's abstract base, with that schema's ``MetaData``."""
+        if schema is not None:
+            cls.__abstract__ = True
+            cls.metadata = MetaData(schema=SchemaRoles(schema=schema).schema)
+        elif ModuleTable in cls.__bases__:
+            raise UnscopedTableError(cls.__qualname__)
+        super().__init_subclass__(**kw)
 
 
 def _moment(name: str, *, nullable: bool = True) -> Column[datetime]:

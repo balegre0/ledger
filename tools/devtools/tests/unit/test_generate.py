@@ -139,7 +139,7 @@ def test_scripts_and_third_party_module_names_are_written(tree: Path) -> None:
     workspace = Workspace.load(tree)
     platform = pyproject_text(workspace.by_name("platform"), workspace)
     assert '[project.scripts]\nledger-probe = "ledger_platform.observability.probe:main"' in platform
-    assert '"prometheus-client" = "prometheus_client"' in platform
+    assert "[tool.deptry.package_module_name_map]" not in platform  # deptry reads - as _ itself
     assert 'source = ["packages/platform/src/ledger_platform/data/revisions"]' in platform
     app = pyproject_text(workspace.by_name("api"), workspace)
     assert '[project.scripts]\nledger-api = "ledger_app_api.main:main"' in app
@@ -409,7 +409,10 @@ def test_distributions_no_module_imports_by_name_are_never_reported_unused(tree:
     platform = tomllib.loads(pyproject_text(workspace.by_name("platform"), workspace))
     assert platform["tool"]["deptry"]["per_rule_ignores"] == {"DEP002": ["tzdata"]}
     identity = tomllib.loads(pyproject_text(workspace.by_name("identity"), workspace))
-    assert identity["tool"]["deptry"] == {"per_rule_ignores": {"DEP002": ["python-multipart"]}}
+    assert identity["tool"]["deptry"] == {
+        "package_module_name_map": {"python-multipart": ["multipart", "python_multipart"]},
+        "per_rule_ignores": {"DEP002": ["python-multipart"]},
+    }
     kernel = pyproject_text(workspace.by_name("kernel"), workspace)
     assert "per_rule_ignores" not in kernel
 

@@ -125,6 +125,8 @@ class Dependencies(_Section):
     packages: tuple[Name, ...] = ()
     modules: tuple[Name, ...] = ()
     python: tuple[Requirement, ...] = ()
+    test: tuple[Requirement, ...] = ()
+    """What its tests and type checks need besides (installed by the root's dev group, never shipped)."""
 
 
 class DataSection(_Section):

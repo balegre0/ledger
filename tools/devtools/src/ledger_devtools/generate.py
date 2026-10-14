@@ -14,6 +14,7 @@ from typing import Final, TypeIs, final
 lazy from collections.abc import Callable, Iterator, Mapping, Sequence
 
 from ledger_devtools.names import LOADED_BY_OTHERS, TEST_TOOLING, distribution_of, import_names, renamed
+from ledger_devtools.root import ROOT_PYPROJECT, root_text
 from ledger_devtools.sql import init_sql_text
 from ledger_devtools.workspace import MANIFEST_GLOBS, MODULE_LAYERS
 from ledger_platform.config.manifest import PackageKind
@@ -576,7 +577,7 @@ def importlinter_text(workspace: Workspace) -> str:
 def targets(
     workspace: Workspace, *, document: Callable[[], Mapping[str, object]] | None = None
 ) -> dict[Path, str]:
-    """Every generated file (relative to the root) and its content.
+    """Every generated file (relative to the root) and its content; the root ``pyproject.toml``, its block.
 
     ``document`` makes the ``api`` app's OpenAPI document (``api_document`` by default: the installed app's);
     it is called once, and only when a module mounts routes in the ``api`` app.
@@ -585,6 +586,9 @@ def targets(
         Path(".importlinter"): importlinter_text(workspace),
         INIT_SQL: init_sql_text(workspace),
     }
+    root = root_text(workspace)
+    if root is not None:
+        generated[Path(ROOT_PYPROJECT)] = root
     for package in workspace.packages:
         generated[package.directory / "pyproject.toml"] = pyproject_text(package, workspace)
         if has_manifest_module(package):

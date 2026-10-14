@@ -7,16 +7,27 @@ def test_a_requirement_names_its_distribution() -> None:
     assert distribution_of(">=1") == ""
 
 
-def test_a_distribution_installs_its_modules() -> None:
+def test_an_installed_distribution_installs_the_modules_its_metadata_lists() -> None:
     assert import_names("prometheus-client") == ("prometheus_client",)
     assert import_names("grpcio") == ("grpc",)
     assert import_names("pydantic") == ("pydantic",)
-    assert import_names("typing-extensions") == ("typing_extensions",)
+    assert import_names("opentelemetry-sdk") == ("opentelemetry",)
+    assert import_names("Pydantic_Settings") == ("pydantic_settings",)
 
 
-def test_only_distributions_known_to_install_other_modules_are_renamed() -> None:
-    assert import_names("protobuf") == ("google",)
-    assert renamed("protobuf")
-    assert renamed("prometheus-client")
-    assert not renamed("typing-extensions")
+def test_private_and_unimportable_names_are_left_out() -> None:
+    assert import_names("pytest") == ("py", "pytest")  # never _pytest
+    assert import_names("types-lxml") == ("mypy_plugin_lxml",)  # never lxml-stubs
+
+
+def test_a_distribution_not_installed_is_assumed_to_install_its_own_name() -> None:
+    assert import_names("zz-not-installed") == ("zz_not_installed",)
+    assert not renamed("zz-not-installed")
+
+
+def test_a_distribution_is_renamed_when_it_installs_anything_but_its_own_name() -> None:
+    assert renamed("grpcio")
+    assert not renamed("prometheus-client")  # deptry reads - as _ itself
+    assert renamed("pytest")
     assert not renamed("pydantic")
+    assert not renamed("typing-extensions")

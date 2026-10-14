@@ -9,7 +9,7 @@ point at another's company. Every table is in schema ``identity`` (§6.2): ident
 """
 
 from datetime import datetime
-from typing import ClassVar, Final
+from typing import Final
 from uuid import UUID
 lazy from enum import StrEnum
 
@@ -20,12 +20,11 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
-    MetaData,
     String,
     UniqueConstraint,
     text,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.schema import SchemaItem
 
 from ledger_identity.domain.company import CompanyStatus
@@ -34,6 +33,7 @@ from ledger_identity.domain.roles import Role
 from ledger_identity.domain.text import MAX_CODE, MAX_LEGAL_NAME, MAX_NAME
 from ledger_kernel.access import MAX_PROVIDER_ORGANIZATION_LENGTH, MAX_SUBJECT_LENGTH
 from ledger_kernel.tax_ids import MAX_TAX_ID_LENGTH
+from ledger_platform.data import ModuleTable
 
 SCHEMA: Final = "identity"
 """identity's schema: its tables and the chassis's (``chassis_schema_v1``), under its roles."""
@@ -64,10 +64,8 @@ def _of_company(table: str) -> ForeignKeyConstraint:
     )
 
 
-class IdentityTable(DeclarativeBase):
+class IdentityTable(ModuleTable, schema=SCHEMA):
     """identity's own tables, in its schema; the chassis's are ``chassis_tables("identity")``."""
-
-    metadata: ClassVar[MetaData] = MetaData(schema=SCHEMA)
 
 
 class OrganizationRecord(IdentityTable):

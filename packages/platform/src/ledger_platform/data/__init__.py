@@ -7,6 +7,7 @@ from ledger_platform.data.database import Database
 from ledger_platform.data.migrations import SchemaMigrations, run_schema_migrations
 from ledger_platform.data.paging import paged
 from ledger_platform.data.rls import RlsScope, policy
+from ledger_platform.data.tables import ModuleTable
 from ledger_platform.data.unit_of_work import JobPolicy, UnitOfWork
 
 __all__ = [
@@ -14,6 +15,7 @@ __all__ = [
     "BoundDatabase",
     "Database",
     "JobPolicy",
+    "ModuleTable",
     "RlsScope",
     "SchemaMigrations",
     "UnitOfWork",

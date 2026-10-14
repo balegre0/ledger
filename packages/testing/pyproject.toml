@@ -39,3 +39,9 @@ show_missing = true
 skip_covered = true
 exclude_lines = []  # no "pragma: no cover": every line counts
 partial_branches = []  # no "pragma: no branch": every branch counts
+
+[tool.deptry.package_module_name_map]
+"pytest" = [
+    "py",
+    "pytest",
+]

@@ -54,8 +54,6 @@ partial_branches = []  # no "pragma: no branch": every branch counts
 "opentelemetry-api" = "opentelemetry"
 "opentelemetry-exporter-otlp-proto-grpc" = "opentelemetry"
 "opentelemetry-sdk" = "opentelemetry"
-"prometheus-client" = "prometheus_client"
-"pydantic-settings" = "pydantic_settings"
 
 [tool.deptry.per_rule_ignores]
 DEP002 = [

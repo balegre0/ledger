@@ -1,41 +1,27 @@
-"""What ``check`` asks of the repository around the manifests: root lists, image pins, the build context.
+"""What ``check`` asks of the repository around the manifests: the root's block, members, pins, the context.
 
-The root ``pyproject.toml`` is written by hand (the generator cannot own the file that configures it), so the
-lists in it that name packages are compared with the workspace. ``sync`` writes neither, so a problem here
-never stops it.
+The root ``pyproject.toml`` is written by hand but for its generated block (``ledger_devtools.root``); every
+directory its member globs match must hold a manifest. ``sync`` fixes none of these, so a problem here never
+stops it.
 """
 
 import tomllib
-from typing import ClassVar, Final
+from typing import ClassVar
 lazy from collections.abc import Iterator
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from ledger_devtools.checks import Problem
 from ledger_devtools.context import context_problems
 from ledger_devtools.images import image_problems, pin_problems, pinned_images
-from ledger_devtools.names import distribution_of
+from ledger_devtools.root import ROOT_PYPROJECT, root_problems
 lazy from ledger_devtools.workspace import Workspace
-
-ROOT_PYPROJECT: Final = "pyproject.toml"
 
 
 class _Lenient(BaseModel):
     """A table of the root file: only the keys read here; the rest is the tools' business."""
 
-    model_config: ClassVar[ConfigDict] = ConfigDict(extra="ignore", frozen=True, populate_by_name=True)
-
-
-class _Isort(_Lenient):
-    known_first_party: tuple[str, ...] = Field(default=(), alias="known-first-party")
-
-
-class _Lint(_Lenient):
-    isort: _Isort = _Isort()
-
-
-class _Ruff(_Lenient):
-    lint: _Lint = _Lint()
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="ignore", frozen=True)
 
 
 class _UvWorkspace(_Lenient):
@@ -43,45 +29,15 @@ class _UvWorkspace(_Lenient):
 
 
 class _Uv(_Lenient):
-    sources: dict[str, object] = Field(default_factory=dict)
     workspace: _UvWorkspace = _UvWorkspace()
 
 
 class _Tool(_Lenient):
-    ruff: _Ruff = _Ruff()
     uv: _Uv = _Uv()
-
-
-class _Groups(_Lenient):
-    dev: tuple[str, ...] = ()
 
 
 class _Root(_Lenient):
     tool: _Tool = _Tool()
-    dependency_groups: _Groups = Field(default=_Groups(), alias="dependency-groups")
-
-
-def _root_lists(workspace: Workspace) -> Iterator[Problem]:
-    path = workspace.root / ROOT_PYPROJECT
-    if not path.is_file():
-        return
-    root = _Root.model_validate(tomllib.loads(path.read_text(encoding="utf-8")))
-    packages = workspace.packages
-    if set(root.tool.ruff.lint.isort.known_first_party) != {package.import_name for package in packages}:
-        yield Problem(ROOT_PYPROJECT, "known-first-party is not the workspace's import packages")
-    if set(root.tool.uv.sources) != {package.distribution for package in packages}:
-        yield Problem(ROOT_PYPROJECT, "[tool.uv.sources] is not the workspace's distributions")
-    distributions = {package.distribution for package in packages}
-    dev = {
-        name
-        for requirement in root.dependency_groups.dev
-        if (name := distribution_of(requirement)) in distributions
-    }
-    if dev != {package.distribution for package in packages if not package.is_production}:
-        yield Problem(
-            ROOT_PYPROJECT,
-            "the dev dependency group does not name exactly the workspace's dev-only distributions",
-        )
 
 
 def _members_without_manifests(workspace: Workspace) -> Iterator[Problem]:
@@ -107,9 +63,9 @@ def _members_without_manifests(workspace: Workspace) -> Iterator[Problem]:
 
 
 def repository_problems(workspace: Workspace) -> tuple[Problem, ...]:
-    """Root lists unlike the workspace, members without manifests, unpinned images, an unsafe context."""
+    """The root's block, members without manifests, unpinned images, an unsafe context."""
     return (
-        *_root_lists(workspace),
+        *root_problems(workspace),
         *_members_without_manifests(workspace),
         *pin_problems(workspace.root),
         *image_problems(workspace.root, pinned_images(workspace.root)),

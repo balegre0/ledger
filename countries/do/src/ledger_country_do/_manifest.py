@@ -29,6 +29,11 @@ MANIFEST: Final = PackageManifest.model_validate(
                 "lxml>=6.1.3",
                 "pydantic>=2.14.1",
             ],
+            "test": [
+                "signxml>=5.1.0",
+                "types-lxml>=2026.2.16",
+                "xmlschema>=4.3.2",
+            ],
         },
         "country": {
             "iso": "DO",

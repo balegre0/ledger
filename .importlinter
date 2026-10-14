@@ -40,9 +40,11 @@ forbidden_modules =
     joserfc
     ledger_testing
     lxml
+    multipart
     opentelemetry
     prometheus_client
     psycopg
+    py
     pydantic
     pydantic_settings
     pytest
@@ -253,9 +255,11 @@ forbidden_modules =
     ledger_platform
     ledger_testing
     lxml
+    multipart
     opentelemetry
     prometheus_client
     psycopg
+    py
     pydantic
     pydantic_settings
     pytest
@@ -302,9 +306,11 @@ forbidden_modules =
     ledger_platform
     ledger_testing
     lxml
+    multipart
     opentelemetry
     prometheus_client
     psycopg
+    py
     pydantic
     pydantic_settings
     pytest
@@ -385,9 +391,11 @@ forbidden_modules =
     ledger_platform
     ledger_testing
     lxml
+    multipart
     opentelemetry
     prometheus_client
     psycopg
+    py
     pydantic
     pydantic_settings
     pytest
@@ -416,9 +424,11 @@ forbidden_modules =
     ledger_country_do
     ledger_identity.adapters
     lxml
+    multipart
     opentelemetry
     prometheus_client
     psycopg
+    py
     pydantic
     pydantic_settings
     pytest
@@ -448,6 +458,8 @@ forbidden_modules =
     ledger_country_do_testing
     ledger_devtools
     ledger_testing
+    multipart
+    py
     pytest
     python_multipart
     signxml
