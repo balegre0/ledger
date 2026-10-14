@@ -33,6 +33,7 @@ from ledger_platform.runtime.app import (
     App,
     AppAlreadyStartedError,
     DirectUrlMissingError,
+    PoolTooSmallError,
     RoleMismatchError,
     RoleNotBuiltError,
     SchemaUnknownError,
@@ -757,3 +758,43 @@ def test_every_section_s_problems_are_listed_at_once_and_no_value_is_echoed(
     ]
     assert "many" not in str(caught.value)
     assert "soon" not in str(caught.value)
+
+
+# ── The pool (§6.7): sized for what the role runs at once ───────────────────────────────────────────
+
+
+def sized(settings: Settings, pool: int) -> Settings:
+    return settings.model_copy(update={"database_pool_size": pool})
+
+
+BUSY: Final = JOBS + "concurrency = 6\n\n" + CONSUMES
+
+
+def busy(context: ModuleContext) -> ModuleParts:
+    return ModuleParts(
+        consumers=(ConsumerSpec(name="probe.echo", handler=record),),
+        jobs=(JobSpec(kind="probe.export", handler=export),),
+        migrations=migrations(context.database.schema),
+    )
+
+
+def test_a_worker_s_pool_holds_every_job_it_may_run_its_runners_and_headroom() -> None:
+    """Jobs 6 (probe) + 1 + 1 (the platform's purges); runners 1 inbox + 2 job runners + fan-out + scheduler;
+    headroom 2: 15."""
+    discover = discovering(module("probe", busy, BUSY))
+    App("worker", settings=sized(SETTINGS, 15), discover=discover)
+    with pytest.raises(PoolTooSmallError) as caught:
+        App("worker", settings=sized(SETTINGS, 14), discover=discover)
+    assert str(caught.value) == (
+        "the worker's pool of 14 connections (LEDGER_DATABASE_POOL_SIZE) is smaller than the 15 it may hold "
+        "at once: 8 for jobs (their concurrency), 5 for its runners, 2 of headroom"
+    )
+    assert caught.value.code == "pool_too_small"
+
+
+def test_the_api_and_migrate_need_the_headroom_only() -> None:
+    discover = discovering(module("probe", busy, BUSY))
+    App("api", settings=sized(TOKENS, 2), discover=discover)
+    App("migrate", settings=sized(SETTINGS, 2), discover=discover)
+    with pytest.raises(PoolTooSmallError, match="the api's pool of 1 connections"):
+        App("api", settings=sized(TOKENS, 1), discover=discover)

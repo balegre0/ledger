@@ -29,7 +29,7 @@ lazy from sqlalchemy.ext.asyncio import AsyncConnection
 from ledger_kernel.errors import ErrorKind
 from ledger_kernel.ids import new_id
 from ledger_platform.config.options import InvalidOptionError
-from ledger_platform.data.database import Database, DatabaseLimits
+from ledger_platform.data.database import Database, DatabaseLimits, Pooling
 
 metadata = MetaData()
 notes = Table("notes", metadata, Column("id", Uuid(), primary_key=True), Column("body", Text, nullable=False))
@@ -359,6 +359,22 @@ async def open_it(url: str, *, pool_size: int = 1) -> None:
 async def test_a_pool_needs_at_least_one_connection(database_url: str, pool_size: int) -> None:
     with pytest.raises(InvalidOptionError, match=f"pool_size must be at least 1, not int: {pool_size}"):
         await open_it(database_url, pool_size=pool_size)
+
+
+async def test_a_pool_without_overflow_grows_no_further_than_its_size(database_url: str) -> None:
+    limits = DatabaseLimits(pool_timeout=timedelta(milliseconds=100))
+    exact = Database.create(database_url, pool_size=1, limits=limits, pooling=Pooling(overflow=0))
+    try:
+        async with exact.engine.connect():
+            with pytest.raises(PoolTimeoutError):
+                await asyncio.wait_for(touch(exact), timeout=5)
+    finally:
+        await exact.aclose()
+
+
+def test_a_pool_s_overflow_is_never_negative(database_url: str) -> None:
+    with pytest.raises(InvalidOptionError, match="overflow must be at least 0, not int: -1"):
+        Database.create(database_url, pooling=Pooling(overflow=-1))
 
 
 async def test_only_the_psycopg_driver_is_accepted_and_the_url_is_not_echoed() -> None:

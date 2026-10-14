@@ -36,9 +36,11 @@ resource = "event"
 
 [[jobs]]
 kind = "platform.purge_idempotency_keys"
+concurrency = 1  # one purge at a time: a pass deletes every expired row
 
 [[jobs]]
 kind = "platform.purge_done_jobs"
+concurrency = 1
 
 [[schedules]]
 name = "platform.purge_idempotency_keys"

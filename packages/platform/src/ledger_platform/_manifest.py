@@ -58,9 +58,11 @@ MANIFEST: Final = PackageManifest.model_validate(
         "jobs": [
             {
                 "kind": "platform.purge_idempotency_keys",
+                "concurrency": 1,
             },
             {
                 "kind": "platform.purge_done_jobs",
+                "concurrency": 1,
             },
         ],
         "schedules": [

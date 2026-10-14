@@ -79,6 +79,25 @@ def test_a_pooled_database_url_is_said_so(monkeypatch: pytest.MonkeyPatch) -> No
     assert not Settings().database_pooled
 
 
+def test_the_pool_is_sized_by_two_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    environment(monkeypatch, REQUIRED)
+    assert (Settings().database_pool_size, Settings().database_pool_overflow) == (20, 10)
+    environment(monkeypatch, {"LEDGER_DATABASE_POOL_SIZE": "24", "LEDGER_DATABASE_POOL_OVERFLOW": "0"})
+    assert (Settings().database_pool_size, Settings().database_pool_overflow) == (24, 0)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"), [("LEDGER_DATABASE_POOL_SIZE", "0"), ("LEDGER_DATABASE_POOL_OVERFLOW", "-1")]
+)
+def test_a_pool_needs_a_connection_and_no_negative_overflow(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    environment(monkeypatch, REQUIRED | {name: value})
+    with pytest.raises(ValidationError) as caught:
+        Settings()
+    assert problems(caught.value) == {name.removeprefix("LEDGER_").lower()}
+
+
 def test_without_a_database_or_an_environment_the_start_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LEDGER_DATABASE_URL", raising=False)
     monkeypatch.delenv("LEDGER_ENVIRONMENT", raising=False)

@@ -54,7 +54,7 @@ lazy from sqlalchemy import Connection
 from ledger_kernel.clock import utc_now
 from ledger_kernel.errors import LedgerError
 from ledger_platform.config.options import InvalidOptionError
-from ledger_platform.data.database import Database, DatabaseLimits
+from ledger_platform.data.database import Database, DatabaseLimits, Pooling
 from ledger_platform.data.migrations import MIGRATION_LOCK_WAIT
 from ledger_platform.data.notifier import Notifier
 from ledger_platform.data.roles import SchemaRoles, identifier
@@ -76,6 +76,7 @@ lazy from ledger_kernel.clock import Clock
 lazy from ledger_platform.config.manifest import AppRole, PackageManifest
 lazy from ledger_platform.config.settings import Settings
 lazy from ledger_platform.data.bound import BoundDatabase
+lazy from ledger_platform.runtime.assembly import Member
 lazy from ledger_platform.runtime.registries import Discover
 
 NOTIFY_LIMITS: Final = DatabaseLimits(
@@ -86,6 +87,10 @@ NOTIFY_LIMITS: Final = DatabaseLimits(
     pool_timeout=timedelta(seconds=1),
 )
 """The NOTIFYs' pool waits little: a NOTIFY that cannot go is dropped, and the one-second poll covers it."""
+POOL_HEADROOM: Final = 2
+"""Connections beyond what a role runs: readiness checks, a request or a renewal at a busy moment."""
+WORKER_LOOPS: Final = 2
+"""The worker's fan-out and scheduler, each holding a connection while it runs a pass."""
 STOP_BUDGET: Final = 25.0
 """Seconds an app takes to stop at most: inside an orchestrator's usual 30-second grace."""
 
@@ -137,6 +142,44 @@ class RoleMismatchError(LedgerError):
 
     def __init__(self, role: str, operation: str) -> None:
         super().__init__(f"the {role} app does not {operation}")
+
+
+class PoolTooSmallError(LedgerError):
+    """A pool smaller than what the app's role may hold at once: a unit would wait for a connection."""
+
+    code: ClassVar[str] = "pool_too_small"
+
+    def __init__(self, role: str, size: int, need: PoolNeed) -> None:
+        pool = f"the {role}'s pool of {size} connections (LEDGER_DATABASE_POOL_SIZE)"
+        parts = f"{need.jobs} for jobs (their concurrency), {need.runners} for its runners, {need.headroom}"
+        super().__init__(f"{pool} is smaller than the {need.total} it may hold at once: {parts} of headroom")
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PoolNeed:
+    """The connections an app's role may hold at once (§6.7): what its pool must keep."""
+
+    jobs: int = 0
+    """Every job kind's ``concurrency``: a running job holds its unit's connection."""
+    runners: int = 0
+    """One per inbox runner and per job runner (claims, outcomes), the fan-out's and the scheduler's."""
+    headroom: int = POOL_HEADROOM
+
+    @property
+    def total(self) -> int:
+        """The pool's size, at least."""
+        return self.jobs + self.runners + self.headroom
+
+
+def pool_need(role: AppRole, members: Sequence[Member]) -> PoolNeed:
+    """What ``role`` holds at once: the worker runs every member's jobs and runners; the others, requests."""
+    if role != "worker":
+        return PoolNeed()
+    return PoolNeed(
+        jobs=sum(decl.concurrency for member in members for decl, _ in member.kinds.values()),
+        runners=sum(len(member.consumers) + bool(member.kinds) for member in members) + WORKER_LOOPS,
+    )
 
 
 class DirectUrlMissingError(LedgerError):
@@ -294,15 +337,20 @@ class App:
         )
         self._tracing = Tracing.create(service_name=f"ledger-{role}", exporter=exporter)
         url = settings.database_url.get_secret_value()
-        prepared = not settings.database_pooled
+        pooled = settings.database_pooled
         name = f"ledger-{role}"
-        self._database = Database.create(url, application_name=name, prepared_statements=prepared)
+        self._database = Database.create(
+            url,
+            pool_size=settings.database_pool_size,
+            application_name=name,
+            pooling=Pooling(overflow=settings.database_pool_overflow, through_pooler=pooled),
+        )
         self._notifications = Database.create(
             url,
             pool_size=1,
             application_name=f"{name}-notify",
             limits=NOTIFY_LIMITS,
-            prepared_statements=prepared,
+            pooling=Pooling(through_pooler=pooled),
         )
         self._signals = Notifier(self._notifications)
         shared = Shared(
@@ -315,6 +363,9 @@ class App:
             authentication=self._authentication,
         )
         self._assembled = assemble(shared, discover)
+        need = pool_need(role, self._assembled.members)
+        if settings.database_pool_size < need.total:
+            raise PoolTooSmallError(role, settings.database_pool_size, need)
         self._supervisor = Supervisor(registry=self._registry, permanent=_PERMANENT)
         self._wakeups: Wakeups | None = None
         self._runners: list[InboxRunner | JobRunner] = []

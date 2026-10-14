@@ -175,6 +175,11 @@ class Settings(_ClosedSettings):
     """Where units run, through a pooler if any: ``postgresql+psycopg://ledger_app:...@pooler/ledger``."""
     database_direct_url: SecretStr | None = None
     """Direct to PostgreSQL (§6.7): the worker's LISTEN connection and ``ledger-migrate``, which need it."""
+    database_pool_size: Annotated[int, Field(ge=1, le=1000)] = 20
+    """Connections the app's pool keeps for its units; the app refuses to start with fewer than its role may
+    hold at once (its jobs' concurrency, its runners and some headroom)."""
+    database_pool_overflow: Annotated[int, Field(ge=0, le=1000)] = 10
+    """Connections the pool opens beyond its size for a burst, closed once they are given back."""
     database_pooled: bool = False
     """``database_url`` goes through a transaction pooler (PgBouncer or the managed equivalent, §6.7).
 

@@ -140,6 +140,22 @@ class DatabaseLimits:
 
 
 DEFAULT_LIMITS: Final = DatabaseLimits()
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Pooling:
+    """How a pool grows past its size, and what sits between it and PostgreSQL."""
+
+    overflow: int | None = None
+    """Connections opened beyond the pool's size for a burst, closed once given back; as many as its size by
+    default."""
+    through_pooler: bool = False
+    """The URL goes through a transaction pooler (§6.7): psycopg then prepares no statement, since a statement
+    it prepares on a session is gone when the pooler hands the next transaction another session."""
+
+
+DEFAULT_POOLING: Final = Pooling()
 DEFAULT_POOL_SIZE: Final = 10
 """Connections a pool keeps, unless told otherwise; as many again are opened for bursts."""
 
@@ -300,18 +316,15 @@ class Database:
         pool_size: int = DEFAULT_POOL_SIZE,
         application_name: str = "ledger",
         limits: DatabaseLimits = DEFAULT_LIMITS,
-        prepared_statements: bool = True,
+        pooling: Pooling = DEFAULT_POOLING,
     ) -> Database:
         """A connection pool to ``url`` (``postgresql+psycopg://``), not yet connected; ``aclose`` closes it.
 
         No I/O: SQLAlchemy connects on first use. ``application_name`` is how PostgreSQL names these
         connections (``pg_stat_activity``, its logs): the service passes its own name. Beyond ``pool_size``
-        the pool opens as many again, for bursts. The URL must not carry ``application_name``,
-        ``connect_timeout`` or ``options``: the chassis sets them from its arguments.
-
-        ``prepared_statements=False`` for a URL that goes through a transaction pooler (§6.7): psycopg
-        prepares a statement it runs often on the session, and the pooler hands the next transaction another
-        session.
+        the pool opens ``pooling.overflow`` more for bursts (as many again by default). The URL must not
+        carry ``application_name``, ``connect_timeout`` or ``options``: the chassis sets them from its
+        arguments.
 
         SQLAlchemy does not echo the values bound to a statement (tenant ids, payloads) in the text of a SQL
         error (``hide_parameters``): that text reaches logs. PostgreSQL's own message can still carry
@@ -319,6 +332,8 @@ class Database:
         (``ledger_platform.observability.logs``).
         """
         require_at_least(_COMPONENT, "pool_size", pool_size)
+        overflow = pool_size if pooling.overflow is None else pooling.overflow
+        require_at_least(_COMPONENT, "overflow", overflow, 0)
         parsed = make_url(url)
         _require_psycopg(parsed)
         _leave_the_owned_parameters_out(parsed)
@@ -327,12 +342,12 @@ class Database:
             "connect_timeout": ceil(limits.connect_timeout / _SECOND),
             "options": _server_options(limits),
         }
-        if not prepared_statements:
+        if pooling.through_pooler:
             connect_args["prepare_threshold"] = None
         engine = create_async_engine(
             url,
             pool_size=pool_size,
-            max_overflow=pool_size,
+            max_overflow=overflow,
             pool_timeout=limits.pool_timeout.total_seconds(),
             pool_recycle=limits.pool_recycle // _SECOND,
             pool_pre_ping=True,
