@@ -6,15 +6,15 @@ compose cannot read TOML, so ``compose.yaml`` and every Dockerfile of the reposi
 cannot change what runs.
 """
 
-import os
 import re
 import tomllib
-from pathlib import Path
 from typing import Final
+lazy from pathlib import Path
 
 from pydantic import TypeAdapter
 
 from ledger_devtools.checks import Problem
+from ledger_devtools.tree import visible_files
 
 PINS: Final = "deploy/local/images.toml"
 COMPOSE: Final = "deploy/local/compose.yaml"
@@ -53,13 +53,12 @@ def pin_problems(root: Path) -> tuple[Problem, ...]:
 
 def dockerfiles(root: Path) -> list[Path]:
     """Every ``Dockerfile`` and ``*.Dockerfile`` of the repository, wherever it is, in path order."""
-    found: list[Path] = []
-    for directory, children, files in os.walk(root):
-        children[:] = [child for child in children if not child.startswith(".") and child not in _SKIPPED]
-        found += (
-            Path(directory) / name for name in files if name == "Dockerfile" or name.endswith(".Dockerfile")
-        )
-    return sorted(found)
+    return [
+        root / path
+        for path in visible_files(root)
+        if (path.name == "Dockerfile" or path.name.endswith(".Dockerfile"))
+        and not any(part.startswith(".") or part in _SKIPPED for part in path.parts)
+    ]
 
 
 def _named(root: Path) -> tuple[tuple[str, str], ...]:

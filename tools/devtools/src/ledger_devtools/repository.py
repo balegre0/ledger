@@ -50,15 +50,14 @@ def _members_without_manifests(workspace: Workspace) -> Iterator[Problem]:
         {
             found
             for pattern in root.tool.uv.workspace.members
-            for found in workspace.root.glob(pattern)
-            if found.is_dir() and not found.name.startswith((".", "__"))
+            for found in workspace.seen.directories
+            if found.full_match(pattern) and not found.name.startswith((".", "__"))
         }
     )
     for member in members:
-        if not (member / "manifest.toml").is_file():
+        if member / "manifest.toml" not in workspace.seen.files:
             yield Problem(
-                member.relative_to(workspace.root).as_posix(),
-                "a workspace member without manifest.toml: the gate would leave it out",
+                member.as_posix(), "a workspace member without manifest.toml: the gate would leave it out"
             )
 
 

@@ -435,12 +435,9 @@ def _edge_contracts(facts: _Facts) -> Iterator[str | None]:
 
 def _channels(facts: _Facts, country: Package) -> tuple[str, ...]:
     """The channel packages of ``country`` on disk (``<import package>/channels/<channel>/``), sorted."""
-    channels = facts.workspace.root / country.source / "channels"
-    if not channels.is_dir():
-        return ()
-    return tuple(
-        sorted(entry.name for entry in channels.iterdir() if entry.is_dir() and entry.name != "__pycache__")
-    )
+    channels = country.source / "channels"
+    found = {path.name for path in facts.workspace.seen.directories if path.parent == channels}
+    return tuple(sorted(found - {"__pycache__"}))
 
 
 def _channel_contracts(facts: _Facts, country: Package) -> Iterator[str | None]:
@@ -637,10 +634,10 @@ def orphans(workspace: Workspace, generated: Mapping[Path, str]) -> list[Path]:
     places = (pattern.removesuffix("/manifest.toml") for pattern in MANIFEST_GLOBS)
     found = sorted(
         {
-            path.relative_to(workspace.root)
+            path
             for place in places
             for pattern in (f"{place}/pyproject.toml", f"{place}/src/*/_manifest.py")
-            for path in workspace.root.glob(pattern)
+            for path in workspace.matching(pattern)
         }
     )
     return [

@@ -7,4 +7,4 @@ scripts = { "ledger-devtools" = "ledger_devtools.cli:main" }
 
 [dependencies]
 packages = ["kernel", "platform"]
-python = ["pydantic>=2.14.1", "pydantic-settings>=2.15.0"]
+python = ["pathspec>=1.1.1", "pydantic>=2.14.1", "pydantic-settings>=2.15.0"]
