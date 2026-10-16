@@ -175,7 +175,7 @@ def test_the_kernel_s_calculator_totals_the_lines_as_dgii_does(lines: list[Line]
     draft = replace(consumer_invoice(), lines=tuple(lines))
     totals = compute_totals(draft)
     taxed = [
-        TaxLine(base=Money.of(amount, _PESO), category=TaxCategoryKey(CATEGORY_OF[line.billing]))
+        TaxLine(base=Money.of(amount, _PESO), categories=(TaxCategoryKey(CATEGORY_OF[line.billing]),))
         for line, amount in zip(draft.lines, totals.line_amounts, strict=True)
     ]
     kernel = TaxCalculator(REGIME).totals(taxed, draft.issued_on)
