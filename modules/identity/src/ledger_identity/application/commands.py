@@ -73,8 +73,14 @@ async def create_company(
 def _audit_membership(
     unit: IdentityUnit, action: AuditAction, before: Membership | None, after: Membership
 ) -> None:
-    """Record a change of a membership, naming its member and the role it holds (or held) after it."""
+    """Record a change of a membership: its member, its role after it, and the role it replaced.
+
+    The replaced role is in the record because the hashes cannot say it, and the event that carried it is gone
+    once delivered: without it nobody can tell who demoted a member from owner, and from what.
+    """
     detail = {"member": after.subject, "role": after.role.value}
+    if before is not None and before.active and before.role is not after.role:
+        detail["previous_role"] = before.role.value
     unit.audit.record(action, after.id, before=before, after=after, detail=detail)
 
 

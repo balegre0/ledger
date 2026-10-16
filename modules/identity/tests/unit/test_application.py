@@ -524,7 +524,9 @@ async def test_what_changes_nothing_or_is_refused_is_not_audited(state: State) -
     ]
 
 
-async def test_a_grant_and_a_revocation_are_audited_with_the_member_and_its_role(state: State) -> None:
+async def test_a_grant_and_a_revocation_are_audited_with_the_member_its_role_and_the_one_it_replaced(
+    state: State,
+) -> None:
     company = await created(state)
     first = await commands.grant_role(state.unit(), company.id, subject=VIEWER, role=Role.VIEWER, actor=OWNER)
     changed = await commands.grant_role(
@@ -540,7 +542,7 @@ async def test_a_grant_and_a_revocation_are_audited_with_the_member_and_its_role
             member,
             first.membership,
             changed.membership,
-            {"member": VIEWER, "role": "issuer"},
+            {"member": VIEWER, "role": "issuer", "previous_role": "viewer"},
         ),
         Audited(
             "membership.revoke", member, changed.membership, revoked, {"member": VIEWER, "role": "issuer"}
