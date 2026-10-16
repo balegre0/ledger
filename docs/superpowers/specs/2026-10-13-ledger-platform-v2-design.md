@@ -702,6 +702,8 @@ enqueues = "invoicing.purge_drafts"
 [extension_points]
 declares = ["IssuePolicy"]          # Protocols in this module's api.py that other modules may implement
 implements = []                     # "<module>.<Protocol>" this module implements (bound by apps)
+# [extension_points.order]          # optional: where each implementation goes in the point's chain, lowest first
+# "invoicing.IssuePolicy" = 10      # 0-1000, default 100, ties by module name (ADR 0011)
 provides = []                       # fiscal-kit ports this module provides to channels: "SignerPort", "CompanyDirectory"
 
 [http]
