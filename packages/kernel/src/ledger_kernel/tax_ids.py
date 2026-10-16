@@ -26,6 +26,14 @@ _SCHEME: Final = re.compile(r"[a-z]{2}\.[a-z][a-z0-9_]{0,30}", re.ASCII)
 _SHOWN: Final = 3
 
 
+def masked(value: str) -> str:
+    """``value`` with all but its last three characters hidden: the form a tax id takes in logs and ``repr``.
+
+    A value of three characters or fewer is hidden whole, so a short id gives away nothing.
+    """
+    return "***" if len(value) <= _SHOWN else "*" * (len(value) - _SHOWN) + value[-_SHOWN:]
+
+
 class TaxIdCheck(StrEnum):
     """What a scheme's check says of a value."""
 
@@ -95,6 +103,4 @@ class TaxId:
 
     @override
     def __repr__(self) -> str:
-        value = self.value
-        masked = "***" if len(value) <= _SHOWN else "*" * (len(value) - _SHOWN) + value[-_SHOWN:]
-        return f"TaxId(scheme={self.scheme!r}, value={masked!r})"
+        return f"TaxId(scheme={self.scheme!r}, value={masked(self.value)!r})"

@@ -62,6 +62,7 @@ from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import checked
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError, EcfUnavailableError
 from ledger_country_do.channels.ecf_v1.domain.notation import parse_dgii_moment
+from ledger_kernel.tax_ids import masked
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import Endpoint, Resolve
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DirectoryEntry
 lazy from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
@@ -164,11 +165,15 @@ AUDIT_LOGGER: Final = "ledger_country_do.audit.buyer_seeds"
 
 
 def log_seed_signed(event: SeedSigned) -> None:
-    """``event`` as a line of ``AUDIT_LOGGER`` at INFO: the default audit."""
+    """``event`` as a line of ``AUDIT_LOGGER`` at INFO: the default audit, the tax ids masked (§7.3).
+
+    A tax id never reaches a log line whole: an audit that needs the full ids reads them from ``event`` in its
+    own ``audit`` callable.
+    """
     logging.getLogger(AUDIT_LOGGER).info(
         "signed a buyer's seed: issuer %s, buyer %s, endpoint %s, at %s",
-        event.issuer_rnc,
-        event.buyer_rnc,
+        masked(event.issuer_rnc),
+        masked(event.buyer_rnc),
         event.endpoint_host,
         event.signed_at.isoformat(),
     )

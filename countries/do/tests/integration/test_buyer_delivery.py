@@ -601,7 +601,9 @@ async def test_every_buyer_seed_signed_is_audited_without_secrets(party: Party, 
     assert len(audited) == 1
 
 
-def test_the_default_audit_is_a_log_line_naming_no_secret(caplog: pytest.LogCaptureFixture) -> None:
+def test_the_default_audit_is_a_log_line_naming_no_secret_and_no_whole_tax_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     with caplog.at_level(logging.INFO, logger=AUDIT_LOGGER):
         log_seed_signed(
             SeedSigned(ISSUER.rnc, "131098193", SIMULATOR_HOST, datetime(2026, 10, 13, tzinfo=UTC))
@@ -609,7 +611,7 @@ def test_the_default_audit_is_a_log_line_naming_no_secret(caplog: pytest.LogCapt
     (record,) = caplog.records
     assert record.name == AUDIT_LOGGER
     assert record.getMessage() == (
-        "signed a buyer's seed: issuer 101850043, buyer 131098193, endpoint ecf.fake.test, "
+        "signed a buyer's seed: issuer ******043, buyer ******193, endpoint ecf.fake.test, "
         "at 2026-10-13T00:00:00+00:00"
     )
 
