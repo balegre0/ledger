@@ -312,8 +312,9 @@ def serve_grpc(
 
     The port is plaintext and open to whatever reaches it: until a service mesh adds mTLS (after go-live, spec
     §16.4), what protects a service is the network policy and the per-caller token and method allowlist its
-    guard checks (ADR 0010), so a service that signs or holds secrets must not be served without both. On exit
-    the server stops taking calls and gives those in flight ``grace`` seconds to finish before it cancels them.
+    guard checks (ADR 0010), so a service that signs or holds secrets must not be served without both. On
+    exit the server stops taking calls and gives those in flight ``grace`` seconds to finish before it cancels
+    them.
 
     Raises ``InvalidOptionError``, at once, for a ``port`` outside 0..65535 or a ``grace`` that is not a
     positive, finite number of seconds; and ``GrpcBindError`` on entering when the port cannot be bound, with
