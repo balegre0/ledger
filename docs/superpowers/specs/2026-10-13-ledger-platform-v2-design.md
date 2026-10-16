@@ -112,7 +112,7 @@ These replace v1's ten rules. Each is enforced by a tool where a tool can enforc
 | # | Rule | Enforced by |
 |---|---|---|
 | 1 | **A module owns its data.** One PostgreSQL schema and one DML role per module; no cross-schema foreign key, join or query. Data crosses modules through the owner's `api` (commands and queries) or its `events`. | DB grants (§6.2); import-linter (§4.6) |
-| 2 | **Commands are in-process calls through a Protocol, facts are events.** `ledger_<m>.api` holds typed Protocols and DTOs; `ledger_<m>.events` holds frozen event types. Nothing else of a module is importable by another. **Consuming an event is a dependency edge exactly like an import**: the module graph, imports and subscriptions together must be acyclic. | import-linter `protected`; `ledger-devtools check` on the manifest graph |
+| 2 | **Commands are in-process calls through a Protocol, facts are events.** `ledger_<m>.api` holds typed Protocols and DTOs; `ledger_<m>.events` holds frozen event types. Nothing else of a module is importable by another. **Consuming an event is a dependency edge exactly like an import**: the module graph, imports and subscriptions together must be acyclic. A process that coordinates several modules is a **flow** (`flows/<name>`), a leaf above modules that no module depends on (ADR 0011). | import-linter `protected`; `ledger-devtools check` on the manifest graph |
 | 3 | **Every state change and the event announcing it commit together** (outbox in the producer's schema). | `UnitOfWork.publish` is the only way to emit |
 | 4 | **Every consumer and every job is idempotent** (inbox keyed by consumer and event id; jobs keyed by kind and key); facade commands callable from consumers or jobs take an idempotency token or a version. | chassis tables' primary keys; facade signatures |
 | 5 | **Every external write is idempotent**: `Idempotency-Key` (7 days, scoped per route) on the public API and a permanent business key (`external_reference`). | http dependencies; unique indexes |
@@ -556,7 +556,7 @@ Assembly fails the start, never a later call, when: two packages claim one schem
 a consumer or job kind is declared without a handler or handed over undeclared; a declared extension point
 has no implementation or a declared port no provider after every module assembled (a channel reads its ports
 while it assembles, so a missing one fails there); an API, extension point implementation or port has a public
-coroutine that is not a `@facade`. A name is bound once: **one implementation per extension point** and one
+coroutine that is not a `@facade`. A name is bound once: one provider per port, and an extension point's implementations are **chained** in `(order, module name)` order (ADR 0011, which replaces the former one-implementation rule); one
 provider per port; a point that needs several (a chain of policies) gets a directory of its own when one does.
 
 ---
@@ -829,6 +829,7 @@ only the public surfaces and the layering are mandated.
 | 7 | Module public surface | `protected` (one per module) | `ledger_<m>.*` importable only by `ledger_<m>` itself, except `ledger_<m>.api` and `ledger_<m>.events` (by declared dependents) and `ledger_<m>.assembly` (by apps) |
 | 8 | Declared module edges only | `forbidden` (one per module) | `ledger_<m>` → every module not in its `dependencies.modules` |
 | 9 | Acyclic modules | `acyclic_siblings` | over the module set (subscription edges checked by `ledger-devtools check`) |
+| 9b | Flows are leaves | `forbidden` | `ledger_<module>` → `ledger_flow_*` (ADR 0011); flows reach modules through `api`, `events` and declared edges only |
 | 10 | Layers inside each package | `layers` with `containers` | §4.5 per module, per channel |
 | 11 | Domain purity | `forbidden` (one per package) | `*.domain`, `*.events`, `*.application` → third-party |
 | 12 | Signer custody | `forbidden` | everything but `ledger_app_signer` and `ledger_signer` → `ledger_signer.adapters.custody` |
@@ -2036,6 +2037,7 @@ Written as `docs/adr/NNNN-*.md` (MADR, short), status *Proposed* until the owner
 | [0008](../../adr/0008-dated-api-versions.md) | `/v1` path major plus pinned dated versions (transforms deferred); TypeID public ids; thin Standard Webhooks |
 | [0009](../../adr/0009-manifest-driven-workspace.md) | A uv workspace with one package per unit, `manifest.toml` as the source of truth, generated lists and contracts, devtools sync/check (gate deferred) |
 | [0010](../../adr/0010-signer-isolation.md) | Private keys only in a separate signer process, reached over gRPC with per-caller allowlists; two signing backends (local key, remote INDOTEL-authorized entity) |
+| [0011](../../adr/0011-flows-and-chained-extension-points.md) | Flows (`flows/<name>`) coordinate several modules as leaves above them; extension points are chained by declared order |
 
 ## 18. Risks
 
