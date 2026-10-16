@@ -81,7 +81,7 @@ def router(context: ApiContext) -> APIRouter:
         """
         access = place.access
         opening = commands.Opening(parse_code(body.code), parse_name(body.name))
-        attempt = attempt_of(request, access.principal, key, body)
+        attempt = attempt_of(request, access.principal, key, body, company=access.tenant.company)
         async with database.unit(moded(access, mode)) as unit:
 
             async def open_it() -> StoredResponse:

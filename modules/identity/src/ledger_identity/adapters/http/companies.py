@@ -93,7 +93,7 @@ def router(context: ApiContext) -> APIRouter:
         """
         tax_id = context.tax_ids.parse(body.tax_id.scheme, body.tax_id.value).tax_id
         legal_name = parse_legal_name(body.legal_name)
-        attempt = attempt_of(request, principal, key, body)
+        attempt = attempt_of(request, principal, key, body, company=None)
         async with database.unit(OrganizationScope(principal.organization, mode)) as unit:
 
             async def register() -> StoredResponse:
@@ -173,7 +173,7 @@ def router(context: ApiContext) -> APIRouter:
 
         The request acts in ``Ledger-Mode``: its ``Idempotency-Key`` is kept per mode.
         """
-        attempt = attempt_of(request, access.principal, key)
+        attempt = attempt_of(request, access.principal, key, company=access.tenant.company)
         tenant = Tenant(access.tenant.organization, access.tenant.company, mode)
         with precondition_checked(StaleVersionError):
             async with database.unit(tenant) as unit:

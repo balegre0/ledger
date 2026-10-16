@@ -45,6 +45,7 @@ from ledger_kernel.errors import ConflictError, InvalidInputError, LedgerError
 from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.http.metrics import full_template
 lazy from ledger_kernel.access import Principal
+lazy from ledger_kernel.ids import CompanyId
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
 
 _COMPONENT: Final = "idempotency"
@@ -200,20 +201,24 @@ def canonical_body(request: BaseModel | None) -> CanonicalBody:
 @final
 @dataclass(frozen=True, slots=True)
 class Target:
-    """The resource a request is for: its path and its query, as the request is fingerprinted by them."""
+    """The resource a request is for: its path, its query and the company it acts for."""
 
     path: str
     query: str
+    company: CompanyId | None = None
 
     @classmethod
-    def of(cls, path: str, parameters: Iterable[tuple[str, str]] = ()) -> Target:
-        """``path`` with the query ``parameters`` sorted, then percent-encoded.
+    def of(
+        cls, path: str, parameters: Iterable[tuple[str, str]] = (), *, company: CompanyId | None = None
+    ) -> Target:
+        """``path`` with the query ``parameters`` sorted, then percent-encoded, for ``company``.
 
         The same parameters sent in another order are the same request; a repeated name keeps all its values,
         in any order too: a route that reads a repeated parameter as an ordered list must not take a key
-        (spec §9.5).
+        (spec §9.5). ``company`` is the one the request acts for when it is not in the path (``None`` when it
+        acts for none): the same key for another company is another request.
         """
-        return cls(path, urlencode(sorted(parameters)))
+        return cls(path, urlencode(sorted(parameters)), company)
 
 
 @final
@@ -232,13 +237,15 @@ class Attempt:
     ) -> Attempt:
         """``principal``'s use of ``key`` on ``route`` (``METHOD /template``), for ``target`` with ``body``.
 
-        The key is scoped to the route; the request is the route, the target's path and query, and the body,
-        each length-prefixed: the same key on another resource of the route is another request (422).
+        The key is scoped to the route; the request is the route, the target's path, query and company, and
+        the body, each length-prefixed: the same key on another resource of the route, or for another company
+        named by a header, is another request (422).
         """
         if _KEY.fullmatch(key) is None:
             raise InvalidIdempotencyKeyError
         digest = hashlib.sha256()
-        for part in (route.encode(), target.path.encode(), target.query.encode(), body):
+        company = b"" if target.company is None else str(target.company).encode()
+        for part in (route.encode(), target.path.encode(), target.query.encode(), company, body):
             digest.update(len(part).to_bytes(_LENGTH_BYTES, "big"))  # no part can run into the next
             digest.update(part)
         return cls(principal=f"user:{principal.subject}", route=route, key=key, request_hash=digest.digest())
@@ -360,8 +367,18 @@ async def idempotency_key(
     return key
 
 
-def attempt_of(request: Request, principal: Principal, key: str, body: BaseModel | None = None) -> Attempt:
-    """``principal``'s use of ``key`` for ``request``: its route's full template, and its canonical body.
+def attempt_of(
+    request: Request,
+    principal: Principal,
+    key: str,
+    body: BaseModel | None = None,
+    *,
+    company: CompanyId | None,
+) -> Attempt:
+    """``principal``'s use of ``key`` for ``request``: its route's full template, its body and its company.
+
+    ``company`` is the one the request acts for (``None`` when it acts for none): it is not always in the
+    path, so it is named here and fingerprinted with the rest.
 
     ``UnlabelledRouteError`` when the route has no full template: an app ``create_app`` did not make, or a
     route added after the app was built.
@@ -373,7 +390,7 @@ def attempt_of(request: Request, principal: Principal, key: str, body: BaseModel
         principal,
         key,
         route=f"{request.method} {template}",
-        target=Target.of(request.url.path, request.query_params.multi_items()),
+        target=Target.of(request.url.path, request.query_params.multi_items(), company=company),
         body=canonical_body(body),
     )
 
