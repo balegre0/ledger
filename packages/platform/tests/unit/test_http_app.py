@@ -17,7 +17,7 @@ from opentelemetry.sdk.trace.export import SpanExporter
 from opentelemetry.trace import SpanKind, StatusCode, format_span_id, format_trace_id
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, TypeAdapter, field_validator
 from structlog.testing import capture_logs
-lazy from fastapi import FastAPI
+lazy from fastapi import FastAPI, Request
 lazy from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 lazy from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 lazy from prometheus_client import CollectorRegistry
@@ -262,6 +262,11 @@ async def fail_as(kind: ErrorKind) -> None:
 @router.get("/crash")
 async def crash() -> None:
     raise ZeroDivisionError
+
+
+@router.get("/baggage", include_in_schema=False)
+async def baggage(request: Request) -> dict[str, str | None]:
+    return {"baggage": request.headers.get("baggage")}
 
 
 class Profile(BaseModel):
@@ -1172,6 +1177,17 @@ async def test_an_untrusted_caller_s_trace_is_linked_not_continued(
     assert [
         (format_trace_id(link.context.trace_id), format_span_id(link.context.span_id)) for link in span.links
     ] == [(TRACE_ID, CALLER_SPAN_ID)]
+
+
+async def test_a_public_caller_s_baggage_goes_with_its_trace(linking: httpx.AsyncClient) -> None:
+    """Baggage is the caller's to write, and the propagator would carry it to every call the request makes."""
+    response = await linking.get("/baggage", headers={"baggage": "role=admin", "traceparent": TRACEPARENT})
+    assert response.json() == {"baggage": None}
+
+
+async def test_a_trusted_edge_s_baggage_is_left_alone(client: httpx.AsyncClient) -> None:
+    response = await client.get("/baggage", headers={"baggage": "role=admin"})
+    assert response.json() == {"baggage": "role=admin"}
 
 
 async def test_a_caller_s_trace_that_is_no_trace_is_not_linked(

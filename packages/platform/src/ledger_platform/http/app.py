@@ -57,6 +57,8 @@ type CallerTrace = Literal["adopt", "link"]
 
 _TRACEPARENT: Final = "traceparent"
 _TRACESTATE: Final = "tracestate"
+_BAGGAGE: Final = "baggage"
+"""Written by the caller too, and carried by the propagator to every call the request makes."""
 _MAX_TRACEPARENT_LENGTH: Final = 55
 """A version 00 ``traceparent``; a longer value is never handed to the propagator (its pattern backtracks)."""
 _CALLER_SPAN: Final = "ledger.caller_span"
@@ -132,11 +134,12 @@ def _caller_span(traceparent: str) -> SpanContext | None:
 
 
 def _without_the_caller_s_trace(scope: AsgiScope) -> None:
-    """Take the caller's trace headers off the request, keeping the span they name for a link."""
+    """Take the caller's trace headers and baggage off the request, keeping the span they name for a link."""
     headers = MutableHeaders(scope=scope)
     caller = headers.get(_TRACEPARENT)
     del headers[_TRACEPARENT]
     del headers[_TRACESTATE]
+    del headers[_BAGGAGE]
     span = None if caller is None else _caller_span(caller)
     if span is not None:
         scope[_CALLER_SPAN] = span
