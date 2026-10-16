@@ -5,9 +5,8 @@ lazy from collections.abc import Mapping
 lazy from uuid import UUID
 
 from ledger_identity.adapters.postgres.repositories import (
-    PgBranches,
     PgCompanies,
-    PgEmissionPoints,
+    PgEstablishments,
     PgMemberships,
     PgOrganizations,
 )
@@ -66,20 +65,18 @@ class UnitAudit(Audit):
 def bind(unit: UnitOfWork) -> IdentityUnit:
     """The identity view of ``unit``: what its use cases read, change and announce.
 
-    The repositories are bound to the organization of the unit's scope, and those of a company's rows to its
-    company too (to none, in a unit of a whole organization), which they name in their statements as row-level
-    security enforces them. The unit's time is the database's, read once when it began: everything it
+    The repositories are bound to the organization of the unit's scope, which they name in their statements as
+    row-level security enforces it. The unit's time is the database's, read once when it began: everything it
     records and announces happened then.
     """
     scope = unit.scope
     if scope is None:
         raise UnscopedUnitError
-    organization, company, connection = scope.organization, scope.company, unit.connection
+    organization, connection = scope.organization, unit.connection
     return IdentityUnit(
         organizations=PgOrganizations(connection, organization),
         companies=PgCompanies(connection, organization),
-        branches=PgBranches(connection, organization, company),
-        emission_points=PgEmissionPoints(connection, organization, company),
+        establishments=PgEstablishments(connection, organization),
         memberships=PgMemberships(connection, organization),
         events=UnitEvents(unit),
         audit=UnitAudit(unit),

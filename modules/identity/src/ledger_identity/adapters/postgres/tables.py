@@ -1,11 +1,11 @@
 """identity's tables, typed for SQLAlchemy Core: what the migrations create and the repositories use.
 
-Organizations own their companies and the memberships in them (``organization_id``); companies own their
-branches and emission points (``organization_id`` and ``company_id``). The migrations put each table under the
-isolation of its owner. A row refers to another through a foreign key that carries the tenant
-(``(organization_id, company_id)`` to a company, ``(company_id, branch_id)`` to a branch): PostgreSQL's
-referential checks bypass row-level security, so a single-column key would let a row of one organization
-point at another's company. Every table is in schema ``identity`` (§6.2): identity's role reaches no other.
+Organizations own their companies and what belongs to them: tax ids, memberships and establishments
+(``organization_id``, and ``company_id`` for the company a row is of). The migrations put each table under
+the isolation of its organization. A row refers to another through a foreign key that carries the tenant
+(``(organization_id, company_id)`` to a company): PostgreSQL's referential checks bypass row-level security,
+so a single-column key would let a row of one organization point at another's company. Every table is in
+schema ``identity`` (§6.2): identity's role reaches no other.
 """
 
 from datetime import datetime
@@ -44,6 +44,8 @@ SUBDIVISION_LENGTH: Final = 6
 """An ISO 3166-2 code as the kernel reads it: the country, a dash and up to three characters."""
 CURRENCY_LENGTH: Final = 3
 """An ISO 4217 code."""
+TIME_ZONE_LENGTH: Final = 64
+"""The longest IANA zone name ``ledger_identity.domain.text`` reads."""
 WORD_LENGTH: Final = 16
 """For a status or a role: a short word of a closed list, which a check constraint names."""
 
@@ -170,14 +172,13 @@ class MembershipRecord(IdentityTable):
     changed_by: Mapped[str] = mapped_column(String(MAX_SUBJECT_LENGTH))
 
 
-class BranchRecord(IdentityTable):
-    """A branch of a company."""
+class EstablishmentRecord(IdentityTable):
+    """An establishment of a company, known by a code unique in the company."""
 
-    __tablename__: str = "branches"
+    __tablename__: str = "establishments"
     __table_args__: tuple[SchemaItem, ...] = (
-        UniqueConstraint("company_id", "code", name="uq_branches_code"),
-        UniqueConstraint("company_id", "id", name="uq_branches_company"),
-        _of_company("branches"),
+        UniqueConstraint("company_id", "code", name="uq_establishments_code"),
+        _of_company("establishments"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True)
@@ -185,28 +186,5 @@ class BranchRecord(IdentityTable):
     company_id: Mapped[UUID] = mapped_column()
     code: Mapped[str] = mapped_column(String(MAX_CODE))
     name: Mapped[str] = mapped_column(String(MAX_NAME))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-
-
-class EmissionPointRecord(IdentityTable):
-    """An emission point of a branch."""
-
-    __tablename__: str = "emission_points"
-    __table_args__: tuple[SchemaItem, ...] = (
-        UniqueConstraint("branch_id", "code", name="uq_emission_points_code"),
-        Index("ix_emission_points_branch", "branch_id", "id"),
-        _of_company("emission_points"),
-        ForeignKeyConstraint(
-            ["company_id", "branch_id"],
-            [f"{SCHEMA}.branches.company_id", f"{SCHEMA}.branches.id"],
-            name="fk_emission_points_branch",
-        ),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True)
-    organization_id: Mapped[UUID] = mapped_column()
-    company_id: Mapped[UUID] = mapped_column()
-    branch_id: Mapped[UUID] = mapped_column()
-    code: Mapped[str] = mapped_column(String(MAX_CODE))
-    name: Mapped[str] = mapped_column(String(MAX_NAME))
+    time_zone: Mapped[str] = mapped_column(String(TIME_ZONE_LENGTH))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

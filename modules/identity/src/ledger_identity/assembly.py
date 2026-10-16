@@ -9,7 +9,7 @@ schemes of the installed regimes: identity names no country, and is not ready wh
 from typing import ClassVar, Final
 
 from ledger_identity._manifest import MANIFEST
-from ledger_identity.adapters.http import branches, companies, emission_points, memberships, organization
+from ledger_identity.adapters.http import companies, establishments, memberships, organization
 from ledger_identity.adapters.http.context import ApiContext
 from ledger_identity.adapters.postgres.schema import migrations
 from ledger_kernel.errors import UnavailableError
@@ -31,13 +31,12 @@ def assemble(context: ModuleContext) -> ModuleParts:
     api = ApiContext.build(
         database=context.database,
         authentication=context.auth,
-        tax_ids=context.regimes.tax_id_schemes,
+        regimes=context.regimes,
     )
     routers = (
         organization.router(api),
         companies.router(api),
-        branches.router(api),
-        emission_points.router(api),
+        establishments.router(api),
         memberships.router(api),
     )
 

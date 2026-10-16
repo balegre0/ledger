@@ -3,6 +3,5 @@
 from typing import NewType
 from uuid import UUID
 
-BranchId = NewType("BranchId", UUID)
-EmissionPointId = NewType("EmissionPointId", UUID)
+EstablishmentId = NewType("EstablishmentId", UUID)
 MembershipId = NewType("MembershipId", UUID)

@@ -1,7 +1,7 @@
 [package]
 name = "identity"
 kind = "module"
-summary = "Organizations, companies, their branches and emission points, memberships and roles."
+summary = "Organizations, companies, their establishments, memberships and roles."
 owners = ["@balegre0"]
 
 [dependencies]
@@ -25,12 +25,12 @@ resource = "membership"
 
 [[permissions]]
 code = "identity.companies.read"
-summary = "Read the company, its branches and its emission points."
+summary = "Read the company and its establishments."
 roles = ["owner", "admin", "accountant", "issuer", "viewer"]
 
 [[permissions]]
 code = "identity.companies.manage"
-summary = "Change or deactivate the company; open branches and emission points."
+summary = "Change or deactivate the company; open establishments."
 roles = ["owner", "admin"]
 
 [[permissions]]

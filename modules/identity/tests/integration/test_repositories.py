@@ -21,26 +21,24 @@ lazy from sqlalchemy.ext.asyncio import AsyncConnection
 from ledger_identity.adapters.permissions import MembershipPermissions
 from ledger_identity.adapters.postgres.repositories import ForeignTenantError
 from ledger_identity.adapters.postgres.tables import (
-    BranchRecord,
     CompanyRecord,
-    EmissionPointRecord,
+    EstablishmentRecord,
     MembershipRecord,
     TaxRegistrationRecord,
 )
 from ledger_identity.adapters.postgres.unit import UnscopedUnitError, bind
 from ledger_identity.application import commands, queries
-from ledger_identity.domain.branches import Branch, EmissionPoint
 from ledger_identity.domain.errors import (
-    BranchCodeTakenError,
     CompanyInactiveError,
-    EmissionPointCodeTakenError,
+    EstablishmentCodeTakenError,
     OwnersOnlyError,
     TaxIdTakenError,
 )
+from ledger_identity.domain.establishments import MAIN_CODE, Establishment
 from ledger_identity.domain.membership import found
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN, Organization
 from ledger_identity.domain.roles import EVERYTHING, READ_ONLY
-from ledger_identity.domain.text import parse_code, parse_legal_name, parse_name
+from ledger_identity.domain.text import parse_code, parse_legal_name, parse_name, parse_time_zone
 from ledger_kernel.access import CompanyNotFoundError, Principal, Role, SubjectId
 from ledger_kernel.ids import CompanyId, new_id
 from ledger_kernel.jurisdiction import parse_jurisdiction
@@ -80,6 +78,7 @@ MEMBER: Final = Principal(
     subject=SubjectId("3001"), organization=FOUNDER.organization, provider_organization="1001"
 )
 RNC: Final = TaxId(TaxIdScheme("do.rnc"), "101850043")
+SANTO_DOMINGO: Final = parse_time_zone("America/Santo_Domingo")
 THEIRS: Final = TaxId(TaxIdScheme("do.rnc"), "401500022")
 """The tax id of the other organization's company: one taxpayer is one active company."""
 SHOWING: Final = text(
@@ -143,7 +142,11 @@ async def create(
         module_database,
         OrganizationScope(founder.organization, None),
         lambda unit: commands.create_company(
-            unit, founder, profile=profile(tax_id, *also), legal_name=parse_legal_name("Duarte")
+            unit,
+            founder,
+            profile=profile(tax_id, *also),
+            legal_name=parse_legal_name("Duarte"),
+            time_zone=SANTO_DOMINGO,
         ),
     )
 
@@ -206,7 +209,9 @@ async def test_a_unit_that_fails_keeps_and_announces_nothing(
     module_database: BoundDatabase, admin: psycopg.AsyncConnection
 ) -> None:
     async def create_then_fail(unit: IdentityUnit) -> None:
-        await commands.create_company(unit, FOUNDER, profile=profile(), legal_name=parse_legal_name("Duarte"))
+        await commands.create_company(
+            unit, FOUNDER, profile=profile(), legal_name=parse_legal_name("Duarte"), time_zone=SANTO_DOMINGO
+        )
         raise ZeroDivisionError
 
     with pytest.raises(ZeroDivisionError):
@@ -447,109 +452,94 @@ async def test_a_principal_pages_through_the_companies_it_holds_a_role_in(
     assert partner.items == ()
 
 
-# ── Branches and emission points ───────────────────────────────────────────────
+# ── Establishments ─────────────────────────────────────────────────────────────
 
 
-async def test_branches_and_emission_points_are_kept_per_company(module_database: BoundDatabase) -> None:
+async def open_in(
+    module_database: BoundDatabase, company: Company, code: str, *, time_zone: str | None = None
+) -> Establishment:
+    """The establishment ``OWNER`` opens in ``company`` under ``code``, named after it."""
+    opening = commands.Opening(
+        parse_code(code), parse_name(code), None if time_zone is None else parse_time_zone(time_zone)
+    )
+    return await in_unit(
+        module_database,
+        company.tenant,
+        lambda unit: commands.open_establishment(unit, company.id, opening, actor=OWNER),
+    )
+
+
+async def main_of(module_database: BoundDatabase, company: Company) -> Establishment:
+    return await in_unit(
+        module_database, company.tenant, lambda unit: queries.main_establishment(unit, company.id)
+    )
+
+
+async def test_a_company_is_registered_with_its_main_establishment_in_the_zone_it_was_given(
+    module_database: BoundDatabase,
+) -> None:
     company = await create(module_database)
-    other = await create(module_database, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
-    branch = await in_unit(
-        module_database,
+    main = await main_of(module_database, company)
+    assert (main.code, main.tenant, main.time_zone, main.created_at) == (
+        MAIN_CODE,
         company.tenant,
-        lambda unit: commands.open_branch(
-            unit, company.id, commands.Opening(parse_code("SUC1"), parse_name("Santiago")), actor=OWNER
-        ),
-    )
-    await in_unit(
-        module_database,
-        other.tenant,
-        lambda unit: commands.open_branch(
-            unit, other.id, commands.Opening(parse_code("SUC1"), parse_name("Bonao")), actor=OWNER
-        ),
-    )
-    with pytest.raises(BranchCodeTakenError):
-        await in_unit(
-            module_database,
-            company.tenant,
-            lambda unit: commands.open_branch(
-                unit, company.id, commands.Opening(parse_code("SUC1"), parse_name("X")), actor=OWNER
-            ),
-        )
-    point = await in_unit(
-        module_database,
-        company.tenant,
-        lambda unit: commands.open_emission_point(
-            unit, company.id, branch.id, commands.Opening(parse_code("001"), parse_name("Caja")), actor=OWNER
-        ),
-    )
-    with pytest.raises(EmissionPointCodeTakenError):
-        await in_unit(
-            module_database,
-            company.tenant,
-            lambda unit: commands.open_emission_point(
-                unit, company.id, branch.id, commands.Opening(parse_code("001"), parse_name("Y")), actor=OWNER
-            ),
-        )
-    assert (
-        await in_unit(
-            module_database, company.tenant, lambda unit: queries.branch(unit, company.id, branch.id)
-        )
-        == branch
+        SANTO_DOMINGO,
+        company.created_at,
     )
     assert (
         await in_unit(
-            module_database,
-            company.tenant,
-            lambda unit: queries.emission_point(unit, company.id, branch.id, point.id),
+            module_database, company.tenant, lambda unit: queries.establishment(unit, company.id, main.id)
         )
-        == point
+        == main
     )
-    branches = await in_unit(
-        module_database, company.tenant, lambda unit: queries.branches(unit, company.id, PageRequest())
-    )
-    points = await in_unit(
-        module_database,
-        company.tenant,
-        lambda unit: queries.emission_points(unit, company.id, branch.id, PageRequest()),
-    )
-    assert (branches.items, points.items) == ((branch,), (point,))
 
 
-async def test_a_company_scope_sees_no_branch_of_another_company(module_database: BoundDatabase) -> None:
+async def test_establishments_are_kept_per_company_under_codes_unique_in_it(
+    module_database: BoundDatabase,
+) -> None:
     company = await create(module_database)
     other = await create(module_database, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
-    branch = await in_unit(
-        module_database,
-        company.tenant,
-        lambda unit: commands.open_branch(
-            unit, company.id, commands.Opening(parse_code("SUC1"), parse_name("Santiago")), actor=OWNER
-        ),
+    santiago = await open_in(module_database, company, "SUC1")
+    await open_in(module_database, other, "SUC1")  # another company's code is free
+    for code in ("SUC1", "MAIN"):
+        with pytest.raises(EstablishmentCodeTakenError):
+            await open_in(module_database, company, code)
+    assert santiago.time_zone == SANTO_DOMINGO  # the main one's, when none is named
+    madrid = await open_in(module_database, company, "SUC2", time_zone="Europe/Madrid")
+    assert madrid.time_zone == parse_time_zone("Europe/Madrid")
+    listed = await in_unit(
+        module_database, company.tenant, lambda unit: queries.establishments(unit, company.id, PageRequest())
     )
-    seen_by_other = await in_unit(
-        module_database, other.tenant, lambda unit: unit.branches.page(company.id, PageRequest())
+    main = await main_of(module_database, company)
+    assert {item.code for item in listed.items} == {"MAIN", "SUC1", "SUC2"}
+    assert main in listed.items
+    assert santiago in listed.items
+
+
+async def test_another_organization_sees_no_establishment(module_database: BoundDatabase) -> None:
+    company = await create(module_database)
+    santiago = await open_in(module_database, company, "SUC1")
+    theirs = await create(module_database, founder=STRANGER, tax_id=THEIRS)
+    seen_by_theirs = await in_unit(
+        module_database, theirs.tenant, lambda unit: unit.establishments.page(company.id, PageRequest())
     )
     asked_wrongly = await in_unit(
-        module_database, company.tenant, lambda unit: unit.branches.get(other.id, branch.id)
+        module_database, theirs.tenant, lambda unit: unit.establishments.get(company.id, santiago.id)
     )
-    assert (seen_by_other.items, asked_wrongly) == ((), None)
+    by_code = await in_unit(
+        module_database, theirs.tenant, lambda unit: unit.establishments.by_code(company.id, MAIN_CODE)
+    )
+    assert (seen_by_theirs.items, asked_wrongly, by_code) == ((), None, None)
 
 
 # ── Tenancy checked twice ───────────────────────────────────────────────────────
 
 
-async def test_a_row_cannot_point_at_a_company_or_a_branch_of_another_tenant(
+async def test_a_row_cannot_point_at_a_company_of_another_tenant(
     module_database: BoundDatabase,
 ) -> None:
     mine = await create(module_database)
-    sister = await create(module_database, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
     theirs = await create(module_database, founder=STRANGER, tax_id=THEIRS)
-    branch = await in_unit(
-        module_database,
-        sister.tenant,
-        lambda unit: commands.open_branch(
-            unit, sister.id, commands.Opening(parse_code("SUC1"), parse_name("Bonao")), actor=OWNER
-        ),
-    )
     member_of_theirs = insert(MembershipRecord).values(
         id=new_id(),
         organization_id=mine.organization,
@@ -561,21 +551,13 @@ async def test_a_row_cannot_point_at_a_company_or_a_branch_of_another_tenant(
         changed_at=NOW,
         changed_by="2001",
     )
-    branch_of_theirs = insert(BranchRecord).values(
+    establishment_of_theirs = insert(EstablishmentRecord).values(
         id=new_id(),
         organization_id=mine.organization,
         company_id=theirs.id,
         code="SUC9",
         name="X",
-        created_at=NOW,
-    )
-    point_in_the_sister_s_branch = insert(EmissionPointRecord).values(
-        id=new_id(),
-        organization_id=mine.organization,
-        company_id=mine.id,
-        branch_id=branch.id,
-        code="001",
-        name="Caja",
+        time_zone="America/Santo_Domingo",
         created_at=NOW,
     )
     attempts: tuple[tuple[Scope, Insert], ...] = (
@@ -583,8 +565,7 @@ async def test_a_row_cannot_point_at_a_company_or_a_branch_of_another_tenant(
             OrganizationScope(mine.organization, None),
             member_of_theirs,
         ),  # row-level security lets each of these through
-        (Tenant(mine.organization, theirs.id, None), branch_of_theirs),
-        (mine.tenant, point_in_the_sister_s_branch),
+        (Tenant(mine.organization, theirs.id, None), establishment_of_theirs),
     )
     for scope, statement in attempts:
         with pytest.raises(IntegrityError) as caught:
@@ -610,31 +591,15 @@ async def with_the_policies_showing[T](
         return await look(bind(unit), unit.connection)
 
 
-async def a_company_with_a_branch_and_a_point(
-    module_database: BoundDatabase,
-) -> tuple[Company, Branch, EmissionPoint]:
+async def a_company_with_an_establishment(module_database: BoundDatabase) -> tuple[Company, Establishment]:
     company = await create(module_database)
-    branch = await in_unit(
-        module_database,
-        company.tenant,
-        lambda unit: commands.open_branch(
-            unit, company.id, commands.Opening(parse_code("SUC1"), parse_name("S")), actor=OWNER
-        ),
-    )
-    point = await in_unit(
-        module_database,
-        company.tenant,
-        lambda unit: commands.open_emission_point(
-            unit, company.id, branch.id, commands.Opening(parse_code("001"), parse_name("Caja")), actor=OWNER
-        ),
-    )
-    return company, branch, point
+    return company, await open_in(module_database, company, "SUC1")
 
 
 async def test_the_repositories_keep_to_the_unit_s_organization_without_row_level_security(
     module_database: BoundDatabase,
 ) -> None:
-    company, branch, point = await a_company_with_a_branch_and_a_point(module_database)
+    company, santiago = await a_company_with_an_establishment(module_database)
 
     async def look(unit: IdentityUnit, connection: AsyncConnection) -> list[object]:
         every_company = select(func.count()).select_from(CompanyRecord)
@@ -647,68 +612,34 @@ async def test_the_repositories_keep_to_the_unit_s_organization_without_row_leve
             await unit.memberships.get(company.id, OWNER),
             await unit.memberships.owners(company.id),
             (await unit.memberships.page(company.id, PageRequest())).items,
-            await unit.branches.get(company.id, branch.id),
-            (await unit.branches.page(company.id, PageRequest())).items,
-            await unit.emission_points.get(company.id, point.id),
-            (await unit.emission_points.page(company.id, branch.id, PageRequest())).items,
+            await unit.establishments.get(company.id, santiago.id),
+            await unit.establishments.by_code(company.id, MAIN_CODE),
+            (await unit.establishments.page(company.id, PageRequest())).items,
         ]
 
     seen = await with_the_policies_showing(
         module_database, OrganizationScope(STRANGER.organization, None), company.tenant, look
     )
-    assert seen == [1, None, None, None, (), None, 0, (), None, (), None, ()]
-
-
-async def test_the_repositories_keep_to_the_unit_s_company_without_row_level_security(
-    module_database: BoundDatabase,
-) -> None:
-    company, branch, point = await a_company_with_a_branch_and_a_point(module_database)
-    sister = await create(module_database, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
-
-    async def look(unit: IdentityUnit, connection: AsyncConnection) -> list[object]:
-        del connection
-        return [
-            await unit.branches.get(company.id, branch.id),
-            (await unit.branches.page(company.id, PageRequest())).items,
-            await unit.emission_points.get(company.id, point.id),
-            (await unit.emission_points.page(company.id, branch.id, PageRequest())).items,
-        ]
-
-    nothing: Final = [None, (), None, ()]
-    shown = company.tenant
-    assert await with_the_policies_showing(module_database, sister.tenant, shown, look) == nothing
-    whole = OrganizationScope(company.organization, None)
-    assert await with_the_policies_showing(module_database, whole, shown, look) == nothing
-    own = await with_the_policies_showing(module_database, company.tenant, shown, look)
-    assert own == [branch, (branch,), point, (point,)]  # the same statements, in the company's own unit
+    assert seen == [1, None, None, None, (), None, 0, (), None, None, ()]
 
 
 async def test_a_unit_refuses_to_write_a_row_of_another_tenant(module_database: BoundDatabase) -> None:
     """Row-level security would refuse each of these too: the repositories do not count on it."""
     company = await create(module_database)
-    sister = await create(module_database, tax_id=TaxId(TaxIdScheme("do.rnc"), "130000012"))
-    branch = Branch.open(company, code=parse_code("SUC1"), name=parse_name("S"), now=NOW)
-    point = EmissionPoint.open(company, branch, code=parse_code("001"), name=parse_name("Caja"), now=NOW)
+    establishment = Establishment.open(
+        company, code=parse_code("SUC1"), name=parse_name("S"), time_zone=SANTO_DOMINGO, now=NOW
+    )
     owner, _ = found(company, FOUNDER, now=NOW)
     renamed, _ = company.rename(parse_legal_name("Duarte S.A."), now=NOW)
     of_another_organization: tuple[Callable[[IdentityUnit], Awaitable[object]], ...] = (
         lambda unit: unit.organizations.add(Organization.of(FOUNDER, now=NOW)),
         lambda unit: unit.companies.add(company),
         lambda unit: unit.companies.update(renamed, version=company.version),
-        lambda unit: unit.branches.add(branch),
-        lambda unit: unit.emission_points.add(point),
+        lambda unit: unit.establishments.add(establishment),
         lambda unit: unit.memberships.put(owner),
     )
-    of_another_company: tuple[Callable[[IdentityUnit], Awaitable[object]], ...] = (
-        lambda unit: unit.branches.add(branch),
-        lambda unit: unit.emission_points.add(point),
-    )
-    attempts: tuple[tuple[Scope, Callable[[IdentityUnit], Awaitable[object]]], ...] = (
-        *((OrganizationScope(STRANGER.organization, None), write) for write in of_another_organization),
-        *((sister.tenant, write) for write in of_another_company),
-        *(
-            (OrganizationScope(company.organization, None), write) for write in of_another_company
-        ),  # a unit of no company at all
+    attempts = tuple(
+        (OrganizationScope(STRANGER.organization, None), write) for write in of_another_organization
     )
     for scope, write_elsewhere in attempts:
         with pytest.raises(ForeignTenantError) as caught:
@@ -724,7 +655,7 @@ async def test_a_unit_s_time_is_its_transaction_s_for_what_it_records_and_announ
     async with module_database.unit(OrganizationScope(FOUNDER.organization, None)) as transaction:
         unit = bind(transaction)
         company = await commands.create_company(
-            unit, FOUNDER, profile=profile(), legal_name=parse_legal_name("Duarte")
+            unit, FOUNDER, profile=profile(), legal_name=parse_legal_name("Duarte"), time_zone=SANTO_DOMINGO
         )
         began = MOMENT.validate_python(
             (await transaction.connection.execute(text("SELECT now()"))).scalar_one()
@@ -914,64 +845,30 @@ async def test_a_deactivated_company_lets_other_modules_read_only_and_identity_s
     assert (await published(admin))[-2:] == ["identity.company.deactivated", "identity.membership.revoked"]
 
 
-# ── Pages of branches and emission points ───────────────────────────────────────
+# ── Pages of establishments ────────────────────────────────────────────────────
 
 
-async def test_branches_and_emission_points_are_paged_in_id_order_by_cursor(
-    module_database: BoundDatabase,
-) -> None:
-    company, first_branch, first_point = await a_company_with_a_branch_and_a_point(module_database)
+async def test_establishments_are_paged_in_id_order_by_cursor(module_database: BoundDatabase) -> None:
+    company, santiago = await a_company_with_an_establishment(module_database)
     tenant = company.tenant
-
-    async def open_branch(code: str) -> Branch:
-        return await in_unit(
-            module_database,
-            tenant,
-            lambda unit: commands.open_branch(
-                unit, company.id, commands.Opening(parse_code(code), parse_name(code)), actor=OWNER
-            ),
-        )
-
-    async def open_point(code: str) -> EmissionPoint:
-        return await in_unit(
-            module_database,
-            tenant,
-            lambda unit: commands.open_emission_point(
-                unit,
-                company.id,
-                first_branch.id,
-                commands.Opening(parse_code(code), parse_name(code)),
-                actor=OWNER,
-            ),
-        )
-
-    async def branch_page(request: PageRequest) -> Page[Branch]:
-        return await in_unit(
-            module_database, tenant, lambda unit: queries.branches(unit, company.id, request)
-        )
-
-    async def point_page(request: PageRequest) -> Page[EmissionPoint]:
-        return await in_unit(
-            module_database,
-            tenant,
-            lambda unit: queries.emission_points(unit, company.id, first_branch.id, request),
-        )
-
-    branches = sorted(
-        [first_branch, await open_branch("SUC2"), await open_branch("SUC3")], key=lambda b: b.id
+    every = sorted(
+        [
+            await main_of(module_database, company),
+            santiago,
+            await open_in(module_database, company, "SUC2"),
+            await open_in(module_database, company, "SUC3"),
+        ],
+        key=lambda item: item.id,
     )
-    points = sorted([first_point, await open_point("002"), await open_point("003")], key=lambda p: p.id)
-    first = await branch_page(PageRequest(size=2))
+
+    async def listed(request: PageRequest) -> Page[Establishment]:
+        return await in_unit(
+            module_database, tenant, lambda unit: queries.establishments(unit, company.id, request)
+        )
+
+    first = await listed(PageRequest(size=3))
     assert first.next_cursor is not None
-    rest = await branch_page(PageRequest(size=2, after=decode_cursor(first.next_cursor)))
-    assert (first.items, rest.items, rest.next_cursor) == (tuple(branches[:2]), tuple(branches[2:]), None)
-    first_points = await point_page(PageRequest(size=2))
-    assert first_points.next_cursor is not None
-    rest_points = await point_page(PageRequest(size=2, after=decode_cursor(first_points.next_cursor)))
-    assert (first_points.items, rest_points.items, rest_points.next_cursor) == (
-        tuple(points[:2]),
-        tuple(points[2:]),
-        None,
-    )
-    exactly_full = await point_page(PageRequest(size=3))
-    assert (exactly_full.items, exactly_full.next_cursor) == (tuple(points), None)
+    rest = await listed(PageRequest(size=3, after=decode_cursor(first.next_cursor)))
+    assert (first.items, rest.items, rest.next_cursor) == (tuple(every[:3]), tuple(every[3:]), None)
+    exactly_full = await listed(PageRequest(size=4))
+    assert (exactly_full.items, exactly_full.next_cursor) == (tuple(every), None)

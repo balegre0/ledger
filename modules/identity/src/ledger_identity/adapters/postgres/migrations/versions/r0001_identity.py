@@ -28,8 +28,7 @@ ISOLATION: Final = (
     ("companies", RlsScope.ORGANIZATION, "organization_id"),
     ("company_tax_ids", RlsScope.ORGANIZATION, "organization_id"),
     ("memberships", RlsScope.ORGANIZATION, "organization_id"),
-    ("branches", RlsScope.COMPANY, "organization_id"),
-    ("emission_points", RlsScope.COMPANY, "organization_id"),
+    ("establishments", RlsScope.ORGANIZATION, "organization_id"),
 )
 """Whose rows each table holds, and the column naming the organization (an organization is its own)."""
 
@@ -121,37 +120,18 @@ def upgrade() -> None:
     op.create_index("ix_memberships_subject", "memberships", ["organization_id", "subject"], schema=S)
     op.create_index("ix_memberships_company", "memberships", ["company_id", "id"], schema=S)
     op.create_table(
-        "branches",
+        "establishments",
         sa.Column("id", sa.Uuid(), primary_key=True),
         sa.Column("organization_id", sa.Uuid(), nullable=False),
         sa.Column("company_id", sa.Uuid(), nullable=False),
         sa.Column("code", sa.String(10), nullable=False),
         sa.Column("name", sa.String(100), nullable=False),
+        sa.Column("time_zone", sa.String(64), nullable=False),
         _moment("created_at"),
-        sa.UniqueConstraint("company_id", "code", name="uq_branches_code"),
-        sa.UniqueConstraint("company_id", "id", name="uq_branches_company"),
-        _of_company("branches"),
+        sa.UniqueConstraint("company_id", "code", name="uq_establishments_code"),
+        _of_company("establishments"),
         schema=S,
     )
-    op.create_table(
-        "emission_points",
-        sa.Column("id", sa.Uuid(), primary_key=True),
-        sa.Column("organization_id", sa.Uuid(), nullable=False),
-        sa.Column("company_id", sa.Uuid(), nullable=False),
-        sa.Column("branch_id", sa.Uuid(), nullable=False),
-        sa.Column("code", sa.String(10), nullable=False),
-        sa.Column("name", sa.String(100), nullable=False),
-        _moment("created_at"),
-        sa.UniqueConstraint("branch_id", "code", name="uq_emission_points_code"),
-        _of_company("emission_points"),
-        sa.ForeignKeyConstraint(
-            ["company_id", "branch_id"],
-            [f"{S}.branches.company_id", f"{S}.branches.id"],
-            name="fk_emission_points_branch",
-        ),
-        schema=S,
-    )
-    op.create_index("ix_emission_points_branch", "emission_points", ["branch_id", "id"], schema=S)
     for table, scope, column in ISOLATION:
         for statement in policy(f"{S}.{table}", scope, organization_column=column):
             op.execute(statement)

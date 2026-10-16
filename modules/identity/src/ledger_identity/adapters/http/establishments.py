@@ -1,6 +1,7 @@
-"""``/v1/companies/{company_id}/branches``: a company's branches, shared by both modes.
+"""``/v1/companies/{company_id}/establishments``: a company's establishments, shared by both modes.
 
-Opening one is a ``POST``: it acts in ``Ledger-Mode``, which keeps its ``Idempotency-Key``.
+Opening one is a ``POST``: it acts in ``Ledger-Mode``, which keeps its ``Idempotency-Key``. An establishment
+without a time zone of its own works in the one of the company's ``MAIN`` establishment (§7.1).
 """
 
 from http import HTTPStatus
@@ -9,12 +10,12 @@ from typing import Annotated, Final
 from fastapi import APIRouter, Depends
 lazy from fastapi import Request, Response
 
-from ledger_identity.adapters.http.models import BranchView
+from ledger_identity.adapters.http.models import EstablishmentView
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import commands, queries
-from ledger_identity.domain.ids import BranchId
+from ledger_identity.domain.ids import EstablishmentId
 from ledger_identity.domain.roles import COMPANIES_MANAGE, COMPANIES_READ
-from ledger_identity.domain.text import parse_code, parse_name
+from ledger_identity.domain.text import parse_code, parse_name, parse_time_zone
 from ledger_kernel.ids import parse_uuid
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.http import (
@@ -32,7 +33,7 @@ from ledger_platform.http import (
     success,
 )
 lazy from ledger_identity.adapters.http.context import ApiContext
-lazy from ledger_identity.adapters.http.models import NewBranch
+lazy from ledger_identity.adapters.http.models import NewEstablishment
 lazy from ledger_kernel.pagination import PageRequest
 lazy from ledger_kernel.tenancy import Mode
 lazy from ledger_platform.auth import CompanyAccess
@@ -52,53 +53,56 @@ def moded(access: CompanyAccess, mode: Mode) -> Tenant:
 
 
 def router(context: ApiContext) -> APIRouter:
-    """The routes of branches."""
-    branches = APIRouter(prefix="/v1/companies/{company_id}/branches", tags=["branches"])
+    """The routes of establishments."""
+    establishments = APIRouter(prefix="/v1/companies/{company_id}/establishments", tags=["establishments"])
     database = context.database
     reader, manager = (
         allowed(context.in_company, COMPANIES_READ),
         allowed(context.in_company, COMPANIES_MANAGE),
     )
 
-    @branches.post("", status_code=HTTPStatus.CREATED, response_model=BranchView, responses=OPEN)
-    async def open_branch(
+    @establishments.post("", status_code=HTTPStatus.CREATED, response_model=EstablishmentView, responses=OPEN)
+    async def open_establishment(
         access: Annotated[CompanyAccess, Depends(manager)],
         mode: Annotated[Mode, Depends(ledger_mode)],
         key: Annotated[str, Depends(idempotency_key)],
-        body: NewBranch,
+        body: NewEstablishment,
         request: Request,
     ) -> Response:
-        """Open a branch of the company under a code it does not use yet."""
-        opening = commands.Opening(parse_code(body.code), parse_name(body.name))
+        """Open an establishment of the company under a code it does not use yet."""
+        time_zone = None if body.time_zone is None else parse_time_zone(body.time_zone)
+        opening = commands.Opening(parse_code(body.code), parse_name(body.name), time_zone)
         attempt = attempt_of(request, access.principal, key, body, company=access.tenant.company)
         async with database.unit(moded(access, mode)) as unit:
 
             async def open_it() -> StoredResponse:
-                opened = await commands.open_branch(
+                opened = await commands.open_establishment(
                     bind(unit), access.tenant.company, opening, actor=access.principal.subject
                 )
-                location = f"/v1/companies/{opened.tenant.company}/branches/{opened.id}"
-                return json_response(HTTPStatus.CREATED, BranchView.of(opened), {"Location": location})
+                location = f"/v1/companies/{opened.tenant.company}/establishments/{opened.id}"
+                return json_response(HTTPStatus.CREATED, EstablishmentView.of(opened), {"Location": location})
 
             outcome = await context.idempotency.once(unit, attempt, open_it)
         return answer(outcome)
 
-    @branches.get("", response_model=Page[BranchView], responses=READ)
-    async def list_branches(
+    @establishments.get("", response_model=Page[EstablishmentView], responses=READ)
+    async def list_establishments(
         access: Annotated[CompanyAccess, Depends(reader)],
         page: Annotated[PageRequest, Depends(page_query)],
-    ) -> Page[BranchView]:
-        """The company's branches."""
+    ) -> Page[EstablishmentView]:
+        """The company's establishments."""
         async with database.unit(access.tenant) as unit:
-            found = await queries.branches(bind(unit), access.tenant.company, page)
-        return page_of_items(found, BranchView.of)
+            found = await queries.establishments(bind(unit), access.tenant.company, page)
+        return page_of_items(found, EstablishmentView.of)
 
-    @branches.get("/{branch_id}", response_model=BranchView, responses=READ)
-    async def read_branch(access: Annotated[CompanyAccess, Depends(reader)], branch_id: str) -> BranchView:
-        """A branch of the company."""
-        branch = BranchId(parse_uuid(branch_id))
+    @establishments.get("/{establishment_id}", response_model=EstablishmentView, responses=READ)
+    async def read_establishment(
+        access: Annotated[CompanyAccess, Depends(reader)], establishment_id: str
+    ) -> EstablishmentView:
+        """An establishment of the company."""
+        wanted = EstablishmentId(parse_uuid(establishment_id))
         async with database.unit(access.tenant) as unit:
-            found = await queries.branch(bind(unit), access.tenant.company, branch)
-        return BranchView.of(found)
+            found = await queries.establishment(bind(unit), access.tenant.company, wanted)
+        return EstablishmentView.of(found)
 
-    return branches
+    return establishments

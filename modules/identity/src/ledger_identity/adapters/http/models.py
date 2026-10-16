@@ -15,8 +15,8 @@ from ledger_identity.domain.company import CompanyStatus
 from ledger_identity.domain.text import MAX_LEGAL_NAME
 from ledger_kernel.access import Role
 from ledger_kernel.tax_ids import MAX_TAX_ID_LENGTH
-lazy from ledger_identity.domain.branches import Branch, EmissionPoint
 lazy from ledger_identity.domain.company import Company
+lazy from ledger_identity.domain.establishments import Establishment
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_identity.domain.organization import Organization
 lazy from ledger_kernel.jurisdiction import Jurisdiction
@@ -92,6 +92,16 @@ class NewCompany(_Shape):
     )
     legal_name: str = Field(
         min_length=1, max_length=MAX_LEGAL_NAME, description="As registered with the tax authority."
+    )
+    time_zone: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description=(
+            "An IANA zone: where the days of its main establishment begin and end. "
+            "Absent: its regime's; required where no regime is installed."
+        ),
+        examples=["America/Santo_Domingo"],
     )
 
 
@@ -185,65 +195,42 @@ class OrganizationView(_Shape):
         )
 
 
-class NewBranch(_Shape):
-    """A branch to open."""
+class NewEstablishment(_Shape):
+    """An establishment to open."""
 
     code: str = Field(
         min_length=1, max_length=10, description="1 to 10 upper-case letters and digits.", examples=["SUC1"]
     )
     name: str = Field(min_length=1, max_length=200)
-
-
-class BranchView(_Shape):
-    """A branch of a company."""
-
-    id: UUID
-    company_id: UUID
-    code: str
-    name: str
-    created_at: datetime
-
-    @classmethod
-    def of(cls, branch: Branch) -> Self:
-        """The view of ``branch``."""
-        return cls(
-            id=branch.id,
-            company_id=branch.tenant.company,
-            code=branch.code,
-            name=branch.name,
-            created_at=branch.created_at,
-        )
-
-
-class NewEmissionPoint(_Shape):
-    """An emission point to open."""
-
-    code: str = Field(
-        min_length=1, max_length=10, description="1 to 10 upper-case letters and digits.", examples=["001"]
+    time_zone: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description="An IANA zone: where its days begin and end. Absent: the company's main establishment's.",
+        examples=["America/Santo_Domingo"],
     )
-    name: str = Field(min_length=1, max_length=200)
 
 
-class EmissionPointView(_Shape):
-    """An emission point of a branch."""
+class EstablishmentView(_Shape):
+    """An establishment of a company."""
 
     id: UUID
     company_id: UUID
-    branch_id: UUID
     code: str
     name: str
+    time_zone: str
     created_at: datetime
 
     @classmethod
-    def of(cls, point: EmissionPoint) -> Self:
-        """The view of ``point``."""
+    def of(cls, establishment: Establishment) -> Self:
+        """The view of ``establishment``."""
         return cls(
-            id=point.id,
-            company_id=point.tenant.company,
-            branch_id=point.branch,
-            code=point.code,
-            name=point.name,
-            created_at=point.created_at,
+            id=establishment.id,
+            company_id=establishment.tenant.company,
+            code=establishment.code,
+            name=establishment.name,
+            time_zone=establishment.time_zone,
+            created_at=establishment.created_at,
         )
 
 

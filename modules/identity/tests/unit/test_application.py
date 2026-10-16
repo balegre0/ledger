@@ -11,9 +11,8 @@ import pytest
 from ledger_identity.application import commands, queries
 from ledger_identity.application.ports import (
     Audit,
-    Branches,
     Companies,
-    EmissionPoints,
+    Establishments,
     Events,
     IdentityUnit,
     Memberships,
@@ -21,11 +20,9 @@ from ledger_identity.application.ports import (
 )
 from ledger_identity.domain.company import CompanyStatus, FiscalProfile
 from ledger_identity.domain.errors import (
-    BranchCodeTakenError,
-    BranchNotFoundError,
     CompanyInactiveError,
-    EmissionPointCodeTakenError,
-    EmissionPointNotFoundError,
+    EstablishmentCodeTakenError,
+    EstablishmentNotFoundError,
     LastOwnerError,
     MembershipNotFoundError,
     OrganizationAdminRequiredError,
@@ -34,10 +31,9 @@ from ledger_identity.domain.errors import (
     StaleVersionError,
     TaxIdTakenError,
 )
-from ledger_identity.domain.ids import BranchId, EmissionPointId
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN, Organization
 from ledger_identity.domain.roles import EVERYTHING, READ_ONLY
-from ledger_identity.domain.text import parse_code, parse_legal_name, parse_name
+from ledger_identity.domain.text import parse_code, parse_legal_name, parse_name, parse_time_zone
 from ledger_identity.events import (
     CompanyDeactivated,
     CompanyRegistered,
@@ -54,9 +50,11 @@ from ledger_kernel.pagination import PageRequest, page_of
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Tenant
 lazy from ledger_identity.application.ports import AuditAction
-lazy from ledger_identity.domain.branches import Branch, EmissionPoint
 lazy from ledger_identity.domain.company import Company
+lazy from ledger_identity.domain.establishments import Establishment
+lazy from ledger_identity.domain.ids import EstablishmentId
 lazy from ledger_identity.domain.membership import Membership
+lazy from ledger_identity.domain.text import Code
 lazy from ledger_identity.events import IdentityEvent
 lazy from ledger_kernel.pagination import Page
 
@@ -78,6 +76,7 @@ STRANGER: Final = Principal(
 OWNER: Final = FOUNDER.subject
 ADMIN: Final = SubjectId("2002")
 VIEWER: Final = SubjectId("3001")
+SANTO_DOMINGO: Final = parse_time_zone("America/Santo_Domingo")
 RNC: Final = TaxId(TaxIdScheme("do.rnc"), "101850043")
 CEDULA: Final = TaxId(TaxIdScheme("do.cedula"), "00113918205")
 THEIRS: Final = TaxId(TaxIdScheme("do.rnc"), "401500022")
@@ -111,8 +110,7 @@ class State:
     def __init__(self) -> None:
         self.organizations: dict[OrganizationId, Organization] = {}
         self.companies: dict[CompanyId, Company] = {}
-        self.branches: dict[BranchId, Branch] = {}
-        self.points: dict[EmissionPointId, EmissionPoint] = {}
+        self.establishments: dict[EstablishmentId, Establishment] = {}
         self.memberships: dict[tuple[CompanyId, SubjectId], Membership] = {}
         self.events: list[IdentityEvent] = []
         self.audited: list[Audited] = []
@@ -125,8 +123,7 @@ class State:
         return IdentityUnit(
             organizations=MemoryOrganizations(self),
             companies=MemoryCompanies(self, organization),
-            branches=MemoryBranches(self, organization),
-            emission_points=MemoryEmissionPoints(self, organization),
+            establishments=MemoryEstablishments(self, organization),
             memberships=MemoryMemberships(self, organization),
             events=MemoryEvents(self),
             audit=MemoryAudit(self),
@@ -217,65 +214,38 @@ class MemoryCompanies(Companies):
 
 
 @final
-class MemoryBranches(Branches):
+class MemoryEstablishments(Establishments):
     def __init__(self, state: State, organization: OrganizationId) -> None:
         self._state = state
         self._organization = organization
 
     @override
-    async def add(self, branch: Branch) -> bool:
+    async def add(self, establishment: Establishment) -> bool:
         if any(
-            other.tenant == branch.tenant and other.code == branch.code
-            for other in self._state.branches.values()
+            other.tenant == establishment.tenant and other.code == establishment.code
+            for other in self._state.establishments.values()
         ):
             return False
-        self._state.branches[branch.id] = branch
+        self._state.establishments[establishment.id] = establishment
         return True
 
     @override
-    async def get(self, company: CompanyId, branch: BranchId) -> Branch | None:
-        found = self._state.branches.get(branch)
-        return (
-            found if found is not None and found.tenant == Tenant(self._organization, company, None) else None
-        )
+    async def get(self, company: CompanyId, establishment: EstablishmentId) -> Establishment | None:
+        found = self._state.establishments.get(establishment)
+        return found if found is not None and found.tenant == self._tenant(company) else None
 
     @override
-    async def page(self, company: CompanyId, request: PageRequest) -> Page[Branch]:
-        mine = [
-            branch
-            for branch in self._state.branches.values()
-            if branch.tenant == Tenant(self._organization, company, None)
-        ]
-        return paged(mine, request, key=lambda branch: branch.id)
-
-
-@final
-class MemoryEmissionPoints(EmissionPoints):
-    def __init__(self, state: State, organization: OrganizationId) -> None:
-        self._state = state
-        self._organization = organization
+    async def by_code(self, company: CompanyId, code: Code) -> Establishment | None:
+        mine = (e for e in self._state.establishments.values() if e.tenant == self._tenant(company))
+        return next((e for e in mine if e.code == code), None)
 
     @override
-    async def add(self, point: EmissionPoint) -> bool:
-        if any(
-            other.branch == point.branch and other.code == point.code for other in self._state.points.values()
-        ):
-            return False
-        self._state.points[point.id] = point
-        return True
+    async def page(self, company: CompanyId, request: PageRequest) -> Page[Establishment]:
+        mine = [e for e in self._state.establishments.values() if e.tenant == self._tenant(company)]
+        return paged(mine, request, key=lambda establishment: establishment.id)
 
-    @override
-    async def get(self, company: CompanyId, point: EmissionPointId) -> EmissionPoint | None:
-        found = self._state.points.get(point)
-        return (
-            found if found is not None and found.tenant == Tenant(self._organization, company, None) else None
-        )
-
-    @override
-    async def page(self, company: CompanyId, branch: BranchId, request: PageRequest) -> Page[EmissionPoint]:
-        tenant = Tenant(self._organization, company, None)
-        mine = [p for p in self._state.points.values() if p.tenant == tenant and p.branch == branch]
-        return paged(mine, request, key=lambda point: point.id)
+    def _tenant(self, company: CompanyId) -> Tenant:
+        return Tenant(self._organization, company, None)
 
 
 @final
@@ -354,6 +324,7 @@ async def created(state: State, tax_id: TaxId = RNC, founder: Principal = FOUNDE
         founder,
         profile=profile(tax_id),
         legal_name=parse_legal_name("Duarte"),
+        time_zone=SANTO_DOMINGO,
     )
 
 
@@ -394,7 +365,11 @@ async def test_registering_a_company_needs_the_organization_s_admin_role(
 async def test_a_second_company_of_the_organization_keeps_the_organization_as_it_was(state: State) -> None:
     await created(state)
     await commands.create_company(
-        state.unit(LATER), FOUNDER, profile=profile(CEDULA), legal_name=parse_legal_name("Duarte II")
+        state.unit(LATER),
+        FOUNDER,
+        profile=profile(CEDULA),
+        legal_name=parse_legal_name("Duarte II"),
+        time_zone=SANTO_DOMINGO,
     )
     assert state.organizations[ORGANIZATION].created_at == NOW
     assert len(state.companies) == 2
@@ -422,10 +397,15 @@ async def test_any_one_of_a_company_s_tax_ids_that_is_taken_refuses_the_company(
             STRANGER,
             profile=profile(CEDULA, RNC),  # the cédula is free; the RNC is held
             legal_name=parse_legal_name("Duarte II"),
+            time_zone=SANTO_DOMINGO,
         )
     assert len(state.companies) == 1
     both = await commands.create_company(
-        state.unit(LATER), STRANGER, profile=profile(CEDULA, THEIRS), legal_name=parse_legal_name("Duarte II")
+        state.unit(LATER),
+        STRANGER,
+        profile=profile(CEDULA, THEIRS),
+        legal_name=parse_legal_name("Duarte II"),
+        time_zone=SANTO_DOMINGO,
     )
     assert both.profile.tax_ids == (CEDULA, THEIRS)
 
@@ -487,8 +467,11 @@ async def test_a_deactivated_company_is_announced_and_opens_nothing_more(state: 
         True,
     )
     with pytest.raises(CompanyInactiveError):
-        await commands.open_branch(
-            state.unit(LATER), company.id, commands.Opening(parse_code("SUC1"), parse_name("S")), actor=OWNER
+        await commands.open_establishment(
+            state.unit(LATER),
+            company.id,
+            commands.Opening(parse_code("SUC1"), parse_name("S"), None),
+            actor=OWNER,
         )
 
 
@@ -508,9 +491,17 @@ async def test_a_company_that_does_not_exist_is_not_found(state: State) -> None:
 async def test_a_new_company_and_its_owner_are_audited_as_created(state: State) -> None:
     company = await created(state)
     owner = state.memberships[company.id, OWNER]
+    (main,) = state.establishments.values()
     assert state.audited == [
         Audited("company.register", company.id, None, company, {}),
         Audited("membership.grant", owner.id, None, owner, {"member": OWNER, "role": "owner"}),
+        Audited(
+            "establishment.open",
+            main.id,
+            None,
+            main,
+            {"code": "MAIN", "time_zone": "America/Santo_Domingo"},
+        ),
     ]
 
 
@@ -524,7 +515,7 @@ async def test_a_change_of_a_company_is_audited_from_what_it_was_to_what_it_is(s
         actor=OWNER,
     )
     inactive = await commands.deactivate_company(state.unit(LATER), company.id, admits=anything, actor=OWNER)
-    assert state.audited[2:] == [
+    assert state.audited[3:] == [
         Audited("company.rename", company.id, company, renamed, {}),
         Audited("company.deactivate", company.id, renamed, inactive, {}),
     ]
@@ -541,16 +532,17 @@ async def test_what_changes_nothing_or_is_refused_is_not_audited(state: State) -
     await commands.grant_role(state.unit(), company.id, subject=VIEWER, role=Role.VIEWER, actor=OWNER)
     await commands.revoke_role(state.unit(), company.id, subject=VIEWER, actor=OWNER)
     await commands.revoke_role(state.unit(), company.id, subject=VIEWER, actor=OWNER)
-    opening = commands.Opening(parse_code("SUC1"), parse_name("A"))
-    await commands.open_branch(state.unit(), company.id, opening, actor=OWNER)
-    with pytest.raises(BranchCodeTakenError):
-        await commands.open_branch(state.unit(), company.id, opening, actor=OWNER)
+    opening = commands.Opening(parse_code("SUC1"), parse_name("A"), None)
+    await commands.open_establishment(state.unit(), company.id, opening, actor=OWNER)
+    with pytest.raises(EstablishmentCodeTakenError):
+        await commands.open_establishment(state.unit(), company.id, opening, actor=OWNER)
     assert [entry.action for entry in state.audited] == [
         "company.register",
         "membership.grant",
+        "establishment.open",
         "membership.grant",
         "membership.revoke",
-        "branch.open",
+        "establishment.open",
     ]
 
 
@@ -565,7 +557,7 @@ async def test_a_grant_and_a_revocation_are_audited_with_the_member_its_role_and
     await commands.revoke_role(state.unit(LATER), company.id, subject=VIEWER, actor=OWNER)
     revoked = state.memberships[company.id, VIEWER]
     member = first.membership.id
-    assert state.audited[2:] == [
+    assert state.audited[3:] == [
         Audited("membership.grant", member, None, first.membership, {"member": VIEWER, "role": "viewer"}),
         Audited(
             "membership.grant",
@@ -580,115 +572,98 @@ async def test_a_grant_and_a_revocation_are_audited_with_the_member_its_role_and
     ]
 
 
-async def test_an_opened_branch_and_emission_point_are_audited_with_their_codes(state: State) -> None:
+async def test_an_opened_establishment_is_audited_with_its_code_and_time_zone(state: State) -> None:
     company = await created(state)
-    branch = await commands.open_branch(
-        state.unit(), company.id, commands.Opening(parse_code("SUC1"), parse_name("Santiago")), actor=OWNER
-    )
-    point = await commands.open_emission_point(
+    opened = await commands.open_establishment(
         state.unit(),
         company.id,
-        branch.id,
-        commands.Opening(parse_code("001"), parse_name("Caja")),
+        commands.Opening(parse_code("SUC1"), parse_name("Santiago"), SANTO_DOMINGO),
         actor=OWNER,
     )
-    assert state.audited[2:] == [
-        Audited("branch.open", branch.id, None, branch, {"code": "SUC1"}),
-        Audited("emission_point.open", point.id, None, point, {"branch_id": str(branch.id), "code": "001"}),
-    ]
+    detail = {"code": "SUC1", "time_zone": "America/Santo_Domingo"}
+    assert state.audited[3:] == [Audited("establishment.open", opened.id, None, opened, detail)]
 
 
-# ── Branches and emission points ───────────────────────────────────────────────
+# ── Establishments ─────────────────────────────────────────────────────────────
 
 
-async def test_branches_and_emission_points_are_opened_once_per_code(state: State) -> None:
+async def test_a_new_company_has_a_main_establishment_in_the_time_zone_it_was_given(state: State) -> None:
     company = await created(state)
-    branch = await commands.open_branch(
-        state.unit(), company.id, commands.Opening(parse_code("SUC1"), parse_name("Santiago")), actor=OWNER
+    (main,) = state.establishments.values()
+    assert (main.tenant, main.code, main.name, main.time_zone) == (
+        company.tenant,
+        "MAIN",
+        "Main",
+        SANTO_DOMINGO,
     )
-    with pytest.raises(BranchCodeTakenError):
-        await commands.open_branch(
-            state.unit(), company.id, commands.Opening(parse_code("SUC1"), parse_name("Other")), actor=OWNER
-        )
-    point = await commands.open_emission_point(
+    detail = {"code": "MAIN", "time_zone": "America/Santo_Domingo"}
+    assert state.audited[2] == Audited("establishment.open", main.id, None, main, detail)
+
+
+async def test_establishments_are_opened_once_per_code_and_default_to_the_main_time_zone(
+    state: State,
+) -> None:
+    company = await created(state)
+    santiago = await commands.open_establishment(
         state.unit(),
         company.id,
-        branch.id,
-        commands.Opening(parse_code("001"), parse_name("Caja")),
+        commands.Opening(parse_code("SUC1"), parse_name("Santiago"), None),
         actor=OWNER,
     )
-    with pytest.raises(EmissionPointCodeTakenError):
-        await commands.open_emission_point(
-            state.unit(),
-            company.id,
-            branch.id,
-            commands.Opening(parse_code("001"), parse_name("Caja")),
-            actor=OWNER,
-        )
-    assert await queries.branch(state.unit(), company.id, branch.id) == branch
-    assert await queries.emission_point(state.unit(), company.id, branch.id, point.id) == point
-    assert (await queries.branches(state.unit(), company.id, PageRequest())).items == (branch,)
-    assert (await queries.emission_points(state.unit(), company.id, branch.id, PageRequest())).items == (
-        point,
+    assert santiago.time_zone == SANTO_DOMINGO
+    madrid = await commands.open_establishment(
+        state.unit(),
+        company.id,
+        commands.Opening(parse_code("SUC2"), parse_name("Madrid"), parse_time_zone("Europe/Madrid")),
+        actor=OWNER,
     )
+    assert madrid.time_zone == "Europe/Madrid"
+    for taken in ("SUC1", "MAIN"):
+        with pytest.raises(EstablishmentCodeTakenError):
+            await commands.open_establishment(
+                state.unit(),
+                company.id,
+                commands.Opening(parse_code(taken), parse_name("Other"), None),
+                actor=OWNER,
+            )
+    assert await queries.establishment(state.unit(), company.id, santiago.id) == santiago
+    listed = await queries.establishments(state.unit(), company.id, PageRequest())
+    assert {item.code for item in listed.items} == {"MAIN", "SUC1", "SUC2"}
 
 
-async def test_a_company_deactivated_while_a_branch_waits_for_its_lock_opens_nothing(state: State) -> None:
+async def test_a_company_deactivated_while_an_establishment_waits_for_its_lock_opens_nothing(
+    state: State,
+) -> None:
     company = await created(state)
-    branch = await commands.open_branch(
-        state.unit(), company.id, commands.Opening(parse_code("SUC1"), parse_name("A")), actor=OWNER
-    )
     state.while_waiting = deactivate(state, company)
     with pytest.raises(CompanyInactiveError):
-        await commands.open_branch(
-            state.unit(), company.id, commands.Opening(parse_code("SUC2"), parse_name("B")), actor=OWNER
-        )
-    with pytest.raises(CompanyInactiveError):
-        await commands.open_emission_point(
+        await commands.open_establishment(
             state.unit(),
             company.id,
-            branch.id,
-            commands.Opening(parse_code("001"), parse_name("Caja")),
+            commands.Opening(parse_code("SUC2"), parse_name("B"), None),
             actor=OWNER,
         )
-    assert (len(state.branches), len(state.points)) == (1, 0)
+    assert len(state.establishments) == 1
 
 
-async def test_an_emission_point_opens_in_a_branch_that_exists_only(state: State) -> None:
+async def test_an_establishment_of_another_company_is_not_found(state: State) -> None:
+    mine = await created(state)
+    theirs = await created(state, THEIRS, founder=STRANGER)
+    (theirs_main,) = (e for e in state.establishments.values() if e.tenant == theirs.tenant)
+    with pytest.raises(EstablishmentNotFoundError):
+        await queries.establishment(state.unit(), mine.id, theirs_main.id)
+
+
+async def test_a_company_without_its_main_establishment_has_no_default_time_zone(state: State) -> None:
     company = await created(state)
-    with pytest.raises(BranchNotFoundError):
-        await commands.open_emission_point(
+    state.establishments.clear()
+    with pytest.raises(EstablishmentNotFoundError):
+        await commands.open_establishment(
             state.unit(),
             company.id,
-            BranchId(new_id()),
-            commands.Opening(parse_code("001"), parse_name("Caja")),
+            commands.Opening(parse_code("SUC1"), parse_name("Santiago"), None),
             actor=OWNER,
         )
-    with pytest.raises(BranchNotFoundError):
-        await queries.emission_points(state.unit(), company.id, BranchId(new_id()), PageRequest())
-    with pytest.raises(BranchNotFoundError):
-        await queries.branch(state.unit(), company.id, BranchId(new_id()))
-
-
-async def test_an_emission_point_is_found_under_its_own_branch_only(state: State) -> None:
-    company = await created(state)
-    first = await commands.open_branch(
-        state.unit(), company.id, commands.Opening(parse_code("SUC1"), parse_name("A")), actor=OWNER
-    )
-    second = await commands.open_branch(
-        state.unit(), company.id, commands.Opening(parse_code("SUC2"), parse_name("B")), actor=OWNER
-    )
-    point = await commands.open_emission_point(
-        state.unit(),
-        company.id,
-        first.id,
-        commands.Opening(parse_code("001"), parse_name("Caja")),
-        actor=OWNER,
-    )
-    with pytest.raises(EmissionPointNotFoundError):
-        await queries.emission_point(state.unit(), company.id, second.id, point.id)
-    with pytest.raises(EmissionPointNotFoundError):
-        await queries.emission_point(state.unit(), company.id, first.id, EmissionPointId(new_id()))
 
 
 # ── Memberships ─────────────────────────────────────────────────────────────────
@@ -862,44 +837,28 @@ async def test_a_refused_actor_is_refused_whatever_version_it_names(state: State
 
 async def test_an_admin_demoted_while_its_opening_waits_for_the_company_opens_nothing(state: State) -> None:
     company = await created(state)
-    branch = await commands.open_branch(
-        state.unit(), company.id, commands.Opening(parse_code("SUC1"), parse_name("A")), actor=OWNER
-    )
     await with_an_admin(state, company)
     state.while_waiting = demote(state, company, ADMIN, Role.VIEWER)
     with pytest.raises(PermissionDeniedError):
-        await commands.open_branch(
-            state.unit(), company.id, commands.Opening(parse_code("SUC2"), parse_name("B")), actor=ADMIN
-        )
-    with pytest.raises(PermissionDeniedError):
-        await commands.open_emission_point(
+        await commands.open_establishment(
             state.unit(),
             company.id,
-            branch.id,
-            commands.Opening(parse_code("001"), parse_name("Caja")),
+            commands.Opening(parse_code("SUC2"), parse_name("B"), None),
             actor=ADMIN,
         )
-    assert (len(state.branches), len(state.points)) == (1, 0)
+    assert len(state.establishments) == 1
 
 
 async def test_establishments_open_for_an_actor_with_an_active_role_only(state: State) -> None:
     company = await created(state)
-    branch = await commands.open_branch(
-        state.unit(), company.id, commands.Opening(parse_code("SUC1"), parse_name("A")), actor=OWNER
-    )
     with pytest.raises(CompanyNotFoundError):
-        await commands.open_branch(
-            state.unit(), company.id, commands.Opening(parse_code("SUC2"), parse_name("B")), actor=VIEWER
-        )
-    with pytest.raises(CompanyNotFoundError):
-        await commands.open_emission_point(
+        await commands.open_establishment(
             state.unit(),
             company.id,
-            branch.id,
-            commands.Opening(parse_code("001"), parse_name("Caja")),
+            commands.Opening(parse_code("SUC2"), parse_name("B"), None),
             actor=VIEWER,
         )
-    assert (len(state.branches), len(state.points)) == (1, 0)
+    assert len(state.establishments) == 1
 
 
 async def test_a_deactivated_company_grants_no_role_but_still_revokes(state: State) -> None:
@@ -914,15 +873,16 @@ async def test_a_deactivated_company_grants_no_role_but_still_revokes(state: Sta
 
 async def test_another_organizations_unit_sees_nothing_of_the_company(state: State) -> None:
     company = await created(state)
-    branch = await commands.open_branch(
-        state.unit(), company.id, commands.Opening(parse_code("SUC1"), parse_name("A")), actor=OWNER
-    )
+    (main,) = state.establishments.values()
     outsider = state.unit(organization=STRANGER.organization)
     with pytest.raises(CompanyNotFoundError):
         await queries.company(outsider, company.id)
     with pytest.raises(CompanyNotFoundError):
-        await commands.open_branch(
-            outsider, company.id, commands.Opening(parse_code("SUC2"), parse_name("B")), actor=OWNER
+        await commands.open_establishment(
+            outsider,
+            company.id,
+            commands.Opening(parse_code("SUC2"), parse_name("B"), None),
+            actor=OWNER,
         )
     with pytest.raises(CompanyNotFoundError):
         await commands.grant_role(outsider, company.id, subject=VIEWER, role=Role.VIEWER, actor=OWNER)
@@ -930,11 +890,11 @@ async def test_another_organizations_unit_sees_nothing_of_the_company(state: Sta
         await commands.rename_company(
             outsider, company.id, legal_name=parse_legal_name("X"), admits=anything, actor=OWNER
         )
-    with pytest.raises(BranchNotFoundError):
-        await queries.branch(outsider, company.id, branch.id)
+    with pytest.raises(EstablishmentNotFoundError):
+        await queries.establishment(outsider, company.id, main.id)
     assert await queries.permissions_of(outsider, company.id, OWNER) == frozenset()
     assert (await queries.memberships(outsider, company.id, PageRequest())).items == ()
-    assert (await queries.branches(outsider, company.id, PageRequest())).items == ()
+    assert (await queries.establishments(outsider, company.id, PageRequest())).items == ()
 
 
 async def test_memberships_of_a_company_that_does_not_exist_are_not_found(state: State) -> None:

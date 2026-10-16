@@ -25,6 +25,8 @@ layout) and a Dominican pack that is closer to a spike than to a channel. `signe
 | One extension implementation per point makes modules fight over a hook | `feat(runtime): extension points are chained …` (ADR 0011) |
 | A public caller's `baggage` is carried to outbound calls | `fix(http): a public caller's baggage goes with its trace` |
 | `test_two_migrations_at_once_serialize` raced on alembic's process-global `op` | `test: serialize migrations through the database lock, not two threads` |
+| A company holds one tax id and no jurisdiction or currency; two organizations could register one taxpayer | `feat(identity): …` fiscal profile, qualified tax ids, the global `tax_registrations` registry |
+| Branches and emission points are Dominican shapes in identity | `feat(identity): establishments replace branches and emission points` (code, name, time zone; `MAIN` from registration; the company's regime gives its zone). Spec §6.3 listed establishments under the *company* RLS scope; they are under the *organization* scope like memberships and tax ids, because registering a company writes its `MAIN` in the unit that creates the company, before a company scope exists. The spec line is amended; flagged for the owner. |
 
 ## Recorded in the spec as limits of what is built
 

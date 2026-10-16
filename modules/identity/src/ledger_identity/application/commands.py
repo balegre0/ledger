@@ -4,24 +4,18 @@ from dataclasses import dataclass
 from typing import final
 lazy from collections.abc import Callable
 
-from ledger_identity.application.queries import branch
-from ledger_identity.domain.branches import Branch, EmissionPoint
+from ledger_identity.application.queries import main_establishment
 from ledger_identity.domain.company import Company
-from ledger_identity.domain.errors import (
-    BranchCodeTakenError,
-    EmissionPointCodeTakenError,
-    StaleVersionError,
-    TaxIdTakenError,
-)
+from ledger_identity.domain.errors import EstablishmentCodeTakenError, StaleVersionError, TaxIdTakenError
+from ledger_identity.domain.establishments import Establishment
 from ledger_identity.domain.membership import Actor, Roster, found, grant, revoke
 from ledger_identity.domain.organization import Organization, require_organization_admin
 from ledger_identity.domain.roles import COMPANIES_MANAGE
 from ledger_kernel.access import CompanyNotFoundError
 lazy from ledger_identity.application.ports import AuditAction, IdentityUnit
 lazy from ledger_identity.domain.company import FiscalProfile
-lazy from ledger_identity.domain.ids import BranchId
 lazy from ledger_identity.domain.membership import Membership
-lazy from ledger_identity.domain.text import Code, LegalName, Name
+lazy from ledger_identity.domain.text import Code, LegalName, Name, TimeZone
 lazy from ledger_kernel.access import Principal, Role, SubjectId
 lazy from ledger_kernel.ids import CompanyId
 
@@ -32,10 +26,14 @@ type Admits = Callable[[int], bool]
 @final
 @dataclass(frozen=True, slots=True)
 class Opening:
-    """What a branch or an emission point opens under: its code, unique where it opens, and its name."""
+    """What an establishment opens under: its code, unique in the company, its name and its time zone.
+
+    No time zone is the one of the company's ``MAIN`` establishment.
+    """
 
     code: Code
     name: Name
+    time_zone: TimeZone | None
 
 
 @final
@@ -48,9 +46,16 @@ class Granted:
 
 
 async def create_company(
-    unit: IdentityUnit, founder: Principal, *, profile: FiscalProfile, legal_name: LegalName
+    unit: IdentityUnit,
+    founder: Principal,
+    *,
+    profile: FiscalProfile,
+    legal_name: LegalName,
+    time_zone: TimeZone,
 ) -> Company:
     """Register a company of the founder's organization, with the founder as its first owner.
+
+    It is opened with its ``MAIN`` establishment, in ``time_zone``.
 
     The founder must be an administrator of the organization (``require_organization_admin``). Any one of the
     profile's tax ids that an active company holds refuses the registration (``TaxIdTakenError``).
@@ -64,10 +69,13 @@ async def create_company(
         raise TaxIdTakenError
     owner, granted = found(registered, founder, now=unit.now)
     await unit.memberships.put(owner)
+    main = Establishment.main(registered, time_zone=time_zone, now=unit.now)
+    _ = await unit.establishments.add(main)  # the first of a new company: its code cannot be taken
     unit.events.publish(created)
     unit.events.publish(granted)
     unit.audit.record("company.register", registered.id, before=None, after=registered)
     _audit_membership(unit, "membership.grant", None, owner)
+    _audit_establishment(unit, main)
     return registered
 
 
@@ -127,30 +135,28 @@ async def deactivate_company(
     return inactive
 
 
-async def open_branch(
+async def open_establishment(
     unit: IdentityUnit, company_id: CompanyId, opening: Opening, *, actor: SubjectId
-) -> Branch:
-    """Open a branch of the company under a code it does not use yet, as ``actor`` may."""
+) -> Establishment:
+    """Open an establishment of the company under a code it does not use yet, as ``actor`` may.
+
+    Without a time zone of its own it works in the one of the company's ``MAIN`` establishment.
+    """
     company = await _managed(unit, company_id, actor)
-    opened = Branch.open(company, code=opening.code, name=opening.name, now=unit.now)
-    if not await unit.branches.add(opened):
-        raise BranchCodeTakenError
-    unit.audit.record("branch.open", opened.id, before=None, after=opened, detail={"code": opened.code})
+    time_zone = opening.time_zone or (await main_establishment(unit, company_id)).time_zone
+    opened = Establishment.open(
+        company, code=opening.code, name=opening.name, time_zone=time_zone, now=unit.now
+    )
+    if not await unit.establishments.add(opened):
+        raise EstablishmentCodeTakenError
+    _audit_establishment(unit, opened)
     return opened
 
 
-async def open_emission_point(
-    unit: IdentityUnit, company_id: CompanyId, branch_id: BranchId, opening: Opening, *, actor: SubjectId
-) -> EmissionPoint:
-    """Open an emission point of one of the company's branches, under a code the branch does not use yet."""
-    company = await _managed(unit, company_id, actor)
-    within = await branch(unit, company_id, branch_id)
-    opened = EmissionPoint.open(company, within, code=opening.code, name=opening.name, now=unit.now)
-    if not await unit.emission_points.add(opened):
-        raise EmissionPointCodeTakenError
-    detail = {"branch_id": str(within.id), "code": opened.code}
-    unit.audit.record("emission_point.open", opened.id, before=None, after=opened, detail=detail)
-    return opened
+def _audit_establishment(unit: IdentityUnit, opened: Establishment) -> None:
+    """Record that ``opened`` was opened, naming its code and time zone."""
+    detail = {"code": opened.code, "time_zone": opened.time_zone}
+    unit.audit.record("establishment.open", opened.id, before=None, after=opened, detail=detail)
 
 
 async def _managed(unit: IdentityUnit, company_id: CompanyId, actor: SubjectId) -> Company:

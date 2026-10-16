@@ -5,10 +5,13 @@ from typing import final
 
 from ledger_identity.adapters.permissions import MembershipPermissions
 from ledger_platform.http import Idempotency, company_in_path
+lazy from ledger_identity.domain.text import TimeZone
+lazy from ledger_kernel.jurisdiction import Jurisdiction
 lazy from ledger_kernel.regimes import TaxIdSchemes
 lazy from ledger_platform.auth import PermissionSource
 lazy from ledger_platform.data import BoundDatabase
 lazy from ledger_platform.http import Authentication, Caller, InCompany
+lazy from ledger_platform.runtime.registries import Regimes
 
 
 @final
@@ -21,12 +24,27 @@ class ApiContext:
     caller: Caller
     in_company: InCompany
     idempotency: Idempotency
-    tax_ids: TaxIdSchemes
-    """Every installed regime's tax id schemes: a client's ``{scheme, value}`` is read with them."""
+    regimes: Regimes
+    """The installed regimes: their schemes read a client's ``{scheme, value}``, their zones default."""
+
+    @property
+    def tax_ids(self) -> TaxIdSchemes:
+        """Every installed regime's tax id schemes."""
+        return self.regimes.tax_id_schemes
+
+    def default_time_zone(self, jurisdiction: Jurisdiction) -> TimeZone | None:
+        """The zone the installed regime of ``jurisdiction`` runs its days in; none when no regime is of it.
+
+        A subdivision with its own regime is judged by it; any other falls back to its country's.
+        """
+        for key in (jurisdiction.subdivision, jurisdiction.country):
+            if key is not None and key.lower() in self.regimes:
+                return TimeZone(self.regimes.get(key.lower()).time_zone)
+        return None
 
     @classmethod
     def build(
-        cls, *, database: BoundDatabase, authentication: Authentication, tax_ids: TaxIdSchemes
+        cls, *, database: BoundDatabase, authentication: Authentication, regimes: Regimes
     ) -> ApiContext:
         """The context of the routes: the caller from the chassis, its access from identity's memberships."""
         caller = authentication.caller
@@ -40,5 +58,5 @@ class ApiContext:
             caller=caller,
             in_company=company_in_path(caller, permission_source),
             idempotency=Idempotency(),
-            tax_ids=tax_ids,
+            regimes=regimes,
         )

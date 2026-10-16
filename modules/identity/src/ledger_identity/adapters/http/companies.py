@@ -20,10 +20,10 @@ from ledger_identity.adapters.http.models import CompanyView, RegisteredCompany,
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import commands, queries
 from ledger_identity.domain.company import FiscalProfile
-from ledger_identity.domain.errors import DuplicateTaxIdError, StaleVersionError
+from ledger_identity.domain.errors import DuplicateTaxIdError, StaleVersionError, TimeZoneRequiredError
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN
 from ledger_identity.domain.roles import COMPANIES_MANAGE, COMPANIES_READ
-from ledger_identity.domain.text import parse_legal_name
+from ledger_identity.domain.text import parse_legal_name, parse_time_zone
 from ledger_kernel.jurisdiction import parse_jurisdiction
 from ledger_kernel.money import Currency
 from ledger_kernel.tax_ids import TaxIdCheck
@@ -106,8 +106,16 @@ def router(context: ApiContext) -> APIRouter:
         tax_ids = tuple(item.tax_id for item in read)
         if len(set(tax_ids)) != len(tax_ids):
             raise DuplicateTaxIdError
+        jurisdiction = parse_jurisdiction(body.jurisdiction.country, body.jurisdiction.subdivision)
+        time_zone = (
+            context.default_time_zone(jurisdiction)
+            if body.time_zone is None
+            else parse_time_zone(body.time_zone)
+        )
+        if time_zone is None:
+            raise TimeZoneRequiredError
         profile = FiscalProfile(
-            jurisdiction=parse_jurisdiction(body.jurisdiction.country, body.jurisdiction.subdivision),
+            jurisdiction=jurisdiction,
             functional_currency=Currency.of(body.functional_currency),
             tax_ids=tax_ids,
         )
@@ -122,7 +130,7 @@ def router(context: ApiContext) -> APIRouter:
 
             async def register() -> StoredResponse:
                 created = await commands.create_company(
-                    bind(unit), principal, profile=profile, legal_name=legal_name
+                    bind(unit), principal, profile=profile, legal_name=legal_name, time_zone=time_zone
                 )
                 return stored(HTTPStatus.CREATED, created, warnings)
 

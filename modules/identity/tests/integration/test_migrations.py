@@ -35,7 +35,7 @@ lazy from ledger_testing.postgres import WorkerDatabase
 
 S: Final = "identity"
 IDENTITY_TABLES: Final = frozenset(
-    {"organizations", "companies", "company_tax_ids", "memberships", "branches", "emission_points"}
+    {"organizations", "companies", "company_tax_ids", "memberships", "establishments"}
 )
 OUTSIDE_RLS: Final = frozenset({"tax_registrations"})
 """Identity's tables no tenant reads: the global registry of the tax ids active companies hold (§6.3)."""

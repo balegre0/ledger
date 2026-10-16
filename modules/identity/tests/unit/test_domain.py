@@ -9,16 +9,14 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from ledger_identity._manifest import MANIFEST
-from ledger_identity.domain.branches import Branch, EmissionPoint
 from ledger_identity.domain.company import Company, CompanyStatus, FiscalProfile
 from ledger_identity.domain.errors import (
-    BranchCodeTakenError,
-    BranchNotFoundError,
     CompanyInactiveError,
-    EmissionPointCodeTakenError,
-    EmissionPointNotFoundError,
+    EstablishmentCodeTakenError,
+    EstablishmentNotFoundError,
     InvalidCodeError,
     InvalidNameError,
+    InvalidTimeZoneError,
     LastOwnerError,
     MembershipNotFoundError,
     OrganizationNotFoundError,
@@ -26,6 +24,7 @@ from ledger_identity.domain.errors import (
     StaleVersionError,
     TaxIdTakenError,
 )
+from ledger_identity.domain.establishments import MAIN_CODE, MAIN_NAME, Establishment
 from ledger_identity.domain.membership import (
     Actor,
     MembershipStatus,
@@ -56,6 +55,7 @@ from ledger_identity.domain.text import (
     parse_code,
     parse_legal_name,
     parse_name,
+    parse_time_zone,
 )
 from ledger_identity.events import (
     CompanyDeactivated,
@@ -149,8 +149,8 @@ def test_a_name_that_cannot_be_shown_is_refused_without_being_echoed(text: str, 
 
 def test_other_names_say_which_field_and_have_their_own_limit() -> None:
     assert parse_name("Sucursal Santiago") == "Sucursal Santiago"
-    with pytest.raises(InvalidNameError, match=r"^branch_name is longer than 100 characters$"):
-        parse_name("x" * (MAX_NAME + 1), field="branch_name")
+    with pytest.raises(InvalidNameError, match=r"^establishment_name is longer than 100 characters$"):
+        parse_name("x" * (MAX_NAME + 1), field="establishment_name")
 
 
 @given(st.text(max_size=200))
@@ -319,37 +319,81 @@ def test_a_deactivated_company_says_so_and_changes_no_more() -> None:
         inactive.deactivate(now=LATER)
 
 
-# ── Branches and emission points ───────────────────────────────────────────────
+# ── Establishments ─────────────────────────────────────────────────────────────
+
+SANTO_DOMINGO: Final = parse_time_zone("America/Santo_Domingo")
 
 
-def test_a_branch_and_its_emission_points_belong_to_the_company() -> None:
+def test_an_establishment_belongs_to_the_company_and_keeps_its_time_zone() -> None:
     company = registered()
-    branch = Branch.open(company, code=parse_code("SUC1"), name=parse_name("Santiago"), now=NOW)
-    point = EmissionPoint.open(company, branch, code=parse_code("001"), name=parse_name("Caja 1"), now=NOW)
-    assert (branch.tenant, branch.code, branch.name, branch.created_at) == (
-        company.tenant,
-        "SUC1",
-        "Santiago",
-        NOW,
+    establishment = Establishment.open(
+        company, code=parse_code("SUC1"), name=parse_name("Santiago"), time_zone=SANTO_DOMINGO, now=NOW
     )
-    assert (point.tenant, point.branch, point.code) == (company.tenant, branch.id, "001")
+    assert (
+        establishment.tenant,
+        establishment.code,
+        establishment.name,
+        establishment.time_zone,
+        establishment.created_at,
+    ) == (company.tenant, "SUC1", "Santiago", "America/Santo_Domingo", NOW)
+    assert establishment.id.version == 7
+
+
+def test_every_company_gets_a_main_establishment_in_its_time_zone() -> None:
+    company = registered()
+    main = Establishment.main(company, time_zone=SANTO_DOMINGO, now=NOW)
+    assert (main.tenant, main.code, main.name, main.time_zone) == (
+        company.tenant,
+        MAIN_CODE,
+        MAIN_NAME,
+        SANTO_DOMINGO,
+    )
+    assert (MAIN_CODE, MAIN_NAME) == ("MAIN", "Main")
 
 
 def test_nothing_opens_in_a_deactivated_company() -> None:
-    company = registered()
-    branch = Branch.open(company, code=parse_code("SUC1"), name=parse_name("Santiago"), now=NOW)
-    inactive = company.deactivate(now=LATER)[0]
+    inactive = registered().deactivate(now=LATER)[0]
     with pytest.raises(CompanyInactiveError):
-        Branch.open(inactive, code=parse_code("SUC2"), name=parse_name("Bonao"), now=LATER)
-    with pytest.raises(CompanyInactiveError):
-        EmissionPoint.open(inactive, branch, code=parse_code("002"), name=parse_name("Caja 2"), now=LATER)
+        Establishment.open(
+            inactive, code=parse_code("SUC2"), name=parse_name("Bonao"), time_zone=SANTO_DOMINGO, now=LATER
+        )
 
 
-def test_an_emission_point_cannot_open_in_a_branch_of_another_company() -> None:
-    company, other = registered(), registered()
-    branch = Branch.open(other, code=parse_code("SUC1"), name=parse_name("Santiago"), now=NOW)
-    with pytest.raises(BranchNotFoundError):
-        EmissionPoint.open(company, branch, code=parse_code("001"), name=parse_name("Caja 1"), now=NOW)
+@pytest.mark.parametrize("text", ["America/Santo_Domingo", "UTC", "Europe/Madrid", "Etc/GMT+5"])
+def test_a_time_zone_is_the_name_of_an_iana_zone(text: str) -> None:
+    assert parse_time_zone(text) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "Santo Domingo",
+        "America/Nowhere",
+        "../etc/passwd",
+        "/etc/passwd",
+        "UTC\x00",
+        "America/" + "x" * 80,
+        "America/Santo_Domingo ",
+        "América/Santo_Domingo",
+    ],
+    ids=[
+        "empty",
+        "space",
+        "unknown",
+        "relative-path",
+        "absolute-path",
+        "nul",
+        "too-long",
+        "trailing-space",
+        "non-ascii",
+    ],
+)
+def test_anything_else_is_no_time_zone_and_is_not_echoed(text: str) -> None:
+    with pytest.raises(InvalidTimeZoneError) as caught:
+        parse_time_zone(text)
+    assert (caught.value.kind, caught.value.code) == (ErrorKind.INVALID, "invalid_time_zone")
+    assert str(caught.value) == "a time zone is the name of an IANA zone, such as America/Santo_Domingo"
 
 
 # ── Memberships ─────────────────────────────────────────────────────────────────
@@ -639,16 +683,10 @@ SOME_ID: Final = UUID("01a134e5-8363-74c7-9f6c-aa195c5ba397")
             f"company {SOME_ID} was not found",
         ),
         (
-            BranchNotFoundError(SOME_ID),
+            EstablishmentNotFoundError(SOME_ID),
             ErrorKind.NOT_FOUND,
-            "branch_not_found",
-            f"branch {SOME_ID} was not found",
-        ),
-        (
-            EmissionPointNotFoundError(SOME_ID),
-            ErrorKind.NOT_FOUND,
-            "emission_point_not_found",
-            f"emission point {SOME_ID} was not found",
+            "establishment_not_found",
+            f"establishment {SOME_ID} was not found",
         ),
         (
             TaxIdTakenError(),
@@ -657,16 +695,10 @@ SOME_ID: Final = UUID("01a134e5-8363-74c7-9f6c-aa195c5ba397")
             "an active company already holds this tax id",
         ),
         (
-            BranchCodeTakenError(),
+            EstablishmentCodeTakenError(),
             ErrorKind.CONFLICT,
-            "branch_code_taken",
-            "the company already has a branch with this code",
-        ),
-        (
-            EmissionPointCodeTakenError(),
-            ErrorKind.CONFLICT,
-            "emission_point_code_taken",
-            "the branch already has an emission point with this code",
+            "establishment_code_taken",
+            "the company already has an establishment with this code",
         ),
         (
             StaleVersionError(SOME_ID),

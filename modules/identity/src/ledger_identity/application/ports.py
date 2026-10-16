@@ -13,11 +13,12 @@ lazy from collections.abc import Mapping
 lazy from datetime import datetime
 lazy from uuid import UUID
 
-lazy from ledger_identity.domain.branches import Branch, EmissionPoint
 lazy from ledger_identity.domain.company import Company
-lazy from ledger_identity.domain.ids import BranchId, EmissionPointId
+lazy from ledger_identity.domain.establishments import Establishment
+lazy from ledger_identity.domain.ids import EstablishmentId
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_identity.domain.organization import Organization
+lazy from ledger_identity.domain.text import Code
 lazy from ledger_identity.events import IdentityEvent
 lazy from ledger_kernel.access import SubjectId
 lazy from ledger_kernel.ids import CompanyId, OrganizationId
@@ -51,7 +52,7 @@ class Companies(Protocol, metaclass=ABCMeta):
     async def locked(self, company: CompanyId) -> Company | None:
         """The company, locked until the unit ends.
 
-        Whatever is decided on it (its memberships, its being active, a new branch or emission point) waits
+        Whatever is decided on it (its memberships, its being active, a new establishment) waits
         for the other units that lock it.
         """
 
@@ -64,36 +65,24 @@ class Companies(Protocol, metaclass=ABCMeta):
         """The companies of the unit's organization in which ``subject`` holds an active role, in id order."""
 
 
-class Branches(Protocol, metaclass=ABCMeta):
-    """The branches of the unit's company."""
+class Establishments(Protocol, metaclass=ABCMeta):
+    """The establishments of the unit's company."""
 
     @abstractmethod
-    async def add(self, branch: Branch) -> bool:
-        """Keep a new branch; false when its company has a branch with its code."""
+    async def add(self, establishment: Establishment) -> bool:
+        """Keep a new establishment; false when its company has one with its code."""
 
     @abstractmethod
-    async def get(self, company: CompanyId, branch: BranchId) -> Branch | None:
-        """The branch of ``company``, or ``None``."""
+    async def get(self, company: CompanyId, establishment: EstablishmentId) -> Establishment | None:
+        """The establishment of ``company``, or ``None``."""
 
     @abstractmethod
-    async def page(self, company: CompanyId, request: PageRequest) -> Page[Branch]:
-        """The branches of ``company``, in id order."""
-
-
-class EmissionPoints(Protocol, metaclass=ABCMeta):
-    """The emission points of the unit's company."""
+    async def by_code(self, company: CompanyId, code: Code) -> Establishment | None:
+        """The establishment of ``company`` known by ``code``, or ``None``."""
 
     @abstractmethod
-    async def add(self, point: EmissionPoint) -> bool:
-        """Keep a new emission point; false when its branch has one with its code."""
-
-    @abstractmethod
-    async def get(self, company: CompanyId, point: EmissionPointId) -> EmissionPoint | None:
-        """The emission point of ``company``, or ``None``."""
-
-    @abstractmethod
-    async def page(self, company: CompanyId, branch: BranchId, request: PageRequest) -> Page[EmissionPoint]:
-        """The emission points of ``branch``, in id order."""
+    async def page(self, company: CompanyId, request: PageRequest) -> Page[Establishment]:
+        """The establishments of ``company``, in id order."""
 
 
 class Memberships(Protocol, metaclass=ABCMeta):
@@ -130,8 +119,7 @@ type AuditAction = Literal[
     "company.deactivate",
     "membership.grant",
     "membership.revoke",
-    "branch.open",
-    "emission_point.open",
+    "establishment.open",
 ]
 """What a use case records it did (§10: identity's changes are audited); the part before the dot names the
 kind of subject."""
@@ -166,8 +154,7 @@ class IdentityUnit:
 
     organizations: Organizations
     companies: Companies
-    branches: Branches
-    emission_points: EmissionPoints
+    establishments: Establishments
     memberships: Memberships
     events: Events
     audit: Audit

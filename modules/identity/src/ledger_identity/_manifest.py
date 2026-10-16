@@ -12,7 +12,7 @@ MANIFEST: Final = PackageManifest.model_validate(
         "package": {
             "name": "identity",
             "kind": "module",
-            "summary": "Organizations, companies, their branches and emission points, memberships and roles.",
+            "summary": "Organizations, companies, their establishments, memberships and roles.",
             "owners": [
                 "@balegre0",
             ],
@@ -49,7 +49,7 @@ MANIFEST: Final = PackageManifest.model_validate(
         "permissions": [
             {
                 "code": "identity.companies.read",
-                "summary": "Read the company, its branches and its emission points.",
+                "summary": "Read the company and its establishments.",
                 "roles": [
                     "owner",
                     "admin",
@@ -60,7 +60,7 @@ MANIFEST: Final = PackageManifest.model_validate(
             },
             {
                 "code": "identity.companies.manage",
-                "summary": "Change or deactivate the company; open branches and emission points.",
+                "summary": "Change or deactivate the company; open establishments.",
                 "roles": [
                     "owner",
                     "admin",

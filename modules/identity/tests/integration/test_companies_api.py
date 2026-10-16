@@ -314,6 +314,46 @@ async def test_a_company_that_cannot_be_registered_is_refused(
     assert (response.status_code, document(response)["code"]) == (422, code)
 
 
+async def test_a_company_is_registered_in_its_regime_s_time_zone_unless_it_names_one(
+    client: httpx.AsyncClient, owner: TestPrincipal
+) -> None:
+    by_default = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("k-1"))
+    named = await client.post(
+        "/v1/companies",
+        json=body({"scheme": "do.rnc", "value": "130000012"}, time_zone="Europe/Madrid"),
+        headers=owner.posting("k-2"),
+    )
+    zones: list[tuple[str, str]] = []
+    for made in (by_default, named):
+        path = f"/v1/companies/{document(made)['id']}/establishments"
+        (main,) = page(await client.get(path, headers=owner.bearer()))["items"]
+        zones.append((str(main["code"]), str(main["time_zone"])))
+    assert zones == [("MAIN", "America/Santo_Domingo"), ("MAIN", "Europe/Madrid")]
+
+
+async def test_a_company_of_a_country_without_a_regime_must_name_its_time_zone(
+    client: httpx.AsyncClient, owner: TestPrincipal
+) -> None:
+    abroad = body({"scheme": "do.rnc", "value": "101-85004-3"}, jurisdiction={"country": "ES"})
+    refused = await client.post("/v1/companies", json=abroad, headers=owner.posting("k-1"))
+    assert (refused.status_code, document(refused)["code"]) == (422, "time_zone_required")
+    accepted = await client.post(
+        "/v1/companies", json=abroad | {"time_zone": "Europe/Madrid"}, headers=owner.posting("k-2")
+    )
+    assert accepted.status_code == 201
+
+
+@pytest.mark.parametrize("zone", ["Mars/Olympus", "../etc/passwd", "", "x" * 65])
+async def test_a_company_s_time_zone_that_is_no_zone_is_refused(
+    client: httpx.AsyncClient, owner: TestPrincipal, zone: str
+) -> None:
+    refused = await client.post(
+        "/v1/companies", json=DUARTE | {"time_zone": zone}, headers=owner.posting("k-1")
+    )
+    assert refused.status_code == 422
+    assert document(refused)["code"] in {"invalid_time_zone", "invalid_request"}
+
+
 async def test_a_check_digit_mismatch_is_registered_as_dgii_issued_it(
     client: httpx.AsyncClient, owner: TestPrincipal
 ) -> None:

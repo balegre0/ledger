@@ -981,9 +981,10 @@ pooled connection has seen the setting, and `''::uuid` would raise:
 USING (organization_id = (SELECT NULLIF(current_setting('ledger.organization_id', true), '')::uuid)
    AND company_id      = (SELECT NULLIF(current_setting('ledger.company_id', true), '')::uuid)
    AND mode            = (SELECT NULLIF(current_setting('ledger.mode', true), '')))
--- scope "company": organization_id, company_id; a company's rows shared by both modes (establishments, branches)
--- scope "organization": organization_id only (organizations, companies, memberships); visible to the
---   organization's transactions and to those of its companies
+-- scope "company": organization_id, company_id; a company's rows shared by both modes
+-- scope "organization": organization_id only (organizations, companies, tax ids, memberships, establishments);
+--   visible to the organization's transactions and to those of its companies. A company's establishments are
+--   here because registering a company writes its `MAIN` one in the same unit, before any company scope exists
 -- scope "moded_organization": organization_id + mode (API clients, organization-level idempotency keys)
 ```
 

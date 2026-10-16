@@ -14,9 +14,9 @@ from ledger_kernel.access import Role, parse_permission
 lazy from ledger_kernel.access import Permission
 
 COMPANIES_READ: Final = parse_permission("identity.companies.read")
-"""Read the company, its branches and its emission points."""
+"""Read the company and its establishments."""
 COMPANIES_MANAGE: Final = parse_permission("identity.companies.manage")
-"""Change or deactivate the company; open branches and emission points."""
+"""Change or deactivate the company; open establishments."""
 MEMBERSHIPS_READ: Final = parse_permission("identity.memberships.read")
 """See who holds which role in the company."""
 MEMBERSHIPS_MANAGE: Final = parse_permission("identity.memberships.manage")

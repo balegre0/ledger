@@ -1,6 +1,6 @@
 # ledger-identity
 
-Organizations, companies, their branches and emission points, memberships and roles (spec §7.1, §7.7).
+Organizations, companies, their establishments, memberships and roles (spec §7.1, §7.7).
 
 - Owns schema `identity` (roles `identity_owner`, `identity_rw`, `identity_purge`), id prefixes `org`, `cmp`,
   `mbr`, the `identity.*` permissions (granted by its role table, `domain/roles.py`) and events.

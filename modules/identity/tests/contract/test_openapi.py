@@ -79,7 +79,7 @@ def test_the_document_is_openapi_3_1_and_every_post_takes_an_idempotency_key_in_
     parsed = DOCUMENT.validate_json(document())
     assert parsed["openapi"].startswith("3.1.")
     posts = [operations["post"] for operations in parsed["paths"].values() if "post" in operations]
-    assert len(posts) == 4
+    assert len(posts) == 3
     for post in posts:
         required = post.get("parameters", [])
         assert {"name": "Idempotency-Key", "in": "header", "required": True} in required

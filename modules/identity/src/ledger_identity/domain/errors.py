@@ -22,6 +22,26 @@ class InvalidNameError(InvalidInputError):
         super().__init__(f"{field} {problem}")
 
 
+class InvalidTimeZoneError(InvalidInputError):
+    """Text that is not the name of an IANA time zone."""
+
+    code: ClassVar[str] = "invalid_time_zone"
+
+    def __init__(self) -> None:
+        super().__init__("a time zone is the name of an IANA zone, such as America/Santo_Domingo")
+
+
+class TimeZoneRequiredError(InvalidInputError):
+    """A company of a jurisdiction no regime is installed for, registered without the zone its days run in."""
+
+    code: ClassVar[str] = "time_zone_required"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "a time zone is required: no installed regime says where this jurisdiction's days run"
+        )
+
+
 class InvalidCodeError(InvalidInputError):
     """A code that is not 1 to 10 upper-case ASCII letters and digits."""
 
@@ -40,22 +60,13 @@ class OrganizationNotFoundError(NotFoundError):
         super().__init__(f"organization {organization} has no company yet")
 
 
-class BranchNotFoundError(NotFoundError):
-    """No branch by this id in the company."""
+class EstablishmentNotFoundError(NotFoundError):
+    """No establishment by this id in the company."""
 
-    code: ClassVar[str] = "branch_not_found"
+    code: ClassVar[str] = "establishment_not_found"
 
-    def __init__(self, branch: UUID) -> None:
-        super().__init__(f"branch {branch} was not found")
-
-
-class EmissionPointNotFoundError(NotFoundError):
-    """No emission point by this id in the branch."""
-
-    code: ClassVar[str] = "emission_point_not_found"
-
-    def __init__(self, point: UUID) -> None:
-        super().__init__(f"emission point {point} was not found")
+    def __init__(self, establishment: UUID) -> None:
+        super().__init__(f"establishment {establishment} was not found")
 
 
 class MembershipNotFoundError(NotFoundError):
@@ -88,22 +99,13 @@ class DuplicateTaxIdError(InvalidInputError):
         super().__init__("a company lists each of its tax ids once")
 
 
-class BranchCodeTakenError(ConflictError):
-    """The company already has a branch with this code."""
+class EstablishmentCodeTakenError(ConflictError):
+    """The company already has an establishment with this code."""
 
-    code: ClassVar[str] = "branch_code_taken"
-
-    def __init__(self) -> None:
-        super().__init__("the company already has a branch with this code")
-
-
-class EmissionPointCodeTakenError(ConflictError):
-    """The branch already has an emission point with this code."""
-
-    code: ClassVar[str] = "emission_point_code_taken"
+    code: ClassVar[str] = "establishment_code_taken"
 
     def __init__(self) -> None:
-        super().__init__("the branch already has an emission point with this code")
+        super().__init__("the company already has an establishment with this code")
 
 
 class CompanyInactiveError(ConflictError):

@@ -8,15 +8,18 @@ letters and digits (``001``, ``SUC1``). A refusal says which field and what is w
 import re
 import unicodedata
 from typing import Final, NewType
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from ledger_identity.domain.errors import InvalidCodeError, InvalidNameError
+from ledger_identity.domain.errors import InvalidCodeError, InvalidNameError, InvalidTimeZoneError
 
 LegalName = NewType("LegalName", str)
 """A company's registered name, as its tax authority knows it."""
 Name = NewType("Name", str)
-"""The name of a branch or an emission point."""
+"""The name of an establishment."""
 Code = NewType("Code", str)
-"""A short code of a branch or an emission point, unique where it lives."""
+"""A short code of an establishment, unique in its company."""
+TimeZone = NewType("TimeZone", str)
+"""The name of an IANA time zone (``America/Santo_Domingo``): where an establishment's days begin and end."""
 
 MAX_LEGAL_NAME: Final = 300
 """Generic (§7.1): a channel enforces its own, shorter limit (an e-CF's ``RazonSocialEmisor`` is 150)."""
@@ -24,6 +27,8 @@ MAX_NAME: Final = 100
 MAX_CODE: Final = 10
 """The message of ``InvalidCodeError`` spells this limit as a literal: its test pins the two together."""
 _CODE: Final = re.compile(rf"[A-Z0-9]{{1,{MAX_CODE}}}", re.ASCII)
+_TIME_ZONE: Final = re.compile(r"[A-Za-z0-9_+/-]{1,64}", re.ASCII)
+"""What an IANA name is made of: no space, dot or NUL, so that no name can reach beyond the zone database."""
 _INVISIBLE: Final = "C"
 """Unicode's "other" categories: controls, formats (zero-width joiners), surrogates, unassigned."""
 
@@ -45,7 +50,7 @@ def parse_legal_name(text: str) -> LegalName:
 
 
 def parse_name(text: str, *, field: str = "name") -> Name:
-    """The name of a branch or an emission point; ``field`` is how a refusal names it."""
+    """The name of an establishment; ``field`` is how a refusal names it."""
     return Name(_cleaned(field, text, MAX_NAME))
 
 
@@ -54,3 +59,14 @@ def parse_code(text: str) -> Code:
     if _CODE.fullmatch(text) is None:
         raise InvalidCodeError
     return Code(text)
+
+
+def parse_time_zone(text: str) -> TimeZone:
+    """The IANA zone ``text`` names; ``InvalidTimeZoneError`` for anything else, which it never repeats."""
+    if _TIME_ZONE.fullmatch(text) is None:
+        raise InvalidTimeZoneError
+    try:
+        ZoneInfo(text)
+    except (ZoneInfoNotFoundError, ValueError) as error:
+        raise InvalidTimeZoneError from error
+    return TimeZone(text)
