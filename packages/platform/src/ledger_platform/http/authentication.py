@@ -16,6 +16,7 @@ lazy from prometheus_client import CollectorRegistry
 from ledger_platform.auth.keys import HttpKeys, PublishedKeys
 from ledger_platform.auth.tokens import TokenPolicy, TokenSettingsMissingError, TokenVerifier
 from ledger_platform.http.deps import Verifier, authenticated
+from ledger_platform.http.rate import RateLimiter
 lazy from ledger_kernel.access import Principal
 lazy from ledger_platform.config.settings import Settings
 lazy from ledger_platform.http.deps import Caller
@@ -58,7 +59,8 @@ class Authentication:
         policy = TokenPolicy.of_settings(settings)
         keys = HttpKeys()
         verifier = TokenVerifier(policy, keys=PublishedKeys(policy, fetch=keys, registry=registry))
-        return cls(authenticated(verifier), keys)
+        limiter = RateLimiter(rate=settings.rate_limit_per_second, burst=settings.rate_limit_burst)
+        return cls(authenticated(verifier, limiter), keys)
 
     def resources(self) -> tuple[AbstractAsyncContextManager[object], ...]:
         """What the app opens while it runs: the client that fetches the provider's keys, if any."""

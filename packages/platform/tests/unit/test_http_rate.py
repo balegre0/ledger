@@ -1,0 +1,188 @@
+"""The in-process rate limit (§10): GCRA per credential, with an injected clock (no test waits)."""
+
+from contextlib import asynccontextmanager
+from typing import Annotated, Final, final, override
+lazy from collections.abc import AsyncGenerator
+
+import httpx
+import pytest
+from fastapi import APIRouter, Depends
+from opentelemetry.sdk.trace import TracerProvider
+from prometheus_client import CollectorRegistry
+lazy from fastapi import FastAPI
+
+from ledger_kernel.access import Principal, SubjectId
+from ledger_platform.auth.providers.zitadel import organization_of
+from ledger_platform.config.options import InvalidOptionError
+from ledger_platform.http.app import ApiInfo, Observability, create_app
+from ledger_platform.http.deps import Verifier, authenticated
+from ledger_platform.http.problems import Problem
+from ledger_platform.http.rate import RateLimitedError, RateLimiter
+from ledger_platform.observability.health import Health
+
+KEY: Final = "org:subject"
+
+
+@final
+class Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def limiter_of(clock: Clock, *, rate: float = 2.0, burst: int = 3, keys: int = 100) -> RateLimiter:
+    return RateLimiter(rate=rate, burst=burst, clock=clock, max_keys=keys)
+
+
+def test_a_credential_may_burst_and_is_then_held_to_the_rate() -> None:
+    clock = Clock()
+    limiter = limiter_of(clock)  # 2 per second, a burst of 3
+    assert [limiter.wait(KEY) for _ in range(3)] == [0.0, 0.0, 0.0]
+    assert limiter.wait(KEY) == pytest.approx(0.5)  # the fourth waits one interval (1 / 2 s)
+    clock.now += 0.5
+    assert limiter.wait(KEY) == 0.0  # an interval later, one more is allowed
+    assert limiter.wait(KEY) == pytest.approx(0.5)
+
+
+def test_a_refused_request_does_not_use_up_the_allowance() -> None:
+    clock = Clock()
+    limiter = limiter_of(clock)
+    for _ in range(3):
+        limiter.wait(KEY)
+    assert limiter.wait(KEY) > 0
+    assert limiter.wait(KEY) == pytest.approx(0.5)  # asking again earns no further delay
+    clock.now += 0.5
+    assert limiter.wait(KEY) == 0.0
+
+
+def test_an_idle_credential_has_its_whole_burst_back() -> None:
+    clock = Clock()
+    limiter = limiter_of(clock)
+    for _ in range(3):
+        limiter.wait(KEY)
+    clock.now += 60
+    assert [limiter.wait(KEY) for _ in range(3)] == [0.0, 0.0, 0.0]
+    assert limiter.wait(KEY) > 0
+
+
+def test_credentials_do_not_share_an_allowance() -> None:
+    clock = Clock()
+    limiter = limiter_of(clock)
+    for _ in range(3):
+        limiter.wait("a")
+    assert limiter.wait("a") > 0
+    assert limiter.wait("b") == 0.0
+
+
+def test_the_credentials_it_remembers_are_bounded_and_idle_ones_go_first() -> None:
+    clock = Clock()
+    limiter = limiter_of(clock, keys=3)
+    for key in ("a", "b", "c"):
+        limiter.wait(key)
+    clock.now += 60  # a, b and c are idle: forgotten when room is needed
+    limiter.wait("d")
+    assert limiter.remembered() == 1
+
+
+def test_when_every_credential_is_active_the_oldest_is_forgotten() -> None:
+    clock = Clock()
+    limiter = limiter_of(clock, rate=1.0, burst=1, keys=2)
+    for key in ("a", "b", "c"):
+        limiter.wait(key)
+    assert limiter.remembered() == 2
+    assert limiter.wait("a") == 0.0  # forgotten, so it starts afresh
+    assert limiter.wait("c") > 0  # still held
+
+
+@pytest.mark.parametrize(
+    ("rate", "burst", "keys", "option"),
+    [(0.0, 1, 1, "rate"), (float("inf"), 1, 1, "rate"), (1.0, 0, 1, "burst"), (1.0, 1, 0, "max_keys")],
+)
+def test_options_that_cannot_work_are_refused(rate: float, burst: int, keys: int, option: str) -> None:
+    with pytest.raises(InvalidOptionError) as caught:
+        RateLimiter(rate=rate, burst=burst, max_keys=keys)
+    assert caught.value.component == "rate limit"
+    assert option in str(caught.value)
+
+
+def test_the_refusal_says_when_to_come_back_in_whole_seconds() -> None:
+    assert RateLimitedError(0.2).retry_after == 1
+    assert RateLimitedError(1.0).retry_after == 1
+    assert RateLimitedError(1.01).retry_after == 2
+    assert RateLimitedError(0.2).code == "rate_limited"
+
+
+@final
+class ByToken(Verifier):
+    """Proves a token to the subject it spells."""
+
+    @override
+    async def verify(self, token: str) -> Principal:
+        return Principal(
+            subject=SubjectId(token), organization=organization_of("1001"), provider_organization="1001"
+        )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+    del app
+    yield
+
+
+def guarded_app(limiter: RateLimiter | None) -> FastAPI:
+    caller = authenticated(ByToken(), limiter)
+    router = APIRouter()
+
+    @router.get("/me")
+    async def me(principal: Annotated[Principal, Depends(caller)]) -> dict[str, str]:
+        return {"subject": principal.subject}
+
+    @router.get("/slow-down")
+    async def slow_down() -> None:
+        raise RateLimitedError(2.5)
+
+    observability = Observability(
+        health=Health(), registry=CollectorRegistry(), tracer_provider=TracerProvider()
+    )
+    return create_app(
+        info=ApiInfo(title="t", version="1"), observability=observability, lifespan=lifespan, routers=[router]
+    )
+
+
+async def get_as(app: FastAPI, subject: str, path: str = "/me") -> httpx.Response:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        return await client.get(path, headers={"Authorization": f"Bearer {subject}"})
+
+
+async def test_a_caller_over_its_rate_is_refused_after_it_is_proven_and_others_are_not() -> None:
+    app = guarded_app(limiter_of(Clock(), rate=1.0, burst=2))
+    first = [(await get_as(app, "s1")).status_code for _ in range(2)]
+    over = await get_as(app, "s1")
+    other = await get_as(app, "s2")
+    assert (first, over.status_code, other.status_code) == ([200, 200], 429, 200)
+    assert over.headers["retry-after"] == "1"
+    problem = Problem.model_validate_json(over.content)
+    assert (problem.code, problem.status) == ("rate_limited", 429)
+
+
+async def test_an_unproven_caller_is_refused_401_and_never_counted() -> None:
+    limiter = limiter_of(Clock(), rate=1.0, burst=1)
+    app = guarded_app(limiter)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/me")
+    assert response.status_code == 401
+    assert limiter.remembered() == 0
+
+
+async def test_an_app_without_a_limiter_does_not_limit() -> None:
+    app = guarded_app(None)
+    assert {(await get_as(app, "s1")).status_code for _ in range(20)} == {200}
+
+
+async def test_a_refusal_to_wait_names_whole_seconds_in_retry_after() -> None:
+    response = await get_as(guarded_app(None), "s1", "/slow-down")
+    assert (response.status_code, response.headers["retry-after"]) == (429, "3")

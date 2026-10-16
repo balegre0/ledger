@@ -54,6 +54,7 @@ def test_settings_need_only_the_database_and_the_environment(monkeypatch: pytest
     assert settings.http_host == "127.0.0.1"  # a run on a host binds loopback; the image says otherwise
     assert (settings.token_issuer, settings.token_audience, settings.token_jwks_url) == (None, None, None)
     assert (settings.token_algorithms, settings.token_leeway_seconds) == (frozenset({"RS256"}), 60)
+    assert (settings.rate_limit_per_second, settings.rate_limit_burst) == (50.0, 100)
 
 
 def test_settings_come_from_ledger_environment_variables(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -257,6 +258,24 @@ def test_the_leeway_is_at_most_five_minutes(monkeypatch: pytest.MonkeyPatch, lee
     with pytest.raises(ValidationError) as caught:
         Settings()
     assert problems(caught.value) == {"token_leeway_seconds"}
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "field"),
+    [
+        ("LEDGER_RATE_LIMIT_PER_SECOND", "0", "rate_limit_per_second"),
+        ("LEDGER_RATE_LIMIT_PER_SECOND", "100001", "rate_limit_per_second"),
+        ("LEDGER_RATE_LIMIT_BURST", "0", "rate_limit_burst"),
+        ("LEDGER_RATE_LIMIT_BURST", "100001", "rate_limit_burst"),
+    ],
+)
+def test_the_rate_limit_must_be_a_positive_rate_and_a_burst_of_at_least_one(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str, field: str
+) -> None:
+    environment(monkeypatch, REQUIRED | {name: value})
+    with pytest.raises(ValidationError) as caught:
+        Settings()
+    assert problems(caught.value) == {field}
 
 
 def test_listen_url_is_the_direct_url_in_libpq_form(monkeypatch: pytest.MonkeyPatch) -> None:

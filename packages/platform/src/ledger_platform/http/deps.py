@@ -52,9 +52,11 @@ from ledger_platform.auth.access import CompanyAccess
 from ledger_platform.auth.tokens import MissingTokenError
 from ledger_platform.data.audit import Actor, acting_as
 from ledger_platform.http.problems import current_request_id
+from ledger_platform.http.rate import RateLimitedError
 from ledger_platform.http.request_fields import remember
 lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_platform.auth.access import PermissionSource
+lazy from ledger_platform.http.rate import RateLimiter
 
 COMPANY_HEADER: Final = "Ledger-Company"
 IF_MATCH: Final = "If-Match"
@@ -133,8 +135,12 @@ def _bound(request: Request, **fields: str) -> Generator[None]:
         yield
 
 
-def authenticated(verifier: Verifier) -> Caller:
-    """The dependency that gives a route its caller, proven by the request's bearer token."""
+def authenticated(verifier: Verifier, limiter: RateLimiter | None = None) -> Caller:
+    """The dependency that gives a route its caller, proven by the request's bearer token.
+
+    With a ``limiter``, a caller over its rate is refused (429) once it is proven: nobody is counted, and so
+    nobody can be limited, by presenting a token that does not verify.
+    """
 
     async def caller(
         request: Request,
@@ -143,6 +149,11 @@ def authenticated(verifier: Verifier) -> Caller:
         if credentials is None:
             raise MissingTokenError
         principal = await verifier.verify(credentials.credentials)
+        if (
+            limiter is not None
+            and (wait := limiter.wait(f"{principal.organization}:{principal.subject}")) > 0
+        ):
+            raise RateLimitedError(wait)
         call = current_request_id() or str(new_id())
         with (
             _bound(request, organization_id=str(principal.organization), subject=principal.subject),

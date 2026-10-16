@@ -13,6 +13,7 @@ from pydantic import SecretStr
 from ledger_platform.auth.tokens import TokenPolicy, TokenSettingsMissingError
 from ledger_platform.config.settings import Settings
 from ledger_platform.http.authentication import Authentication
+from ledger_platform.http.rate import RateLimitedError
 from ledger_testing.issuer import AUDIENCE, ISSUER, SUBJECT
 lazy from ledger_kernel.access import Principal
 lazy from ledger_testing.issuer import LocalIssuer
@@ -48,6 +49,29 @@ async def test_configured_from_the_token_settings_it_proves_callers(local_issuer
             proven = await client.get("/me", headers={"Authorization": f"Bearer {local_issuer.token()}"})
     assert (proven.status_code, proven.json()) == (HTTPStatus.OK, {"subject": SUBJECT})
     assert b"ledger_auth_keys_age_seconds" in generate_latest(registry)
+
+
+async def test_a_caller_is_held_to_the_rate_the_settings_give(local_issuer: LocalIssuer) -> None:
+    settings = SETTINGS.model_copy(
+        update={
+            "token_issuer": ISSUER,
+            "token_audience": AUDIENCE,
+            "token_jwks_url": local_issuer.keys_url,
+            "rate_limit_per_second": 0.001,
+            "rate_limit_burst": 1,
+        }
+    )
+    authentication = Authentication.of(settings)
+    transport = httpx.ASGITransport(served(authentication))
+    async with AsyncExitStack() as stack:
+        for resource in authentication.resources():
+            await stack.enter_async_context(resource)
+        async with httpx.AsyncClient(transport=transport, base_url="http://ledger.test") as client:
+            headers = {"Authorization": f"Bearer {local_issuer.token()}"}
+            first = await client.get("/me", headers=headers)
+            with pytest.raises(RateLimitedError):
+                await client.get("/me", headers=headers)
+    assert first.status_code == HTTPStatus.OK
 
 
 async def test_without_token_settings_it_proves_nobody() -> None:
