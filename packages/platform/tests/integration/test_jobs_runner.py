@@ -639,6 +639,35 @@ async def test_a_handler_whose_lease_was_taken_is_cancelled(
     assert registry.get_sample_value("ledger_job_lease_lost_total", {"kind": SLOW}) == 1
 
 
+async def test_a_handler_past_its_timeout_is_stopped_and_the_job_retried(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry
+) -> None:
+    """A handler that hangs would hold its slot and renew its lease for ever: it has a time of its own."""
+    blocking = Blocking()
+    hanging = JobDecl(kind=SLOW, lease=LEASE, max_attempts=3, timeout=timedelta(milliseconds=100))
+    runner = JobRunner(database=probe, kinds={SLOW: (hanging, blocking)}, registry=registry)
+    await enqueue(probe, "k1", kind=SLOW)
+    with capture_logs() as logs:
+        assert await runner.run_due() == 1
+    assert blocking.cancelled
+    assert await state(admin, "k1") == ("ready", 1, "job_timed_out", None, *UNLEASED, timedelta(seconds=1))
+    assert [entry["code"] for entry in logs] == ["job_timed_out"]
+    assert finished(registry, "retry", SLOW) == 1
+
+
+async def test_a_timeout_the_handler_raises_itself_is_not_the_jobs(
+    runner: JobRunner, probe: BoundDatabase, handler: Scripted, admin: psycopg.AsyncConnection
+) -> None:
+    await enqueue(probe, "k1")
+    handler.will("k1", TimeoutError())
+    assert await runner.run_due() == 1
+    assert (await state(admin, "k1"))[2] == "internal"
+
+
+def test_a_job_timeout_defaults_to_fifteen_minutes() -> None:
+    assert JobDecl(kind=SLOW).timeout == timedelta(minutes=15)
+
+
 @pytest.mark.parametrize("started", [True, False], ids=["while-it-runs", "before-it-starts"])
 async def test_a_lease_that_cannot_be_renewed_stops_the_handler(
     chassis: WorkerDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry, *, started: bool

@@ -376,6 +376,9 @@ state machines** (ADR 0003).
   a lost lease (another worker reclaimed it) makes the late writer's record a no-op and it logs
   `job_lease_lost`. Business writes of a step re-read their row under lock and are idempotent, so a zombie step
   cannot do harm before it records.
+- **A handler has a time of its own** (`timeout` in the manifest, default 15 min): a run past it is stopped
+  and retried as a retryable failure (`job_timed_out`), so a hung call cannot hold its slot and renew its lease
+  for ever.
 - **Outcomes**: `Done`; `RunAgain(at)` (polling: does not count as a failure; attempts reset); `Park(reason)`
   (waiting for an outside fact; `uow.jobs.wake(kind, key)` or `uow.jobs.wake_all(kind, company, reason)` makes
   matching parked jobs `ready`); a retryable error → `ready` at the kind's backoff; an `INVALID`/`CONFLICT`
@@ -673,6 +676,7 @@ ordered = false                                 # optional: head-of-line claim p
 [[jobs]]
 kind = "invoicing.export"           # <module>.<verb_or_noun>
 lease = "60s"                       # optional (default 60s)
+timeout = "15m"                     # optional (default 15m): the longest one run may take; past it, stopped and retried
 max_attempts = 20                   # optional (default 20)
 deadline = "72h"                    # optional
 concurrency = 8                     # optional: per worker process (default 8)

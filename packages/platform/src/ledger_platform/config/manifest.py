@@ -225,6 +225,8 @@ class JobDecl(_Section):
 
     kind: Dotted
     lease: Duration = timedelta(seconds=60)
+    timeout: Duration = timedelta(minutes=15)
+    """The longest one run of the handler may take: past it the run is stopped and retried (a hung call)."""
     max_attempts: int = Field(default=20, ge=1)
     deadline: Duration | None = None
     concurrency: int = Field(default=8, ge=1)
