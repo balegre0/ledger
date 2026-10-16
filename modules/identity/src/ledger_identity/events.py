@@ -10,6 +10,8 @@ from typing import ClassVar, final
 
 from ledger_kernel.events import Event
 lazy from ledger_kernel.access import SubjectId
+lazy from ledger_kernel.jurisdiction import Jurisdiction
+lazy from ledger_kernel.money import Currency
 lazy from ledger_kernel.tax_ids import TaxId
 
 
@@ -20,19 +22,24 @@ class CompanyRegistered(Event):
 
     TYPE: ClassVar[str] = "identity.company.registered"
     VERSION: ClassVar[int] = 1
-    tax_id: TaxId
+    jurisdiction: Jurisdiction
+    functional_currency: Currency
+    tax_ids: tuple[TaxId, ...]
+    """The company's tax ids; the first is its primary one."""
     legal_name: str
 
 
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CompanyUpdated(Event):
-    """A company's details changed."""
+    """A company's details changed: its legal name, or its fiscal profile was locked."""
 
     TYPE: ClassVar[str] = "identity.company.updated"
     VERSION: ClassVar[int] = 1
-    tax_id: TaxId
+    tax_ids: tuple[TaxId, ...]
     legal_name: str
+    fiscal_profile_locked: bool
+    """Whether jurisdiction, functional currency and primary tax id are now immutable (§7.1)."""
 
 
 @final

@@ -19,7 +19,7 @@ from ledger_identity.application.ports import (
     Memberships,
     Organizations,
 )
-from ledger_identity.domain.company import CompanyStatus
+from ledger_identity.domain.company import CompanyStatus, FiscalProfile
 from ledger_identity.domain.errors import (
     BranchCodeTakenError,
     BranchNotFoundError,
@@ -48,6 +48,8 @@ from ledger_identity.events import (
 from ledger_kernel.access import CompanyNotFoundError, PermissionDeniedError, Principal, Role, SubjectId
 from ledger_kernel.errors import ErrorKind
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_kernel.jurisdiction import parse_jurisdiction
+from ledger_kernel.money import Currency
 from ledger_kernel.pagination import PageRequest, page_of
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Tenant
@@ -167,7 +169,13 @@ class MemoryCompanies(Companies):
     @override
     async def add(self, company: Company) -> bool:
         kept = self._state.companies.values()
-        if any(other.status is CompanyStatus.ACTIVE and other.tax_id == company.tax_id for other in kept):
+        taken = {
+            tax_id
+            for other in kept
+            if other.status is CompanyStatus.ACTIVE
+            for tax_id in other.profile.tax_ids
+        }
+        if taken & set(company.profile.tax_ids):
             return False
         self._state.companies[company.id] = company
         return True
@@ -334,11 +342,17 @@ def state() -> State:
     return State()
 
 
+def profile(*tax_ids: TaxId) -> FiscalProfile:
+    return FiscalProfile(
+        jurisdiction=parse_jurisdiction("DO"), functional_currency=Currency.of("DOP"), tax_ids=tax_ids
+    )
+
+
 async def created(state: State, tax_id: TaxId = RNC, founder: Principal = FOUNDER) -> Company:
     return await commands.create_company(
         state.unit(organization=founder.organization),
         founder,
-        tax_id=tax_id,
+        profile=profile(tax_id),
         legal_name=parse_legal_name("Duarte"),
     )
 
@@ -380,7 +394,7 @@ async def test_registering_a_company_needs_the_organization_s_admin_role(
 async def test_a_second_company_of_the_organization_keeps_the_organization_as_it_was(state: State) -> None:
     await created(state)
     await commands.create_company(
-        state.unit(LATER), FOUNDER, tax_id=CEDULA, legal_name=parse_legal_name("Duarte II")
+        state.unit(LATER), FOUNDER, profile=profile(CEDULA), legal_name=parse_legal_name("Duarte II")
     )
     assert state.organizations[ORGANIZATION].created_at == NOW
     assert len(state.companies) == 2
@@ -400,11 +414,27 @@ async def test_no_organization_may_register_a_tax_id_an_active_company_holds(sta
     assert len(state.companies) == 1
 
 
+async def test_any_one_of_a_company_s_tax_ids_that_is_taken_refuses_the_company(state: State) -> None:
+    await created(state)
+    with pytest.raises(TaxIdTakenError):
+        await commands.create_company(
+            state.unit(LATER),
+            STRANGER,
+            profile=profile(CEDULA, RNC),  # the cédula is free; the RNC is held
+            legal_name=parse_legal_name("Duarte II"),
+        )
+    assert len(state.companies) == 1
+    both = await commands.create_company(
+        state.unit(LATER), STRANGER, profile=profile(CEDULA, THEIRS), legal_name=parse_legal_name("Duarte II")
+    )
+    assert both.profile.tax_ids == (CEDULA, THEIRS)
+
+
 async def test_a_deactivated_company_s_tax_id_may_be_registered_again(state: State) -> None:
     company = await created(state)
     await commands.deactivate_company(state.unit(LATER), company.id, admits=anything, actor=OWNER)
     other = await created(state, founder=STRANGER)
-    assert (other.organization, other.tax_id) == (STRANGER.organization, company.tax_id)
+    assert (other.organization, other.profile) == (STRANGER.organization, company.profile)
 
 
 async def test_a_rename_is_a_new_version_announced(state: State) -> None:

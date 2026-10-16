@@ -26,7 +26,12 @@ lazy from ledger_testing.postgres import Template
 UNDER_TEST: Final = ModuleUnderTest(MANIFEST, MIGRATIONS)
 TEST_ACTOR: Final = Actor("system:test", "identity-tests")
 """Who the use cases a test calls itself act as; a request through the app acts as its caller instead."""
-COMPANY: Final = {"tax_id": {"scheme": "do.rnc", "value": "101850043"}, "legal_name": "Duarte"}
+COMPANY: Final = {
+    "jurisdiction": {"country": "DO"},
+    "functional_currency": "DOP",
+    "tax_ids": [{"scheme": "do.rnc", "value": "101850043"}],
+    "legal_name": "Duarte",
+}
 """What the ``company`` fixture registers."""
 
 

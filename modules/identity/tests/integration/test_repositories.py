@@ -43,6 +43,8 @@ from ledger_identity.domain.roles import EVERYTHING, READ_ONLY
 from ledger_identity.domain.text import parse_code, parse_legal_name, parse_name
 from ledger_kernel.access import CompanyNotFoundError, Principal, Role, SubjectId
 from ledger_kernel.ids import CompanyId, new_id
+from ledger_kernel.jurisdiction import parse_jurisdiction
+from ledger_kernel.money import Currency
 from ledger_kernel.pagination import PageRequest, decode_cursor
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import OrganizationScope, Tenant
@@ -50,7 +52,7 @@ from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_testing.database import app_url
 from ledger_testing.waiting import eventually, waits_for_a_lock
 lazy from ledger_identity.application.ports import IdentityUnit
-lazy from ledger_identity.domain.company import Company
+lazy from ledger_identity.domain.company import Company, FiscalProfile
 lazy from ledger_kernel.pagination import Page
 lazy from ledger_kernel.tenancy import Scope
 lazy from ledger_platform.data.bound import BoundDatabase
@@ -122,14 +124,26 @@ async def in_unit[T](
         return await work(bind(unit))
 
 
+def profile(tax_id: TaxId = RNC, *also: TaxId) -> FiscalProfile:
+    """A Dominican company's profile under ``tax_id`` (its primary one) and ``also``."""
+    return FiscalProfile(
+        jurisdiction=parse_jurisdiction("DO"),
+        functional_currency=Currency.of("DOP"),
+        tax_ids=(tax_id, *also),
+    )
+
+
 async def create(
-    module_database: BoundDatabase, founder: Principal = FOUNDER, tax_id: TaxId = RNC
+    module_database: BoundDatabase,
+    founder: Principal = FOUNDER,
+    tax_id: TaxId = RNC,
+    *also: TaxId,
 ) -> Company:
     return await in_unit(
         module_database,
         OrganizationScope(founder.organization, None),
         lambda unit: commands.create_company(
-            unit, founder, tax_id=tax_id, legal_name=parse_legal_name("Duarte")
+            unit, founder, profile=profile(tax_id, *also), legal_name=parse_legal_name("Duarte")
         ),
     )
 
@@ -192,7 +206,7 @@ async def test_a_unit_that_fails_keeps_and_announces_nothing(
     module_database: BoundDatabase, admin: psycopg.AsyncConnection
 ) -> None:
     async def create_then_fail(unit: IdentityUnit) -> None:
-        await commands.create_company(unit, FOUNDER, tax_id=RNC, legal_name=parse_legal_name("Duarte"))
+        await commands.create_company(unit, FOUNDER, profile=profile(), legal_name=parse_legal_name("Duarte"))
         raise ZeroDivisionError
 
     with pytest.raises(ZeroDivisionError):
@@ -226,9 +240,12 @@ async def test_a_tax_id_is_unique_by_its_scheme_and_its_value(module_database: B
     cedula = await create(
         module_database, founder=STRANGER, tax_id=TaxId(TaxIdScheme("do.cedula"), RNC.value)
     )
-    assert (rnc.tax_id, cedula.tax_id) == (RNC, TaxId(TaxIdScheme("do.cedula"), "101850043"))
+    assert (rnc.profile.primary_tax_id, cedula.profile.primary_tax_id) == (
+        RNC,
+        TaxId(TaxIdScheme("do.cedula"), "101850043"),
+    )
     read = await in_unit(module_database, cedula.tenant, lambda unit: queries.company(unit, cedula.id))
-    assert read.tax_id == cedula.tax_id
+    assert read.profile == cedula.profile
     with pytest.raises(TaxIdTakenError):
         await create(module_database, founder=STRANGER, tax_id=TaxId(TaxIdScheme("do.cedula"), RNC.value))
 
@@ -266,6 +283,55 @@ async def test_a_refused_registration_leaves_neither_the_company_nor_a_registry_
     with pytest.raises(TaxIdTakenError):
         await create(module_database, founder=STRANGER)
     assert await registered_ids(module_database) == [("do.rnc", "101850043", first.organization, first.id)]
+
+
+CEDULA: Final = TaxId(TaxIdScheme("do.cedula"), "00113918205")
+
+
+async def test_a_company_keeps_its_profile_and_every_tax_id_in_order(module_database: BoundDatabase) -> None:
+    company = await create(module_database, FOUNDER, RNC, CEDULA)
+    read = await in_unit(module_database, company.tenant, lambda unit: queries.company(unit, company.id))
+    assert read == company
+    assert read.profile.tax_ids == (RNC, CEDULA)  # the first stays the primary one
+    assert (read.profile.jurisdiction, read.profile.functional_currency) == (
+        parse_jurisdiction("DO"),
+        Currency.of("DOP"),
+    )
+    assert await registered_ids(module_database) == [
+        ("do.cedula", "00113918205", company.organization, company.id),
+        ("do.rnc", "101850043", company.organization, company.id),
+    ]
+
+
+async def test_any_one_tax_id_of_a_company_taken_refuses_it_whole(module_database: BoundDatabase) -> None:
+    first = await create(module_database)
+    with pytest.raises(TaxIdTakenError):
+        await create(module_database, STRANGER, CEDULA, RNC)
+    assert await registered_ids(module_database) == [("do.rnc", "101850043", first.organization, first.id)]
+    async with module_database.unit(OrganizationScope(STRANGER.organization, None)) as unit:
+        assert (
+            await unit.connection.execute(select(func.count()).select_from(CompanyRecord))
+        ).scalar_one() == 0
+
+
+async def test_deactivating_a_company_releases_all_its_tax_ids(module_database: BoundDatabase) -> None:
+    company = await create(module_database, FOUNDER, RNC, CEDULA)
+    await deactivate(module_database, company)
+    assert await registered_ids(module_database) == []
+    again = await create(module_database, STRANGER, CEDULA)
+    assert again.profile.primary_tax_id == CEDULA
+
+
+async def test_a_locked_fiscal_profile_is_kept_at_its_new_version(module_database: BoundDatabase) -> None:
+    company = await create(module_database)
+    locked, _ = company.lock_fiscal_profile(now=NOW)
+
+    async def lock(unit: IdentityUnit) -> bool:
+        return await unit.companies.update(locked, version=company.version)
+
+    assert await in_unit(module_database, company.tenant, lock)
+    read = await in_unit(module_database, company.tenant, lambda unit: queries.company(unit, company.id))
+    assert (read.fiscal_profile_locked_at, read.version, read.profile) == (NOW, 2, company.profile)
 
 
 async def test_two_organizations_registering_one_taxpayer_at_once_get_one_company(
@@ -658,7 +724,7 @@ async def test_a_unit_s_time_is_its_transaction_s_for_what_it_records_and_announ
     async with module_database.unit(OrganizationScope(FOUNDER.organization, None)) as transaction:
         unit = bind(transaction)
         company = await commands.create_company(
-            unit, FOUNDER, tax_id=RNC, legal_name=parse_legal_name("Duarte")
+            unit, FOUNDER, profile=profile(), legal_name=parse_legal_name("Duarte")
         )
         began = MOMENT.validate_python(
             (await transaction.connection.execute(text("SELECT now()"))).scalar_one()

@@ -79,6 +79,15 @@ class TaxIdTakenError(ConflictError):
         super().__init__("an active company already holds this tax id")
 
 
+class DuplicateTaxIdError(InvalidInputError):
+    """A company lists the same tax id twice (once normalized: separators and case do not tell them apart)."""
+
+    code: ClassVar[str] = "tax_id_duplicated"
+
+    def __init__(self) -> None:
+        super().__init__("a company lists each of its tax ids once")
+
+
 class BranchCodeTakenError(ConflictError):
     """The company already has a branch with this code."""
 

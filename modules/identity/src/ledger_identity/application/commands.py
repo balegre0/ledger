@@ -18,12 +18,12 @@ from ledger_identity.domain.organization import Organization, require_organizati
 from ledger_identity.domain.roles import COMPANIES_MANAGE
 from ledger_kernel.access import CompanyNotFoundError
 lazy from ledger_identity.application.ports import AuditAction, IdentityUnit
+lazy from ledger_identity.domain.company import FiscalProfile
 lazy from ledger_identity.domain.ids import BranchId
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_identity.domain.text import Code, LegalName, Name
 lazy from ledger_kernel.access import Principal, Role, SubjectId
 lazy from ledger_kernel.ids import CompanyId
-lazy from ledger_kernel.tax_ids import TaxId
 
 type Admits = Callable[[int], bool]
 """Whether a change may apply to a company at a version: the client's ``If-Match``."""
@@ -48,16 +48,17 @@ class Granted:
 
 
 async def create_company(
-    unit: IdentityUnit, founder: Principal, *, tax_id: TaxId, legal_name: LegalName
+    unit: IdentityUnit, founder: Principal, *, profile: FiscalProfile, legal_name: LegalName
 ) -> Company:
     """Register a company of the founder's organization, with the founder as its first owner.
 
-    The founder must be an administrator of the organization (``require_organization_admin``).
+    The founder must be an administrator of the organization (``require_organization_admin``). Any one of the
+    profile's tax ids that an active company holds refuses the registration (``TaxIdTakenError``).
     """
     require_organization_admin(founder)
     await unit.organizations.add(Organization.of(founder, now=unit.now))
     registered, created = Company.register(
-        organization=founder.organization, tax_id=tax_id, legal_name=legal_name, now=unit.now
+        organization=founder.organization, profile=profile, legal_name=legal_name, now=unit.now
     )
     if not await unit.companies.add(registered):
         raise TaxIdTakenError

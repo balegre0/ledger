@@ -74,10 +74,30 @@
             "title": "Created At",
             "type": "string"
           },
+          "fiscal_profile_locked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When its jurisdiction, currency and primary tax id became immutable, if they did.",
+            "title": "Fiscal Profile Locked At"
+          },
+          "functional_currency": {
+            "title": "Functional Currency",
+            "type": "string"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
             "type": "string"
+          },
+          "jurisdiction": {
+            "$ref": "#/components/schemas/JurisdictionBody"
           },
           "legal_name": {
             "title": "Legal Name",
@@ -91,8 +111,13 @@
           "status": {
             "$ref": "#/components/schemas/CompanyStatus"
           },
-          "tax_id": {
-            "$ref": "#/components/schemas/TaxIdBody"
+          "tax_ids": {
+            "description": "The first is its primary one.",
+            "items": {
+              "$ref": "#/components/schemas/TaxIdBody"
+            },
+            "title": "Tax Ids",
+            "type": "array"
           },
           "updated_at": {
             "format": "date-time",
@@ -107,9 +132,12 @@
         "required": [
           "id",
           "organization_id",
-          "tax_id",
+          "jurisdiction",
+          "functional_currency",
+          "tax_ids",
           "legal_name",
           "status",
+          "fiscal_profile_locked_at",
           "version",
           "created_at",
           "updated_at"
@@ -159,6 +187,44 @@
           "created_at"
         ],
         "title": "EmissionPointView",
+        "type": "object"
+      },
+      "JurisdictionBody": {
+        "additionalProperties": false,
+        "description": "Where a company is: a country and, where law differs inside it, a subdivision.",
+        "properties": {
+          "country": {
+            "description": "ISO 3166-1 alpha-2, upper case.",
+            "examples": [
+              "DO"
+            ],
+            "maxLength": 2,
+            "minLength": 2,
+            "title": "Country",
+            "type": "string"
+          },
+          "subdivision": {
+            "anyOf": [
+              {
+                "maxLength": 6,
+                "minLength": 4,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "ISO 3166-2, where law differs inside the country.",
+            "examples": [
+              "US-CA"
+            ],
+            "title": "Subdivision"
+          }
+        },
+        "required": [
+          "country"
+        ],
+        "title": "JurisdictionBody",
         "type": "object"
       },
       "MembershipView": {
@@ -242,6 +308,19 @@
         "additionalProperties": false,
         "description": "A company to register.",
         "properties": {
+          "functional_currency": {
+            "description": "ISO 4217: the currency its books are kept in.",
+            "examples": [
+              "DOP"
+            ],
+            "maxLength": 3,
+            "minLength": 3,
+            "title": "Functional Currency",
+            "type": "string"
+          },
+          "jurisdiction": {
+            "$ref": "#/components/schemas/JurisdictionBody"
+          },
           "legal_name": {
             "description": "As registered with the tax authority.",
             "maxLength": 300,
@@ -249,12 +328,21 @@
             "title": "Legal Name",
             "type": "string"
           },
-          "tax_id": {
-            "$ref": "#/components/schemas/TaxIdBody"
+          "tax_ids": {
+            "description": "One or more, each once; the first is its primary one.",
+            "items": {
+              "$ref": "#/components/schemas/TaxIdBody"
+            },
+            "maxItems": 5,
+            "minItems": 1,
+            "title": "Tax Ids",
+            "type": "array"
           }
         },
         "required": [
-          "tax_id",
+          "jurisdiction",
+          "functional_currency",
+          "tax_ids",
           "legal_name"
         ],
         "title": "NewCompany",
@@ -494,6 +582,123 @@
           "previous_cursor"
         ],
         "title": "Page[MembershipView]",
+        "type": "object"
+      },
+      "RegisteredCompany": {
+        "additionalProperties": false,
+        "description": "A company just registered, and what the registration accepted with a warning.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "fiscal_profile_locked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When its jurisdiction, currency and primary tax id became immutable, if they did.",
+            "title": "Fiscal Profile Locked At"
+          },
+          "functional_currency": {
+            "title": "Functional Currency",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "jurisdiction": {
+            "$ref": "#/components/schemas/JurisdictionBody"
+          },
+          "legal_name": {
+            "title": "Legal Name",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/CompanyStatus"
+          },
+          "tax_ids": {
+            "description": "The first is its primary one.",
+            "items": {
+              "$ref": "#/components/schemas/TaxIdBody"
+            },
+            "title": "Tax Ids",
+            "type": "array"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          },
+          "warnings": {
+            "description": "Empty unless something was accepted with a doubt, such as a tax id's check digit.",
+            "items": {
+              "$ref": "#/components/schemas/RegistrationWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "jurisdiction",
+          "functional_currency",
+          "tax_ids",
+          "legal_name",
+          "status",
+          "fiscal_profile_locked_at",
+          "version",
+          "created_at",
+          "updated_at",
+          "warnings"
+        ],
+        "title": "RegisteredCompany",
+        "type": "object"
+      },
+      "RegistrationWarning": {
+        "additionalProperties": false,
+        "description": "Something the registration accepted that its sender may want to look at again (§7.3).",
+        "properties": {
+          "code": {
+            "description": "What to match on.",
+            "examples": [
+              "tax_id_checksum_mismatch"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "field": {
+            "description": "Where in the request.",
+            "examples": [
+              "tax_ids.0"
+            ],
+            "title": "Field",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "field"
+        ],
+        "title": "RegistrationWarning",
         "type": "object"
       },
       "Role": {
@@ -881,7 +1086,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CompanyView"
+                  "$ref": "#/components/schemas/RegisteredCompany"
                 }
               }
             },

@@ -21,7 +21,12 @@ lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_testing.api import TestPrincipal
 
 ORGANIZATION: Final = organization_of("1001")
-DUARTE: Final = {"tax_id": {"scheme": "do.rnc", "value": "101850043"}, "legal_name": "Duarte"}
+DUARTE: Final = {
+    "jurisdiction": {"country": "DO"},
+    "functional_currency": "DOP",
+    "tax_ids": [{"scheme": "do.rnc", "value": "101850043"}],
+    "legal_name": "Duarte",
+}
 AUDIT: Final = """
     SELECT organization_id, actor, call_id, action, subject_type, subject_id, before_hash, after_hash, detail
     FROM identity.audit_events ORDER BY occurred_at, id

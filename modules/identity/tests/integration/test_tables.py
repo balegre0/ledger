@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError, ProgrammingError
 from ledger_identity.adapters.postgres.tables import (
     BranchRecord,
     CompanyRecord,
+    CompanyTaxIdRecord,
     EmissionPointRecord,
     IdentityTable,
     MembershipRecord,
@@ -94,13 +95,24 @@ async def seeded(module_database: BoundDatabase, organization: OrganizationId | 
             insert(CompanyRecord).values(
                 id=tenant.company,
                 organization_id=tenant.organization,
-                tax_scheme="do.rnc",
-                tax_value=tax_value,
+                country="DO",
+                subdivision=None,
+                currency="DOP",
                 legal_name="Acme SRL",
                 status="active",
+                fiscal_profile_locked_at=None,
                 version=1,
                 created_at=NOW,
                 updated_at=NOW,
+            )
+        )
+        await unit.connection.execute(
+            insert(CompanyTaxIdRecord).values(
+                organization_id=tenant.organization,
+                company_id=tenant.company,
+                position=0,
+                scheme="do.rnc",
+                value=tax_value,
             )
         )
         await unit.connection.execute(
@@ -142,7 +154,14 @@ async def test_row_level_security_shows_a_scope_what_it_owns_and_nothing_without
         module_database, first.tenant.organization
     )  # another company of the same organization
     other = await seeded(module_database)
-    everything = {"organizations": 1, "companies": 2, "memberships": 2, "branches": 1, "emission_points": 1}
+    everything = {
+        "organizations": 1,
+        "companies": 2,
+        "company_tax_ids": 2,
+        "memberships": 2,
+        "branches": 1,
+        "emission_points": 1,
+    }
     registry = {
         "tax_registrations": 3
     }  # no tenant's: every scope sees every organization's tax ids, even none
@@ -158,6 +177,7 @@ async def test_row_level_security_shows_a_scope_what_it_owns_and_nothing_without
         **everything,
         **registry,
         "companies": 1,
+        "company_tax_ids": 1,
         "memberships": 1,
     }
     assert await counts(module_database, None) == dict.fromkeys(everything, 0) | registry

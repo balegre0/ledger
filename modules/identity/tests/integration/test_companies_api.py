@@ -8,6 +8,7 @@ from typing import Final
 from uuid import UUID
 
 import pytest
+from pydantic import TypeAdapter
 lazy import httpx
 
 from ledger_identity.adapters.postgres.unit import bind
@@ -24,11 +25,20 @@ from ledger_testing.waiting import eventually, waits_for_a_lock
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_testing.postgres import WorkerDatabase
 
-DUARTE: Final = {
-    "tax_id": {"scheme": "do.rnc", "value": "101-85004-3"},
-    "legal_name": "Ferretería Duarte, S.R.L.",
-}
+
+def body(*tax_ids: object, legal_name: str = "Duarte", **extra: object) -> dict[str, object]:
+    """A registration of a Dominican company in pesos holding ``tax_ids``; ``extra`` adds or replaces."""
+    return {
+        "jurisdiction": {"country": "DO"},
+        "functional_currency": "DOP",
+        "tax_ids": list(tax_ids),
+        "legal_name": legal_name,
+    } | extra
+
+
+DUARTE: Final = body({"scheme": "do.rnc", "value": "101-85004-3"}, legal_name="Ferretería Duarte, S.R.L.")
 """The same taxpayer as the ``company`` fixture's, as a client may type it."""
+TAX_IDS: Final = TypeAdapter(list[dict[str, str]])
 FAR_FUTURE: Final = 4_102_444_800
 """2100-01-01, as a JWT's ``exp``."""
 
@@ -60,17 +70,24 @@ async def test_a_company_is_created_owned_by_its_creator_and_readable(
     response = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("k-1"))
     assert response.status_code == 201
     made = document(response)
-    assert (made["tax_id"], made["legal_name"], made["status"], made["version"]) == (
-        {"scheme": "do.rnc", "value": "101850043"},
+    assert (made["tax_ids"], made["legal_name"], made["status"], made["version"]) == (
+        [{"scheme": "do.rnc", "value": "101850043"}],
         "Ferretería Duarte, S.R.L.",
         "active",
         1,
     )
+    assert (made["jurisdiction"], made["functional_currency"], made["fiscal_profile_locked_at"]) == (
+        {"country": "DO", "subdivision": None},
+        "DOP",
+        None,
+    )
+    assert made["warnings"] == []
     assert made["organization_id"] == str(organization_of("1001"))
     assert response.headers["location"] == f"/v1/companies/{made['id']}"
     assert response.headers["etag"] == '"1"'
     read = await client.get(f"/v1/companies/{made['id']}", headers=owner.bearer())
-    assert (read.status_code, document(read), read.headers["etag"]) == (200, made, '"1"')
+    listed = {key: value for key, value in made.items() if key != "warnings"}  # said once, at registration
+    assert (read.status_code, document(read), read.headers["etag"]) == (200, listed, '"1"')
     organization = await client.get("/v1/organization", headers=owner.bearer())
     assert document(organization)["provider_id"] == "1001"
 
@@ -147,9 +164,14 @@ async def test_a_retry_with_its_fields_in_another_order_is_the_same_request(
     client: httpx.AsyncClient, owner: TestPrincipal
 ) -> None:
     first = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("k-1"))
-    reordered = (
-        '{"legal_name": "Ferretería Duarte, S.R.L.",   '
-        '"tax_id": {"value": "101-85004-3", "scheme": "do.rnc"}}'
+    reordered = json.dumps(
+        {
+            "legal_name": "Ferretería Duarte, S.R.L.",
+            "tax_ids": [{"value": "101-85004-3", "scheme": "do.rnc"}],
+            "functional_currency": "DOP",
+            "jurisdiction": {"country": "DO"},
+        },
+        indent=3,
     )
     headers = owner.posting("k-1") | {"Content-Type": "application/json"}
     again = await client.post("/v1/companies", content=reordered.encode(), headers=headers)
@@ -180,7 +202,7 @@ async def test_a_key_reused_for_another_body_is_refused(
     client: httpx.AsyncClient, owner: TestPrincipal
 ) -> None:
     await created(client, "/v1/companies", DUARTE, owner.posting("k-1"))
-    other = {"tax_id": {"scheme": "do.rnc", "value": "130000012"}, "legal_name": "Otra"}
+    other = body({"scheme": "do.rnc", "value": "130000012"}, legal_name="Otra")
     response = await client.post("/v1/companies", json=other, headers=owner.posting("k-1"))
     assert (response.status_code, document(response)["code"]) == (422, "idempotency_key_reused")
 
@@ -191,7 +213,7 @@ async def test_a_key_belongs_to_its_caller(
     mine = await created(client, "/v1/companies", DUARTE, owner.posting("k-1"))
     theirs = await client.post(
         "/v1/companies",
-        json=DUARTE | {"tax_id": {"scheme": "do.rnc", "value": "401500022"}},
+        json=DUARTE | {"tax_ids": [{"scheme": "do.rnc", "value": "401500022"}]},
         headers=TestPrincipal(local_issuer, organization="1002", roles=(ORGANIZATION_ADMIN,)).posting("k-1"),
     )
     assert theirs.status_code == 201
@@ -219,32 +241,42 @@ async def test_two_posts_with_one_key_at_once_create_one_company(
 RNC: Final = {"scheme": "do.rnc", "value": "101850043"}
 
 
+def without(payload: dict[str, object], key: str) -> dict[str, object]:
+    return {name: value for name, value in payload.items() if name != key}
+
+
 @pytest.mark.parametrize(
     ("payload", "code"),
     [
-        ({"tax_id": {"scheme": "do.rnc", "value": "12345"}, "legal_name": "Duarte"}, "invalid_tax_id"),
-        ({"tax_id": {"scheme": "do.cedula", "value": "101850043"}, "legal_name": "Duarte"}, "invalid_tax_id"),
-        ({"tax_id": {"scheme": "do.rnc", "value": "x" * 41}, "legal_name": "Duarte"}, "invalid_request"),
+        (body({"scheme": "do.rnc", "value": "12345"}), "invalid_tax_id"),
+        (body({"scheme": "do.cedula", "value": "101850043"}), "invalid_tax_id"),
+        (body({"scheme": "do.rnc", "value": "x" * 41}), "invalid_request"),
+        (body({"scheme": "mx.rfc", "value": "101850043"}), "tax_id_scheme_unknown"),
+        (body({"scheme": "DO.RNC", "value": "101850043"}), "invalid_tax_id_scheme"),
+        (body({"scheme": "zz.rnc", "value": "101850043"}), "invalid_tax_id_scheme"),
+        (body("101850043"), "invalid_request"),
+        (body({"scheme": "do.rnc"}), "invalid_request"),
+        (body({"scheme": "do.rnc", "value": 101850043}), "invalid_request"),
+        (body(RNC | {"kind": "rnc"}), "invalid_request"),
+        (body(RNC, legal_name="Duarte\u0000"), "invalid_name"),
+        (body(RNC, legal_name="x" * 301), "invalid_request"),
+        (body(RNC, colour="red"), "invalid_request"),
+        (without(body(RNC), "legal_name"), "invalid_request"),
+        (body(), "invalid_request"),
+        (body(RNC, RNC | {"value": "101-85004-3"}), "tax_id_duplicated"),
         (
-            {"tax_id": {"scheme": "mx.rfc", "value": "101850043"}, "legal_name": "Duarte"},
-            "tax_id_scheme_unknown",
+            body(*({"scheme": "do.cedula", "value": f"0011391820{number}"} for number in range(6))),
+            "invalid_request",
         ),
-        (
-            {"tax_id": {"scheme": "DO.RNC", "value": "101850043"}, "legal_name": "Duarte"},
-            "invalid_tax_id_scheme",
-        ),
-        (
-            {"tax_id": {"scheme": "zz.rnc", "value": "101850043"}, "legal_name": "Duarte"},
-            "invalid_tax_id_scheme",
-        ),
-        ({"tax_id": "101850043", "legal_name": "Duarte"}, "invalid_request"),
-        ({"tax_id": {"scheme": "do.rnc"}, "legal_name": "Duarte"}, "invalid_request"),
-        ({"tax_id": {"scheme": "do.rnc", "value": 101850043}, "legal_name": "Duarte"}, "invalid_request"),
-        ({"tax_id": RNC | {"kind": "rnc"}, "legal_name": "Duarte"}, "invalid_request"),
-        ({"tax_id": RNC, "legal_name": "Duarte\u0000"}, "invalid_name"),
-        ({"tax_id": RNC, "legal_name": "x" * 301}, "invalid_request"),
-        ({"tax_id": RNC, "legal_name": "Duarte", "colour": "red"}, "invalid_request"),
-        ({"tax_id": RNC}, "invalid_request"),
+        (body(RNC, jurisdiction={"country": "do"}), "invalid_country"),
+        (body(RNC, jurisdiction={"country": "ZZ"}), "invalid_country"),
+        (body(RNC, jurisdiction={"country": "DO", "subdivision": "US-CA"}), "invalid_subdivision"),
+        (body(RNC, jurisdiction={"country": "DO", "state": "x"}), "invalid_request"),
+        (body(RNC, functional_currency="dop"), "invalid_currency"),
+        (body(RNC, functional_currency="XXXX"), "invalid_request"),
+        (without(body(RNC), "jurisdiction"), "invalid_request"),
+        (without(body(RNC), "functional_currency"), "invalid_request"),
+        (without(body(RNC), "tax_ids"), "invalid_request"),
     ],
     ids=[
         "malformed-value",
@@ -260,7 +292,19 @@ RNC: Final = {"scheme": "do.rnc", "value": "101850043"}
         "legal-name",
         "legal-name-too-long",
         "unknown-field",
-        "missing-field",
+        "missing-legal-name",
+        "no-tax-ids",
+        "the-same-tax-id-twice",
+        "too-many-tax-ids",
+        "lower-case-country",
+        "unassigned-country",
+        "subdivision-of-another-country",
+        "unknown-jurisdiction-field",
+        "lower-case-currency",
+        "four-letter-currency",
+        "missing-jurisdiction",
+        "missing-currency",
+        "missing-tax-ids",
     ],
 )
 async def test_a_company_that_cannot_be_registered_is_refused(
@@ -274,20 +318,49 @@ async def test_a_check_digit_mismatch_is_registered_as_dgii_issued_it(
     client: httpx.AsyncClient, owner: TestPrincipal
 ) -> None:
     """``do.rnc`` reports a mismatching check digit without refusing it: DGII has issued such numbers."""
-    payload = {"tax_id": {"scheme": "do.rnc", "value": "101-85004-2"}, "legal_name": "Duarte"}
+    payload = body({"scheme": "do.rnc", "value": "101-85004-2"})
     made = await client.post("/v1/companies", json=payload, headers=owner.posting("k-1"))
-    assert (made.status_code, document(made)["tax_id"]) == (201, {"scheme": "do.rnc", "value": "101850042"})
+    assert (made.status_code, document(made)["tax_ids"]) == (
+        201,
+        [{"scheme": "do.rnc", "value": "101850042"}],
+    )
+    assert document(made)["warnings"] == [{"code": "tax_id_checksum_mismatch", "field": "tax_ids.0"}]
+    replayed = await client.post("/v1/companies", json=payload, headers=owner.posting("k-1"))
+    assert (replayed.content, replayed.headers["idempotent-replayed"]) == (made.content, "true")  # warned too
+
+
+async def test_a_company_holds_several_tax_ids_and_a_warning_names_the_one_it_is_about(
+    client: httpx.AsyncClient, owner: TestPrincipal
+) -> None:
+    payload = body(
+        {"scheme": "do.rnc", "value": "101-85004-3"}, {"scheme": "do.cedula", "value": "001-1391820-4"}
+    )
+    made = await client.post("/v1/companies", json=payload, headers=owner.posting("k-1"))
+    assert made.status_code == 201
+    listed = TAX_IDS.validate_python(document(made)["tax_ids"])
+    assert [item["scheme"] for item in listed] == ["do.rnc", "do.cedula"]  # in order
+    assert document(made)["warnings"] == [{"code": "tax_id_checksum_mismatch", "field": "tax_ids.1"}]
+
+
+async def test_any_one_tax_id_of_a_company_that_is_held_is_a_conflict(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
+) -> None:
+    del company
+    payload = body({"scheme": "do.cedula", "value": "001-1391820-5"}, RNC)  # the cédula is free, the RNC held
+    response = await client.post("/v1/companies", json=payload, headers=owner.posting("k-2"))
+    assert (response.status_code, document(response)["code"]) == (409, "tax_id_taken")
+    assert len(page(await client.get("/v1/companies", headers=owner.bearer()))["items"]) == 1
 
 
 async def test_a_cedula_and_a_legal_name_of_three_hundred_characters_are_registered(
     client: httpx.AsyncClient, owner: TestPrincipal
 ) -> None:
     """The legal name's limit is identity's own (300): a channel enforces its own shorter one."""
-    payload = {"tax_id": {"scheme": "do.cedula", "value": "001-1391820-5"}, "legal_name": "x" * 300}
+    payload = body({"scheme": "do.cedula", "value": "001-1391820-5"}, legal_name="x" * 300)
     made = await client.post("/v1/companies", json=payload, headers=owner.posting("k-1"))
     assert made.status_code == 201
-    assert (document(made)["tax_id"], document(made)["legal_name"]) == (
-        {"scheme": "do.cedula", "value": "00113918205"},
+    assert (document(made)["tax_ids"], document(made)["legal_name"]) == (
+        [{"scheme": "do.cedula", "value": "00113918205"}],
         "x" * 300,
     )
 
@@ -429,7 +502,7 @@ async def test_a_caller_pages_through_the_companies_it_holds_a_role_in(
     client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal
 ) -> None:
     for number, rnc in enumerate(("101850043", "130000012", "401007551")):
-        payload = {"tax_id": {"scheme": "do.rnc", "value": rnc}, "legal_name": f"Company {number}"}
+        payload = body({"scheme": "do.rnc", "value": rnc}, legal_name=f"Company {number}")
         await created(client, "/v1/companies", payload, owner.posting(f"k-{number}"))
     first = page(await client.get("/v1/companies", params={"limit": 2}, headers=owner.bearer()))
     assert len(first["items"]) == 2
@@ -620,9 +693,11 @@ async def test_a_change_needs_the_version_it_was_made_from(
     ("payload", "code"),
     [
         ({"legal_name": " "}, "invalid_name"),
-        ({"legal_name": "X", "tax_id": {"scheme": "do.rnc", "value": "130000012"}}, "invalid_request"),
+        ({"legal_name": "X", "tax_ids": [{"scheme": "do.rnc", "value": "130000012"}]}, "invalid_request"),
+        ({"legal_name": "X", "jurisdiction": {"country": "US"}}, "invalid_request"),
+        ({"legal_name": "X", "functional_currency": "USD"}, "invalid_request"),
     ],
-    ids=["blank-name", "tax-id-never-changes"],
+    ids=["blank-name", "tax-ids-never-change", "jurisdiction-never-changes", "currency-never-changes"],
 )
 async def test_a_change_that_cannot_be_made_is_refused(
     client: httpx.AsyncClient, owner: TestPrincipal, company: str, payload: dict[str, str], code: str

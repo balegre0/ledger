@@ -20,6 +20,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    SmallInteger,
     String,
     UniqueConstraint,
 )
@@ -37,6 +38,12 @@ SCHEMA: Final = "identity"
 """identity's schema: its tables and the chassis's (``chassis_schema_v1``), under its roles."""
 TAX_SCHEME_LENGTH: Final = 34
 """The longest scheme key ``ledger_kernel.tax_ids`` reads: a country code, a dot and 31 characters."""
+COUNTRY_LENGTH: Final = 2
+"""An ISO 3166-1 alpha-2 code."""
+SUBDIVISION_LENGTH: Final = 6
+"""An ISO 3166-2 code as the kernel reads it: the country, a dash and up to three characters."""
+CURRENCY_LENGTH: Final = 3
+"""An ISO 4217 code."""
 WORD_LENGTH: Final = 16
 """For a status or a role: a short word of a closed list, which a check constraint names."""
 
@@ -86,13 +93,36 @@ class CompanyRecord(IdentityTable):
 
     id: Mapped[UUID] = mapped_column(primary_key=True)
     organization_id: Mapped[UUID] = mapped_column(ForeignKey(f"{SCHEMA}.organizations.id"))
-    tax_scheme: Mapped[str] = mapped_column(String(TAX_SCHEME_LENGTH))
-    tax_value: Mapped[str] = mapped_column(String(MAX_TAX_ID_LENGTH))
+    country: Mapped[str] = mapped_column(String(COUNTRY_LENGTH))
+    subdivision: Mapped[str | None] = mapped_column(String(SUBDIVISION_LENGTH))
+    currency: Mapped[str] = mapped_column(String(CURRENCY_LENGTH))
     legal_name: Mapped[str] = mapped_column(String(MAX_LEGAL_NAME))
     status: Mapped[str] = mapped_column(String(WORD_LENGTH))
+    fiscal_profile_locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     version: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class CompanyTaxIdRecord(IdentityTable):
+    """One of a company's tax ids, at its place in the company's list (the first is the primary one).
+
+    Kept for as long as the company is: a deactivated company still shows its tax ids, though its registry
+    rows (``tax_registrations``) are released.
+    """
+
+    __tablename__: str = "company_tax_ids"
+    __table_args__: tuple[SchemaItem, ...] = (
+        UniqueConstraint("company_id", "scheme", "value", name="uq_company_tax_ids_value"),
+        _of_company("company_tax_ids"),
+        CheckConstraint("position >= 0", name="ck_company_tax_ids_position"),
+    )
+
+    organization_id: Mapped[UUID] = mapped_column()
+    company_id: Mapped[UUID] = mapped_column(primary_key=True)
+    position: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    scheme: Mapped[str] = mapped_column(String(TAX_SCHEME_LENGTH))
+    value: Mapped[str] = mapped_column(String(MAX_TAX_ID_LENGTH))
 
 
 class TaxRegistrationRecord(IdentityTable):

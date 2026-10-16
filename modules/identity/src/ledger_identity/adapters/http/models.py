@@ -5,8 +5,9 @@ answers a ``Page`` of its views (``ledger_platform.http.models.Page``, §9.7).
 """
 
 from datetime import datetime
-from typing import ClassVar, Self
+from typing import ClassVar, Final, Self
 from uuid import UUID
+lazy from collections.abc import Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -18,6 +19,7 @@ lazy from ledger_identity.domain.branches import Branch, EmissionPoint
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_identity.domain.organization import Organization
+lazy from ledger_kernel.jurisdiction import Jurisdiction
 lazy from ledger_kernel.tax_ids import TaxId
 
 
@@ -47,10 +49,47 @@ class TaxIdBody(_Shape):
         return cls(scheme=tax_id.scheme, value=tax_id.value)
 
 
+class JurisdictionBody(_Shape):
+    """Where a company is: a country and, where law differs inside it, a subdivision."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    country: str = Field(
+        min_length=2, max_length=2, description="ISO 3166-1 alpha-2, upper case.", examples=["DO"]
+    )
+    subdivision: str | None = Field(
+        default=None,
+        min_length=4,
+        max_length=6,
+        description="ISO 3166-2, where law differs inside the country.",
+        examples=["US-CA"],
+    )
+
+    @classmethod
+    def of(cls, jurisdiction: Jurisdiction) -> Self:
+        """The body of ``jurisdiction``."""
+        return cls(country=jurisdiction.country, subdivision=jurisdiction.subdivision)
+
+
+MAX_TAX_IDS: Final = 5
+"""How many tax ids a company lists: a taxpayer has few (an RNC, a cédula, a foreign id)."""
+
+
 class NewCompany(_Shape):
     """A company to register."""
 
-    tax_id: TaxIdBody
+    jurisdiction: JurisdictionBody
+    functional_currency: str = Field(
+        min_length=3,
+        max_length=3,
+        description="ISO 4217: the currency its books are kept in.",
+        examples=["DOP"],
+    )
+    tax_ids: list[TaxIdBody] = Field(
+        min_length=1,
+        max_length=MAX_TAX_IDS,
+        description="One or more, each once; the first is its primary one.",
+    )
     legal_name: str = Field(
         min_length=1, max_length=MAX_LEGAL_NAME, description="As registered with the tax authority."
     )
@@ -67,9 +106,14 @@ class CompanyView(_Shape):
 
     id: UUID
     organization_id: UUID
-    tax_id: TaxIdBody
+    jurisdiction: JurisdictionBody
+    functional_currency: str
+    tax_ids: list[TaxIdBody] = Field(description="The first is its primary one.")
     legal_name: str
     status: CompanyStatus
+    fiscal_profile_locked_at: datetime | None = Field(
+        description="When its jurisdiction, currency and primary tax id became immutable, if they did."
+    )
     version: int
     created_at: datetime
     updated_at: datetime
@@ -80,12 +124,49 @@ class CompanyView(_Shape):
         return cls(
             id=company.id,
             organization_id=company.organization,
-            tax_id=TaxIdBody.of(company.tax_id),
+            jurisdiction=JurisdictionBody.of(company.profile.jurisdiction),
+            functional_currency=company.profile.functional_currency.code,
+            tax_ids=[TaxIdBody.of(tax_id) for tax_id in company.profile.tax_ids],
             legal_name=company.legal_name,
             status=company.status,
+            fiscal_profile_locked_at=company.fiscal_profile_locked_at,
             version=company.version,
             created_at=company.created_at,
             updated_at=company.updated_at,
+        )
+
+
+class RegistrationWarning(_Shape):
+    """Something the registration accepted that its sender may want to look at again (§7.3)."""
+
+    code: str = Field(description="What to match on.", examples=["tax_id_checksum_mismatch"])
+    field: str = Field(description="Where in the request.", examples=["tax_ids.0"])
+
+
+class RegisteredCompany(CompanyView):
+    """A company just registered, and what the registration accepted with a warning."""
+
+    warnings: list[RegistrationWarning] = Field(
+        description="Empty unless something was accepted with a doubt, such as a tax id's check digit."
+    )
+
+    @classmethod
+    def registered(cls, company: Company, warnings: Sequence[RegistrationWarning]) -> Self:
+        """The view of ``company`` with the ``warnings`` its registration raised."""
+        view = CompanyView.of(company)
+        return cls(
+            id=view.id,
+            organization_id=view.organization_id,
+            jurisdiction=view.jurisdiction,
+            functional_currency=view.functional_currency,
+            tax_ids=view.tax_ids,
+            legal_name=view.legal_name,
+            status=view.status,
+            fiscal_profile_locked_at=view.fiscal_profile_locked_at,
+            version=view.version,
+            created_at=view.created_at,
+            updated_at=view.updated_at,
+            warnings=list(warnings),
         )
 
 

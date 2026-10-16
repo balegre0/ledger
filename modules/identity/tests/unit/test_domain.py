@@ -10,7 +10,7 @@ from hypothesis import strategies as st
 
 from ledger_identity._manifest import MANIFEST
 from ledger_identity.domain.branches import Branch, EmissionPoint
-from ledger_identity.domain.company import Company, CompanyStatus
+from ledger_identity.domain.company import Company, CompanyStatus, FiscalProfile
 from ledger_identity.domain.errors import (
     BranchCodeTakenError,
     BranchNotFoundError,
@@ -74,6 +74,8 @@ from ledger_kernel.access import (
 )
 from ledger_kernel.errors import ErrorKind, InvalidValueError
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_kernel.jurisdiction import parse_jurisdiction
+from ledger_kernel.money import Currency
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.data.codec import payload_of
@@ -85,14 +87,24 @@ LATER: Final = NOW + timedelta(hours=1)
 ORGANIZATION: Final = OrganizationId(new_id())
 FOUNDER: Final = Principal(subject=SubjectId("2001"), organization=ORGANIZATION, provider_organization="1001")
 RNC: Final = TaxId(TaxIdScheme("do.rnc"), "101850043")
+CEDULA: Final = TaxId(TaxIdScheme("do.cedula"), "00113918205")
+DOMINICAN: Final = parse_jurisdiction("DO")
+PESO: Final = Currency.of("DOP")
 OWNER: Final = Actor(SubjectId("2001"), permissions_of(Role.OWNER))
 ADMIN: Final = Actor(SubjectId("2002"), permissions_of(Role.ADMIN))
 VIEWER: Final = Actor(SubjectId("2003"), permissions_of(Role.VIEWER))
 
 
+def profile(*tax_ids: TaxId) -> FiscalProfile:
+    return FiscalProfile(jurisdiction=DOMINICAN, functional_currency=PESO, tax_ids=tax_ids)
+
+
 def registered() -> Company:
     company, _ = Company.register(
-        organization=ORGANIZATION, tax_id=RNC, legal_name=parse_legal_name("Ferretería Duarte"), now=NOW
+        organization=ORGANIZATION,
+        profile=profile(RNC),
+        legal_name=parse_legal_name("Ferretería Duarte"),
+        now=NOW,
     )
     return company
 
@@ -210,7 +222,10 @@ def test_an_organization_is_the_one_its_principal_acts_in() -> None:
 
 def test_a_registered_company_is_active_at_its_first_version_and_says_so() -> None:
     company, created = Company.register(
-        organization=ORGANIZATION, tax_id=RNC, legal_name=parse_legal_name("Duarte"), now=NOW
+        organization=ORGANIZATION,
+        profile=profile(RNC, CEDULA),
+        legal_name=parse_legal_name("Duarte"),
+        now=NOW,
     )
     assert (company.status, company.version, company.created_at, company.updated_at) == (
         CompanyStatus.ACTIVE,
@@ -218,13 +233,18 @@ def test_a_registered_company_is_active_at_its_first_version_and_says_so() -> No
         NOW,
         NOW,
     )
+    assert (company.profile.jurisdiction, company.profile.functional_currency) == (DOMINICAN, PESO)
+    assert (company.profile.tax_ids, company.profile.primary_tax_id) == ((RNC, CEDULA), RNC)
+    assert company.fiscal_profile_locked_at is None
     assert company.tenant == Tenant(ORGANIZATION, company.id, None)
     assert company.id.version == 7
     assert created == CompanyRegistered(
         scope=company.tenant,
         subject=company.id,
         aggregate_version=1,
-        tax_id=RNC,
+        jurisdiction=DOMINICAN,
+        functional_currency=PESO,
+        tax_ids=(RNC, CEDULA),
         legal_name=LegalName("Duarte"),
     )
     assert (created.TYPE, created.VERSION, created.scope) == (
@@ -232,6 +252,35 @@ def test_a_registered_company_is_active_at_its_first_version_and_says_so() -> No
         1,
         company.tenant,
     )
+
+
+@pytest.mark.parametrize("tax_ids", [(), (RNC, RNC)], ids=["none", "the-same-twice"])
+def test_a_fiscal_profile_holds_one_or_more_distinct_tax_ids(tax_ids: tuple[TaxId, ...]) -> None:
+    with pytest.raises(InvalidValueError, match=r"^fiscal_profile\.tax_ids must be"):
+        profile(*tax_ids)
+
+
+def test_a_company_locks_its_fiscal_profile_once_at_a_new_version() -> None:
+    company = registered()
+    locked, updated = company.lock_fiscal_profile(now=LATER)
+    assert (locked.fiscal_profile_locked_at, locked.version, locked.updated_at) == (LATER, 2, LATER)
+    assert locked.profile == company.profile  # what the lock holds fixed
+    assert updated == CompanyUpdated(
+        scope=company.tenant,
+        subject=company.id,
+        aggregate_version=2,
+        tax_ids=(RNC,),
+        legal_name=company.legal_name,
+        fiscal_profile_locked=True,
+    )
+    assert updated is not None
+    assert updated.fiscal_profile_locked  # what a consumer reads to know the profile no longer moves
+    assert locked.lock_fiscal_profile(now=LATER + timedelta(hours=1)) == (locked, None)  # locked once
+
+
+def test_a_deactivated_company_locks_nothing() -> None:
+    with pytest.raises(CompanyInactiveError):
+        deactivated().lock_fiscal_profile(now=LATER)
 
 
 def test_renaming_a_company_makes_a_new_version() -> None:
@@ -247,8 +296,9 @@ def test_renaming_a_company_makes_a_new_version() -> None:
         scope=company.tenant,
         subject=company.id,
         aggregate_version=2,
-        tax_id=RNC,
+        tax_ids=(RNC,),
         legal_name=LegalName("Duarte Hermanos"),
+        fiscal_profile_locked=False,
     )
 
 

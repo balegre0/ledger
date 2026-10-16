@@ -14,6 +14,7 @@ its page (``ledger_platform.data.paging``): backwards for a page that ends befor
 """
 
 from typing import ClassVar, final, override
+lazy from collections.abc import Sequence
 lazy from datetime import datetime
 lazy from uuid import UUID
 
@@ -26,6 +27,7 @@ lazy from sqlalchemy.orm import InstrumentedAttribute
 from ledger_identity.adapters.postgres.tables import (
     BranchRecord,
     CompanyRecord,
+    CompanyTaxIdRecord,
     EmissionPointRecord,
     MembershipRecord,
     OrganizationRecord,
@@ -33,7 +35,7 @@ from ledger_identity.adapters.postgres.tables import (
 )
 from ledger_identity.application.ports import Branches, Companies, EmissionPoints, Memberships, Organizations
 from ledger_identity.domain.branches import Branch, EmissionPoint
-from ledger_identity.domain.company import Company, CompanyStatus
+from ledger_identity.domain.company import Company, CompanyStatus, FiscalProfile
 from ledger_identity.domain.ids import BranchId, EmissionPointId, MembershipId
 from ledger_identity.domain.membership import Membership, MembershipStatus
 from ledger_identity.domain.organization import Organization
@@ -41,6 +43,8 @@ from ledger_identity.domain.text import Code, LegalName, Name
 from ledger_kernel.access import Role, SubjectId
 from ledger_kernel.errors import LedgerError
 from ledger_kernel.ids import CompanyId, OrganizationId
+from ledger_kernel.jurisdiction import CountryCode, Jurisdiction
+from ledger_kernel.money import Currency
 from ledger_kernel.pagination import page_of
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Tenant
@@ -83,14 +87,17 @@ _ORGANIZATION = select(OrganizationRecord.id, OrganizationRecord.provider_id, Or
 _COMPANY = select(
     CompanyRecord.id,
     CompanyRecord.organization_id,
-    CompanyRecord.tax_scheme,
-    CompanyRecord.tax_value,
+    CompanyRecord.country,
+    CompanyRecord.subdivision,
+    CompanyRecord.currency,
     CompanyRecord.legal_name,
     CompanyRecord.status,
+    CompanyRecord.fiscal_profile_locked_at,
     CompanyRecord.version,
     CompanyRecord.created_at,
     CompanyRecord.updated_at,
 )
+type CompanyRow = Row[UUID, UUID, str, str | None, str, str, str, datetime | None, int, datetime, datetime]
 _BRANCH = select(
     BranchRecord.id,
     BranchRecord.organization_id,
@@ -127,14 +134,31 @@ def _organization(row: Row[UUID, str, datetime]) -> Organization:
     return Organization(id=OrganizationId(identifier), provider_id=provider_id, created_at=created_at)
 
 
-def _company(row: Row[UUID, UUID, str, str, str, str, int, datetime, datetime]) -> Company:
-    identifier, organization, scheme, value, legal_name, status, version, created_at, updated_at = row
+def _company(row: CompanyRow, tax_ids: tuple[TaxId, ...]) -> Company:
+    (
+        identifier,
+        organization,
+        country,
+        subdivision,
+        currency,
+        legal_name,
+        status,
+        locked_at,
+        version,
+        created_at,
+        updated_at,
+    ) = row
     return Company(
         id=CompanyId(identifier),
         organization=OrganizationId(organization),
-        tax_id=TaxId(TaxIdScheme(scheme), value),
+        profile=FiscalProfile(
+            jurisdiction=Jurisdiction(CountryCode(country), subdivision),
+            functional_currency=Currency.of(currency),
+            tax_ids=tax_ids,
+        ),
         legal_name=LegalName(legal_name),
         status=CompanyStatus(status),
+        fiscal_profile_locked_at=locked_at,
         version=version,
         created_at=created_at,
         updated_at=updated_at,
@@ -218,7 +242,7 @@ class PgCompanies(Companies):
     @override
     async def add(self, company: Company) -> bool:
         _require_own(company.organization, self._organization)
-        taxpayer = company.tax_id
+        profile = company.profile
         attempt = (
             await self._connection.begin_nested()
         )  # a taken tax id leaves no company and no registration
@@ -226,30 +250,51 @@ class PgCompanies(Companies):
             insert(CompanyRecord).values(
                 id=company.id,
                 organization_id=company.organization,
-                tax_scheme=taxpayer.scheme,
-                tax_value=taxpayer.value,
+                country=profile.jurisdiction.country,
+                subdivision=profile.jurisdiction.subdivision,
+                currency=profile.functional_currency.code,
                 legal_name=company.legal_name,
                 status=company.status.value,
+                fiscal_profile_locked_at=company.fiscal_profile_locked_at,
                 version=company.version,
                 created_at=company.created_at,
                 updated_at=company.updated_at,
+            )
+        )
+        await self._connection.execute(
+            insert(CompanyTaxIdRecord).values(
+                [
+                    {
+                        "organization_id": company.organization,
+                        "company_id": company.id,
+                        "position": position,
+                        "scheme": tax_id.scheme,
+                        "value": tax_id.value,
+                    }
+                    for position, tax_id in enumerate(profile.tax_ids)
+                ]
             )
         )
         # The registry's key, not a lookup: another organization's company is a row this unit cannot see.
         registered = await self._connection.execute(
             insert(TaxRegistrationRecord)
             .values(
-                scheme=taxpayer.scheme,
-                value=taxpayer.value,
-                organization_id=company.organization,
-                company_id=company.id,
+                [
+                    {
+                        "scheme": tax_id.scheme,
+                        "value": tax_id.value,
+                        "organization_id": company.organization,
+                        "company_id": company.id,
+                    }
+                    for tax_id in profile.tax_ids
+                ]
             )
             .on_conflict_do_nothing(
                 index_elements=[TaxRegistrationRecord.scheme, TaxRegistrationRecord.value]
             )
-            .returning(TaxRegistrationRecord.company_id)
+            .returning(TaxRegistrationRecord.scheme)
         )
-        if registered.first() is None:
+        if len(registered.all()) != len(profile.tax_ids):  # any one tax id held refuses the whole company
             await attempt.rollback()
             return False
         await attempt.commit()
@@ -257,13 +302,13 @@ class PgCompanies(Companies):
 
     @override
     async def get(self, company: CompanyId) -> Company | None:
-        row = (await self._connection.execute(self._one(company))).first()
-        return None if row is None else _company(row)
+        rows = (await self._connection.execute(self._one(company))).all()
+        return (await self._companies(rows))[0] if rows else None
 
     @override
     async def locked(self, company: CompanyId) -> Company | None:
-        row = (await self._connection.execute(self._one(company).with_for_update())).first()
-        return None if row is None else _company(row)
+        rows = (await self._connection.execute(self._one(company).with_for_update())).all()
+        return (await self._companies(rows))[0] if rows else None
 
     @override
     async def update(self, company: Company, *, version: int) -> bool:
@@ -278,13 +323,14 @@ class PgCompanies(Companies):
             .values(
                 legal_name=company.legal_name,
                 status=company.status.value,
+                fiscal_profile_locked_at=company.fiscal_profile_locked_at,
                 version=company.version,
                 updated_at=company.updated_at,
             )
         )
         if changed.rowcount != 1:
             return False
-        if company.status is CompanyStatus.INACTIVE:  # its tax id is free for any organization to register
+        if company.status is CompanyStatus.INACTIVE:  # its tax ids are free for any organization to register
             await self._connection.execute(
                 delete(TaxRegistrationRecord).where(
                     TaxRegistrationRecord.organization_id == self._organization,
@@ -303,9 +349,26 @@ class PgCompanies(Companies):
             CompanyRecord.organization_id == self._organization, MembershipRecord.subject == subject, _ACTIVE
         )
         rows = (await self._connection.execute(paged(statement, CompanyRecord.id, request))).all()
-        return page_of([_company(row) for row in rows], request, key=lambda company: company.id)
+        return page_of(await self._companies(rows), request, key=lambda company: company.id)
 
-    def _one(self, company: CompanyId) -> Select[UUID, UUID, str, str, str, str, int, datetime, datetime]:
+    async def _companies(self, rows: Sequence[CompanyRow]) -> list[Company]:
+        """The companies of ``rows``, each with its tax ids in their order (one read for all of them)."""
+        found = await self._connection.execute(
+            select(CompanyTaxIdRecord.company_id, CompanyTaxIdRecord.scheme, CompanyTaxIdRecord.value)
+            .where(
+                CompanyTaxIdRecord.organization_id == self._organization,
+                CompanyTaxIdRecord.company_id.in_([row[0] for row in rows]),
+            )
+            .order_by(CompanyTaxIdRecord.company_id, CompanyTaxIdRecord.position)
+        )
+        tax_ids: dict[UUID, list[TaxId]] = {}
+        for company, scheme, value in found.all():
+            tax_ids.setdefault(company, []).append(TaxId(TaxIdScheme(scheme), value))
+        return [_company(row, tuple(tax_ids[row[0]])) for row in rows]
+
+    def _one(
+        self, company: CompanyId
+    ) -> Select[UUID, UUID, str, str | None, str, str, str, datetime | None, int, datetime, datetime]:
         return _COMPANY.where(
             CompanyRecord.organization_id == self._organization, CompanyRecord.id == company
         )
