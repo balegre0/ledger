@@ -7,6 +7,8 @@ lazy from collections.abc import AsyncGenerator
 import httpx
 import pytest
 from fastapi import APIRouter, Depends
+from hypothesis import given
+from hypothesis import strategies as st
 from opentelemetry.sdk.trace import TracerProvider
 from prometheus_client import CollectorRegistry
 lazy from fastapi import FastAPI
@@ -186,3 +188,16 @@ async def test_an_app_without_a_limiter_does_not_limit() -> None:
 async def test_a_refusal_to_wait_names_whole_seconds_in_retry_after() -> None:
     response = await get_as(guarded_app(None), "s1", "/slow-down")
     assert (response.status_code, response.headers["retry-after"]) == (429, "3")
+
+
+@given(
+    now=st.floats(min_value=1.0, max_value=1e9, allow_nan=False),
+    rate=st.floats(min_value=1e-6, max_value=1e4, allow_nan=False),
+    burst=st.integers(min_value=1, max_value=1000),
+)
+def test_a_credential_that_has_never_asked_is_always_allowed_its_first_request(
+    now: float, rate: float, burst: int
+) -> None:
+    clock = Clock()
+    clock.now = now
+    assert limiter_of(clock, rate=rate, burst=burst).wait(KEY) == 0.0

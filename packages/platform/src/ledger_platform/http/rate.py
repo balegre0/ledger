@@ -65,13 +65,13 @@ class RateLimiter:
     def wait(self, key: str) -> float:
         """Seconds ``key`` must wait before this request is allowed: ``0.0`` when it is, and it is counted."""
         now = self._clock()
-        due = max(self._tats.get(key, now), now) + self._interval
-        late = due - now - self._tolerance
+        ahead = max(self._tats.get(key, now) - now, 0.0)  # exactly zero for a credential at rest
+        late = ahead + self._interval - self._tolerance
         if late > 0:
             return late  # a refusal changes nothing
         _ = self._tats.pop(key, None)  # put back last: the oldest is the one allowed least recently
         self._make_room(now)
-        self._tats[key] = due
+        self._tats[key] = now + ahead + self._interval
         return 0.0
 
     def remembered(self) -> int:
