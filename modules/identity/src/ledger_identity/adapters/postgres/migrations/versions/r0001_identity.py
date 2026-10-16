@@ -1,11 +1,11 @@
 """Revision 0001 of schema ``identity``: the chassis's tables, then identity's, under row-level security.
 
-v1's two revisions squashed into one (nothing was in production, §6.5): one active company per tax id in every
-organization is the index ``ux_companies_active_tax_id`` from the start, over the tax id's scheme and value
-(§7.3: a tax id is qualified by its scheme). Every type, length, word and
-constraint is spelled out (a revision records what was done and must not move with the models); the tests
-keep the models equal to it. The chassis's tables and the row-level security policies come from their
-versioned builders, whose output never changes (``chassis_schema_v1``, ``rls.policy``).
+v1's two revisions squashed into one (nothing was in production, §6.5): one active company per tax id in
+every organization is the primary key of ``tax_registrations`` from the start, over the tax id's scheme and
+value (§7.3: a tax id is qualified by its scheme), a table outside row-level security (§6.3). Every type,
+length, word and constraint is spelled out (a revision records what was done and must not move with the
+models); the tests keep the models equal to it. The chassis's tables and the row-level security policies
+come from their versioned builders, whose output never changes (``chassis_schema_v1``, ``rls.policy``).
 """
 
 from typing import Final
@@ -46,7 +46,7 @@ def _of_company(table: str) -> sa.ForeignKeyConstraint:
 
 
 def upgrade() -> None:
-    """The chassis's tables, identity's, their policies, and one active company per tax id everywhere."""
+    """The chassis's tables, identity's, their policies, and the registry of one active company per tax id."""
     chassis_schema_v1(op, S)
     op.create_table(
         "organizations",
@@ -71,14 +71,17 @@ def upgrade() -> None:
         sa.CheckConstraint("version > 0", name="ck_companies_version"),
         schema=S,
     )
-    op.create_index(
-        "ux_companies_active_tax_id",
-        "companies",
-        ["tax_scheme", "tax_value"],
-        unique=True,
-        postgresql_where=sa.text("status = 'active'"),
+    op.create_table(
+        "tax_registrations",
+        sa.Column("scheme", sa.String(34), nullable=False),
+        sa.Column("value", sa.String(40), nullable=False),
+        sa.Column("organization_id", sa.Uuid(), nullable=False),
+        sa.Column("company_id", sa.Uuid(), nullable=False),
+        sa.PrimaryKeyConstraint("scheme", "value", name="tax_registrations_pkey"),
+        _of_company("tax_registrations"),
         schema=S,
     )
+    op.create_index("ix_tax_registrations_company", "tax_registrations", ["company_id"], schema=S)
     op.create_table(
         "memberships",
         sa.Column("id", sa.Uuid(), primary_key=True),

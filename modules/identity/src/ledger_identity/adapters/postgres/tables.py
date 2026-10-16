@@ -22,7 +22,6 @@ from sqlalchemy import (
     Index,
     String,
     UniqueConstraint,
-    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.schema import SchemaItem
@@ -38,8 +37,6 @@ SCHEMA: Final = "identity"
 """identity's schema: its tables and the chassis's (``chassis_schema_v1``), under its roles."""
 TAX_SCHEME_LENGTH: Final = 34
 """The longest scheme key ``ledger_kernel.tax_ids`` reads: a country code, a dot and 31 characters."""
-ACTIVE_TAX_ID: Final = "ux_companies_active_tax_id"
-"""One active company per tax id (its scheme and value), in every organization: a tax id is one taxpayer."""
 WORD_LENGTH: Final = 16
 """For a status or a role: a short word of a closed list, which a check constraint names."""
 
@@ -78,18 +75,11 @@ class OrganizationRecord(IdentityTable):
 
 
 class CompanyRecord(IdentityTable):
-    """A company of an organization, at its current version; its tax id is no other active company's."""
+    """A company of an organization, at its current version (its tax id is held in ``tax_registrations``)."""
 
     __tablename__: str = "companies"
     __table_args__: tuple[SchemaItem, ...] = (
         UniqueConstraint("organization_id", "id", name="uq_companies_organization"),
-        Index(
-            ACTIVE_TAX_ID,
-            "tax_scheme",
-            "tax_value",
-            unique=True,
-            postgresql_where=text(f"status = '{CompanyStatus.ACTIVE.value}'"),
-        ),
         _one_of("status", CompanyStatus, name="ck_companies_status"),
         _positive_version("companies"),
     )
@@ -103,6 +93,26 @@ class CompanyRecord(IdentityTable):
     version: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class TaxRegistrationRecord(IdentityTable):
+    """The tax id an active company holds: one taxpayer is one active company, in every organization (§7.3).
+
+    The global registry, outside row-level security by design (§6.3): the one thing identity keeps across
+    organizations, and the table a future cell router and the receiver look a taxpayer up by. A company's row
+    here lives while the company is active; its deactivation releases the tax id.
+    """
+
+    __tablename__: str = "tax_registrations"
+    __table_args__: tuple[SchemaItem, ...] = (
+        _of_company("tax_registrations"),
+        Index("ix_tax_registrations_company", "company_id"),
+    )
+
+    scheme: Mapped[str] = mapped_column(String(TAX_SCHEME_LENGTH), primary_key=True)
+    value: Mapped[str] = mapped_column(String(MAX_TAX_ID_LENGTH), primary_key=True)
+    organization_id: Mapped[UUID] = mapped_column()
+    company_id: Mapped[UUID] = mapped_column()
 
 
 class MembershipRecord(IdentityTable):

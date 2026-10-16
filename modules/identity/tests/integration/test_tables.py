@@ -18,6 +18,7 @@ from ledger_identity.adapters.postgres.tables import (
     IdentityTable,
     MembershipRecord,
     OrganizationRecord,
+    TaxRegistrationRecord,
 )
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.tenancy import OrganizationScope, Tenant
@@ -88,17 +89,26 @@ async def seeded(module_database: BoundDatabase, organization: OrganizationId | 
                     id=tenant.organization, provider_id="312345678901234567", created_at=NOW
                 )
             )
+        tax_value = str(tenant.company.int)[-9:]  # the random end of a UUIDv7
         await unit.connection.execute(
             insert(CompanyRecord).values(
                 id=tenant.company,
                 organization_id=tenant.organization,
                 tax_scheme="do.rnc",
-                tax_value=str(tenant.company.int)[-9:],  # the random end of a UUIDv7
+                tax_value=tax_value,
                 legal_name="Acme SRL",
                 status="active",
                 version=1,
                 created_at=NOW,
                 updated_at=NOW,
+            )
+        )
+        await unit.connection.execute(
+            insert(TaxRegistrationRecord).values(
+                scheme="do.rnc",
+                value=tax_value,
+                organization_id=tenant.organization,
+                company_id=tenant.company,
             )
         )
         await unit.connection.execute(insert(MembershipRecord).values(membership_of(tenant)))
@@ -133,15 +143,24 @@ async def test_row_level_security_shows_a_scope_what_it_owns_and_nothing_without
     )  # another company of the same organization
     other = await seeded(module_database)
     everything = {"organizations": 1, "companies": 2, "memberships": 2, "branches": 1, "emission_points": 1}
-    assert await counts(module_database, first.tenant) == everything
-    assert await counts(module_database, sibling.tenant) == everything
+    registry = {
+        "tax_registrations": 3
+    }  # no tenant's: every scope sees every organization's tax ids, even none
+    assert await counts(module_database, first.tenant) == everything | registry
+    assert await counts(module_database, sibling.tenant) == everything | registry
     assert await counts(module_database, OrganizationScope(first.tenant.organization, None)) == {
         **everything,
+        **registry,
         "branches": 0,
         "emission_points": 0,
     }
-    assert await counts(module_database, other.tenant) == {**everything, "companies": 1, "memberships": 1}
-    assert await counts(module_database, None) == dict.fromkeys(everything, 0)
+    assert await counts(module_database, other.tenant) == {
+        **everything,
+        **registry,
+        "companies": 1,
+        "memberships": 1,
+    }
+    assert await counts(module_database, None) == dict.fromkeys(everything, 0) | registry
 
 
 async def test_a_membership_cannot_point_at_another_organizations_company(

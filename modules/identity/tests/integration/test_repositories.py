@@ -8,6 +8,7 @@ import asyncio
 from datetime import UTC, datetime
 from typing import Final, final
 lazy from collections.abc import Awaitable, Callable
+lazy from uuid import UUID
 
 import psycopg
 import pytest
@@ -24,6 +25,7 @@ from ledger_identity.adapters.postgres.tables import (
     CompanyRecord,
     EmissionPointRecord,
     MembershipRecord,
+    TaxRegistrationRecord,
 )
 from ledger_identity.adapters.postgres.unit import UnscopedUnitError, bind
 from ledger_identity.application import commands, queries
@@ -229,6 +231,41 @@ async def test_a_tax_id_is_unique_by_its_scheme_and_its_value(module_database: B
     assert read.tax_id == cedula.tax_id
     with pytest.raises(TaxIdTakenError):
         await create(module_database, founder=STRANGER, tax_id=TaxId(TaxIdScheme("do.cedula"), RNC.value))
+
+
+async def registered_ids(module_database: BoundDatabase) -> list[tuple[str, str, UUID, UUID]]:
+    """The global registry's rows, as any unit reads them (it is no tenant's)."""
+    async with module_database.unit(OrganizationScope(STRANGER.organization, None)) as unit:
+        rows = await unit.connection.execute(
+            select(
+                TaxRegistrationRecord.scheme,
+                TaxRegistrationRecord.value,
+                TaxRegistrationRecord.organization_id,
+                TaxRegistrationRecord.company_id,
+            ).order_by(TaxRegistrationRecord.scheme, TaxRegistrationRecord.value)
+        )
+        return [(row[0], row[1], row[2], row[3]) for row in rows.all()]
+
+
+async def test_an_active_company_is_in_the_global_registry_and_deactivating_it_releases_its_tax_id(
+    module_database: BoundDatabase,
+) -> None:
+    """Another organization sees the registry, though it sees none of the company's own rows."""
+    company = await create(module_database)
+    assert await registered_ids(module_database) == [
+        ("do.rnc", "101850043", company.organization, company.id)
+    ]
+    await deactivate(module_database, company)
+    assert await registered_ids(module_database) == []
+
+
+async def test_a_refused_registration_leaves_neither_the_company_nor_a_registry_row(
+    module_database: BoundDatabase,
+) -> None:
+    first = await create(module_database)
+    with pytest.raises(TaxIdTakenError):
+        await create(module_database, founder=STRANGER)
+    assert await registered_ids(module_database) == [("do.rnc", "101850043", first.organization, first.id)]
 
 
 async def test_two_organizations_registering_one_taxpayer_at_once_get_one_company(

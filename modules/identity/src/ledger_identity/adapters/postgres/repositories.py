@@ -7,7 +7,7 @@ twice (§2): a statement that forgot its filter still sees nothing of another te
 mistake still leaves every read and change inside the organization. An insert that could collide uses ``ON
 CONFLICT DO NOTHING`` against the constraint or unique index that would refuse it, and reads the outcome from
 ``RETURNING``: a taken tax id or code is an answer, not an exception to parse. The index decides even where
-row-level security hides the row that holds the value (an active company of another organization). A row of
+row-level security hides the row that holds the value (the registry holds every organization's). A row of
 another organization handed to a repository to keep is refused before any statement (``ForeignTenantError``):
 a defect of the caller, which row-level security would refuse as well. A list is read in the direction of
 its page (``ledger_platform.data.paging``): backwards for a page that ends before a cursor.
@@ -17,7 +17,7 @@ from typing import ClassVar, final, override
 lazy from datetime import datetime
 lazy from uuid import UUID
 
-from sqlalchemy import and_, false, func, select, update
+from sqlalchemy import and_, delete, false, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 lazy from sqlalchemy import ColumnElement, Row, Select
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
@@ -29,6 +29,7 @@ from ledger_identity.adapters.postgres.tables import (
     EmissionPointRecord,
     MembershipRecord,
     OrganizationRecord,
+    TaxRegistrationRecord,
 )
 from ledger_identity.application.ports import Branches, Companies, EmissionPoints, Memberships, Organizations
 from ledger_identity.domain.branches import Branch, EmissionPoint
@@ -217,27 +218,42 @@ class PgCompanies(Companies):
     @override
     async def add(self, company: Company) -> bool:
         _require_own(company.organization, self._organization)
-        added = await self._connection.execute(
-            insert(CompanyRecord)
-            .values(
+        taxpayer = company.tax_id
+        attempt = (
+            await self._connection.begin_nested()
+        )  # a taken tax id leaves no company and no registration
+        await self._connection.execute(
+            insert(CompanyRecord).values(
                 id=company.id,
                 organization_id=company.organization,
-                tax_scheme=company.tax_id.scheme,
-                tax_value=company.tax_id.value,
+                tax_scheme=taxpayer.scheme,
+                tax_value=taxpayer.value,
                 legal_name=company.legal_name,
                 status=company.status.value,
                 version=company.version,
                 created_at=company.created_at,
                 updated_at=company.updated_at,
             )
-            # The index, not a lookup: another organization's company is a row this unit cannot see.
-            .on_conflict_do_nothing(
-                index_elements=[CompanyRecord.tax_scheme, CompanyRecord.tax_value],
-                index_where=CompanyRecord.status == CompanyStatus.ACTIVE.value,
-            )
-            .returning(CompanyRecord.id)
         )
-        return added.first() is not None
+        # The registry's key, not a lookup: another organization's company is a row this unit cannot see.
+        registered = await self._connection.execute(
+            insert(TaxRegistrationRecord)
+            .values(
+                scheme=taxpayer.scheme,
+                value=taxpayer.value,
+                organization_id=company.organization,
+                company_id=company.id,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[TaxRegistrationRecord.scheme, TaxRegistrationRecord.value]
+            )
+            .returning(TaxRegistrationRecord.company_id)
+        )
+        if registered.first() is None:
+            await attempt.rollback()
+            return False
+        await attempt.commit()
+        return True
 
     @override
     async def get(self, company: CompanyId) -> Company | None:
@@ -266,7 +282,16 @@ class PgCompanies(Companies):
                 updated_at=company.updated_at,
             )
         )
-        return changed.rowcount == 1
+        if changed.rowcount != 1:
+            return False
+        if company.status is CompanyStatus.INACTIVE:  # its tax id is free for any organization to register
+            await self._connection.execute(
+                delete(TaxRegistrationRecord).where(
+                    TaxRegistrationRecord.organization_id == self._organization,
+                    TaxRegistrationRecord.company_id == company.id,
+                )
+            )
+        return True
 
     @override
     async def of_member(self, subject: SubjectId, request: PageRequest) -> Page[Company]:

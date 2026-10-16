@@ -37,6 +37,8 @@ S: Final = "identity"
 IDENTITY_TABLES: Final = frozenset(
     {"organizations", "companies", "memberships", "branches", "emission_points"}
 )
+OUTSIDE_RLS: Final = frozenset({"tax_registrations"})
+"""Identity's tables no tenant reads: the global registry of the tax ids active companies hold (§6.3)."""
 CHASSIS_TABLES: Final = frozenset(
     {"outbox", "inbox", "jobs", "subscriptions", "idempotency_keys", "audit_events"}
 )
@@ -69,7 +71,12 @@ def test_the_migrate_app_brings_identity_s_schema_to_head_from_nothing(
 ) -> None:
     assert tables_of(fresh_admin_url, schema=S) == set()
     App("migrate", settings=fresh).migrate()
-    assert tables_of(fresh_admin_url, schema=S) == {*IDENTITY_TABLES, *CHASSIS_TABLES, "alembic_version"}
+    assert tables_of(fresh_admin_url, schema=S) == {
+        *IDENTITY_TABLES,
+        *OUTSIDE_RLS,
+        *CHASSIS_TABLES,
+        "alembic_version",
+    }
     assert (version_of(fresh_admin_url, S), version_of(fresh_admin_url, "platform")) == (
         MIGRATIONS.head,
         "0001",
@@ -102,7 +109,12 @@ def test_two_migrations_started_at_once_both_succeed(fresh: Settings, fresh_admi
     command = [sys.executable, "-c", "from ledger_app_migrate.main import main; raise SystemExit(main())"]
     runs = [subprocess.Popen(command, env=environment) for _ in range(2)]
     assert [run.wait(timeout=120) for run in runs] == [0, 0]
-    assert tables_of(fresh_admin_url, schema=S) == {*IDENTITY_TABLES, *CHASSIS_TABLES, "alembic_version"}
+    assert tables_of(fresh_admin_url, schema=S) == {
+        *IDENTITY_TABLES,
+        *OUTSIDE_RLS,
+        *CHASSIS_TABLES,
+        "alembic_version",
+    }
 
 
 def test_the_migrated_schema_is_exactly_the_models(migrated: WorkerDatabase) -> None:
@@ -156,6 +168,7 @@ def test_every_table_of_a_tenant_s_data_is_under_its_policies_forced_on_its_owne
         ]
     assert row_security(url, schema=S) == {
         **dict.fromkeys(IDENTITY_TABLES, (True, True)),
+        **dict.fromkeys(OUTSIDE_RLS, (False, False)),  # no tenant's rows: every organization's, by design
         "idempotency_keys": (True, True),
         "audit_events": (True, True),
         "outbox": (False, False),  # the queues are the module's own and the relay's, no tenant's to read
@@ -178,16 +191,25 @@ def test_every_primary_key_is_the_models_column_for_column(migrated: WorkerDatab
 
 
 def test_one_active_company_holds_a_tax_id_in_every_organization(migrated: WorkerDatabase) -> None:
-    """Alembic does not compare an index's predicate: the partial unique index is read back here."""
+    """The global registry's primary key is the tax id: the scheme and the value, in every organization."""
+    assert indexes_of(superuser(migrated), "tax_registrations", schema=S) == {
+        "tax_registrations_pkey": (
+            "CREATE UNIQUE INDEX tax_registrations_pkey ON identity.tax_registrations "
+            "USING btree (scheme, value)"
+        ),
+        "ix_tax_registrations_company": (
+            "CREATE INDEX ix_tax_registrations_company ON identity.tax_registrations USING btree (company_id)"
+        ),
+    }
+
+
+def test_a_company_no_longer_carries_the_partial_index_that_made_its_tax_id_unique(
+    migrated: WorkerDatabase,
+) -> None:
     assert indexes_of(superuser(migrated), "companies", schema=S) == {
         "companies_pkey": "CREATE UNIQUE INDEX companies_pkey ON identity.companies USING btree (id)",
         "uq_companies_organization": (
             "CREATE UNIQUE INDEX uq_companies_organization ON identity.companies "
             "USING btree (organization_id, id)"
-        ),
-        "ux_companies_active_tax_id": (
-            "CREATE UNIQUE INDEX ux_companies_active_tax_id ON identity.companies "
-            "USING btree (tax_scheme, tax_value) "
-            "WHERE ((status)::text = 'active'::text)"
         ),
     }
