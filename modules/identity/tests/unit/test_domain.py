@@ -45,6 +45,7 @@ from ledger_identity.domain.roles import (
     OWNERSHIP_MANAGE,
     PERMISSIONS,
     READ_ONLY,
+    only_reads,
     permissions_of,
 )
 from ledger_identity.domain.text import (
@@ -63,7 +64,14 @@ from ledger_identity.events import (
     MembershipGranted,
     MembershipRevoked,
 )
-from ledger_kernel.access import CompanyNotFoundError, PermissionDeniedError, Principal, Role, SubjectId
+from ledger_kernel.access import (
+    CompanyNotFoundError,
+    PermissionDeniedError,
+    Principal,
+    Role,
+    SubjectId,
+    parse_permission,
+)
 from ledger_kernel.errors import ErrorKind, InvalidValueError
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
@@ -491,6 +499,25 @@ def test_a_revoked_owner_is_revoked_again_by_an_owner_only() -> None:
         revoked,
         None,
     )
+
+
+def test_what_reads_is_decided_by_the_verb_so_every_module_s_permissions_are_covered() -> None:
+    """A deactivated company keeps its data readable in every module, not only in identity."""
+    held = frozenset(
+        parse_permission(code)
+        for code in (
+            "identity.companies.read",
+            "invoicing.invoices.read",
+            "invoicing.invoices.issue",
+            "do_ecf.ranges.manage",
+            "fiscal.enrollments.read",
+        )
+    )
+    assert only_reads(held) == frozenset(
+        parse_permission(code)
+        for code in ("identity.companies.read", "invoicing.invoices.read", "fiscal.enrollments.read")
+    )
+    assert only_reads(frozenset()) == frozenset()
 
 
 def test_other_services_may_let_a_member_of_a_deactivated_company_read_only() -> None:

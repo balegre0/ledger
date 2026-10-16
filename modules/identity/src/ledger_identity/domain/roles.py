@@ -8,7 +8,7 @@ invoicing's manifest.
 
 from types import MappingProxyType
 from typing import Final
-lazy from collections.abc import Mapping
+lazy from collections.abc import Collection, Mapping
 
 from ledger_kernel.access import Role, parse_permission
 lazy from ledger_kernel.access import Permission
@@ -41,7 +41,17 @@ PERMISSIONS: Final[Mapping[Role, frozenset[Permission]]] = MappingProxyType(
 
 
 READ_ONLY: Final = frozenset({COMPANIES_READ, MEMBERSHIPS_READ})
-"""What a role still allows other modules to do for a deactivated company: read."""
+"""What identity's roles still allow other modules to do for a deactivated company: read."""
+_READ_VERB: Final = ".read"
+
+
+def only_reads(permissions: Collection[Permission]) -> frozenset[Permission]:
+    """Those of ``permissions`` that read: their action, the last part of the code, is ``read``.
+
+    Decided by the verb, not by a list, so that the permissions every module declares are covered: a
+    deactivated company keeps its data readable everywhere and issues nothing anywhere (§7.7).
+    """
+    return frozenset(permission for permission in permissions if permission.endswith(_READ_VERB))
 
 
 def permissions_of(role: Role) -> frozenset[Permission]:
