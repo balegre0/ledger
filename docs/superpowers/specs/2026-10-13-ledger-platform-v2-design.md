@@ -315,6 +315,13 @@ type wait in the inbox for the next roll forward (alerted by age), never fail.
  retryable failure: next_attempt_at = backoff(attempts) ; INVALID or attempts = max: status = 'dead' (kept)
 ```
 
+- **A consumer handles its event inside a unit (as built, v2-M1).** The handler and the delete of its inbox row
+  share one transaction, which is what makes the effect exactly once. A facade call inside it raises
+  `UnitOpenError` (rule 13), so until an "outside" consumer style exists (the handler runs with no unit and the
+  runner deletes the row in a second unit under its token, the facade command carrying the event id as its
+  idempotency token), a consumer writes its own schema and enqueues a job for any cross-module call. The
+  consumers §8.5 shows calling `InvoicingApi.apply_fiscal_status` (`fiscal.channel_documents`) need the outside
+  style first.
 - **Exactly-once effects over at-least-once delivery.** Fan-out inserts and the outbox delete commit together,
   so one outbox row is fanned out once; the inbox primary key `(consumer, event_id)` absorbs any repeat. A
   handled inbox row is deleted in the handler's transaction (nothing can deliver it again: its outbox row is
@@ -340,6 +347,12 @@ type wait in the inbox for the next roll forward (alerted by age), never fail.
   transaction-level advisory lock per schema), so a subject's rows reach the inbox in id order. A dead row no
   longer blocks its subject (the rows behind it go on); replaying it is refused while an earlier live row of its
   subject waits. Events without a subject are not ordered.
+  **As built (v2-M1), known limit:** subject order holds while the fan-out is healthy. When the row-by-row path
+  skips a row (its target refused it) or sets one aside (10 failures), later events of the same subject go on to
+  an ordered consumer's inbox ahead of it, and run first; the earlier one arrives late as the subject's new head.
+  Before the first ordered consumer ships, the fan-out must hold a subject back behind a skipped or set-aside
+  row of its own (skip later rows of that subject in the pass; let a set-aside row block its subject), or the
+  consumer must be a version-monotonic upsert, which does not depend on order.
 - **Retries**: backoff 1 s, 10 s, 1 min, 5 min, then every 10 min; `max_attempts` 10 (overridable per
   consumer); then `dead`. A row whose worker died (its lease ran out) is retried the same way, a backoff after
   the lease ran out, and is `dead` with `worker_lost` once its attempts are spent (one rule for inboxes and
