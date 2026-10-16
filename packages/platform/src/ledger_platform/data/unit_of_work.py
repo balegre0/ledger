@@ -44,6 +44,10 @@ type Step = Callable[[AsyncConnection], Awaitable[None]]
 _logger = structlog.stdlib.get_logger(__name__)
 
 
+WOKEN_WHILE_RUNNING: Final = "woken_while_running"
+"""What a wake leaves on a running job: the ``Park`` it records next becomes ``ready``."""
+
+
 class EventTooLargeError(LedgerError):
     """An event's payload exceeds 64 KiB (§3.5): a defect of the producer."""
 
@@ -298,6 +302,11 @@ class UnitJobs:
             )
             .values(status="ready", run_at=unit.now, parked_reason=None, updated_at=unit.now)
         )
+        unit.record(
+            _mark_woken(
+                jobs, jobs.c.kind == kind, jobs.c.key == key, *_in_scope(jobs, unit.scope), now=unit.now
+            )
+        )
 
     def wake_all(self, kind: str, company: CompanyId, reason: str) -> None:
         """Ready every job of ``kind`` parked for ``company`` with ``reason``, inside the unit's scope."""
@@ -316,6 +325,24 @@ class UnitJobs:
             )
             .values(status="ready", run_at=unit.now, parked_reason=None, updated_at=unit.now)
         )
+        unit.record(
+            _mark_woken(
+                jobs,
+                jobs.c.kind == kind,
+                jobs.c.company_id == company,
+                *_in_scope(jobs, unit.scope),
+                now=unit.now,
+            )
+        )
+
+
+def _mark_woken(jobs: AnyTable, *where: ColumnElement[bool], now: datetime) -> Executable:
+    """Mark the running jobs matching ``where``: a ``Park`` they record next is a wake that came first."""
+    return (
+        update(jobs)
+        .where(jobs.c.status == "running", *where)
+        .values(parked_reason=WOKEN_WHILE_RUNNING, updated_at=now)
+    )
 
 
 @final

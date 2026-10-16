@@ -138,7 +138,7 @@ def handler() -> Scripted:
 
 
 def runner_of(
-    database: BoundDatabase, handler: Scripted, registry: CollectorRegistry, tracing: Tracing | None = None
+    database: BoundDatabase, handler: JobHandler, registry: CollectorRegistry, tracing: Tracing | None = None
 ) -> JobRunner:
     kinds = {kind: (decl, handler) for kind, decl in DECLS.items()}
     return JobRunner(database=database, kinds=kinds, registry=registry, tracing=tracing, poll=0.02)
@@ -243,6 +243,40 @@ async def test_park_waits_for_a_wake(
     assert await runner.run_due() == 1
     assert (await state(admin, "k1"))[0] == "done"
     assert finished(registry, "parked") == 1
+
+
+async def test_a_wake_while_the_handler_runs_is_not_lost(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry
+) -> None:
+    """The fact a job waits for can arrive before it parks: it must run again, not wait forever."""
+    outcomes: list[JobOutcome] = [Park("certificate_missing"), Done()]
+
+    async def woken_while_running(job: Job) -> JobOutcome:
+        del job
+        async with probe.unit(TENANT) as uow:
+            uow.jobs.wake_all(EXPORT, A1, "certificate_missing")
+        return outcomes.pop(0)
+
+    runner = runner_of(probe, woken_while_running, registry)
+    await enqueue(probe, "k1")
+    assert await runner.run_due() == 1
+    assert (await state(admin, "k1"))[:6] == ("ready", 1, None, None, *UNLEASED)
+    assert await runner.run_due() == 1
+    assert (await state(admin, "k1"))[:6] == ("done", 2, None, None, *UNLEASED)
+
+
+async def test_a_wake_for_one_job_while_it_runs_does_not_outlive_it(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry
+) -> None:
+    async def woken_then_done(job: Job) -> JobOutcome:
+        async with probe.unit(TENANT) as uow:
+            uow.jobs.wake(job.kind, job.key)
+        return Done()
+
+    runner = runner_of(probe, woken_then_done, registry)
+    await enqueue(probe, "k1")
+    assert await runner.run_due() == 1
+    assert (await state(admin, "k1"))[:6] == ("done", 1, None, None, *UNLEASED)
 
 
 async def test_a_retryable_error_backs_off_and_counts_on_claim(

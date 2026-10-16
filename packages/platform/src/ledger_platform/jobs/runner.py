@@ -45,7 +45,7 @@ lazy from datetime import datetime
 
 import structlog
 from pydantic import AwareDatetime, BaseModel, ConfigDict, TypeAdapter
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 lazy from prometheus_client import CollectorRegistry
 lazy from sqlalchemy import RowMapping, Update
 
@@ -54,6 +54,7 @@ from ledger_platform.data.audit import Actor, acting_as
 from ledger_platform.data.codec import JsonValue
 from ledger_platform.data.queue import DEFAULT_BACKOFF, RELEASE_TIMEOUT, claim, parked, recover, release
 from ledger_platform.data.scopes import scope_of
+from ledger_platform.data.unit_of_work import WOKEN_WHILE_RUNNING
 from ledger_platform.jobs.outcomes import Done, Job, Park, RunAgain
 from ledger_platform.observability.metrics import counter
 lazy from ledger_platform.config.manifest import JobDecl
@@ -485,7 +486,12 @@ class JobRunner:
                     jobs.c.lease_token == job.lease_token,
                     jobs.c.status == "running",
                 )
-                .values(lease_until=None, lease_token=None, updated_at=unit.now, **values)
+                .values(
+                    lease_until=None,
+                    lease_token=None,
+                    updated_at=unit.now,
+                    **_settled(jobs, values, unit.now),
+                )
                 .returning(jobs.c.key)
             )
             kept = recorded.first() is not None
@@ -497,6 +503,22 @@ class JobRunner:
     def _lost(self, job: Job) -> None:
         _logger.warning("job_lease_lost", kind=job.kind)
         self._lease_lost.labels(kind=job.kind).inc()
+
+
+def _settled(jobs: AnyTable, values: _Values, now: datetime) -> _Values:
+    """``values`` as written: a ``Park`` after a wake that arrived while the handler ran is ``ready`` at once.
+
+    Nothing parked yet could have been woken, so without this the job would wait for a wake that has passed.
+    Any other outcome clears the mark a wake left.
+    """
+    if values["status"] != "parked":
+        return {"parked_reason": None, **values}
+    woken = jobs.c.parked_reason == WOKEN_WHILE_RUNNING
+    return {
+        "status": case((woken, "ready"), else_="parked"),
+        "parked_reason": case((woken, None), else_=values["parked_reason"]),
+        "run_at": case((woken, now), else_=jobs.c.run_at),
+    }
 
 
 def _bury(jobs: AnyTable, kind: str) -> Update:
