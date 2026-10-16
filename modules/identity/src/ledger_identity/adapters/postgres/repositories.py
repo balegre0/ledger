@@ -30,7 +30,14 @@ from ledger_identity.adapters.postgres.tables import (
     OrganizationRecord,
     TaxRegistrationRecord,
 )
-from ledger_identity.application.ports import Companies, Establishments, Memberships, Organizations
+from ledger_identity.application.ports import (
+    Companies,
+    Establishments,
+    Holder,
+    Memberships,
+    Organizations,
+    TaxRegistry,
+)
 from ledger_identity.domain.company import Company, CompanyStatus, FiscalProfile
 from ledger_identity.domain.establishments import Establishment
 from ledger_identity.domain.ids import EstablishmentId, MembershipId
@@ -337,6 +344,27 @@ class PgCompanies(Companies):
         return _COMPANY.where(
             CompanyRecord.organization_id == self._organization, CompanyRecord.id == company
         )
+
+
+@final
+class PgTaxRegistry(TaxRegistry):
+    """The tax ids active companies hold, in PostgreSQL: no tenant's, so no organization is named."""
+
+    __slots__ = ("_connection",)
+
+    def __init__(self, connection: AsyncConnection) -> None:
+        self._connection = connection
+
+    @override
+    async def holder_of(self, tax_id: TaxId) -> Holder | None:
+        row = (
+            await self._connection.execute(
+                select(TaxRegistrationRecord.organization_id, TaxRegistrationRecord.company_id).where(
+                    TaxRegistrationRecord.scheme == tax_id.scheme, TaxRegistrationRecord.value == tax_id.value
+                )
+            )
+        ).first()
+        return None if row is None else Holder(OrganizationId(row[0]), CompanyId(row[1]))
 
 
 @final

@@ -1,7 +1,8 @@
 """identity's assembly (§3.10): what the apps mount of it.
 
 The ``api`` app mounts its routers, ``migrate`` runs its revisions, and every app checks its schema is
-current (readiness). It publishes events and consumes none, and runs no job. Tax ids are read with the
+current (readiness). Every app binds its API (``IdentityApi``) for the modules that depend on it. It publishes
+events and consumes none, and runs no job. Tax ids are read with the
 schemes of the installed regimes: identity names no country, and is not ready while no regime is installed
 (readiness ``identity:regimes``): it could read no tax id, and every company registration would be refused.
 """
@@ -12,6 +13,9 @@ from ledger_identity._manifest import MANIFEST
 from ledger_identity.adapters.http import companies, establishments, memberships, organization
 from ledger_identity.adapters.http.context import ApiContext
 from ledger_identity.adapters.postgres.schema import migrations
+from ledger_identity.adapters.postgres.unit import PgUnits
+from ledger_identity.api import IDENTITY_API
+from ledger_identity.application.facade import IdentityFacade
 from ledger_kernel.errors import UnavailableError
 from ledger_platform.runtime import Module, ModuleParts
 lazy from ledger_platform.runtime import ModuleContext
@@ -45,7 +49,10 @@ def assemble(context: ModuleContext) -> ModuleParts:
         if not context.regimes.keys():
             raise NoRegimeInstalledError
 
-    return ModuleParts(routers=routers, checks={"regimes": regimes}, migrations=migrations())
+    facade = IdentityFacade(PgUnits(context.database))
+    return ModuleParts(
+        api=IDENTITY_API.bind(facade), routers=routers, checks={"regimes": regimes}, migrations=migrations()
+    )
 
 
 MODULE: Final = Module(manifest=MANIFEST, assemble=assemble)

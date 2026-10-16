@@ -135,6 +135,21 @@ async def deactivate_company(
     return inactive
 
 
+async def lock_fiscal_profile(unit: IdentityUnit, company_id: CompanyId) -> Company:
+    """Lock the company's fiscal profile: its jurisdiction, functional currency and primary tax id.
+
+    The platform's call, before a company's first numbered document; one already locked stays as it was, so a
+    retry changes and announces nothing.
+    """
+    current = await _locked(unit, company_id)
+    locked, updated = current.lock_fiscal_profile(now=unit.now)
+    if updated is not None:
+        await _replace(unit, current, locked)
+        unit.events.publish(updated)
+        unit.audit.record("company.lock_fiscal_profile", current.id, before=current, after=locked)
+    return locked
+
+
 async def open_establishment(
     unit: IdentityUnit, company_id: CompanyId, opening: Opening, *, actor: SubjectId
 ) -> Establishment:

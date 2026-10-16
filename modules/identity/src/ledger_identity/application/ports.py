@@ -10,6 +10,7 @@ from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
 from typing import Literal, Protocol, final
 lazy from collections.abc import Mapping
+lazy from contextlib import AbstractAsyncContextManager
 lazy from datetime import datetime
 lazy from uuid import UUID
 
@@ -23,6 +24,8 @@ lazy from ledger_identity.events import IdentityEvent
 lazy from ledger_kernel.access import SubjectId
 lazy from ledger_kernel.ids import CompanyId, OrganizationId
 lazy from ledger_kernel.pagination import Page, PageRequest
+lazy from ledger_kernel.tax_ids import TaxId
+lazy from ledger_kernel.tenancy import Scope
 
 
 class Organizations(Protocol, metaclass=ABCMeta):
@@ -117,6 +120,7 @@ type AuditAction = Literal[
     "company.register",
     "company.rename",
     "company.deactivate",
+    "company.lock_fiscal_profile",
     "membership.grant",
     "membership.revoke",
     "establishment.open",
@@ -160,3 +164,32 @@ class IdentityUnit:
     audit: Audit
     now: datetime
     """The unit's time: everything it records and announces happened then, as one transaction does."""
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class Holder:
+    """The company that holds a tax id, and the organization it is of."""
+
+    organization: OrganizationId
+    company: CompanyId
+
+
+class TaxRegistry(Protocol, metaclass=ABCMeta):
+    """The tax ids the active companies of every organization hold: what identity keeps across them."""
+
+    @abstractmethod
+    async def holder_of(self, tax_id: TaxId) -> Holder | None:
+        """The active company that holds ``tax_id``, or ``None``."""
+
+
+class IdentityUnits(Protocol, metaclass=ABCMeta):
+    """Where the facade gets the units it works in, one for each thing it does."""
+
+    @abstractmethod
+    def unit(self, scope: Scope) -> AbstractAsyncContextManager[IdentityUnit]:
+        """A unit scoped to an organization or one of its companies; it commits when its block ends."""
+
+    @abstractmethod
+    def registry(self) -> AbstractAsyncContextManager[TaxRegistry]:
+        """A unit that reads the registry, which no organization owns, and nothing else."""

@@ -366,6 +366,7 @@ layers =
     assembly
     adapters
     application
+    api
     domain
     events
     _manifest
