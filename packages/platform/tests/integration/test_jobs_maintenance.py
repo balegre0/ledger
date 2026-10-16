@@ -16,6 +16,7 @@ from sqlalchemy import event
 
 from ledger_kernel.ids import OrganizationId
 from ledger_platform.config.manifest import JobDecl
+from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.data.bound import BoundDatabase
 from ledger_platform.data.database import Database
 from ledger_platform.data.unit_of_work import JobPolicy
@@ -80,14 +81,18 @@ def statements(database: Database) -> list[str]:
     return sent
 
 
-async def purge(database: Database, kind: str) -> int:
+async def purge(database: Database, kind: str, *, batch: int | None = None) -> int:
     """Enqueue ``kind`` in ``platform`` and let the platform's runner run it; how many jobs it ran."""
     bound = [BoundDatabase(database, schema=schema, source=schema, signals=Silent()) for schema in SCHEMAS]
     policies = {
         kind: JobPolicy(max_attempts=3, deadline=None) for kind in (PURGE_IDEMPOTENCY_KEYS, PURGE_DONE_JOBS)
     }
     platform = BoundDatabase(database, schema="platform", source="platform", jobs=policies, signals=Silent())
-    specs = maintenance_jobs([*bound, platform])
+    specs = (
+        maintenance_jobs([*bound, platform])
+        if batch is None
+        else maintenance_jobs([*bound, platform], batch=batch)
+    )
     kinds = {spec.kind: (JobDecl(kind=spec.kind), spec.handler) for spec in specs}
     async with platform.unit(None) as uow:
         uow.jobs.enqueue(kind, "once")
@@ -140,3 +145,32 @@ async def test_done_jobs_are_purged_after_seven_days_and_dead_ones_kept(
     purges = deletes(statements)
     assert len(purges) == 3
     assert not any("RETURNING" in statement.upper() for statement in purges)
+
+
+async def test_expired_keys_are_purged_in_short_batches(
+    database: Database, admin: psycopg.AsyncConnection, statements: list[str]
+) -> None:
+    """A table with millions of expired rows must not be one statement under the statement timeout."""
+    for number in range(7):
+        await admin.execute(KEY.format(schema="probe").encode(), (A, f"old-{number}", "-1 day"))
+    await admin.execute(KEY.format(schema="probe").encode(), (A, "live", "1 day"))
+    assert await purge(database, PURGE_IDEMPOTENCY_KEYS, batch=3) == 1
+    assert await table(admin, KEYS["probe"]) == [("live",)]
+    assert len(deletes(statements)) == 3 + 1 + 1  # probe: 3, 3 and 1 rows; other and platform: none
+
+
+async def test_done_jobs_are_purged_in_short_batches(
+    database: Database, admin: psycopg.AsyncConnection, statements: list[str]
+) -> None:
+    for number in range(6):
+        await admin.execute(JOB.encode(), (f"old-{number}", "done", "8 days"))
+    await admin.execute(JOB.encode(), ("recent", "done", "1 day"))
+    assert await purge(database, PURGE_DONE_JOBS, batch=3) == 1
+    assert await table(admin, "SELECT key FROM probe.jobs") == [("recent",)]
+    assert len(deletes(statements)) == 3 + 1 + 1  # probe: 3, 3, then none left; other and platform: none
+
+
+@pytest.mark.parametrize("batch", [0, -1])
+def test_a_batch_below_one_is_refused(batch: int) -> None:
+    with pytest.raises(InvalidOptionError):
+        maintenance_jobs([], batch=batch)
