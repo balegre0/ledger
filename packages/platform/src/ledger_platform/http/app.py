@@ -37,6 +37,8 @@ lazy from opentelemetry.trace import TracerProvider
 lazy from prometheus_client import CollectorRegistry
 lazy from starlette.types import ASGIApp, Receive, Scope, Send
 
+from ledger_platform.config.options import require_at_least
+from ledger_platform.http.limits import MAX_BODY_BYTES, BodyLimit
 from ledger_platform.http.metrics import ROUTE_KEY, UNMATCHED, Measure, RouteLabels
 from ledger_platform.http.mode import require_mode_header
 from ledger_platform.http.probes import OPERATIONAL_PATHS, add_probes
@@ -234,8 +236,11 @@ def create_app(
     observability: Observability,
     lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]],
     routers: Sequence[APIRouter] = (),
+    max_body_bytes: int = MAX_BODY_BYTES,
 ) -> FastAPI:
     """A FastAPI application with ``routers`` plus ``/livez``, ``/readyz`` and ``/metrics``, traced.
+
+    A request body over ``max_body_bytes`` is refused 413 as it is read (``http.limits``).
 
     Raises ``AmbiguousRouteError`` when one route is mounted under two different templates. Routes must be
     complete before this returns: a route added afterwards, to the app or to a router already included, is
@@ -247,6 +252,7 @@ def create_app(
         lifespan=lifespan,
         telemetry=_telemetry(observability.tracer_provider),
     )
+    require_at_least("http", "max_body_bytes", max_body_bytes)
     app.caller_trace = observability.caller_trace
     add_probes(app, observability.health, observability.registry)
     for router in routers:
@@ -258,6 +264,7 @@ def create_app(
         ["method", "route", "status"],
         registry=observability.registry,
     )
+    app.add_middleware(BodyLimit, limit=max_body_bytes)
     app.add_middleware(Measure, duration=duration, labels=labels)
     install_problem_handlers(app, route_of=labels.of_scope)
     return app

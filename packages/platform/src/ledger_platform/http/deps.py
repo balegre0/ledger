@@ -208,7 +208,9 @@ def allowed(in_company: InCompany, permission: Permission) -> Allowed:
     """The dependency giving the caller's access to the request's company, if it holds ``permission`` there.
 
     Declared before any other dependency of the route: a caller without the permission is refused (403) before
-    the request's preconditions (``If-Match``, ``Idempotency-Key``) or its body are read.
+    the request's preconditions (``If-Match``, ``Idempotency-Key``) are read. FastAPI reads and parses a body
+    before it runs any dependency, so what keeps an unauthorized caller from making the app hold a huge one is
+    the body limit (``http.limits``), not this order.
     """
 
     async def checked(access: Annotated[CompanyAccess, Depends(in_company)]) -> CompanyAccess:
