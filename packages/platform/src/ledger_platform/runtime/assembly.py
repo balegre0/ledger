@@ -37,7 +37,7 @@ from ledger_platform.runtime.contexts import (
     bind_parts,
     extension_view,
 )
-from ledger_platform.runtime.keys import Directory
+from ledger_platform.runtime.keys import ChainDirectory, Directory
 from ledger_platform.runtime.packs import Channels, installed_modules
 from ledger_platform.runtime.registries import Regimes
 from ledger_platform.runtime.sections import Declared, read_sections
@@ -388,7 +388,7 @@ class _Assembly:
         self._bound = bound
         self._sections = sections
         self._apis = Directory("api")
-        self._extensions = Directory("extension")
+        self._extensions = ChainDirectory("extension")
         self._ports = Directory("port")
         self._channels = AssembledChannels()
 
@@ -432,7 +432,7 @@ class _Assembly:
         for module in modules:
             points = module.manifest.extension_points
             for point in points.declares:
-                self._extensions.value_of(f"{module.manifest.package.name}.{point}")
+                _ = self._extensions.chain_of(f"{module.manifest.package.name}.{point}")
             for port in points.provides:
                 self._ports.value_of(port)
 

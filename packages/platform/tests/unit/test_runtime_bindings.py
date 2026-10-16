@@ -17,6 +17,7 @@ from ledger_platform.runtime.facade import (
 )
 from ledger_platform.runtime.keys import (
     BindingMissingError,
+    ChainDirectory,
     Directory,
     Key,
     UndeclaredBindingError,
@@ -122,7 +123,9 @@ class Quiet:
         return "quiet"
 
 
-def manifest(name: str, **extension_points: list[str]) -> PackageManifest:
+def manifest(
+    name: str, orders: dict[str, int] | None = None, **extension_points: list[str]
+) -> PackageManifest:
     lines = [
         "[package]",
         f'name = "{name}"',
@@ -133,6 +136,8 @@ def manifest(name: str, **extension_points: list[str]) -> PackageManifest:
         'modules = ["identity"]' if name != "identity" else "modules = []",
         "[extension_points]",
         *(f"{key} = {values!r}".replace("'", '"') for key, values in extension_points.items()),
+        *(["[extension_points.order]"] if orders else []),
+        *(f'"{point}" = {order}' for point, order in (orders or {}).items()),
     ]
     return load_manifest("\n".join(lines))
 
@@ -141,7 +146,7 @@ def manifest(name: str, **extension_points: list[str]) -> PackageManifest:
 class Bench:
     def __init__(self) -> None:
         self.apis = Directory("apis")
-        self.extensions = Directory("extensions")
+        self.extensions = ChainDirectory("extensions")
         self.ports = Directory("ports")
 
     def bind(self, declared: PackageManifest, parts: ModuleParts) -> None:
@@ -182,11 +187,34 @@ def test_two_modules_declaring_one_protocol_name_never_collide() -> None:
     bench.bind(fiscal, ModuleParts(implements=(INVOICING_POLICY.bind(Approving()),)))
     invoicing = extension_view(manifest("invoicing", declares=["Policy"]), bench.extensions)
     payments = extension_view(manifest("payments", declares=["Policy"]), bench.extensions)
-    assert isinstance(invoicing.get(INVOICING_POLICY), Approving)
+    assert [type(policy) for policy in invoicing.all(INVOICING_POLICY)] == [Approving]
     with pytest.raises(BindingMissingError, match=r"payments\.Policy"):
-        payments.get(PAYMENTS_POLICY)
+        payments.all(PAYMENTS_POLICY)
     with pytest.raises(UndeclaredDependencyError):
-        payments.get(INVOICING_POLICY)
+        payments.all(INVOICING_POLICY)
+
+
+class Denying:
+    @facade
+    async def check(self, document: str) -> bool:
+        return not document
+
+
+def test_modules_implementing_one_point_are_all_in_its_chain_in_their_declared_order() -> None:
+    bench = Bench()
+    bench.bind(
+        manifest("fiscal", implements=["invoicing.Policy"]),
+        ModuleParts(implements=(INVOICING_POLICY.bind(Approving()),)),
+    )
+    bench.bind(
+        manifest("stock", {"invoicing.Policy": 10}, implements=["invoicing.Policy"]),
+        ModuleParts(implements=(INVOICING_POLICY.bind(Denying()),)),
+    )
+    invoicing = extension_view(manifest("invoicing", declares=["Policy"]), bench.extensions)
+    assert [type(policy) for policy in invoicing.all(INVOICING_POLICY)] == [
+        Denying,
+        Approving,
+    ]  # 10, then 100
 
 
 @pytest.mark.parametrize(

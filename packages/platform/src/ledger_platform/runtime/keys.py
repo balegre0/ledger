@@ -9,9 +9,9 @@ a module's API under its own name, extension point implementations under ``<decl
 ports under the port's name. A package reads only the names it declares (``view(allowed)``): reading anything
 else fails at that read, whenever it happens (at assembly, or at call time for what a module reads later).
 
-A name is bound once: one implementation per extension point, one provider per port
-(``DuplicateBindingError``). A point that needs several implementations (a chain of policies) will be a
-directory of its own, keyed by implementer, when one needs it.
+A name is bound once: one provider per port, one API per module (``DuplicateBindingError``). An extension
+point is different (ADR 0011): every module that implements it is in its chain, one implementation per
+implementer, in the order ``(order, implementer)`` the manifests declare (``ChainDirectory``).
 """
 
 from dataclasses import dataclass
@@ -142,9 +142,58 @@ class Directory:
         return DirectoryView(self, allowed)
 
 
+@final
+class ChainView:
+    """What one package may read of a chain directory."""
+
+    __slots__ = ("_allowed", "_directory")
+
+    def __init__(self, directory: ChainDirectory, allowed: frozenset[str]) -> None:
+        self._directory = directory
+        self._allowed = allowed
+
+    def all[T](self, key: Key[T]) -> tuple[T, ...]:
+        """Every implementation bound under ``key``, in chain order, if the reader declared the name."""
+        if key.name not in self._allowed:
+            raise UndeclaredDependencyError(self._directory.label, key.name)
+        return tuple(key.take(value) for value in self._directory.chain_of(key.name))
+
+
+@final
+class ChainDirectory:
+    """Implementations by name, several per name, each with the order its implementer declared (ADR 0011)."""
+
+    __slots__ = ("_chains", "label")
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self._chains: dict[str, dict[str, tuple[int, object]]] = {}
+
+    def add(self, binding: Binding, *, by: str, declared: frozenset[str], order: int) -> None:
+        """Add ``by``'s implementation; ``by`` may bind only ``declared``, one implementation per point."""
+        if binding.name not in declared:
+            raise UndeclaredBindingError(self.label, binding.name, by)
+        chain = self._chains.setdefault(binding.name, {})
+        if by in chain:
+            raise DuplicateBindingError(self.label, binding.name)
+        chain[by] = (order, binding.value)
+
+    def chain_of(self, name: str) -> tuple[object, ...]:
+        """The implementations under ``name``, by order then implementer (``BindingMissingError`` if none)."""
+        chain = self._chains.get(name)
+        if not chain:
+            raise BindingMissingError(self.label, name)
+        ordered = sorted(chain.items(), key=lambda item: (item[1][0], item[0]))
+        return tuple(value for _, (_, value) in ordered)
+
+    def view(self, allowed: frozenset[str]) -> ChainView:
+        """What a package that declared ``allowed`` may read."""
+        return ChainView(self, allowed)
+
+
 type ApiDirectory = DirectoryView
 """Other modules' APIs, as a module that declared them may read them."""
-type ExtensionDirectory = DirectoryView
-"""Implementations of the extension points a module declares, bound by the modules that implement them."""
+type ExtensionDirectory = ChainView
+"""Implementations of the extension points a module declares, chained from the modules that implement them."""
 type Ports = DirectoryView
 """What modules provide to channels (a signer, a company directory), as a channel reads it."""

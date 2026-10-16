@@ -33,7 +33,14 @@ lazy from ledger_platform.http.authentication import Authentication
 lazy from ledger_platform.jobs.outcomes import JobSpec
 lazy from ledger_platform.observability.health import Check
 lazy from ledger_platform.observability.tracing import Tracing
-lazy from ledger_platform.runtime.keys import ApiDirectory, Binding, Directory, ExtensionDirectory, Ports
+lazy from ledger_platform.runtime.keys import (
+    ApiDirectory,
+    Binding,
+    ChainDirectory,
+    Directory,
+    ExtensionDirectory,
+    Ports,
+)
 lazy from ledger_platform.runtime.registries import Regimes
 
 NO_CHECKS: Final[Mapping[str, Check]] = MappingProxyType({})
@@ -226,7 +233,7 @@ def bind_parts(
     parts: ModuleParts,
     *,
     apis: Directory,
-    extensions: Directory,
+    extensions: ChainDirectory,
     ports: Directory,
 ) -> None:
     """Bind what a module's assembly hands over, with the authority its manifest gives it.
@@ -243,7 +250,12 @@ def bind_parts(
     implements = frozenset(manifest.extension_points.implements)
     for binding in parts.implements:
         require_facades(binding.value)
-        extensions.add(binding, by=name, declared=implements)
+        extensions.add(
+            binding,
+            by=name,
+            declared=implements,
+            order=manifest.extension_points.order_of(binding.name),
+        )
     provides = frozenset(manifest.extension_points.provides)
     for binding in parts.provides:
         require_facades(binding.value)
@@ -255,7 +267,7 @@ def api_view(manifest: PackageManifest, apis: Directory) -> ApiDirectory:
     return apis.view(frozenset(manifest.dependencies.modules))
 
 
-def extension_view(manifest: PackageManifest, extensions: Directory) -> ExtensionDirectory:
+def extension_view(manifest: PackageManifest, extensions: ChainDirectory) -> ExtensionDirectory:
     """The implementations a module may read: of the extension points it declares, by qualified name."""
     name = manifest.package.name
     return extensions.view(frozenset(f"{name}.{point}" for point in manifest.extension_points.declares))
