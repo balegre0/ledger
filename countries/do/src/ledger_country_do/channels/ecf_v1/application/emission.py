@@ -53,6 +53,7 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
     Refused,
 )
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfConflictError, EcfError, EcfUnavailableError
+from ledger_country_do.channels.ecf_v1.domain.notation import local_date
 from ledger_country_do.channels.ecf_v1.domain.printed import (
     OFFICIAL_QR,
     EcfQrData,
@@ -99,6 +100,15 @@ class CertificateNotValidError(EcfConflictError):
 
     def __init__(self) -> None:
         super().__init__("the signing certificate is not valid at the moment of signing")
+
+
+class SequenceExpiredError(EcfConflictError):
+    """The number's range ended before the moment of signing: a document parked past it needs a new number."""
+
+    code: ClassVar[str] = "do_ecf_sequence_expired"
+
+    def __init__(self) -> None:
+        super().__init__("the number's range expired before the moment of signing")
 
 
 class SettleTooShortError(EcfError):
@@ -285,6 +295,8 @@ class Emitter:
         totals = compute_totals(draft, self._regime)
         where = route(draft, totals, self._regime)
         signed_at = self._clock()
+        if draft.sequence_expires_on is not None and local_date(signed_at) > draft.sequence_expires_on:
+            raise SequenceExpiredError  # DGII dates the range: it ran up to that day, in Santo Domingo
         validity = await self._signer.certificate_validity()
         if not (validity.covers(signed_at) and validity.covers(signed_at + MAX_SIGNING_SKEW)):
             raise CertificateNotValidError
