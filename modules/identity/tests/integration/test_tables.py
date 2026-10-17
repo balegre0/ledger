@@ -73,7 +73,10 @@ async def seeded(module_database: BoundDatabase, organization: OrganizationId | 
         if organization is None:
             await unit.connection.execute(
                 insert(OrganizationRecord).values(
-                    id=tenant.organization, provider_id="312345678901234567", created_at=NOW
+                    id=tenant.organization,
+                    provider_id="312345678901234567",
+                    created_at=NOW,
+                    api_version=NOW.date(),
                 )
             )
         tax_value = str(tenant.company.int)[-9:]  # the random end of a UUIDv7

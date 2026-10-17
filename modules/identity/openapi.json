@@ -698,6 +698,15 @@
         "additionalProperties": false,
         "description": "The caller's organization.",
         "properties": {
+          "api_version": {
+            "description": "The dated version of the API it speaks unless a request or API client says otherwise: the current one when the organization was created, fixed since.",
+            "examples": [
+              "2026-10-13"
+            ],
+            "format": "date",
+            "title": "Api Version",
+            "type": "string"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -715,7 +724,8 @@
         "required": [
           "id",
           "provider_id",
-          "created_at"
+          "created_at",
+          "api_version"
         ],
         "title": "OrganizationView",
         "type": "object"
@@ -1369,6 +1379,19 @@
               "description": "Read the page before this cursor.",
               "title": "Ending Before"
             }
+          },
+          {
+            "description": "The dated version of the API the request speaks (YYYY-MM-DD); its pin otherwise.",
+            "in": "header",
+            "name": "Ledger-Version",
+            "required": false,
+            "schema": {
+              "enum": [
+                "2026-10-13"
+              ],
+              "format": "date",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1607,6 +1630,19 @@
               "minLength": 1,
               "pattern": "^[!-~]+$",
               "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The dated version of the API the request speaks (YYYY-MM-DD); its pin otherwise.",
+            "in": "header",
+            "name": "Ledger-Version",
+            "required": false,
+            "schema": {
+              "enum": [
+                "2026-10-13"
+              ],
+              "format": "date",
               "type": "string"
             }
           }
@@ -2052,6 +2088,19 @@
               "title": "Company Id",
               "type": "string"
             }
+          },
+          {
+            "description": "The dated version of the API the request speaks (YYYY-MM-DD); its pin otherwise.",
+            "in": "header",
+            "name": "Ledger-Version",
+            "required": false,
+            "schema": {
+              "enum": [
+                "2026-10-13"
+              ],
+              "format": "date",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -2414,6 +2463,19 @@
             "required": true,
             "schema": {
               "maxLength": 1024,
+              "type": "string"
+            }
+          },
+          {
+            "description": "The dated version of the API the request speaks (YYYY-MM-DD); its pin otherwise.",
+            "in": "header",
+            "name": "Ledger-Version",
+            "required": false,
+            "schema": {
+              "enum": [
+                "2026-10-13"
+              ],
+              "format": "date",
               "type": "string"
             }
           }
@@ -3003,6 +3065,19 @@
             "required": true,
             "schema": {
               "maxLength": 1024,
+              "type": "string"
+            }
+          },
+          {
+            "description": "The dated version of the API the request speaks (YYYY-MM-DD); its pin otherwise.",
+            "in": "header",
+            "name": "Ledger-Version",
+            "required": false,
+            "schema": {
+              "enum": [
+                "2026-10-13"
+              ],
+              "format": "date",
               "type": "string"
             }
           }
@@ -3670,6 +3745,19 @@
               "description": "Read the page before this cursor.",
               "title": "Ending Before"
             }
+          },
+          {
+            "description": "The dated version of the API the request speaks (YYYY-MM-DD); its pin otherwise.",
+            "in": "header",
+            "name": "Ledger-Version",
+            "required": false,
+            "schema": {
+              "enum": [
+                "2026-10-13"
+              ],
+              "format": "date",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -4041,6 +4129,19 @@
               "minLength": 1,
               "pattern": "^[!-~]+$",
               "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The dated version of the API the request speaks (YYYY-MM-DD); its pin otherwise.",
+            "in": "header",
+            "name": "Ledger-Version",
+            "required": false,
+            "schema": {
+              "enum": [
+                "2026-10-13"
+              ],
+              "format": "date",
               "type": "string"
             }
           }
@@ -4551,6 +4652,19 @@
               "title": "Company Id",
               "type": "string"
             }
+          },
+          {
+            "description": "The dated version of the API the request speaks (YYYY-MM-DD); its pin otherwise.",
+            "in": "header",
+            "name": "Ledger-Version",
+            "required": false,
+            "schema": {
+              "enum": [
+                "2026-10-13"
+              ],
+              "format": "date",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -4951,6 +5065,19 @@
               "description": "Read the page before this cursor.",
               "title": "Ending Before"
             }
+          },
+          {
+            "description": "The dated version of the API the request speaks (YYYY-MM-DD); its pin otherwise.",
+            "in": "header",
+            "name": "Ledger-Version",
+            "required": false,
+            "schema": {
+              "enum": [
+                "2026-10-13"
+              ],
+              "format": "date",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -5306,6 +5433,19 @@
             "required": true,
             "schema": {
               "title": "Company Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The dated version of the API the request speaks (YYYY-MM-DD); its pin otherwise.",
+            "in": "header",
+            "name": "Ledger-Version",
+            "required": false,
+            "schema": {
+              "enum": [
+                "2026-10-13"
+              ],
+              "format": "date",
               "type": "string"
             }
           }
@@ -5716,6 +5856,19 @@
             "required": true,
             "schema": {
               "title": "Company Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The dated version of the API the request speaks (YYYY-MM-DD); its pin otherwise.",
+            "in": "header",
+            "name": "Ledger-Version",
+            "required": false,
+            "schema": {
+              "enum": [
+                "2026-10-13"
+              ],
+              "format": "date",
               "type": "string"
             }
           }
@@ -6139,6 +6292,21 @@
       "get": {
         "description": "The countries a regime is installed for, with the keys of their regimes and channels.",
         "operationId": "list_countries_v1_countries_get",
+        "parameters": [
+          {
+            "description": "The dated version of the API the request speaks (YYYY-MM-DD); its pin otherwise.",
+            "in": "header",
+            "name": "Ledger-Version",
+            "required": false,
+            "schema": {
+              "enum": [
+                "2026-10-13"
+              ],
+              "format": "date",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -6297,6 +6465,19 @@
             "required": true,
             "schema": {
               "title": "Country Code",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The dated version of the API the request speaks (YYYY-MM-DD); its pin otherwise.",
+            "in": "header",
+            "name": "Ledger-Version",
+            "required": false,
+            "schema": {
+              "enum": [
+                "2026-10-13"
+              ],
+              "format": "date",
               "type": "string"
             }
           }
@@ -6576,6 +6757,21 @@
       "get": {
         "description": "The organization the caller acts in; 404 until it has a company.",
         "operationId": "read_organization_v1_organization_get",
+        "parameters": [
+          {
+            "description": "The dated version of the API the request speaks (YYYY-MM-DD); its pin otherwise.",
+            "in": "header",
+            "name": "Ledger-Version",
+            "required": false,
+            "schema": {
+              "enum": [
+                "2026-10-13"
+              ],
+              "format": "date",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {

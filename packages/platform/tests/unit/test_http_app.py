@@ -1231,7 +1231,11 @@ def test_the_app_s_document_says_a_moded_route_requires_its_mode(observability: 
 
     built = build(observability, moded)
     document = DOCUMENT.validate_python(built.openapi())
-    (parameter,) = document["paths"]["/v1/moded"]["post"]["parameters"]
+    (parameter,) = [
+        found
+        for found in document["paths"]["/v1/moded"]["post"]["parameters"]
+        if found["name"] == "Ledger-Mode"  # the app documents Ledger-Version on every route too
+    ]
     assert (parameter["name"], parameter["required"], parameter["schema"]) == (
         "Ledger-Mode",
         True,

@@ -8,7 +8,7 @@ so a single-column key would let a row of one organization point at another's co
 schema ``identity`` (§6.2): identity's role reaches no other.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Final
 from uuid import UUID
 lazy from enum import StrEnum
@@ -16,6 +16,7 @@ lazy from enum import StrEnum
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -81,6 +82,7 @@ class OrganizationRecord(IdentityTable):
     id: Mapped[UUID] = mapped_column(primary_key=True)
     provider_id: Mapped[str] = mapped_column(String(MAX_PROVIDER_ORGANIZATION_LENGTH))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    api_version: Mapped[date] = mapped_column(Date)
 
 
 class CompanyRecord(IdentityTable):

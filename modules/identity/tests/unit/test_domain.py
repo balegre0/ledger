@@ -1,6 +1,6 @@
 import unicodedata
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Final
 from uuid import UUID
 
@@ -223,8 +223,8 @@ def test_every_role_reads_its_company_and_only_owners_manage_ownership() -> None
 
 
 def test_an_organization_is_the_one_its_principal_acts_in() -> None:
-    assert Organization.of(FOUNDER, now=NOW) == Organization(
-        id=ORGANIZATION, provider_id="1001", created_at=NOW
+    assert Organization.of(FOUNDER, now=NOW, api_version=date(2026, 10, 13)) == Organization(
+        id=ORGANIZATION, provider_id="1001", created_at=NOW, api_version=date(2026, 10, 13)
     )
 
 

@@ -30,6 +30,7 @@ from ledger_kernel.money import Currency
 from ledger_kernel.tax_ids import TaxIdCheck
 from ledger_kernel.tenancy import OrganizationScope, Tenant
 from ledger_platform.http import (
+    CURRENT_VERSION,
     REPLAYED_HEADER,
     Page,
     allowed,
@@ -131,7 +132,14 @@ def router(context: ApiContext) -> APIRouter:
 
             async def register() -> StoredResponse:
                 created = await commands.create_company(
-                    bind(unit), principal, profile=profile, legal_name=legal_name, time_zone=time_zone
+                    bind(unit),
+                    principal,
+                    commands.Registration(
+                        profile=profile,
+                        legal_name=legal_name,
+                        time_zone=time_zone,
+                        api_version=CURRENT_VERSION,
+                    ),
                 )
                 return stored(HTTPStatus.CREATED, created, warnings)
 

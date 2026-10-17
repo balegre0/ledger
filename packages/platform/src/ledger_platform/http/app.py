@@ -20,6 +20,7 @@ instead (``caller_trace="adopt"``).
 """
 
 from dataclasses import dataclass
+from datetime import date
 from typing import Final, Literal, final, override
 lazy from collections.abc import Callable, MutableMapping, Sequence
 lazy from contextlib import AbstractAsyncContextManager
@@ -49,6 +50,13 @@ from ledger_platform.http.problems import (
     install_problem_handlers,
 )
 from ledger_platform.http.request_fields import remembered
+from ledger_platform.http.versions import (
+    CURRENT_VERSION,
+    VERSION_HEADER,
+    VERSION_KEY,
+    document_version_header,
+    sent_version,
+)
 lazy from ledger_platform.http.metrics import AsgiApp, AsgiMessage, AsgiReceive, AsgiScope, AsgiSend
 lazy from ledger_platform.observability.health import Health
 
@@ -147,12 +155,14 @@ def _without_the_caller_s_trace(scope: AsgiScope) -> None:
 
 @final
 class _Named:
-    """Inside the request's span: link it to the caller's, and name the request on its answer.
+    """Inside the request's span: link it to the caller's, and name the request and its version on its answer.
 
-    The answer names its request in ``Request-Id``.
+    The answer names its request in ``Request-Id`` and the version of the API it speaks in ``Ledger-Version``
+    (``http.versions``): the one the request names, else the current, until a route settles it (its caller's
+    pin). The operational routes are neither traced nor versioned.
 
     Every response that starts while the request is traced carries the trace id, unless it names its request
-    already (a problem does). The operational routes are not traced, so they carry none.
+    already (a problem does).
     """
 
     __slots__ = ("_app",)
@@ -168,13 +178,19 @@ class _Named:
         if isinstance(caller, SpanContext):
             trace.get_current_span().add_link(caller)
         request_id = current_request_id()
+        versioned = not _is_operational(scope)
+        if versioned:
+            scope[VERSION_KEY] = sent_version(scope) or CURRENT_VERSION  # a route that reads it may settle it
 
         async def named(message: AsgiMessage) -> None:
-            if request_id is not None and message["type"] == "http.response.start":
+            if message["type"] == "http.response.start":
                 message.setdefault("headers", [])
                 headers = MutableHeaders(scope=message)
-                if REQUEST_ID_HEADER not in headers:
+                if request_id is not None and REQUEST_ID_HEADER not in headers:
                     headers.append(REQUEST_ID_HEADER, request_id)
+                version = scope.get(VERSION_KEY)
+                if versioned and isinstance(version, date):
+                    headers[VERSION_HEADER] = version.isoformat()
             await send(message)
 
         await self._app(scope, receive, named)
@@ -195,7 +211,9 @@ class _ChassisApp(FastAPI):
     def openapi(self) -> dict[str, object]:
         """FastAPI's document, made once, with what the chassis's dependencies need said of them."""
         if self.openapi_schema is None:
-            require_mode_header(super().openapi())
+            document = super().openapi()
+            require_mode_header(document)
+            document_version_header(document)
         return super().openapi()
 
     @override

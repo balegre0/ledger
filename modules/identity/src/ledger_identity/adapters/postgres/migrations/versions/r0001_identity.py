@@ -53,6 +53,7 @@ def upgrade() -> None:
         sa.Column("id", sa.Uuid(), primary_key=True),
         sa.Column("provider_id", sa.String(128), nullable=False),
         _moment("created_at"),
+        sa.Column("api_version", sa.Date(), nullable=False),
         schema=S,
     )
     op.create_table(

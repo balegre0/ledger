@@ -14,7 +14,7 @@ its page (``ledger_platform.data.paging``): backwards for a page that ends befor
 
 from typing import ClassVar, final, override
 lazy from collections.abc import Sequence
-lazy from datetime import datetime
+lazy from datetime import date, datetime
 lazy from uuid import UUID
 
 from sqlalchemy import and_, delete, func, select, update
@@ -71,7 +71,12 @@ def _require_own(organization: OrganizationId, unit: OrganizationId) -> None:
         raise ForeignTenantError
 
 
-_ORGANIZATION = select(OrganizationRecord.id, OrganizationRecord.provider_id, OrganizationRecord.created_at)
+_ORGANIZATION = select(
+    OrganizationRecord.id,
+    OrganizationRecord.provider_id,
+    OrganizationRecord.created_at,
+    OrganizationRecord.api_version,
+)
 _COMPANY = select(
     CompanyRecord.id,
     CompanyRecord.organization_id,
@@ -109,9 +114,11 @@ _MEMBERSHIP = select(
 _ACTIVE = MembershipRecord.status == MembershipStatus.ACTIVE.value
 
 
-def _organization(row: Row[UUID, str, datetime]) -> Organization:
-    identifier, provider_id, created_at = row
-    return Organization(id=OrganizationId(identifier), provider_id=provider_id, created_at=created_at)
+def _organization(row: Row[UUID, str, datetime, date]) -> Organization:
+    identifier, provider_id, created_at, api_version = row
+    return Organization(
+        id=OrganizationId(identifier), provider_id=provider_id, created_at=created_at, api_version=api_version
+    )
 
 
 def _company(row: CompanyRow, tax_ids: tuple[TaxId, ...]) -> Company:
@@ -187,7 +194,10 @@ class PgOrganizations(Organizations):
         await self._connection.execute(
             insert(OrganizationRecord)
             .values(
-                id=organization.id, provider_id=organization.provider_id, created_at=organization.created_at
+                id=organization.id,
+                provider_id=organization.provider_id,
+                created_at=organization.created_at,
+                api_version=organization.api_version,
             )
             .on_conflict_do_nothing(index_elements=[OrganizationRecord.id])
         )

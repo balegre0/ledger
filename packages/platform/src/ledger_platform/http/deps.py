@@ -29,7 +29,7 @@ its subject, in the call its request id names, or in a call of its own (a UUIDv7
 """
 
 from abc import ABCMeta, abstractmethod
-from contextlib import contextmanager
+from contextlib import aclosing, contextmanager
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Annotated, ClassVar, Final, Protocol, final
@@ -39,10 +39,11 @@ lazy from collections.abc import AsyncGenerator, Callable, Coroutine, Generator,
 import structlog
 from fastapi import Depends, Header, Path
 from fastapi.routing import APIRoute, iter_route_contexts
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import HTTPBearer
 from starlette.exceptions import HTTPException
 lazy from fastapi import Request
 lazy from fastapi.dependencies.models import Dependant
+lazy from fastapi.security import HTTPAuthorizationCredentials
 lazy from starlette.routing import BaseRoute
 
 from ledger_kernel.access import CompanyNotFoundError
@@ -55,9 +56,17 @@ from ledger_platform.data.audit import Actor, acting_as
 from ledger_platform.http.problems import current_request_id
 from ledger_platform.http.rate import RateLimitedError
 from ledger_platform.http.request_fields import remember
+from ledger_platform.http.versions import (
+    VERSION_HEADER,
+    VERSION_KEY,
+    VersionUnknownError,
+    parse_version,
+    resolve,
+)
 lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_platform.auth.access import PermissionSource
 lazy from ledger_platform.http.rate import RateLimiter
+lazy from ledger_platform.http.versions import Pins
 
 COMPANY_HEADER: Final = "Ledger-Company"
 IF_MATCH: Final = "If-Match"
@@ -82,7 +91,8 @@ class Verifier(Protocol, metaclass=ABCMeta):
 
 
 type Caller = Callable[[Request, HTTPAuthorizationCredentials | None], AsyncGenerator[Principal]]
-"""The dependency ``authenticated`` makes: a route declares ``Annotated[Principal, Depends(caller)]``."""
+"""The dependency ``authenticated`` makes (``versioned`` wraps it): a route declares
+``Annotated[Principal, Depends(caller)]``."""
 type PermissionsDependency[**P] = Callable[P, Coroutine[object, object, PermissionSource]]
 """A dependency handing the module's ``PermissionSource``; its parameters (``P``) are dependencies of its
 own, such as the module's context."""
@@ -267,6 +277,33 @@ def in_organization(caller: Caller) -> InOrganization:
 
     _GUARDS.add(member)
     return member
+
+
+def versioned(caller: Caller, pins: Pins) -> Caller:
+    """``caller``, which also settles the version the request speaks and has its answer name it.
+
+    The caller is proven first (401). A ``Ledger-Version`` the request names is then read (400
+    ``version_unknown`` for one that does not exist, or for two); without one, the caller's pins are asked and
+    decide. The answer to every request, this one's or not, names its version (``create_app``).
+    """
+
+    async def with_version(
+        request: Request,
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_BEARER)],
+    ) -> AsyncGenerator[Principal]:
+        async with aclosing(caller(request, credentials)) as proven:
+            principal = await anext(proven)
+            sent = request.headers.getlist(VERSION_HEADER)
+            if not sent:
+                version = resolve(None, await pins.of(principal))
+            elif len(sent) == 1:
+                version = parse_version(sent[0])
+            else:
+                raise VersionUnknownError
+            request.scope[VERSION_KEY] = version
+            yield principal
+
+    return with_version
 
 
 def any_principal(caller: Caller) -> InOrganization:

@@ -5,7 +5,7 @@ Units are identity's own (``module_database``: ``identity_rw``, its schema); wha
 """
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Final, final
 lazy from collections.abc import Awaitable, Callable
 lazy from uuid import UUID
@@ -79,6 +79,8 @@ MEMBER: Final = Principal(
 )
 RNC: Final = TaxId(TaxIdScheme("do.rnc"), "101850043")
 SANTO_DOMINGO: Final = parse_time_zone("America/Santo_Domingo")
+VERSION: Final = date(2026, 10, 13)
+"""The API version its organization is pinned to when it is first seen."""
 THEIRS: Final = TaxId(TaxIdScheme("do.rnc"), "401500022")
 """The tax id of the other organization's company: one taxpayer is one active company."""
 SHOWING: Final = text(
@@ -132,6 +134,16 @@ def profile(tax_id: TaxId = RNC, *also: TaxId) -> FiscalProfile:
     )
 
 
+def registration(tax_id: TaxId = RNC, *also: TaxId) -> commands.Registration:
+    """What ``profile(tax_id, *also)`` is registered with: a company named Duarte, in Santo Domingo."""
+    return commands.Registration(
+        profile=profile(tax_id, *also),
+        legal_name=parse_legal_name("Duarte"),
+        time_zone=SANTO_DOMINGO,
+        api_version=VERSION,
+    )
+
+
 async def create(
     module_database: BoundDatabase,
     founder: Principal = FOUNDER,
@@ -141,13 +153,7 @@ async def create(
     return await in_unit(
         module_database,
         OrganizationScope(founder.organization, None),
-        lambda unit: commands.create_company(
-            unit,
-            founder,
-            profile=profile(tax_id, *also),
-            legal_name=parse_legal_name("Duarte"),
-            time_zone=SANTO_DOMINGO,
-        ),
+        lambda unit: commands.create_company(unit, founder, registration(tax_id, *also)),
     )
 
 
@@ -209,9 +215,7 @@ async def test_a_unit_that_fails_keeps_and_announces_nothing(
     module_database: BoundDatabase, admin: psycopg.AsyncConnection
 ) -> None:
     async def create_then_fail(unit: IdentityUnit) -> None:
-        await commands.create_company(
-            unit, FOUNDER, profile=profile(), legal_name=parse_legal_name("Duarte"), time_zone=SANTO_DOMINGO
-        )
+        await commands.create_company(unit, FOUNDER, registration())
         raise ZeroDivisionError
 
     with pytest.raises(ZeroDivisionError):
@@ -632,7 +636,7 @@ async def test_a_unit_refuses_to_write_a_row_of_another_tenant(module_database: 
     owner, _ = found(company, FOUNDER, now=NOW)
     renamed, _ = company.rename(parse_legal_name("Duarte S.A."), now=NOW)
     of_another_organization: tuple[Callable[[IdentityUnit], Awaitable[object]], ...] = (
-        lambda unit: unit.organizations.add(Organization.of(FOUNDER, now=NOW)),
+        lambda unit: unit.organizations.add(Organization.of(FOUNDER, now=NOW, api_version=VERSION)),
         lambda unit: unit.companies.add(company),
         lambda unit: unit.companies.update(renamed, version=company.version),
         lambda unit: unit.establishments.add(establishment),
@@ -654,9 +658,7 @@ async def test_a_unit_s_time_is_its_transaction_s_for_what_it_records_and_announ
 ) -> None:
     async with module_database.unit(OrganizationScope(FOUNDER.organization, None)) as transaction:
         unit = bind(transaction)
-        company = await commands.create_company(
-            unit, FOUNDER, profile=profile(), legal_name=parse_legal_name("Duarte"), time_zone=SANTO_DOMINGO
-        )
+        company = await commands.create_company(unit, FOUNDER, registration())
         began = MOMENT.validate_python(
             (await transaction.connection.execute(text("SELECT now()"))).scalar_one()
         )

@@ -7,7 +7,7 @@ registry, none.
 
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Final, final, override
 lazy from collections.abc import AsyncGenerator, Awaitable, Callable
 lazy from contextlib import AbstractAsyncContextManager
@@ -102,9 +102,12 @@ async def register(module_database: BoundDatabase, founder: Principal = FOUNDER,
         lambda unit: commands.create_company(
             unit,
             founder,
-            profile=profile(*(tax_ids or (RNC,))),
-            legal_name=parse_legal_name("Duarte"),
-            time_zone=SANTO_DOMINGO,
+            commands.Registration(
+                profile=profile(*(tax_ids or (RNC,))),
+                legal_name=parse_legal_name("Duarte"),
+                time_zone=SANTO_DOMINGO,
+                api_version=date(2026, 10, 13),
+            ),
         ),
     )
 

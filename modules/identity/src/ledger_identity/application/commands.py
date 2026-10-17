@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import final
 lazy from collections.abc import Callable
+lazy from datetime import date
 
 from ledger_identity.application.queries import main_establishment
 from ledger_identity.domain.company import Company
@@ -37,6 +38,21 @@ class Opening:
 
 
 @final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Registration:
+    """What a company is registered with.
+
+    Its fiscal profile, its name, the zone its main establishment keeps, and the API version its organization
+    is pinned to if this is the organization's first company.
+    """
+
+    profile: FiscalProfile
+    legal_name: LegalName
+    time_zone: TimeZone
+    api_version: date
+
+
+@final
 @dataclass(frozen=True, slots=True)
 class Granted:
     """The membership a grant left, and whether the subject held no active role before it."""
@@ -45,31 +61,28 @@ class Granted:
     created: bool
 
 
-async def create_company(
-    unit: IdentityUnit,
-    founder: Principal,
-    *,
-    profile: FiscalProfile,
-    legal_name: LegalName,
-    time_zone: TimeZone,
-) -> Company:
+async def create_company(unit: IdentityUnit, founder: Principal, registration: Registration) -> Company:
     """Register a company of the founder's organization, with the founder as its first owner.
 
-    It is opened with its ``MAIN`` establishment, in ``time_zone``.
+    It is opened with its ``MAIN`` establishment, in the registration's time zone. The organization, kept with
+    its first company, is pinned to the registration's API version; a later company leaves it as it was.
 
     The founder must be an administrator of the organization (``require_organization_admin``). Any one of the
     profile's tax ids that an active company holds refuses the registration (``TaxIdTakenError``).
     """
     require_organization_admin(founder)
-    await unit.organizations.add(Organization.of(founder, now=unit.now))
+    await unit.organizations.add(Organization.of(founder, now=unit.now, api_version=registration.api_version))
     registered, created = Company.register(
-        organization=founder.organization, profile=profile, legal_name=legal_name, now=unit.now
+        organization=founder.organization,
+        profile=registration.profile,
+        legal_name=registration.legal_name,
+        now=unit.now,
     )
     if not await unit.companies.add(registered):
         raise TaxIdTakenError
     owner, granted = found(registered, founder, now=unit.now)
     await unit.memberships.put(owner)
-    main = Establishment.main(registered, time_zone=time_zone, now=unit.now)
+    main = Establishment.main(registered, time_zone=registration.time_zone, now=unit.now)
     _ = await unit.establishments.add(main)  # the first of a new company: its code cannot be taken
     unit.events.publish(created)
     unit.events.publish(granted)

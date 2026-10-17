@@ -4,7 +4,7 @@ Ids are TypeIDs (``cmp_…``, §9.4: ``public``), times ISO 8601 with their offs
 lowercase words. A list answers a ``Page`` of its views (``ledger_platform.http.models.Page``, §9.7).
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import ClassVar, Final, Self
 lazy from collections.abc import Sequence
 
@@ -195,6 +195,13 @@ class OrganizationView(_Shape):
     id: OrganizationRef
     provider_id: str = Field(description="The identity provider's (Zitadel's) id of the organization.")
     created_at: datetime
+    api_version: date = Field(
+        description=(
+            "The dated version of the API it speaks unless a request or API client says otherwise: "
+            "the current one when the organization was created, fixed since."
+        ),
+        examples=["2026-10-13"],
+    )
 
     @classmethod
     def of(cls, organization: Organization) -> Self:
@@ -203,6 +210,7 @@ class OrganizationView(_Shape):
             id=organization_ref(organization.id),
             provider_id=organization.provider_id,
             created_at=organization.created_at,
+            api_version=organization.api_version,
         )
 
 

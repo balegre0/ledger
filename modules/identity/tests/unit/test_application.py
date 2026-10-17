@@ -1,7 +1,7 @@
 """The identity use cases over in-memory ports: what they change, announce and refuse."""
 
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Final, final, override
 lazy from collections.abc import Callable, Iterable, Mapping
 lazy from uuid import UUID
@@ -77,6 +77,8 @@ OWNER: Final = FOUNDER.subject
 ADMIN: Final = SubjectId("2002")
 VIEWER: Final = SubjectId("3001")
 SANTO_DOMINGO: Final = parse_time_zone("America/Santo_Domingo")
+VERSION: Final = date(2026, 10, 13)
+"""The API version an organization is pinned to when it is first seen."""
 RNC: Final = TaxId(TaxIdScheme("do.rnc"), "101850043")
 CEDULA: Final = TaxId(TaxIdScheme("do.cedula"), "00113918205")
 THEIRS: Final = TaxId(TaxIdScheme("do.rnc"), "401500022")
@@ -318,13 +320,18 @@ def profile(*tax_ids: TaxId) -> FiscalProfile:
     )
 
 
+def registration(*tax_ids: TaxId, legal_name: str = "Duarte") -> commands.Registration:
+    return commands.Registration(
+        profile=profile(*tax_ids),
+        legal_name=parse_legal_name(legal_name),
+        time_zone=SANTO_DOMINGO,
+        api_version=VERSION,
+    )
+
+
 async def created(state: State, tax_id: TaxId = RNC, founder: Principal = FOUNDER) -> Company:
     return await commands.create_company(
-        state.unit(organization=founder.organization),
-        founder,
-        profile=profile(tax_id),
-        legal_name=parse_legal_name("Duarte"),
-        time_zone=SANTO_DOMINGO,
+        state.unit(organization=founder.organization), founder, registration(tax_id)
     )
 
 
@@ -339,7 +346,7 @@ async def with_an_admin(state: State, company: Company) -> None:
 async def test_a_new_company_has_its_founder_as_owner_and_both_are_announced(state: State) -> None:
     company = await created(state)
     assert state.organizations == {
-        ORGANIZATION: Organization(id=ORGANIZATION, provider_id="1001", created_at=NOW)
+        ORGANIZATION: Organization(id=ORGANIZATION, provider_id="1001", created_at=NOW, api_version=VERSION)
     }
     assert state.companies == {company.id: company}
     owner = state.memberships[company.id, OWNER]
@@ -364,14 +371,9 @@ async def test_registering_a_company_needs_the_organization_s_admin_role(
 
 async def test_a_second_company_of_the_organization_keeps_the_organization_as_it_was(state: State) -> None:
     await created(state)
-    await commands.create_company(
-        state.unit(LATER),
-        FOUNDER,
-        profile=profile(CEDULA),
-        legal_name=parse_legal_name("Duarte II"),
-        time_zone=SANTO_DOMINGO,
-    )
+    await commands.create_company(state.unit(LATER), FOUNDER, registration(CEDULA, legal_name="Duarte II"))
     assert state.organizations[ORGANIZATION].created_at == NOW
+    assert state.organizations[ORGANIZATION].api_version == VERSION
     assert len(state.companies) == 2
 
 
@@ -395,17 +397,11 @@ async def test_any_one_of_a_company_s_tax_ids_that_is_taken_refuses_the_company(
         await commands.create_company(
             state.unit(LATER),
             STRANGER,
-            profile=profile(CEDULA, RNC),  # the cédula is free; the RNC is held
-            legal_name=parse_legal_name("Duarte II"),
-            time_zone=SANTO_DOMINGO,
+            registration(CEDULA, RNC, legal_name="Duarte II"),  # the cédula is free; the RNC is held
         )
     assert len(state.companies) == 1
     both = await commands.create_company(
-        state.unit(LATER),
-        STRANGER,
-        profile=profile(CEDULA, THEIRS),
-        legal_name=parse_legal_name("Duarte II"),
-        time_zone=SANTO_DOMINGO,
+        state.unit(LATER), STRANGER, registration(CEDULA, THEIRS, legal_name="Duarte II")
     )
     assert both.profile.tax_ids == (CEDULA, THEIRS)
 
