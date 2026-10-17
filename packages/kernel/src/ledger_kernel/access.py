@@ -14,6 +14,7 @@ from enum import StrEnum
 from typing import ClassVar, Final, NewType, final
 
 from ledger_kernel.errors import ForbiddenError, InvalidInputError, InvalidValueError, NotFoundError, excerpt
+from ledger_kernel.ids import COMPANY_PREFIX, format_id
 lazy from ledger_kernel.ids import CompanyId, OrganizationId
 
 SubjectId = NewType("SubjectId", str)
@@ -113,8 +114,13 @@ class CompanyNotFoundError(NotFoundError):
 
     code: ClassVar[str] = "company_not_found"
 
-    def __init__(self, company: CompanyId) -> None:
-        super().__init__(f"company {company} was not found")
+    def __init__(self, company: CompanyId | None = None) -> None:
+        """``company`` is named by its public id; none when what the caller sent names no company at all."""
+        super().__init__(
+            "company was not found"
+            if company is None
+            else f"company {format_id(COMPANY_PREFIX, company)} was not found"
+        )
 
 
 @final

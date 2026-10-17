@@ -46,7 +46,7 @@ lazy from starlette.routing import BaseRoute
 
 from ledger_kernel.access import CompanyNotFoundError
 from ledger_kernel.errors import ForbiddenError, InvalidInputError, LedgerError
-from ledger_kernel.ids import CompanyId, new_id, parse_uuid
+from ledger_kernel.ids import COMPANY_PREFIX, CompanyId, InvalidPublicIdError, new_id, parse_id
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.access import CompanyAccess
 from ledger_platform.auth.tokens import MissingTokenError
@@ -165,8 +165,15 @@ def authenticated(verifier: Verifier, limiter: RateLimiter | None = None) -> Cal
 
 
 async def _granted(principal: Principal, company_id: str, source: PermissionSource) -> CompanyAccess:
-    """``principal``'s access to the company ``company_id`` names; ``CompanyNotFoundError`` without a role."""
-    company = CompanyId(parse_uuid(company_id))
+    """``principal``'s access to the company ``company_id`` names; ``CompanyNotFoundError`` without a role.
+
+    A company is named by its public id (``cmp_…``, §9.4): any other text, an internal UUID or another type's
+    id included, names no company, and is not repeated.
+    """
+    try:
+        company = CompanyId(parse_id(COMPANY_PREFIX, company_id))
+    except InvalidPublicIdError:
+        raise CompanyNotFoundError from None
     permissions = await source.permissions(principal, company)
     if not permissions:
         raise CompanyNotFoundError(company)

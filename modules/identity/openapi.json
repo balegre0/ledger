@@ -18,6 +18,10 @@
         "title": "CompanyChanges",
         "type": "object"
       },
+      "CompanyRef": {
+        "pattern": "^cmp_[0-7][0-9a-hjkmnp-tv-z]{25}$",
+        "type": "string"
+      },
       "CompanyStatus": {
         "description": "Whether a company can still change.",
         "enum": [
@@ -54,9 +58,7 @@
             "type": "string"
           },
           "id": {
-            "format": "uuid",
-            "title": "Id",
-            "type": "string"
+            "$ref": "#/components/schemas/CompanyRef"
           },
           "jurisdiction": {
             "$ref": "#/components/schemas/JurisdictionBody"
@@ -66,9 +68,7 @@
             "type": "string"
           },
           "organization_id": {
-            "format": "uuid",
-            "title": "Organization Id",
-            "type": "string"
+            "$ref": "#/components/schemas/OrganizationRef"
           },
           "status": {
             "$ref": "#/components/schemas/CompanyStatus"
@@ -107,6 +107,10 @@
         "title": "CompanyView",
         "type": "object"
       },
+      "EstablishmentRef": {
+        "pattern": "^est_[0-7][0-9a-hjkmnp-tv-z]{25}$",
+        "type": "string"
+      },
       "EstablishmentView": {
         "additionalProperties": false,
         "description": "An establishment of a company.",
@@ -116,9 +120,7 @@
             "type": "string"
           },
           "company_id": {
-            "format": "uuid",
-            "title": "Company Id",
-            "type": "string"
+            "$ref": "#/components/schemas/CompanyRef"
           },
           "created_at": {
             "format": "date-time",
@@ -126,9 +128,7 @@
             "type": "string"
           },
           "id": {
-            "format": "uuid",
-            "title": "Id",
-            "type": "string"
+            "$ref": "#/components/schemas/EstablishmentRef"
           },
           "name": {
             "title": "Name",
@@ -188,14 +188,16 @@
         "title": "JurisdictionBody",
         "type": "object"
       },
+      "MembershipRef": {
+        "pattern": "^mbr_[0-7][0-9a-hjkmnp-tv-z]{25}$",
+        "type": "string"
+      },
       "MembershipView": {
         "additionalProperties": false,
         "description": "A principal's role in a company: an active membership, whose last change is the grant of its role.",
         "properties": {
           "company_id": {
-            "format": "uuid",
-            "title": "Company Id",
-            "type": "string"
+            "$ref": "#/components/schemas/CompanyRef"
           },
           "granted_at": {
             "format": "date-time",
@@ -207,9 +209,7 @@
             "type": "string"
           },
           "id": {
-            "format": "uuid",
-            "title": "Id",
-            "type": "string"
+            "$ref": "#/components/schemas/MembershipRef"
           },
           "role": {
             "$ref": "#/components/schemas/Role"
@@ -343,6 +343,10 @@
         "title": "NewEstablishment",
         "type": "object"
       },
+      "OrganizationRef": {
+        "pattern": "^org_[0-7][0-9a-hjkmnp-tv-z]{25}$",
+        "type": "string"
+      },
       "OrganizationView": {
         "additionalProperties": false,
         "description": "The caller's organization.",
@@ -353,9 +357,7 @@
             "type": "string"
           },
           "id": {
-            "format": "uuid",
-            "title": "Id",
-            "type": "string"
+            "$ref": "#/components/schemas/OrganizationRef"
           },
           "provider_id": {
             "description": "The identity provider's (Zitadel's) id of the organization.",
@@ -533,9 +535,7 @@
             "type": "string"
           },
           "id": {
-            "format": "uuid",
-            "title": "Id",
-            "type": "string"
+            "$ref": "#/components/schemas/CompanyRef"
           },
           "jurisdiction": {
             "$ref": "#/components/schemas/JurisdictionBody"
@@ -545,9 +545,7 @@
             "type": "string"
           },
           "organization_id": {
-            "format": "uuid",
-            "title": "Organization Id",
-            "type": "string"
+            "$ref": "#/components/schemas/OrganizationRef"
           },
           "status": {
             "$ref": "#/components/schemas/CompanyStatus"

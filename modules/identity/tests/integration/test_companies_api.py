@@ -5,7 +5,6 @@ import json
 from functools import partial
 from http import HTTPStatus
 from typing import Final
-from uuid import UUID
 
 import pytest
 from pydantic import TypeAdapter
@@ -15,7 +14,7 @@ from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import commands
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN
 from ledger_kernel.access import Role, SubjectId
-from ledger_kernel.ids import CompanyId, new_id
+from ledger_kernel.ids import COMPANY_PREFIX, ORGANIZATION_PREFIX, CompanyId, format_id, new_id, parse_id
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_testing.api import TestPrincipal, created, document, page
@@ -45,7 +44,7 @@ FAR_FUTURE: Final = 4_102_444_800
 
 async def grant(module_database: BoundDatabase, company: str, subject: str, role: Role) -> None:
     """Give ``subject`` a role directly, as the owner (``2001``) would through the memberships API."""
-    tenant = Tenant(organization_of("1001"), CompanyId(UUID(company)), None)
+    tenant = Tenant(organization_of("1001"), CompanyId(parse_id(COMPANY_PREFIX, company)), None)
     async with module_database.unit(tenant) as unit:
         await commands.grant_role(
             bind(unit),
@@ -82,7 +81,7 @@ async def test_a_company_is_created_owned_by_its_creator_and_readable(
         None,
     )
     assert made["warnings"] == []
-    assert made["organization_id"] == str(organization_of("1001"))
+    assert made["organization_id"] == format_id(ORGANIZATION_PREFIX, organization_of("1001"))
     assert response.headers["location"] == f"/v1/companies/{made['id']}"
     assert response.headers["etag"] == '"1"'
     read = await client.get(f"/v1/companies/{made['id']}", headers=owner.bearer())
@@ -673,7 +672,7 @@ async def test_an_admin_demoted_while_its_deactivation_waits_for_the_company_can
     company: str,
 ) -> None:
     await grant(module_database, company, "2002", Role.ADMIN)
-    tenant = Tenant(organization_of("1001"), CompanyId(UUID(company)), None)
+    tenant = Tenant(organization_of("1001"), CompanyId(parse_id(COMPANY_PREFIX, company)), None)
     headers = TestPrincipal(local_issuer, subject="2002").posting("k-off") | {"If-Match": '"1"'}
     outside = contextvars.copy_context()  # the request is another client's: it holds no unit of the test's
     async with module_database.unit(tenant) as unit:  # holds the company's lock
@@ -694,11 +693,11 @@ async def test_an_admin_demoted_while_its_deactivation_waits_for_the_company_can
     assert (document(read)["status"], read.headers["etag"]) == ("active", '"1"')
 
 
-async def test_a_company_id_that_is_not_an_id_is_refused(
+async def test_a_company_id_that_is_not_an_id_finds_no_company(
     client: httpx.AsyncClient, owner: TestPrincipal
 ) -> None:
     response = await client.get("/v1/companies/not-an-id", headers=owner.bearer())
-    assert (response.status_code, document(response)["code"]) == (422, "invalid_id")
+    assert (response.status_code, document(response)["code"]) == (404, "company_not_found")
 
 
 # ── Changing ────────────────────────────────────────────────────────────────────

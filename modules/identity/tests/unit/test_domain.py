@@ -25,6 +25,7 @@ from ledger_identity.domain.errors import (
     TaxIdTakenError,
 )
 from ledger_identity.domain.establishments import MAIN_CODE, MAIN_NAME, Establishment
+from ledger_identity.domain.ids import ESTABLISHMENT_PREFIX, MEMBERSHIP_PREFIX
 from ledger_identity.domain.membership import (
     Actor,
     MembershipStatus,
@@ -73,7 +74,14 @@ from ledger_kernel.access import (
     parse_permission,
 )
 from ledger_kernel.errors import ErrorKind, InvalidValueError
-from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_kernel.ids import (
+    COMPANY_PREFIX,
+    ORGANIZATION_PREFIX,
+    CompanyId,
+    OrganizationId,
+    format_id,
+    new_id,
+)
 from ledger_kernel.jurisdiction import parse_jurisdiction
 from ledger_kernel.money import Currency
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
@@ -674,19 +682,19 @@ SOME_ID: Final = UUID("01a134e5-8363-74c7-9f6c-aa195c5ba397")
             OrganizationNotFoundError(SOME_ID),
             ErrorKind.NOT_FOUND,
             "organization_not_found",
-            f"organization {SOME_ID} has no company yet",
+            f"organization {format_id(ORGANIZATION_PREFIX, SOME_ID)} has no company yet",
         ),
         (
             CompanyNotFoundError(CompanyId(SOME_ID)),
             ErrorKind.NOT_FOUND,
             "company_not_found",
-            f"company {SOME_ID} was not found",
+            f"company {format_id(COMPANY_PREFIX, SOME_ID)} was not found",
         ),
         (
             EstablishmentNotFoundError(SOME_ID),
             ErrorKind.NOT_FOUND,
             "establishment_not_found",
-            f"establishment {SOME_ID} was not found",
+            f"establishment {format_id(ESTABLISHMENT_PREFIX, SOME_ID)} was not found",
         ),
         (
             TaxIdTakenError(),
@@ -704,13 +712,13 @@ SOME_ID: Final = UUID("01a134e5-8363-74c7-9f6c-aa195c5ba397")
             StaleVersionError(SOME_ID),
             ErrorKind.CONFLICT,
             "stale_version",
-            f"company {SOME_ID} is not at the version the request names",
+            f"company {format_id(COMPANY_PREFIX, SOME_ID)} is not at the version the request names",
         ),
         (
             CompanyInactiveError(SOME_ID),
             ErrorKind.CONFLICT,
             "company_inactive",
-            f"company {SOME_ID} is inactive",
+            f"company {format_id(COMPANY_PREFIX, SOME_ID)} is inactive",
         ),
         (
             LastOwnerError(),
@@ -818,3 +826,19 @@ def test_an_event_s_payload_is_its_own_fields_as_json() -> None:
     _, granted = found(company, FOUNDER, now=NOW)
     assert payload_of(event) == {}
     assert payload_of(granted) == {"member": "2001", "role": "owner", "previous": None}
+
+
+def test_identity_names_its_entities_by_the_prefixes_its_manifest_declares() -> None:
+    assert (ESTABLISHMENT_PREFIX, MEMBERSHIP_PREFIX) == ("est", "mbr")
+    declared = {entry.prefix: entry.resource for entry in MANIFEST.ids}
+    assert declared == {
+        ORGANIZATION_PREFIX: "organization",
+        COMPANY_PREFIX: "company",
+        MEMBERSHIP_PREFIX: "membership",
+        ESTABLISHMENT_PREFIX: "establishment",
+    }
+
+
+def test_an_establishment_that_cannot_even_be_named_is_not_found_without_naming_it() -> None:
+    error = EstablishmentNotFoundError()
+    assert (str(error), error.code) == ("establishment was not found", "establishment_not_found")

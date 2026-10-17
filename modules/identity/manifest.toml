@@ -23,6 +23,10 @@ resource = "company"
 prefix = "mbr"
 resource = "membership"
 
+[[ids]]
+prefix = "est"
+resource = "establishment"
+
 [[permissions]]
 code = "identity.companies.read"
 summary = "Read the company and its establishments."

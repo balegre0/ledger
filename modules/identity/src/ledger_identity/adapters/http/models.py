@@ -1,16 +1,25 @@
 """The shapes of identity's public API: what clients send (unknown fields refused) and what they receive.
 
-Ids are UUID strings, times ISO 8601 with their offset (UTC), enumerations their lowercase words. A list
-answers a ``Page`` of its views (``ledger_platform.http.models.Page``, §9.7).
+Ids are TypeIDs (``cmp_…``, §9.4: ``public``), times ISO 8601 with their offset (UTC), enumerations their
+lowercase words. A list answers a ``Page`` of its views (``ledger_platform.http.models.Page``, §9.7).
 """
 
 from datetime import datetime
 from typing import ClassVar, Final, Self
-from uuid import UUID
 lazy from collections.abc import Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ledger_identity.adapters.http.public import (
+    CompanyRef,
+    EstablishmentRef,
+    MembershipRef,
+    OrganizationRef,
+    company_ref,
+    establishment_ref,
+    membership_ref,
+    organization_ref,
+)
 from ledger_identity.domain.company import CompanyStatus
 from ledger_identity.domain.text import MAX_LEGAL_NAME
 from ledger_kernel.access import Role
@@ -114,8 +123,8 @@ class CompanyChanges(_Shape):
 class CompanyView(_Shape):
     """A company, at its current version (its ``ETag``)."""
 
-    id: UUID
-    organization_id: UUID
+    id: CompanyRef
+    organization_id: OrganizationRef
     jurisdiction: JurisdictionBody
     functional_currency: str
     tax_ids: list[TaxIdBody] = Field(description="The first is its primary one.")
@@ -132,8 +141,8 @@ class CompanyView(_Shape):
     def of(cls, company: Company) -> Self:
         """The view of ``company``."""
         return cls(
-            id=company.id,
-            organization_id=company.organization,
+            id=company_ref(company.id),
+            organization_id=organization_ref(company.organization),
             jurisdiction=JurisdictionBody.of(company.profile.jurisdiction),
             functional_currency=company.profile.functional_currency.code,
             tax_ids=[TaxIdBody.of(tax_id) for tax_id in company.profile.tax_ids],
@@ -183,7 +192,7 @@ class RegisteredCompany(CompanyView):
 class OrganizationView(_Shape):
     """The caller's organization."""
 
-    id: UUID
+    id: OrganizationRef
     provider_id: str = Field(description="The identity provider's (Zitadel's) id of the organization.")
     created_at: datetime
 
@@ -191,7 +200,9 @@ class OrganizationView(_Shape):
     def of(cls, organization: Organization) -> Self:
         """The view of ``organization``."""
         return cls(
-            id=organization.id, provider_id=organization.provider_id, created_at=organization.created_at
+            id=organization_ref(organization.id),
+            provider_id=organization.provider_id,
+            created_at=organization.created_at,
         )
 
 
@@ -214,8 +225,8 @@ class NewEstablishment(_Shape):
 class EstablishmentView(_Shape):
     """An establishment of a company."""
 
-    id: UUID
-    company_id: UUID
+    id: EstablishmentRef
+    company_id: CompanyRef
     code: str
     name: str
     time_zone: str
@@ -225,8 +236,8 @@ class EstablishmentView(_Shape):
     def of(cls, establishment: Establishment) -> Self:
         """The view of ``establishment``."""
         return cls(
-            id=establishment.id,
-            company_id=establishment.tenant.company,
+            id=establishment_ref(establishment.id),
+            company_id=company_ref(establishment.tenant.company),
             code=establishment.code,
             name=establishment.name,
             time_zone=establishment.time_zone,
@@ -243,8 +254,8 @@ class RoleAssignment(_Shape):
 class MembershipView(_Shape):
     """A principal's role in a company: an active membership, whose last change is the grant of its role."""
 
-    id: UUID
-    company_id: UUID
+    id: MembershipRef
+    company_id: CompanyRef
     subject: str = Field(description="The identity provider's id of the user or machine.")
     role: Role
     version: int = Field(description="One more with every change; a role granted again continues it.")
@@ -255,8 +266,8 @@ class MembershipView(_Shape):
     def of(cls, membership: Membership) -> Self:
         """The view of ``membership``, which is active."""
         return cls(
-            id=membership.id,
-            company_id=membership.tenant.company,
+            id=membership_ref(membership.id),
+            company_id=company_ref(membership.tenant.company),
             subject=membership.subject,
             role=membership.role,
             version=membership.version,

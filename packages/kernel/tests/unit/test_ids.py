@@ -5,6 +5,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from ledger_kernel.ids import (
+    COMPANY_PREFIX,
+    ORGANIZATION_PREFIX,
     InvalidIdError,
     InvalidIdPrefixError,
     InvalidPublicIdError,
@@ -104,3 +106,9 @@ def test_an_id_prefix_is_two_to_five_lower_case_letters() -> None:
     for text in ("c", "toolong", "Cmp", "c1"):
         with pytest.raises(InvalidIdPrefixError):
             parse_id_prefix(text)
+
+
+def test_organizations_and_companies_have_the_public_prefixes_their_manifests_declare() -> None:
+    assert (ORGANIZATION_PREFIX, COMPANY_PREFIX) == ("org", "cmp")
+    assert parse_id_prefix(ORGANIZATION_PREFIX) == "org"
+    assert parse_id_prefix(COMPANY_PREFIX) == "cmp"

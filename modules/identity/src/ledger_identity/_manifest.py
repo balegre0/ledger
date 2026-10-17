@@ -45,6 +45,10 @@ MANIFEST: Final = PackageManifest.model_validate(
                 "prefix": "mbr",
                 "resource": "membership",
             },
+            {
+                "prefix": "est",
+                "resource": "establishment",
+            },
         ],
         "permissions": [
             {

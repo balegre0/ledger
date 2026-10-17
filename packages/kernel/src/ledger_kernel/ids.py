@@ -11,6 +11,11 @@ OrganizationId = NewType("OrganizationId", UUID)
 CompanyId = NewType("CompanyId", UUID)
 """A company (one RNC) inside an organization: the unit of tenancy."""
 
+ORGANIZATION_PREFIX: Final = "org"
+"""The public id prefix of an organization: ``org_01h455vb4pex5vsknk084sn02q``."""
+COMPANY_PREFIX: Final = "cmp"
+"""The public id prefix of a company: the one every module's routes and errors name a company by."""
+
 _CANONICAL: Final = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.ASCII | re.IGNORECASE
 )

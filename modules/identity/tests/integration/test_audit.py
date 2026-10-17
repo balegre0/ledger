@@ -12,7 +12,8 @@ lazy import psycopg
 
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import queries
-from ledger_kernel.ids import CompanyId
+from ledger_identity.domain.ids import ESTABLISHMENT_PREFIX
+from ledger_kernel.ids import COMPANY_PREFIX, CompanyId, parse_id
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_platform.data.codec import canonical_json, encode
@@ -55,6 +56,7 @@ async def test_every_change_through_the_api_is_audited_as_its_caller_in_its_requ
 ) -> None:
     registered = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("c-1"))
     company = str(document(registered)["id"])
+    internal = str(parse_id(COMPANY_PREFIX, company))
     base = f"/v1/companies/{company}"
     renamed = await client.patch(
         base, json={"legal_name": "Duarte Hermanos"}, headers=owner.bearer() | {"If-Match": '"1"'}
@@ -101,9 +103,11 @@ async def test_every_change_through_the_api_is_audited_as_its_caller_in_its_requ
     by_action = {row[3]: row for row in rows}
     assert [
         by_action[action][5] for action in ("company.register", "company.rename", "company.deactivate")
-    ] == [company] * 3
-    assert by_action["establishment.open"][5] == str(document(establishment)["id"])  # the last one opened
-    tenant = Tenant(ORGANIZATION, CompanyId(UUID(company)), None)
+    ] == [internal] * 3
+    assert by_action["establishment.open"][5] == str(
+        parse_id(ESTABLISHMENT_PREFIX, str(document(establishment)["id"]))
+    )  # the last one opened
+    tenant = Tenant(ORGANIZATION, CompanyId(parse_id(COMPANY_PREFIX, company)), None)
     async with module_database.unit(tenant) as unit:
         inactive = await queries.company(bind(unit), tenant.company)
     register, rename, deactivate = (

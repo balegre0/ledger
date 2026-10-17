@@ -9,7 +9,9 @@ wrong (``ledger_kernel.errors``).
 from typing import ClassVar
 lazy from uuid import UUID
 
+from ledger_identity.domain.ids import ESTABLISHMENT_PREFIX
 from ledger_kernel.errors import ConflictError, ForbiddenError, InvalidInputError, NotFoundError, excerpt
+from ledger_kernel.ids import COMPANY_PREFIX, ORGANIZATION_PREFIX, format_id
 lazy from ledger_kernel.access import SubjectId
 
 
@@ -57,7 +59,7 @@ class OrganizationNotFoundError(NotFoundError):
     code: ClassVar[str] = "organization_not_found"
 
     def __init__(self, organization: UUID) -> None:
-        super().__init__(f"organization {organization} has no company yet")
+        super().__init__(f"organization {format_id(ORGANIZATION_PREFIX, organization)} has no company yet")
 
 
 class EstablishmentNotFoundError(NotFoundError):
@@ -65,8 +67,13 @@ class EstablishmentNotFoundError(NotFoundError):
 
     code: ClassVar[str] = "establishment_not_found"
 
-    def __init__(self, establishment: UUID) -> None:
-        super().__init__(f"establishment {establishment} was not found")
+    def __init__(self, establishment: UUID | None = None) -> None:
+        """``establishment`` is named by its public id; none when what was sent names no establishment."""
+        super().__init__(
+            "establishment was not found"
+            if establishment is None
+            else f"establishment {format_id(ESTABLISHMENT_PREFIX, establishment)} was not found"
+        )
 
 
 class MembershipNotFoundError(NotFoundError):
@@ -114,7 +121,7 @@ class CompanyInactiveError(ConflictError):
     code: ClassVar[str] = "company_inactive"
 
     def __init__(self, company: UUID) -> None:
-        super().__init__(f"company {company} is inactive")
+        super().__init__(f"company {format_id(COMPANY_PREFIX, company)} is inactive")
 
 
 class StaleVersionError(ConflictError):
@@ -123,7 +130,9 @@ class StaleVersionError(ConflictError):
     code: ClassVar[str] = "stale_version"
 
     def __init__(self, company: UUID) -> None:
-        super().__init__(f"company {company} is not at the version the request names")
+        super().__init__(
+            f"company {format_id(COMPANY_PREFIX, company)} is not at the version the request names"
+        )
 
 
 class LastOwnerError(ConflictError):

@@ -11,12 +11,15 @@ from fastapi import APIRouter, Depends
 lazy from fastapi import Request, Response
 
 from ledger_identity.adapters.http.models import EstablishmentView
+from ledger_identity.adapters.http.public import (
+    company_ref,
+    establishment_ref,
+    parse_establishment_ref,
+)
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import commands, queries
-from ledger_identity.domain.ids import EstablishmentId
 from ledger_identity.domain.roles import COMPANIES_MANAGE, COMPANIES_READ
 from ledger_identity.domain.text import parse_code, parse_name, parse_time_zone
-from ledger_kernel.ids import parse_uuid
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.http import (
     REPLAYED_HEADER,
@@ -79,7 +82,8 @@ def router(context: ApiContext) -> APIRouter:
                 opened = await commands.open_establishment(
                     bind(unit), access.tenant.company, opening, actor=access.principal.subject
                 )
-                location = f"/v1/companies/{opened.tenant.company}/establishments/{opened.id}"
+                company = company_ref(opened.tenant.company)
+                location = f"/v1/companies/{company}/establishments/{establishment_ref(opened.id)}"
                 return json_response(HTTPStatus.CREATED, EstablishmentView.of(opened), {"Location": location})
 
             outcome = await context.idempotency.once(unit, attempt, open_it)
@@ -100,7 +104,7 @@ def router(context: ApiContext) -> APIRouter:
         access: Annotated[CompanyAccess, Depends(reader)], establishment_id: str
     ) -> EstablishmentView:
         """An establishment of the company."""
-        wanted = EstablishmentId(parse_uuid(establishment_id))
+        wanted = parse_establishment_ref(establishment_id)
         async with database.unit(access.tenant) as unit:
             found = await queries.establishment(bind(unit), access.tenant.company, wanted)
         return EstablishmentView.of(found)

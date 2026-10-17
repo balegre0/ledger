@@ -72,19 +72,6 @@ async def test_an_establishment_without_a_time_zone_works_in_the_main_one_s(
     )
 
 
-async def test_where_a_new_establishment_lives_is_spelled_by_the_service(
-    client: httpx.AsyncClient, owner: TestPrincipal, company: str
-) -> None:
-    response = await client.post(
-        f"/v1/companies/{company.upper()}/establishments",
-        json={"code": "SUC2", "name": "Bonao"},
-        headers=owner.posting("e-upper"),
-    )
-    assert response.status_code == 201
-    expected = f"/v1/companies/{company}/establishments/{document(response)['id']}"
-    assert response.headers["location"] == expected
-
-
 async def test_an_establishment_code_is_taken_once_per_company(
     client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:

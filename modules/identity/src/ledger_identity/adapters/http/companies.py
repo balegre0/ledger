@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends
 lazy from fastapi import Request, Response
 
 from ledger_identity.adapters.http.models import CompanyView, RegisteredCompany, RegistrationWarning
+from ledger_identity.adapters.http.public import company_ref
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import commands, queries
 from ledger_identity.domain.company import FiscalProfile
@@ -67,7 +68,7 @@ def stored(
     """
     headers = {"ETag": etag(company.version)}
     if status is HTTPStatus.CREATED:
-        headers["Location"] = f"/v1/companies/{company.id}"
+        headers["Location"] = f"/v1/companies/{company_ref(company.id)}"
     view = CompanyView.of(company) if warnings is None else RegisteredCompany.registered(company, warnings)
     return json_response(status, view, headers)
 

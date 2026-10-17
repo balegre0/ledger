@@ -3,7 +3,6 @@ import contextvars
 from dataclasses import dataclass
 from functools import partial
 from typing import final
-from uuid import UUID
 
 import pytest
 lazy import httpx
@@ -12,7 +11,7 @@ from ledger_identity.adapters.http.models import MembershipView
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import commands
 from ledger_kernel.access import Role, SubjectId
-from ledger_kernel.ids import CompanyId
+from ledger_kernel.ids import COMPANY_PREFIX, CompanyId, parse_id
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_testing.api import TestPrincipal, document, page
@@ -168,7 +167,7 @@ async def test_an_owner_demoted_while_its_grant_of_ownership_waits_for_the_compa
     module_database: BoundDatabase, migrated: WorkerDatabase, members: Members
 ) -> None:
     await members.assign("2002", "owner")
-    tenant = Tenant(organization_of("1001"), CompanyId(UUID(members.company)), None)
+    tenant = Tenant(organization_of("1001"), CompanyId(parse_id(COMPANY_PREFIX, members.company)), None)
     outside = contextvars.copy_context()  # the request is another client's: it holds no unit of the test's
     async with module_database.unit(tenant) as unit:  # holds the company's lock
         await commands.grant_role(
