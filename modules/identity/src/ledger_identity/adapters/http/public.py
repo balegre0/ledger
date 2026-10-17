@@ -9,8 +9,14 @@ from typing import Annotated, Final
 
 from pydantic import StringConstraints
 
-from ledger_identity.domain.errors import EstablishmentNotFoundError
-from ledger_identity.domain.ids import ESTABLISHMENT_PREFIX, MEMBERSHIP_PREFIX, EstablishmentId
+from ledger_identity.domain.errors import ApiClientNotFoundError, EstablishmentNotFoundError
+from ledger_identity.domain.ids import (
+    API_CLIENT_PREFIX,
+    ESTABLISHMENT_PREFIX,
+    MEMBERSHIP_PREFIX,
+    ApiClientId,
+    EstablishmentId,
+)
 from ledger_kernel.ids import (
     COMPANY_PREFIX,
     ORGANIZATION_PREFIX,
@@ -37,6 +43,8 @@ type MembershipRef = Annotated[str, _public(MEMBERSHIP_PREFIX)]
 """A membership, by its public id (``mbr_…``)."""
 type EstablishmentRef = Annotated[str, _public(ESTABLISHMENT_PREFIX)]
 """An establishment, by its public id (``est_…``)."""
+type ApiClientRef = Annotated[str, _public(API_CLIENT_PREFIX)]
+"""An API client, by its public id (``cli_…``)."""
 
 
 def organization_ref(organization: OrganizationId) -> str:
@@ -52,6 +60,19 @@ def company_ref(company: CompanyId) -> str:
 def membership_ref(membership: MembershipId) -> str:
     """The public id of ``membership``."""
     return format_id(MEMBERSHIP_PREFIX, membership)
+
+
+def api_client_ref(client: ApiClientId) -> str:
+    """The public id of ``client``."""
+    return format_id(API_CLIENT_PREFIX, client)
+
+
+def parse_api_client_ref(text: str) -> ApiClientId:
+    """The API client ``text`` names; ``ApiClientNotFoundError`` for anything but its public id."""
+    try:
+        return ApiClientId(parse_id(API_CLIENT_PREFIX, text))
+    except InvalidPublicIdError:
+        raise ApiClientNotFoundError from None
 
 
 def establishment_ref(establishment: EstablishmentId) -> str:

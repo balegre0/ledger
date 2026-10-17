@@ -11,19 +11,24 @@ lazy from collections.abc import Sequence
 from pydantic import BaseModel, ConfigDict, Field
 
 from ledger_identity.adapters.http.public import (
+    ApiClientRef,
     CompanyRef,
     EstablishmentRef,
     MembershipRef,
     OrganizationRef,
+    api_client_ref,
     company_ref,
     establishment_ref,
     membership_ref,
     organization_ref,
 )
+from ledger_identity.domain.api_clients import ApiClientStatus
 from ledger_identity.domain.company import CompanyStatus
-from ledger_identity.domain.text import MAX_LEGAL_NAME
-from ledger_kernel.access import Role
+from ledger_identity.domain.text import MAX_LEGAL_NAME, MAX_NAME
+from ledger_kernel.access import MAX_SUBJECT_LENGTH, Role
 from ledger_kernel.tax_ids import MAX_TAX_ID_LENGTH
+from ledger_kernel.tenancy import Mode
+lazy from ledger_identity.domain.api_clients import ApiClient
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_identity.domain.establishments import Establishment
 lazy from ledger_identity.domain.membership import Membership
@@ -250,6 +255,48 @@ class EstablishmentView(_Shape):
             name=establishment.name,
             time_zone=establishment.time_zone,
             created_at=establishment.created_at,
+        )
+
+
+class NewApiClient(_Shape):
+    """A machine user to register as an API client, for the mode of the request."""
+
+    subject: str = Field(
+        min_length=1,
+        max_length=MAX_SUBJECT_LENGTH,
+        description="The identity provider's (Zitadel's) id of the machine user: its tokens' `sub`.",
+    )
+    name: str = Field(min_length=1, max_length=MAX_NAME, description="What the integration is known as.")
+
+
+class ApiClientView(_Shape):
+    """An API client: a machine user bound to a mode and pinned to a version of the API."""
+
+    id: ApiClientRef
+    mode: Mode = Field(description="The mode its credential acts in: it needs no `Ledger-Mode`.")
+    subject: str
+    name: str
+    api_version: date = Field(
+        description="The dated version of the API it speaks unless a request says otherwise."
+    )
+    status: ApiClientStatus
+    created_at: datetime
+    created_by: str
+    revoked_at: datetime | None
+
+    @classmethod
+    def of(cls, client: ApiClient) -> Self:
+        """The view of ``client``."""
+        return cls(
+            id=api_client_ref(client.id),
+            mode=client.mode,
+            subject=client.subject,
+            name=client.name,
+            api_version=client.api_version,
+            status=client.status,
+            created_at=client.created_at,
+            created_by=client.created_by,
+            revoked_at=client.revoked_at,
         )
 
 

@@ -6,19 +6,29 @@ lazy from collections.abc import Callable
 lazy from datetime import date
 
 from ledger_identity.application.queries import main_establishment
+from ledger_identity.domain.api_clients import ApiClient
 from ledger_identity.domain.company import Company
-from ledger_identity.domain.errors import EstablishmentCodeTakenError, StaleVersionError, TaxIdTakenError
+from ledger_identity.domain.errors import (
+    ApiClientExistsError,
+    ApiClientNotFoundError,
+    EstablishmentCodeTakenError,
+    StaleVersionError,
+    TaxIdTakenError,
+)
 from ledger_identity.domain.establishments import Establishment
 from ledger_identity.domain.membership import Actor, Roster, found, grant, revoke
 from ledger_identity.domain.organization import Organization, require_organization_admin
 from ledger_identity.domain.roles import COMPANIES_MANAGE
 from ledger_kernel.access import CompanyNotFoundError
 lazy from ledger_identity.application.ports import AuditAction, IdentityUnit
+lazy from ledger_identity.domain.api_clients import ApiClientSpec
 lazy from ledger_identity.domain.company import FiscalProfile
+lazy from ledger_identity.domain.ids import ApiClientId
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_identity.domain.text import Code, LegalName, Name, TimeZone
 lazy from ledger_kernel.access import Principal, Role, SubjectId
 lazy from ledger_kernel.ids import CompanyId
+lazy from ledger_kernel.tenancy import Mode
 
 type Admits = Callable[[int], bool]
 """Whether a change may apply to a company at a version: the client's ``If-Match``."""
@@ -50,6 +60,15 @@ class Registration:
     legal_name: LegalName
     time_zone: TimeZone
     api_version: date
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ClientRegistration:
+    """An API client to register: what it is registered as, and the mode it is bound to."""
+
+    spec: ApiClientSpec
+    mode: Mode
 
 
 @final
@@ -146,6 +165,58 @@ async def deactivate_company(
     unit.events.publish(deactivated)
     unit.audit.record("company.deactivate", current.id, before=current, after=inactive)
     return inactive
+
+
+async def register_api_client(
+    unit: IdentityUnit, admin: Principal, registration: ClientRegistration
+) -> ApiClient:
+    """Register a machine user as an API client of the admin's organization, bound to the registration's mode.
+
+    The admin must be an administrator of the organization (``require_organization_admin``). A machine user
+    that is an active API client already, in either mode, is refused (``ApiClientExistsError``): one
+    credential carries one mode. The unit's mode is the registration's. An organization identity has not seen
+    yet is kept now, pinned to the client's version, as its first company would have kept it.
+    """
+    require_organization_admin(admin)
+    await unit.organizations.add(
+        Organization.of(admin, now=unit.now, api_version=registration.spec.api_version)
+    )
+    client = ApiClient.register(
+        registration.spec,
+        organization=admin.organization,
+        mode=registration.mode,
+        actor=admin.subject,
+        now=unit.now,
+    )
+    if not await unit.api_clients.add(client):
+        raise ApiClientExistsError
+    unit.audit.record(
+        "api_client.register", client.id, before=None, after=client, detail=_client_detail(client)
+    )
+    return client
+
+
+async def revoke_api_client(unit: IdentityUnit, admin: Principal, client_id: ApiClientId) -> ApiClient:
+    """Revoke an API client of the unit's mode: its tokens stop counting. Idempotent.
+
+    The admin must be an administrator of the organization. Revoking a client that is revoked already changes
+    and records nothing; an id the organization has no client by, in this mode, is not found.
+    """
+    require_organization_admin(admin)
+    current = await unit.api_clients.get(client_id)
+    if current is None:
+        raise ApiClientNotFoundError(client_id)
+    revoked = current.revoke(now=unit.now)
+    if revoked is not current and await unit.api_clients.revoked(revoked):
+        unit.audit.record(
+            "api_client.revoke", current.id, before=current, after=revoked, detail=_client_detail(revoked)
+        )
+    return revoked
+
+
+def _client_detail(client: ApiClient) -> dict[str, str]:
+    """What an API client's audit rows say of it besides its hashes: ids and words, never its name."""
+    return {"subject": client.subject, "mode": client.mode.value}
 
 
 async def lock_fiscal_profile(unit: IdentityUnit, company_id: CompanyId) -> Company:

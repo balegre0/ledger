@@ -10,6 +10,7 @@ import pytest
 
 from ledger_identity.application import commands, queries
 from ledger_identity.application.ports import (
+    ApiClients,
     Audit,
     Companies,
     Establishments,
@@ -18,8 +19,11 @@ from ledger_identity.application.ports import (
     Memberships,
     Organizations,
 )
+from ledger_identity.domain.api_clients import ApiClientSpec
 from ledger_identity.domain.company import CompanyStatus, FiscalProfile
 from ledger_identity.domain.errors import (
+    ApiClientExistsError,
+    ApiClientNotFoundError,
     CompanyInactiveError,
     EstablishmentCodeTakenError,
     EstablishmentNotFoundError,
@@ -46,13 +50,14 @@ from ledger_kernel.errors import ErrorKind
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.jurisdiction import parse_jurisdiction
 from ledger_kernel.money import Currency
-from ledger_kernel.pagination import PageRequest, page_of
+from ledger_kernel.pagination import PageRequest, decode_cursor, page_of
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
-from ledger_kernel.tenancy import Tenant
+from ledger_kernel.tenancy import Mode, Tenant
 lazy from ledger_identity.application.ports import AuditAction
+lazy from ledger_identity.domain.api_clients import ApiClient
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_identity.domain.establishments import Establishment
-lazy from ledger_identity.domain.ids import EstablishmentId
+lazy from ledger_identity.domain.ids import ApiClientId, EstablishmentId
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_identity.domain.text import Code
 lazy from ledger_identity.events import IdentityEvent
@@ -72,6 +77,9 @@ STRANGER: Final = Principal(
     organization=OrganizationId(new_id()),
     provider_organization="9",
     roles=frozenset({ORGANIZATION_ADMIN}),
+)
+NOT_ADMIN: Final = Principal(
+    subject=SubjectId("2002"), organization=ORGANIZATION, provider_organization="1001"
 )
 OWNER: Final = FOUNDER.subject
 ADMIN: Final = SubjectId("2002")
@@ -114,19 +122,25 @@ class State:
         self.companies: dict[CompanyId, Company] = {}
         self.establishments: dict[EstablishmentId, Establishment] = {}
         self.memberships: dict[tuple[CompanyId, SubjectId], Membership] = {}
+        self.api_clients: dict[ApiClientId, ApiClient] = {}
         self.events: list[IdentityEvent] = []
         self.audited: list[Audited] = []
         self.while_waiting: Callable[[], None] = _nothing_happens
         """What other units commit while a unit waits for a company's lock."""
         self.races_lost = False
         """While set, every compare-and-set of a company finds it changed by someone else."""
+        self.client_races_lost = False
+        """While set, an API client is found revoked already by the unit that revokes it."""
 
-    def unit(self, now: datetime = NOW, organization: OrganizationId = ORGANIZATION) -> IdentityUnit:
+    def unit(
+        self, now: datetime = NOW, organization: OrganizationId = ORGANIZATION, mode: Mode | None = Mode.TEST
+    ) -> IdentityUnit:
         return IdentityUnit(
             organizations=MemoryOrganizations(self),
             companies=MemoryCompanies(self, organization),
             establishments=MemoryEstablishments(self, organization),
             memberships=MemoryMemberships(self, organization),
+            api_clients=MemoryApiClients(self, organization, mode),
             events=MemoryEvents(self),
             audit=MemoryAudit(self),
             now=now,
@@ -278,6 +292,52 @@ class MemoryMemberships(Memberships):
             m
             for (held, _), m in self._state.memberships.items()
             if held == company and m.active and m.tenant.organization == self._organization
+        ]
+
+
+@final
+class MemoryApiClients(ApiClients):
+    def __init__(self, state: State, organization: OrganizationId, mode: Mode | None) -> None:
+        self._state = state
+        self._organization = organization
+        self._mode = mode
+
+    @override
+    async def add(self, client: ApiClient) -> bool:
+        if any(
+            other.organization == client.organization and other.subject == client.subject and other.active
+            for other in self._state.api_clients.values()
+        ):
+            return False
+        self._state.api_clients[client.id] = client
+        return True
+
+    @override
+    async def get(self, client: ApiClientId) -> ApiClient | None:
+        return next((found for found in self._mine() if found.id == client), None)
+
+    @override
+    async def revoked(self, client: ApiClient) -> bool:
+        current = self._state.api_clients.get(client.id)
+        if self._state.client_races_lost or current is None or not current.active:
+            return False
+        self._state.api_clients[client.id] = client
+        return True
+
+    @override
+    async def page(self, request: PageRequest) -> Page[ApiClient]:
+        return paged(self._mine(), request, key=lambda client: client.id)
+
+    @override
+    async def of_subject(self, subject: SubjectId) -> ApiClient | None:
+        ours = sorted((found for found in self._mine() if found.subject == subject), key=lambda c: c.id)
+        return next((found for found in reversed(ours) if found.active), ours[-1] if ours else None)
+
+    def _mine(self) -> list[ApiClient]:
+        return [
+            client
+            for client in self._state.api_clients.values()
+            if client.organization == self._organization and client.mode is self._mode
         ]
 
 
@@ -943,3 +1003,129 @@ async def test_the_memberships_of_a_company_are_listed(state: State) -> None:
     await commands.grant_role(state.unit(), company.id, subject=VIEWER, role=Role.VIEWER, actor=OWNER)
     page = await queries.memberships(state.unit(), company.id, PageRequest())
     assert {membership.subject for membership in page.items} == {"2001", "3001"}
+
+
+# ── API clients ─────────────────────────────────────────────────────────────────
+
+MACHINE: Final = SubjectId("4001")
+
+
+def client_registration(subject: SubjectId = MACHINE, mode: Mode = Mode.TEST) -> commands.ClientRegistration:
+    spec = ApiClientSpec(subject=subject, name=parse_name("Odoo"), api_version=VERSION)
+    return commands.ClientRegistration(spec=spec, mode=mode)
+
+
+async def test_an_administrator_registers_a_machine_user_as_an_api_client_of_its_mode(state: State) -> None:
+    client = await commands.register_api_client(
+        state.unit(mode=Mode.LIVE), FOUNDER, client_registration(mode=Mode.LIVE)
+    )
+    assert state.api_clients == {client.id: client}
+    assert (client.organization, client.mode, client.subject, client.created_by, client.api_version) == (
+        ORGANIZATION,
+        Mode.LIVE,
+        MACHINE,
+        FOUNDER.subject,
+        VERSION,
+    )
+    (audit,) = state.audited
+    assert (audit.action, audit.subject, audit.before, audit.after) == (
+        "api_client.register",
+        client.id,
+        None,
+        client,
+    )
+    assert audit.detail == {"subject": "4001", "mode": "live"}  # ids and words: never the client's name
+    assert state.events == []
+
+
+async def test_the_first_thing_an_organization_registers_may_be_an_api_client(state: State) -> None:
+    await commands.register_api_client(state.unit(), FOUNDER, client_registration())
+    assert state.organizations == {
+        ORGANIZATION: Organization(id=ORGANIZATION, provider_id="1001", created_at=NOW, api_version=VERSION)
+    }
+    await commands.register_api_client(state.unit(LATER), FOUNDER, client_registration(SubjectId("4002")))
+    assert state.organizations[ORGANIZATION].created_at == NOW  # kept as it was
+
+
+async def test_only_an_organization_administrator_registers_or_revokes_api_clients(state: State) -> None:
+    registered = await commands.register_api_client(state.unit(), FOUNDER, client_registration())
+    with pytest.raises(OrganizationAdminRequiredError):
+        await commands.register_api_client(state.unit(), NOT_ADMIN, client_registration(SubjectId("4002")))
+    with pytest.raises(OrganizationAdminRequiredError):
+        await commands.revoke_api_client(state.unit(), NOT_ADMIN, registered.id)
+    assert state.api_clients == {registered.id: registered}
+
+
+async def test_a_machine_user_is_one_api_client_whatever_the_mode_until_it_is_revoked(state: State) -> None:
+    first = await commands.register_api_client(state.unit(), FOUNDER, client_registration())
+    for mode in (Mode.TEST, Mode.LIVE):
+        with pytest.raises(ApiClientExistsError):
+            await commands.register_api_client(state.unit(mode=mode), FOUNDER, client_registration(mode=mode))
+    await commands.revoke_api_client(state.unit(), FOUNDER, first.id)
+    again = await commands.register_api_client(
+        state.unit(mode=Mode.LIVE), FOUNDER, client_registration(mode=Mode.LIVE)
+    )
+    assert again.id != first.id
+    assert [client.active for client in state.api_clients.values()] == [False, True]
+
+
+async def test_revoking_an_api_client_is_audited_once_and_idempotent(state: State) -> None:
+    client = await commands.register_api_client(state.unit(), FOUNDER, client_registration())
+    revoked = await commands.revoke_api_client(state.unit(LATER), FOUNDER, client.id)
+    again = await commands.revoke_api_client(state.unit(LATER + timedelta(hours=1)), FOUNDER, client.id)
+    assert again == revoked
+    assert (revoked.active, revoked.revoked_at) == (False, LATER)
+    assert [(audit.action, audit.before, audit.after) for audit in state.audited] == [
+        ("api_client.register", None, client),
+        ("api_client.revoke", client, revoked),
+    ]
+    assert state.audited[1].detail == {"subject": "4001", "mode": "test"}
+
+
+async def test_an_api_client_revoked_meanwhile_by_another_unit_is_not_audited_twice(state: State) -> None:
+    client = await commands.register_api_client(state.unit(), FOUNDER, client_registration())
+    state.client_races_lost = True  # another unit revoked it between this one's read and its update
+    revoked = await commands.revoke_api_client(state.unit(LATER), FOUNDER, client.id)
+    assert not revoked.active
+    assert [audit.action for audit in state.audited] == ["api_client.register"]
+
+
+async def test_an_api_client_is_found_in_its_own_mode_only(state: State) -> None:
+    client = await commands.register_api_client(state.unit(), FOUNDER, client_registration())
+    assert await queries.api_client(state.unit(), client.id) == client
+    with pytest.raises(ApiClientNotFoundError):
+        await queries.api_client(state.unit(mode=Mode.LIVE), client.id)
+    with pytest.raises(ApiClientNotFoundError):
+        await commands.revoke_api_client(state.unit(mode=Mode.LIVE), FOUNDER, client.id)
+    with pytest.raises(ApiClientNotFoundError):
+        await queries.api_client(state.unit(mode=None), client.id)  # a unit with no mode sees none
+    with pytest.raises(ApiClientNotFoundError):
+        await queries.api_client(state.unit(organization=STRANGER.organization), client.id)
+
+
+async def test_the_api_clients_of_a_mode_are_listed_in_id_order(state: State) -> None:
+    made = [
+        await commands.register_api_client(state.unit(), FOUNDER, client_registration(SubjectId(f"400{n}")))
+        for n in range(3)
+    ]
+    await commands.register_api_client(
+        state.unit(mode=Mode.LIVE), FOUNDER, client_registration(SubjectId("4009"), Mode.LIVE)
+    )
+    first = await queries.api_clients(state.unit(), PageRequest(size=2))
+    assert first.items == tuple(made[:2])
+    assert first.next_cursor is not None
+    rest = await queries.api_clients(
+        state.unit(), PageRequest(size=2, after=decode_cursor(first.next_cursor))
+    )
+    assert (rest.items, rest.next_cursor) == (tuple(made[2:]), None)
+
+
+async def test_a_machine_user_is_found_in_the_mode_it_is_bound_to(state: State) -> None:
+    first = await commands.register_api_client(state.unit(), FOUNDER, client_registration())
+    assert await state.unit().api_clients.of_subject(MACHINE) == first
+    assert await state.unit(mode=Mode.LIVE).api_clients.of_subject(MACHINE) is None
+    assert await state.unit().api_clients.of_subject(SubjectId("4999")) is None
+    await commands.revoke_api_client(state.unit(LATER), FOUNDER, first.id)
+    revoked = await state.unit().api_clients.of_subject(MACHINE)
+    assert revoked is not None
+    assert not revoked.active  # the last revoked one, when no active one is left

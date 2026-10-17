@@ -1,0 +1,216 @@
+"""``/v1/api_clients``: machine users registered for a mode, and what their credentials then carry."""
+
+from datetime import date
+from typing import Final
+
+import pytest
+lazy import httpx
+lazy import psycopg
+
+from ledger_identity.domain.ids import API_CLIENT_PREFIX
+from ledger_identity.domain.organization import ORGANIZATION_ADMIN
+from ledger_kernel.ids import format_id, parse_id
+from ledger_platform.http import CURRENT_VERSION
+from ledger_platform.http.versions import VERSION_HEADER
+from ledger_testing.api import created, document, page
+lazy from ledger_testing.api import TestPrincipal
+lazy from ledger_testing.issuer import LocalIssuer
+
+NEW: Final = {"subject": "4001", "name": " Odoo   connector "}
+EARLIER: Final = date(2026, 1, 1)
+
+
+def machine(local_issuer: LocalIssuer, subject: str = "4001", *, admin: bool = True) -> TestPrincipal:
+    """The machine user ``subject`` of organization ``1001``, with the provider's admin role unless not."""
+    return TestPrincipal(local_issuer, subject=subject, roles=(ORGANIZATION_ADMIN,) if admin else ())
+
+
+async def register_in(client: httpx.AsyncClient, owner: TestPrincipal, mode: str, key: str = "k-1") -> str:
+    """The id of the API client ``owner`` registers in ``mode`` for ``NEW``."""
+    return await created(client, "/v1/api_clients", NEW, owner.posting(key, mode=mode))
+
+
+async def test_an_administrator_registers_a_machine_user_for_its_mode_and_the_client_is_found_again(
+    client: httpx.AsyncClient, owner: TestPrincipal
+) -> None:
+    response = await client.post("/v1/api_clients", json=NEW, headers=owner.posting("k-1", mode="live"))
+    assert response.status_code == 201
+    made = document(response)
+    assert (made["mode"], made["subject"], made["name"], made["status"]) == (
+        "live",
+        "4001",
+        "Odoo connector",
+        "active",
+    )
+    assert (made["api_version"], made["created_by"], made["revoked_at"]) == (
+        CURRENT_VERSION.isoformat(),
+        "2001",
+        None,
+    )
+    assert str(made["id"]).startswith(f"{API_CLIENT_PREFIX}_")
+    assert response.headers["location"] == f"/v1/api_clients/{made['id']}"
+    read = await client.get(f"/v1/api_clients/{made['id']}", headers=owner.bearer() | {"Ledger-Mode": "live"})
+    assert (read.status_code, document(read)) == (200, made)
+    again = await client.post("/v1/api_clients", json=NEW, headers=owner.posting("k-1", mode="live"))
+    assert (again.content, again.headers["idempotent-replayed"]) == (response.content, "true")
+
+
+async def test_registering_needs_the_organization_s_admin_role_a_mode_and_a_key(
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal
+) -> None:
+    plain = machine(local_issuer, "2002", admin=False)
+    forbidden = await client.post("/v1/api_clients", json=NEW, headers=plain.posting("k-1"))
+    assert (forbidden.status_code, document(forbidden)["code"]) == (403, "forbidden")
+    keyless = await client.post("/v1/api_clients", json=NEW, headers=owner.bearer() | {"Ledger-Mode": "test"})
+    assert (keyless.status_code, document(keyless)["code"]) == (422, "invalid_request")
+    modeless = await client.post(
+        "/v1/api_clients", json=NEW, headers=owner.bearer() | {"Idempotency-Key": "k-1"}
+    )
+    assert (modeless.status_code, document(modeless)["code"]) == (400, "mode_required")
+
+
+@pytest.mark.parametrize(
+    ("payload", "code"),
+    [
+        ({"subject": "has space", "name": "X"}, "invalid_subject"),
+        ({"subject": "4001", "name": " "}, "invalid_name"),
+        ({"subject": "", "name": "X"}, "invalid_request"),
+        ({"subject": "4001", "name": "X", "mode": "live"}, "invalid_request"),
+    ],
+    ids=["subject", "name", "empty-subject", "mode-in-the-body"],
+)
+async def test_a_machine_user_that_cannot_be_registered_is_refused(
+    client: httpx.AsyncClient, owner: TestPrincipal, payload: dict[str, str], code: str
+) -> None:
+    response = await client.post("/v1/api_clients", json=payload, headers=owner.posting("k-bad"))
+    assert (response.status_code, document(response)["code"]) == (422, code)
+
+
+async def test_a_machine_user_is_one_api_client_whatever_the_mode_until_it_is_revoked(
+    client: httpx.AsyncClient, owner: TestPrincipal
+) -> None:
+    first = await register_in(client, owner, "test")
+    for mode in ("test", "live"):
+        taken = await client.post("/v1/api_clients", json=NEW, headers=owner.posting(f"k-{mode}", mode=mode))
+        assert (taken.status_code, document(taken)["code"]) == (409, "api_client_exists")
+    revoked = await client.delete(
+        f"/v1/api_clients/{first}", headers=owner.bearer() | {"Ledger-Mode": "test"}
+    )
+    assert (revoked.status_code, document(revoked)["status"]) == (200, "revoked")
+    assert await register_in(client, owner, "live", key="k-again")  # a new client, in the other mode
+
+
+async def test_clients_are_listed_and_found_in_their_own_mode_only(
+    client: httpx.AsyncClient, owner: TestPrincipal
+) -> None:
+    first = await register_in(client, owner, "test")
+    other = await created(
+        client, "/v1/api_clients", {"subject": "4002", "name": "Other"}, owner.posting("k-2", mode="live")
+    )
+    for mode, mine, theirs in (("test", first, other), ("live", other, first)):
+        headers = owner.bearer() | {"Ledger-Mode": mode}
+        listed = page(await client.get("/v1/api_clients", headers=headers))
+        assert [item["id"] for item in listed["items"]] == [mine]
+        seen = await client.get(f"/v1/api_clients/{theirs}", headers=headers)
+        assert (seen.status_code, document(seen)["code"]) == (404, "api_client_not_found")
+        gone = await client.delete(f"/v1/api_clients/{theirs}", headers=headers)
+        assert (gone.status_code, document(gone)["code"]) == (404, "api_client_not_found")
+
+
+async def test_revoking_is_idempotent_and_the_revoked_client_stays_listed(
+    client: httpx.AsyncClient, owner: TestPrincipal
+) -> None:
+    made = await register_in(client, owner, "test")
+    headers = owner.bearer() | {"Ledger-Mode": "test"}
+    first = await client.delete(f"/v1/api_clients/{made}", headers=headers)
+    again = await client.delete(f"/v1/api_clients/{made}", headers=headers)
+    assert (first.status_code, again.status_code, document(again)) == (200, 200, document(first))
+    assert document(first)["revoked_at"] is not None
+    listed = page(await client.get("/v1/api_clients", headers=headers))
+    assert [(item["id"], item["status"]) for item in listed["items"]] == [(made, "revoked")]
+
+
+@pytest.mark.parametrize("which", ["uuid", "other-prefix", "upper-case", "empty-suffix", "garbage"])
+async def test_a_client_that_is_not_named_by_its_public_id_is_not_found(
+    client: httpx.AsyncClient, owner: TestPrincipal, which: str
+) -> None:
+    made = await register_in(client, owner, "test")
+    inside = parse_id(API_CLIENT_PREFIX, made)
+    named = {
+        "uuid": str(inside),
+        "other-prefix": format_id("est", inside),
+        "upper-case": made.upper(),
+        "empty-suffix": f"{API_CLIENT_PREFIX}_",
+        "garbage": "x" * 300,
+    }[which]
+    headers = owner.bearer() | {"Ledger-Mode": "test"}
+    for send in (client.get, client.delete):
+        response = await send(f"/v1/api_clients/{named}", headers=headers)
+        assert (response.status_code, document(response)["code"]) == (404, "api_client_not_found")
+        assert len(named) < 6 or named not in response.text
+
+
+async def test_every_route_needs_the_organization_s_admin_role(
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal
+) -> None:
+    made = await register_in(client, owner, "test")
+    plain = machine(local_issuer, "2002", admin=False)
+    headers = plain.bearer() | {"Ledger-Mode": "test"}
+    for response in (
+        await client.get("/v1/api_clients", headers=headers),
+        await client.get(f"/v1/api_clients/{made}", headers=headers),
+        await client.delete(f"/v1/api_clients/{made}", headers=headers),
+    ):
+        assert (response.status_code, document(response)["code"]) == (403, "forbidden")
+    anonymous = await client.get("/v1/api_clients")
+    assert (anonymous.status_code, document(anonymous)["code"]) == (401, "missing_token")
+
+
+# ── What the client's credential carries ────────────────────────────────────────
+
+
+async def test_a_registered_machine_user_acts_in_its_mode_without_naming_it_and_in_no_other(
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal
+) -> None:
+    await register_in(client, owner, "live")
+    robot = machine(local_issuer)
+    bare = await client.get("/v1/api_clients", headers=robot.bearer())
+    assert (bare.status_code, page(bare)["items"][0]["subject"]) == (200, "4001")  # seen in live: its mode
+    repeated = await client.get("/v1/api_clients", headers=robot.bearer() | {"Ledger-Mode": "live"})
+    assert repeated.status_code == 200
+    other = await client.get("/v1/api_clients", headers=robot.bearer() | {"Ledger-Mode": "test"})
+    assert (other.status_code, document(other)["code"]) == (403, "mode_mismatch")
+    human = await client.get("/v1/api_clients", headers=owner.bearer())  # a human names its mode
+    assert (human.status_code, document(human)["code"]) == (400, "mode_required")
+
+
+async def test_a_registered_machine_user_speaks_its_clients_version_unless_the_request_names_one(
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal, admin: psycopg.AsyncConnection
+) -> None:
+    await register_in(client, owner, "test")
+    await admin.execute("UPDATE identity.api_clients SET api_version = %s", (EARLIER,))
+    robot = machine(local_issuer)
+    pinned = await client.get("/v1/api_clients", headers=robot.bearer())
+    assert pinned.headers[VERSION_HEADER] == EARLIER.isoformat()
+    named = await client.get(
+        "/v1/api_clients", headers=robot.bearer() | {VERSION_HEADER: CURRENT_VERSION.isoformat()}
+    )
+    assert named.headers[VERSION_HEADER] == CURRENT_VERSION.isoformat()
+
+
+async def test_a_revoked_client_s_credential_is_refused_at_once(
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal
+) -> None:
+    made = await register_in(client, owner, "test")
+    await client.delete(f"/v1/api_clients/{made}", headers=owner.bearer() | {"Ledger-Mode": "test"})
+    refused = await client.get("/v1/api_clients", headers=machine(local_issuer).bearer())
+    assert (refused.status_code, document(refused)["code"]) == (401, "api_client_revoked")
+
+
+async def test_a_machine_user_that_is_no_client_stands_as_a_human_does(
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal
+) -> None:
+    await register_in(client, owner, "test")
+    stranger = machine(local_issuer, "4999")
+    response = await client.get("/v1/api_clients", headers=stranger.bearer())
+    assert (response.status_code, document(response)["code"]) == (400, "mode_required")

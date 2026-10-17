@@ -6,6 +6,7 @@ Units are identity's own (``module_database``: ``identity_rw``, its schema); wha
 
 import asyncio
 from datetime import UTC, date, datetime
+from functools import partial
 from typing import Final, final
 lazy from collections.abc import Awaitable, Callable
 lazy from uuid import UUID
@@ -28,7 +29,9 @@ from ledger_identity.adapters.postgres.tables import (
 )
 from ledger_identity.adapters.postgres.unit import UnscopedUnitError, bind
 from ledger_identity.application import commands, queries
+from ledger_identity.domain.api_clients import ApiClient, ApiClientSpec
 from ledger_identity.domain.errors import (
+    ApiClientExistsError,
     CompanyInactiveError,
     EstablishmentCodeTakenError,
     OwnersOnlyError,
@@ -45,12 +48,13 @@ from ledger_kernel.jurisdiction import parse_jurisdiction
 from ledger_kernel.money import Currency
 from ledger_kernel.pagination import PageRequest, decode_cursor
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
-from ledger_kernel.tenancy import OrganizationScope, Tenant
+from ledger_kernel.tenancy import Mode, OrganizationScope, Tenant
 from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_testing.database import app_url
 from ledger_testing.waiting import eventually, waits_for_a_lock
 lazy from ledger_identity.application.ports import IdentityUnit
 lazy from ledger_identity.domain.company import Company, FiscalProfile
+lazy from ledger_identity.domain.ids import ApiClientId
 lazy from ledger_kernel.pagination import Page
 lazy from ledger_kernel.tenancy import Scope
 lazy from ledger_platform.data.bound import BoundDatabase
@@ -536,6 +540,117 @@ async def test_another_organization_sees_no_establishment(module_database: Bound
     assert (seen_by_theirs.items, asked_wrongly, by_code) == ((), None, None)
 
 
+# ── API clients ─────────────────────────────────────────────────────────────────
+
+MACHINE: Final = SubjectId("4001")
+
+
+async def in_mode[T](
+    module_database: BoundDatabase, mode: Mode | None, work: Callable[[IdentityUnit], Awaitable[T]]
+) -> T:
+    """What ``work`` makes of a unit of the founder's organization in ``mode``."""
+    return await in_unit(module_database, OrganizationScope(FOUNDER.organization, mode), work)
+
+
+def client_registration(subject: SubjectId = MACHINE, mode: Mode = Mode.TEST) -> commands.ClientRegistration:
+    spec = ApiClientSpec(subject=subject, name=parse_name("Odoo"), api_version=VERSION)
+    return commands.ClientRegistration(spec=spec, mode=mode)
+
+
+async def test_api_clients_are_kept_per_mode_and_a_machine_user_is_one_active_client_of_an_organization(
+    module_database: BoundDatabase,
+) -> None:
+    first = await in_mode(
+        module_database,
+        Mode.TEST,
+        lambda unit: commands.register_api_client(unit, FOUNDER, client_registration()),
+    )
+    for mode in (Mode.TEST, Mode.LIVE):  # the index sees the client of the other mode, which the policy hides
+        with pytest.raises(ApiClientExistsError):
+            await in_mode(
+                module_database,
+                mode,
+                partial(
+                    commands.register_api_client, admin=FOUNDER, registration=client_registration(mode=mode)
+                ),
+            )
+    assert await in_mode(module_database, Mode.TEST, lambda unit: unit.api_clients.get(first.id)) == first
+    assert await in_mode(module_database, Mode.LIVE, lambda unit: unit.api_clients.get(first.id)) is None
+    assert await in_mode(module_database, None, lambda unit: unit.api_clients.get(first.id)) is None
+    revoked = await in_mode(
+        module_database, Mode.TEST, lambda unit: commands.revoke_api_client(unit, FOUNDER, first.id)
+    )
+    assert not revoked.active
+    again = await in_mode(
+        module_database,
+        Mode.LIVE,
+        lambda unit: commands.register_api_client(unit, FOUNDER, client_registration(mode=Mode.LIVE)),
+    )
+    assert again.active
+    live = await in_mode(module_database, Mode.LIVE, lambda unit: unit.api_clients.of_subject(MACHINE))
+    test = await in_mode(module_database, Mode.TEST, lambda unit: unit.api_clients.of_subject(MACHINE))
+    assert (live, test) == (again, revoked)  # the active one of the mode it is bound to; the revoked, in its
+
+
+async def test_the_last_revoked_client_is_found_when_none_is_active(module_database: BoundDatabase) -> None:
+    ids: list[ApiClientId] = []
+    for _ in range(2):  # registered, revoked, registered again, revoked again: the later one is the one found
+        made = await in_mode(
+            module_database,
+            Mode.TEST,
+            lambda unit: commands.register_api_client(unit, FOUNDER, client_registration()),
+        )
+        await in_mode(
+            module_database,
+            Mode.TEST,
+            partial(commands.revoke_api_client, admin=FOUNDER, client_id=made.id),
+        )
+        ids.append(made.id)
+    found = await in_mode(module_database, Mode.TEST, lambda unit: unit.api_clients.of_subject(MACHINE))
+    assert found is not None
+    assert (found.id, found.active) == (max(ids), False)
+
+
+async def test_revoking_keeps_the_first_revocation_and_a_unit_that_lost_the_race_changes_nothing(
+    module_database: BoundDatabase,
+) -> None:
+    made = await in_mode(
+        module_database,
+        Mode.TEST,
+        lambda unit: commands.register_api_client(unit, FOUNDER, client_registration()),
+    )
+    revoked = made.revoke(now=NOW)
+    first = await in_mode(module_database, Mode.TEST, lambda unit: unit.api_clients.revoked(revoked))
+    second = await in_mode(module_database, Mode.TEST, lambda unit: unit.api_clients.revoked(revoked))
+    other_mode = await in_mode(module_database, Mode.LIVE, lambda unit: unit.api_clients.revoked(revoked))
+    assert (first, second, other_mode) == (True, False, False)
+
+
+async def test_api_clients_are_paged_in_id_order_by_cursor(module_database: BoundDatabase) -> None:
+    made = [
+        await in_mode(
+            module_database,
+            Mode.TEST,
+            partial(
+                commands.register_api_client,
+                admin=FOUNDER,
+                registration=client_registration(SubjectId(f"400{n}")),
+            ),
+        )
+        for n in range(3)
+    ]
+    first = await in_mode(module_database, Mode.TEST, lambda unit: unit.api_clients.page(PageRequest(size=2)))
+    assert first.next_cursor is not None
+    rest = await in_mode(
+        module_database,
+        Mode.TEST,
+        lambda unit: unit.api_clients.page(PageRequest(size=2, after=decode_cursor(first.next_cursor or ""))),
+    )
+    assert (first.items, rest.items, rest.next_cursor) == (tuple(made[:2]), tuple(made[2:]), None)
+    nothing = await in_mode(module_database, Mode.LIVE, lambda unit: unit.api_clients.page(PageRequest()))
+    assert nothing.items == ()
+
+
 # ── Tenancy checked twice ───────────────────────────────────────────────────────
 
 
@@ -634,6 +749,11 @@ async def test_a_unit_refuses_to_write_a_row_of_another_tenant(module_database: 
         company, code=parse_code("SUC1"), name=parse_name("S"), time_zone=SANTO_DOMINGO, now=NOW
     )
     owner, _ = found(company, FOUNDER, now=NOW)
+    spec = ApiClientSpec(subject=MACHINE, name=parse_name("Odoo"), api_version=VERSION)
+    client_of_theirs = ApiClient.register(
+        spec, organization=company.organization, mode=Mode.TEST, actor=OWNER, now=NOW
+    )
+    a_test_client = client_of_theirs  # a client of mode test handed to a unit of mode live
     renamed, _ = company.rename(parse_legal_name("Duarte S.A."), now=NOW)
     of_another_organization: tuple[Callable[[IdentityUnit], Awaitable[object]], ...] = (
         lambda unit: unit.organizations.add(Organization.of(FOUNDER, now=NOW, api_version=VERSION)),
@@ -641,9 +761,15 @@ async def test_a_unit_refuses_to_write_a_row_of_another_tenant(module_database: 
         lambda unit: unit.companies.update(renamed, version=company.version),
         lambda unit: unit.establishments.add(establishment),
         lambda unit: unit.memberships.put(owner),
+        lambda unit: unit.api_clients.add(client_of_theirs),
+        lambda unit: unit.api_clients.revoked(client_of_theirs),
     )
-    attempts = tuple(
-        (OrganizationScope(STRANGER.organization, None), write) for write in of_another_organization
+    attempts: tuple[tuple[Scope, Callable[[IdentityUnit], Awaitable[object]]], ...] = (
+        *((OrganizationScope(STRANGER.organization, Mode.TEST), write) for write in of_another_organization),
+        (
+            OrganizationScope(company.organization, Mode.LIVE),
+            lambda unit: unit.api_clients.add(a_test_client),
+        ),
     )
     for scope, write_elsewhere in attempts:
         with pytest.raises(ForeignTenantError) as caught:

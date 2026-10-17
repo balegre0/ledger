@@ -29,6 +29,7 @@ ISOLATION: Final = (
     ("company_tax_ids", RlsScope.ORGANIZATION, "organization_id"),
     ("memberships", RlsScope.ORGANIZATION, "organization_id"),
     ("establishments", RlsScope.ORGANIZATION, "organization_id"),
+    ("api_clients", RlsScope.MODED_ORGANIZATION, "organization_id"),
 )
 """Whose rows each table holds, and the column naming the organization (an organization is its own)."""
 
@@ -133,6 +134,31 @@ def upgrade() -> None:
         _of_company("establishments"),
         schema=S,
     )
+    op.create_table(
+        "api_clients",
+        sa.Column("id", sa.Uuid(), primary_key=True),
+        sa.Column("organization_id", sa.Uuid(), sa.ForeignKey(f"{S}.organizations.id"), nullable=False),
+        sa.Column("mode", sa.String(16), nullable=False),
+        sa.Column("subject", sa.String(128), nullable=False),
+        sa.Column("name", sa.String(100), nullable=False),
+        sa.Column("api_version", sa.Date(), nullable=False),
+        sa.Column("status", sa.String(16), nullable=False),
+        _moment("created_at"),
+        sa.Column("created_by", sa.String(128), nullable=False),
+        sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
+        sa.CheckConstraint("mode IN ('test', 'live')", name="ck_api_clients_mode"),
+        sa.CheckConstraint("status IN ('active', 'revoked')", name="ck_api_clients_status"),
+        schema=S,
+    )
+    op.create_index(
+        "uq_api_clients_active_subject",
+        "api_clients",
+        ["organization_id", "subject"],
+        unique=True,
+        schema=S,
+        postgresql_where=sa.text("status = 'active'"),
+    )
+    op.create_index("ix_api_clients_subject", "api_clients", ["organization_id", "subject"], schema=S)
     for table, scope, column in ISOLATION:
         for statement in policy(f"{S}.{table}", scope, organization_column=column):
             op.execute(statement)

@@ -1,13 +1,18 @@
 """What reads identity's state: each query runs in a unit scoped to the caller's organization or company."""
 
-from ledger_identity.domain.errors import EstablishmentNotFoundError, OrganizationNotFoundError
+from ledger_identity.domain.errors import (
+    ApiClientNotFoundError,
+    EstablishmentNotFoundError,
+    OrganizationNotFoundError,
+)
 from ledger_identity.domain.establishments import MAIN_CODE
 from ledger_identity.domain.membership import permissions_in
 from ledger_kernel.access import CompanyNotFoundError
 lazy from ledger_identity.application.ports import IdentityUnit
+lazy from ledger_identity.domain.api_clients import ApiClient
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_identity.domain.establishments import Establishment
-lazy from ledger_identity.domain.ids import EstablishmentId
+lazy from ledger_identity.domain.ids import ApiClientId, EstablishmentId
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_identity.domain.organization import Organization
 lazy from ledger_kernel.access import Permission, SubjectId
@@ -51,6 +56,19 @@ async def establishments(
 ) -> Page[Establishment]:
     """The establishments of the company."""
     return await unit.establishments.page(company_id, request)
+
+
+async def api_client(unit: IdentityUnit, client_id: ApiClientId) -> ApiClient:
+    """The API client of the unit's mode; ``ApiClientNotFoundError`` otherwise."""
+    found = await unit.api_clients.get(client_id)
+    if found is None:
+        raise ApiClientNotFoundError(client_id)
+    return found
+
+
+async def api_clients(unit: IdentityUnit, request: PageRequest) -> Page[ApiClient]:
+    """The API clients of the unit's mode, revoked ones too."""
+    return await unit.api_clients.page(request)
 
 
 async def main_establishment(unit: IdentityUnit, company_id: CompanyId) -> Establishment:

@@ -9,7 +9,7 @@ wrong (``ledger_kernel.errors``).
 from typing import ClassVar
 lazy from uuid import UUID
 
-from ledger_identity.domain.ids import ESTABLISHMENT_PREFIX
+from ledger_identity.domain.ids import API_CLIENT_PREFIX, ESTABLISHMENT_PREFIX
 from ledger_kernel.errors import ConflictError, ForbiddenError, InvalidInputError, NotFoundError, excerpt
 from ledger_kernel.ids import COMPANY_PREFIX, ORGANIZATION_PREFIX, format_id
 lazy from ledger_kernel.access import SubjectId
@@ -83,6 +83,29 @@ class CountryNotFoundError(NotFoundError):
 
     def __init__(self) -> None:
         super().__init__("no regime is installed for this country")  # what was sent is not repeated
+
+
+class ApiClientNotFoundError(NotFoundError):
+    """No API client by this id in the organization, in the mode asked."""
+
+    code: ClassVar[str] = "api_client_not_found"
+
+    def __init__(self, client: UUID | None = None) -> None:
+        """``client`` is named by its public id; none when what was sent names no API client."""
+        super().__init__(
+            "API client was not found"
+            if client is None
+            else f"API client {format_id(API_CLIENT_PREFIX, client)} was not found"
+        )
+
+
+class ApiClientExistsError(ConflictError):
+    """The machine user is an API client of the organization already."""
+
+    code: ClassVar[str] = "api_client_exists"
+
+    def __init__(self) -> None:
+        super().__init__("this machine user is an active API client of the organization already")
 
 
 class MembershipNotFoundError(NotFoundError):

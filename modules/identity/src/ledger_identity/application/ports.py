@@ -14,9 +14,10 @@ lazy from contextlib import AbstractAsyncContextManager
 lazy from datetime import datetime
 lazy from uuid import UUID
 
+lazy from ledger_identity.domain.api_clients import ApiClient
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_identity.domain.establishments import Establishment
-lazy from ledger_identity.domain.ids import EstablishmentId
+lazy from ledger_identity.domain.ids import ApiClientId, EstablishmentId
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_identity.domain.organization import Organization
 lazy from ledger_identity.domain.text import Code
@@ -108,6 +109,30 @@ class Memberships(Protocol, metaclass=ABCMeta):
         """The active memberships of ``company``, in id order."""
 
 
+class ApiClients(Protocol, metaclass=ABCMeta):
+    """The API clients of the unit's organization, in the unit's mode: none in a unit that has no mode."""
+
+    @abstractmethod
+    async def add(self, client: ApiClient) -> bool:
+        """Keep a new API client; false when its machine user is an active client of the organization."""
+
+    @abstractmethod
+    async def get(self, client: ApiClientId) -> ApiClient | None:
+        """The API client of the unit's mode, or ``None``."""
+
+    @abstractmethod
+    async def revoked(self, client: ApiClient) -> bool:
+        """Keep ``client``, revoked, in place of the active one; false when it was not active any more."""
+
+    @abstractmethod
+    async def page(self, request: PageRequest) -> Page[ApiClient]:
+        """The API clients of the unit's mode, revoked ones too, in id order."""
+
+    @abstractmethod
+    async def of_subject(self, subject: SubjectId) -> ApiClient | None:
+        """The active API client of the machine user in the unit's mode, else its last revoked one."""
+
+
 class Events(Protocol, metaclass=ABCMeta):
     """What the unit announces once it commits."""
 
@@ -121,6 +146,8 @@ type AuditAction = Literal[
     "company.rename",
     "company.deactivate",
     "company.lock_fiscal_profile",
+    "api_client.register",
+    "api_client.revoke",
     "membership.grant",
     "membership.revoke",
     "establishment.open",
@@ -160,6 +187,7 @@ class IdentityUnit:
     companies: Companies
     establishments: Establishments
     memberships: Memberships
+    api_clients: ApiClients
     events: Events
     audit: Audit
     now: datetime

@@ -9,6 +9,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from ledger_identity._manifest import MANIFEST
+from ledger_identity.domain.api_clients import ApiClient, ApiClientSpec, ApiClientStatus
 from ledger_identity.domain.company import Company, CompanyStatus, FiscalProfile
 from ledger_identity.domain.errors import (
     CompanyInactiveError,
@@ -25,7 +26,7 @@ from ledger_identity.domain.errors import (
     TaxIdTakenError,
 )
 from ledger_identity.domain.establishments import MAIN_CODE, MAIN_NAME, Establishment
-from ledger_identity.domain.ids import ESTABLISHMENT_PREFIX, MEMBERSHIP_PREFIX
+from ledger_identity.domain.ids import API_CLIENT_PREFIX, ESTABLISHMENT_PREFIX, MEMBERSHIP_PREFIX
 from ledger_identity.domain.membership import (
     Actor,
     MembershipStatus,
@@ -85,7 +86,7 @@ from ledger_kernel.ids import (
 from ledger_kernel.jurisdiction import parse_jurisdiction
 from ledger_kernel.money import Currency
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
-from ledger_kernel.tenancy import Tenant
+from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.data.codec import payload_of
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_kernel.errors import LedgerError
@@ -832,6 +833,7 @@ def test_identity_names_its_entities_by_the_prefixes_its_manifest_declares() -> 
     assert (ESTABLISHMENT_PREFIX, MEMBERSHIP_PREFIX) == ("est", "mbr")
     declared = {entry.prefix: entry.resource for entry in MANIFEST.ids}
     assert declared == {
+        API_CLIENT_PREFIX: "api_client",
         ORGANIZATION_PREFIX: "organization",
         COMPANY_PREFIX: "company",
         MEMBERSHIP_PREFIX: "membership",
@@ -842,3 +844,46 @@ def test_identity_names_its_entities_by_the_prefixes_its_manifest_declares() -> 
 def test_an_establishment_that_cannot_even_be_named_is_not_found_without_naming_it() -> None:
     error = EstablishmentNotFoundError()
     assert (str(error), error.code) == ("establishment was not found", "establishment_not_found")
+
+
+# ── API clients ─────────────────────────────────────────────────────────────────
+
+MACHINE: Final = SubjectId("4001")
+
+
+def an_api_client() -> ApiClient:
+    spec = ApiClientSpec(subject=MACHINE, name=parse_name("Odoo connector"), api_version=date(2026, 10, 13))
+    return ApiClient.register(spec, organization=ORGANIZATION, mode=Mode.LIVE, actor=FOUNDER.subject, now=NOW)
+
+
+def test_an_api_client_is_registered_active_in_its_mode_and_pinned() -> None:
+    client = an_api_client()
+    assert (client.organization, client.mode, client.subject, client.name) == (
+        ORGANIZATION,
+        Mode.LIVE,
+        MACHINE,
+        "Odoo connector",
+    )
+    assert (client.status, client.active, client.api_version) == (
+        ApiClientStatus.ACTIVE,
+        True,
+        date(2026, 10, 13),
+    )
+    assert (client.created_at, client.created_by, client.revoked_at) == (NOW, FOUNDER.subject, None)
+    assert client.id != an_api_client().id  # every registration is a new client
+
+
+def test_revoking_an_api_client_keeps_it_revoked_since_the_first_time() -> None:
+    client = an_api_client()
+    revoked = client.revoke(now=LATER)
+    assert (revoked.status, revoked.active, revoked.revoked_at) == (ApiClientStatus.REVOKED, False, LATER)
+    assert revoked.id == client.id
+    assert revoked.revoke(now=LATER + timedelta(hours=1)) is revoked  # already revoked: nothing changes
+
+
+def test_an_api_client_of_an_organization_is_not_one_of_another() -> None:
+    assert an_api_client().organization == ORGANIZATION
+
+
+def test_an_api_client_has_an_id_the_public_prefix_names() -> None:
+    assert API_CLIENT_PREFIX == "cli"

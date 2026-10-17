@@ -1,8 +1,8 @@
 """identity's tables, typed for SQLAlchemy Core: what the migrations create and the repositories use.
 
-Organizations own their companies and what belongs to them: tax ids, memberships and establishments
-(``organization_id``, and ``company_id`` for the company a row is of). The migrations put each table under
-the isolation of its organization. A row refers to another through a foreign key that carries the tenant
+Organizations own their companies and what belongs to them: tax ids, memberships, establishments and API
+clients (``organization_id``, and ``company_id`` for the company a row is of). The migrations put each table
+under the isolation of its organization. A row refers to another through a foreign key that carries the tenant
 (``(organization_id, company_id)`` to a company): PostgreSQL's referential checks bypass row-level security,
 so a single-column key would let a row of one organization point at another's company. Every table is in
 schema ``identity`` (§6.2): identity's role reaches no other.
@@ -24,15 +24,18 @@ from sqlalchemy import (
     SmallInteger,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.schema import SchemaItem
 
+from ledger_identity.domain.api_clients import ApiClientStatus
 from ledger_identity.domain.company import CompanyStatus
 from ledger_identity.domain.membership import MembershipStatus
 from ledger_identity.domain.text import MAX_CODE, MAX_LEGAL_NAME, MAX_NAME
 from ledger_kernel.access import MAX_PROVIDER_ORGANIZATION_LENGTH, MAX_SUBJECT_LENGTH, Role
 from ledger_kernel.tax_ids import MAX_TAX_ID_LENGTH
+from ledger_kernel.tenancy import Mode
 from ledger_platform.data import ModuleTable
 
 SCHEMA: Final = "identity"
@@ -172,6 +175,39 @@ class MembershipRecord(IdentityTable):
     version: Mapped[int] = mapped_column(BigInteger)
     changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     changed_by: Mapped[str] = mapped_column(String(MAX_SUBJECT_LENGTH))
+
+
+class ApiClientRecord(IdentityTable):
+    """An API client: a machine user of an organization for one mode, or the one it was until revoked.
+
+    Under the organization's row-level security in one mode: a unit sees the clients of its mode only. One
+    machine user is one active client of an organization (the partial unique index), whatever its mode.
+    """
+
+    __tablename__: str = "api_clients"
+    __table_args__: tuple[SchemaItem, ...] = (
+        _one_of("mode", Mode, name="ck_api_clients_mode"),
+        _one_of("status", ApiClientStatus, name="ck_api_clients_status"),
+        Index(
+            "uq_api_clients_active_subject",
+            "organization_id",
+            "subject",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index("ix_api_clients_subject", "organization_id", "subject"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    organization_id: Mapped[UUID] = mapped_column(ForeignKey(f"{SCHEMA}.organizations.id"))
+    mode: Mapped[str] = mapped_column(String(WORD_LENGTH))
+    subject: Mapped[str] = mapped_column(String(MAX_SUBJECT_LENGTH))
+    name: Mapped[str] = mapped_column(String(MAX_NAME))
+    api_version: Mapped[date] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(WORD_LENGTH))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str] = mapped_column(String(MAX_SUBJECT_LENGTH))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class EstablishmentRecord(IdentityTable):

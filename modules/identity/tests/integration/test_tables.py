@@ -11,6 +11,7 @@ from sqlalchemy import func, insert, select, text
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 from ledger_identity.adapters.postgres.tables import (
+    ApiClientRecord,
     CompanyRecord,
     CompanyTaxIdRecord,
     EstablishmentRecord,
@@ -20,7 +21,7 @@ from ledger_identity.adapters.postgres.tables import (
     TaxRegistrationRecord,
 )
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
-from ledger_kernel.tenancy import OrganizationScope, Tenant
+from ledger_kernel.tenancy import Mode, OrganizationScope, Tenant
 lazy from ledger_kernel.tenancy import Scope
 lazy from ledger_platform.data.bound import BoundDatabase
 
@@ -49,6 +50,21 @@ def membership_of(tenant: Tenant, subject: str = SUBJECT) -> dict[str, object]:
         "version": 1,
         "changed_at": NOW,
         "changed_by": SUBJECT,
+    }
+
+
+def api_client_of(organization: OrganizationId, mode: str = "test") -> dict[str, object]:
+    return {
+        "id": new_id(),
+        "organization_id": organization,
+        "mode": mode,
+        "subject": str(new_id()),
+        "name": "Connector",
+        "api_version": NOW.date(),
+        "status": "active",
+        "created_at": NOW,
+        "created_by": SUBJECT,
+        "revoked_at": None,
     }
 
 
@@ -115,6 +131,8 @@ async def seeded(module_database: BoundDatabase, organization: OrganizationId | 
         await unit.connection.execute(insert(MembershipRecord).values(membership_of(tenant)))
     async with module_database.unit(tenant) as unit:
         await unit.connection.execute(insert(EstablishmentRecord).values(establishment_of(tenant)))
+    async with module_database.unit(OrganizationScope(tenant.organization, Mode.TEST)) as unit:
+        await unit.connection.execute(insert(ApiClientRecord).values(api_client_of(tenant.organization)))
     return Seeded(tenant=tenant)
 
 
@@ -147,6 +165,7 @@ async def test_row_level_security_shows_a_scope_what_it_owns_and_nothing_without
         "company_tax_ids": 2,
         "memberships": 2,
         "establishments": 2,
+        "api_clients": 0,  # moded: no scope below names a mode (see the test of the moded table)
     }
     registry = {
         "tax_registrations": 3
@@ -166,6 +185,51 @@ async def test_row_level_security_shows_a_scope_what_it_owns_and_nothing_without
         "establishments": 1,
     }
     assert await counts(module_database, None) == dict.fromkeys(everything, 0) | registry
+
+
+async def test_a_moded_table_shows_a_scope_the_clients_of_its_organization_and_mode_only(
+    module_database: BoundDatabase,
+) -> None:
+    mine = await seeded(module_database)
+    other = await seeded(module_database)
+    organization = mine.tenant.organization
+    async with module_database.unit(OrganizationScope(organization, Mode.LIVE)) as unit:
+        await unit.connection.execute(insert(ApiClientRecord).values(api_client_of(organization, "live")))
+    seen = {
+        (scope.organization, scope.mode): (await counts(module_database, scope))["api_clients"]
+        for scope in (
+            OrganizationScope(organization, Mode.TEST),
+            OrganizationScope(organization, Mode.LIVE),
+            OrganizationScope(other.tenant.organization, Mode.TEST),
+            OrganizationScope(other.tenant.organization, Mode.LIVE),
+            OrganizationScope(organization, None),
+            mine.tenant,  # a company's unit has no mode here either
+        )
+    }
+    assert seen == {
+        (organization, Mode.TEST): 1,
+        (organization, Mode.LIVE): 1,
+        (other.tenant.organization, Mode.TEST): 1,
+        (other.tenant.organization, Mode.LIVE): 0,
+        (organization, None): 0,
+    }
+
+
+async def test_an_api_client_of_another_mode_or_organization_cannot_be_written_by_a_unit(
+    module_database: BoundDatabase,
+) -> None:
+    mine = await seeded(module_database)
+    other = await seeded(module_database)
+    organization = mine.tenant.organization
+    for scope, row in (
+        (OrganizationScope(organization, Mode.TEST), api_client_of(organization, "live")),
+        (OrganizationScope(organization, Mode.TEST), api_client_of(other.tenant.organization)),
+        (OrganizationScope(organization, None), api_client_of(organization)),
+    ):
+        with pytest.raises(ProgrammingError) as caught:
+            async with module_database.unit(scope) as unit:
+                await unit.connection.execute(insert(ApiClientRecord).values(row))
+        assert isinstance(caught.value.orig, InsufficientPrivilege)  # the policy refuses the row
 
 
 async def test_a_membership_cannot_point_at_another_organizations_company(

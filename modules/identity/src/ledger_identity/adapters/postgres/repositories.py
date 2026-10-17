@@ -17,12 +17,13 @@ lazy from collections.abc import Sequence
 lazy from datetime import date, datetime
 lazy from uuid import UUID
 
-from sqlalchemy import and_, delete, func, select, update
+from sqlalchemy import and_, case, delete, false, func, select, update
 from sqlalchemy.dialects.postgresql import insert
-lazy from sqlalchemy import Row, Select
+lazy from sqlalchemy import ColumnElement, Row, Select
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ledger_identity.adapters.postgres.tables import (
+    ApiClientRecord,
     CompanyRecord,
     CompanyTaxIdRecord,
     EstablishmentRecord,
@@ -31,6 +32,7 @@ from ledger_identity.adapters.postgres.tables import (
     TaxRegistrationRecord,
 )
 from ledger_identity.application.ports import (
+    ApiClients,
     Companies,
     Establishments,
     Holder,
@@ -38,9 +40,10 @@ from ledger_identity.application.ports import (
     Organizations,
     TaxRegistry,
 )
+from ledger_identity.domain.api_clients import ApiClient, ApiClientStatus
 from ledger_identity.domain.company import Company, CompanyStatus, FiscalProfile
 from ledger_identity.domain.establishments import Establishment
-from ledger_identity.domain.ids import EstablishmentId, MembershipId
+from ledger_identity.domain.ids import ApiClientId, EstablishmentId, MembershipId
 from ledger_identity.domain.membership import Membership, MembershipStatus
 from ledger_identity.domain.organization import Organization
 from ledger_identity.domain.text import Code, LegalName, Name, TimeZone
@@ -51,7 +54,7 @@ from ledger_kernel.jurisdiction import CountryCode, Jurisdiction
 from ledger_kernel.money import Currency
 from ledger_kernel.pagination import page_of
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
-from ledger_kernel.tenancy import Tenant
+from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.data import paged
 lazy from ledger_kernel.pagination import Page, PageRequest
 
@@ -71,6 +74,23 @@ def _require_own(organization: OrganizationId, unit: OrganizationId) -> None:
         raise ForeignTenantError
 
 
+def _in_the_unit_s_mode(mode: Mode | None) -> ColumnElement[bool]:
+    """A moded row is the unit's mode's; a unit with no mode sees none (row-level security's own rule)."""
+    return false() if mode is None else ApiClientRecord.mode == mode.value
+
+
+_API_CLIENT = select(
+    ApiClientRecord.id,
+    ApiClientRecord.organization_id,
+    ApiClientRecord.mode,
+    ApiClientRecord.subject,
+    ApiClientRecord.name,
+    ApiClientRecord.api_version,
+    ApiClientRecord.status,
+    ApiClientRecord.created_at,
+    ApiClientRecord.created_by,
+    ApiClientRecord.revoked_at,
+)
 _ORGANIZATION = select(
     OrganizationRecord.id,
     OrganizationRecord.provider_id,
@@ -149,6 +169,24 @@ def _company(row: CompanyRow, tax_ids: tuple[TaxId, ...]) -> Company:
         version=version,
         created_at=created_at,
         updated_at=updated_at,
+    )
+
+
+def _api_client(row: Row[UUID, UUID, str, str, str, date, str, datetime, str, datetime | None]) -> ApiClient:
+    identifier, organization, mode, subject, name, api_version, status, created_at, created_by, revoked_at = (
+        row
+    )
+    return ApiClient(
+        id=ApiClientId(identifier),
+        organization=OrganizationId(organization),
+        mode=Mode(mode),
+        subject=SubjectId(subject),
+        name=Name(name),
+        api_version=api_version,
+        status=ApiClientStatus(status),
+        created_at=created_at,
+        created_by=SubjectId(created_by),
+        revoked_at=revoked_at,
     )
 
 
@@ -429,6 +467,89 @@ class PgEstablishments(Establishments):
         return _ESTABLISHMENT.where(
             EstablishmentRecord.organization_id == self._organization,
             EstablishmentRecord.company_id == company,
+        )
+
+
+@final
+class PgApiClients(ApiClients):
+    """The API clients of the unit's organization and mode, in PostgreSQL: none in a unit with no mode."""
+
+    __slots__ = ("_connection", "_mode", "_organization")
+
+    def __init__(self, connection: AsyncConnection, organization: OrganizationId, mode: Mode | None) -> None:
+        self._connection = connection
+        self._organization = organization
+        self._mode = mode
+
+    @override
+    async def add(self, client: ApiClient) -> bool:
+        _require_own(client.organization, self._organization)
+        if client.mode is not self._mode:
+            raise ForeignTenantError
+        # The index decides, even where row-level security hides the other mode's client of the machine user.
+        added = await self._connection.execute(
+            insert(ApiClientRecord)
+            .values(
+                id=client.id,
+                organization_id=client.organization,
+                mode=client.mode.value,
+                subject=client.subject,
+                name=client.name,
+                api_version=client.api_version,
+                status=client.status.value,
+                created_at=client.created_at,
+                created_by=client.created_by,
+                revoked_at=client.revoked_at,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[ApiClientRecord.organization_id, ApiClientRecord.subject],
+                index_where=ApiClientRecord.status == ApiClientStatus.ACTIVE.value,
+            )
+            .returning(ApiClientRecord.id)
+        )
+        return added.first() is not None
+
+    @override
+    async def get(self, client: ApiClientId) -> ApiClient | None:
+        row = (await self._connection.execute(self._mine().where(ApiClientRecord.id == client))).first()
+        return None if row is None else _api_client(row)
+
+    @override
+    async def revoked(self, client: ApiClient) -> bool:
+        _require_own(client.organization, self._organization)
+        changed = await self._connection.execute(
+            update(ApiClientRecord)
+            .where(
+                ApiClientRecord.organization_id == self._organization,
+                ApiClientRecord.id == client.id,
+                ApiClientRecord.status == ApiClientStatus.ACTIVE.value,
+                _in_the_unit_s_mode(self._mode),
+            )
+            .values(status=client.status.value, revoked_at=client.revoked_at)
+        )
+        return changed.rowcount == 1
+
+    @override
+    async def page(self, request: PageRequest) -> Page[ApiClient]:
+        rows = (await self._connection.execute(paged(self._mine(), ApiClientRecord.id, request))).all()
+        return page_of([_api_client(row) for row in rows], request, key=lambda found: found.id)
+
+    @override
+    async def of_subject(self, subject: SubjectId) -> ApiClient | None:
+        newest_active_first = (
+            case((ApiClientRecord.status == ApiClientStatus.ACTIVE.value, 0), else_=1),
+            ApiClientRecord.id.desc(),
+        )
+        row = (
+            await self._connection.execute(
+                self._mine().where(ApiClientRecord.subject == subject).order_by(*newest_active_first).limit(1)
+            )
+        ).first()
+        return None if row is None else _api_client(row)
+
+    def _mine(self) -> Select[UUID, UUID, str, str, str, date, str, datetime, str, datetime | None]:
+        return _API_CLIENT.where(
+            ApiClientRecord.organization_id == self._organization, _in_the_unit_s_mode(self._mode)
         )
 
 

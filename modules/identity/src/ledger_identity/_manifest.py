@@ -49,6 +49,10 @@ MANIFEST: Final = PackageManifest.model_validate(
                 "prefix": "est",
                 "resource": "establishment",
             },
+            {
+                "prefix": "cli",
+                "resource": "api_client",
+            },
         ],
         "permissions": [
             {
@@ -127,6 +131,7 @@ MANIFEST: Final = PackageManifest.model_validate(
                 "/v1/organization",
                 "/v1/companies",
                 "/v1/countries",
+                "/v1/api_clients",
             ],
         },
     }

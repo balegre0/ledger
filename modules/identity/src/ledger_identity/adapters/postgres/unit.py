@@ -6,6 +6,7 @@ lazy from collections.abc import AsyncGenerator, Mapping
 lazy from uuid import UUID
 
 from ledger_identity.adapters.postgres.repositories import (
+    PgApiClients,
     PgCompanies,
     PgEstablishments,
     PgMemberships,
@@ -81,6 +82,7 @@ def bind(unit: UnitOfWork) -> IdentityUnit:
         companies=PgCompanies(connection, organization),
         establishments=PgEstablishments(connection, organization),
         memberships=PgMemberships(connection, organization),
+        api_clients=PgApiClients(connection, organization, scope.mode),
         events=UnitEvents(unit),
         audit=UnitAudit(unit),
         now=unit.now,

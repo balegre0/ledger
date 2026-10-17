@@ -12,7 +12,7 @@ lazy import psycopg
 
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import queries
-from ledger_identity.domain.ids import ESTABLISHMENT_PREFIX
+from ledger_identity.domain.ids import API_CLIENT_PREFIX, ESTABLISHMENT_PREFIX
 from ledger_kernel.ids import COMPANY_PREFIX, CompanyId, parse_id
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.providers.zitadel import organization_of
@@ -136,3 +136,30 @@ async def test_a_replayed_request_audits_nothing_more(
         "membership.grant",
         "establishment.open",
     ]
+
+
+async def test_registering_and_revoking_an_api_client_are_audited_as_the_administrator_in_its_request(
+    client: httpx.AsyncClient, owner: TestPrincipal, admin: psycopg.AsyncConnection
+) -> None:
+    made = await client.post(
+        "/v1/api_clients",
+        json={"subject": "4001", "name": "Odoo"},
+        headers=owner.posting("k-1", mode="live"),
+    )
+    revoked = await client.delete(
+        f"/v1/api_clients/{document(made)['id']}", headers=owner.bearer() | {"Ledger-Mode": "live"}
+    )
+    rows = await audited(admin)
+    detail = {"subject": "4001", "mode": "live"}
+    assert [(row[1], row[2], row[3], row[4], row[8]) for row in rows] == [
+        ("2001", made.headers["request-id"], "api_client.register", "api_client", detail),
+        ("2001", revoked.headers["request-id"], "api_client.revoke", "api_client", detail),
+    ]
+    assert rows[0][5] == str(parse_id(API_CLIENT_PREFIX, str(document(made)["id"])))
+    register, revoke = rows
+    assert (register[6], register[7] is not None, revoke[6]) == (None, True, register[7])  # the hashes chain
+    again = await client.delete(
+        f"/v1/api_clients/{document(made)['id']}", headers=owner.bearer() | {"Ledger-Mode": "live"}
+    )
+    assert again.status_code == 200
+    assert len(await audited(admin)) == 2  # revoking again records nothing
