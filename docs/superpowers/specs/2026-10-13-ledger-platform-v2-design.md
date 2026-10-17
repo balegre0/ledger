@@ -1054,6 +1054,10 @@ CREATE TABLE {s}.jobs (
 CREATE INDEX jobs_due     ON {s}.jobs (kind, run_at)        WHERE status = 'ready';
 CREATE INDEX jobs_expired ON {s}.jobs (kind, lease_until)   WHERE status = 'running';
 CREATE INDEX jobs_parked  ON {s}.jobs (kind, company_id, parked_reason) WHERE status = 'parked';
+-- chassis_schema_v2 (a revision in every schema) adds the two the housekeeping reads, as built:
+CREATE INDEX jobs_deadline ON {s}.jobs (kind, deadline_at)
+  WHERE status IN ('ready','running') AND deadline_at IS NOT NULL;  -- the deadline sweep
+CREATE INDEX jobs_done ON {s}.jobs (updated_at) WHERE status = 'done'; -- the done-job purge, oldest first
 -- done jobs are deleted by the purge after 7 days unless the kind keeps them; dead jobs are kept
 
 CREATE TABLE {s}.subscriptions (

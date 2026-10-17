@@ -28,6 +28,7 @@ layout) and a Dominican pack that is closer to a spike than to a channel. `signe
 | A company holds one tax id and no jurisdiction or currency; two organizations could register one taxpayer | `feat(identity): …` fiscal profile, qualified tax ids, the global `tax_registrations` registry |
 | No in-process API for other modules | `feat(identity): IdentityApi for the other modules` (company by id and by tax id, permissions, lock the fiscal profile; a principal's call sees only its organization) |
 | Internal UUIDs in the API and in error messages | `feat(identity): public ids are TypeIDs` (a path naming anything but the public id is a 404 that repeats nothing; the kernel's `CompanyNotFoundError` names a company by its public id) |
+| The deadline sweep reads every due row; done jobs and expired keys are purged by joining the whole table to each batch | `feat(chassis): chassis_schema_v2 …`: `jobs_deadline` and `jobs_done` (a revision in every schema), and both purges delete the rows they chose by address (`ctid`), proved by `EXPLAIN` on 350 000 rows |
 | Branches and emission points are Dominican shapes in identity | `feat(identity): establishments replace branches and emission points` (code, name, time zone; `MAIN` from registration; the company's regime gives its zone). Spec §6.3 listed establishments under the *company* RLS scope; they are under the *organization* scope like memberships and tax ids, because registering a company writes its `MAIN` in the unit that creates the company, before a company scope exists. The spec line is amended; flagged for the owner. |
 
 ## Recorded in the spec as limits of what is built
@@ -62,8 +63,6 @@ layout) and a Dominican pack that is closer to a spike than to a channel. `signe
 
 | Finding | Why it waits |
 |---|---|
-| The deadline sweep of the job claim reads every due row of the kind, and `deadline_at` is in no index | Needs `chassis_schema_v2` and a revision in every schema |
-| The done-job purge has no index on `updated_at` | Same |
 | Idle polling grows with kinds × replicas; wake-ups reach every runner | The spec's one-probe `UNION ALL` is not built |
 | Inbox claims a batch of 20 under one 60 s lease and handles it one row at a time | Needs a per-consumer concurrency and lease design |
 | Metrics for queue depth, oldest event and dead rows; the `ledger-worker replay` command | Not built yet; the spec lists them |

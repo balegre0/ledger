@@ -451,7 +451,9 @@ class JobRunner:
         keys = ("kind", "key")
         async with self._database.unit(None) as unit:
             passed = len(
-                _CODES.validate_python((await unit.connection.execute(_bury(jobs, kind))).scalars().all())
+                _CODES.validate_python(
+                    (await unit.connection.execute(bury_statement(jobs, kind))).scalars().all()
+                )
             )
             recovered = await recover(
                 unit.connection,
@@ -546,7 +548,7 @@ def _settled(jobs: AnyTable, values: _Values, now: datetime) -> _Values:
     }
 
 
-def _bury(jobs: AnyTable, kind: str) -> Update:
+def bury_statement(jobs: AnyTable, kind: str) -> Update:
     """Jobs of ``kind`` whose deadline has passed, due or abandoned: dead (``deadline_passed``), their codes.
 
     A handler would run past the deadline. Jobs whose lease ran out otherwise are the queue's (``recover``).

@@ -57,9 +57,14 @@ INDEXES = {
     "jobs_due": index("jobs_due", "jobs", "kind, run_at", "= 'ready'"),
     "jobs_expired": index("jobs_expired", "jobs", "kind, lease_until", "= 'running'"),
     "jobs_parked": index("jobs_parked", "jobs", "kind, company_id, parked_reason", "= 'parked'"),
+    "jobs_deadline": (
+        "CREATE INDEX jobs_deadline ON probe.jobs USING btree (kind, deadline_at)"
+        " WHERE ((status = ANY (ARRAY['ready'::text, 'running'::text])) AND (deadline_at IS NOT NULL))"
+    ),
+    "jobs_done": index("jobs_done", "jobs", "updated_at", "= 'done'"),
     "idempotency_expiry": index("idempotency_expiry", "idempotency_keys", "expires_at"),
 }
-"""§6.4's indexes as PostgreSQL prints them back: a change to the DDL shows here first."""
+"""§6.4's indexes (``jobs_deadline`` and ``jobs_done`` are version 2's) as PostgreSQL prints them back."""
 QUEUE = [
     "autovacuum_vacuum_scale_factor=0.0",
     "autovacuum_vacuum_threshold=1000",

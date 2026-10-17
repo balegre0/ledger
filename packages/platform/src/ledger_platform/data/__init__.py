@@ -2,7 +2,7 @@
 
 from ledger_platform.data.audit import Actor, acting_as
 from ledger_platform.data.bound import BoundDatabase
-from ledger_platform.data.chassis_schema import chassis_schema_v1
+from ledger_platform.data.chassis_schema import chassis_schema_v1, chassis_schema_v2
 from ledger_platform.data.database import Database
 from ledger_platform.data.migrations import SchemaMigrations, run_schema_migrations
 from ledger_platform.data.paging import paged
@@ -21,6 +21,7 @@ __all__ = [
     "UnitOfWork",
     "acting_as",
     "chassis_schema_v1",
+    "chassis_schema_v2",
     "paged",
     "policy",
     "run_schema_migrations",

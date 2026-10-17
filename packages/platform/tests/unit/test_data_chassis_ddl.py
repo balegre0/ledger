@@ -1,6 +1,6 @@
 import pytest
 
-from ledger_platform.data.chassis_schema import chassis_schema_v1, platform_schema_v1
+from ledger_platform.data.chassis_schema import chassis_schema_v1, chassis_schema_v2, platform_schema_v1
 from ledger_platform.data.rls import RlsScope, policy
 from ledger_platform.data.roles import InvalidSchemaNameError
 
@@ -65,3 +65,23 @@ def test_the_platform_keeps_one_routing_row_and_the_schedule_leases() -> None:
         """CREATE TABLE "platform".schedule_leases (
   name text PRIMARY KEY, holder text, leased_until timestamptz, next_run_at timestamptz NOT NULL)""",
     ]
+
+
+def test_version_two_adds_the_two_housekeeping_indexes_and_nothing_else() -> None:
+    recorder = Recorder()
+    chassis_schema_v2(recorder, "probe")
+    assert recorder.statements == [
+        (
+            'CREATE INDEX jobs_deadline ON "probe".jobs (kind, deadline_at)'
+            " WHERE status IN ('ready','running') AND deadline_at IS NOT NULL"
+        ),
+        "CREATE INDEX jobs_done ON \"probe\".jobs (updated_at) WHERE status = 'done'",
+    ]
+    assert not set(recorder.statements) & set(recorded())  # version 1's statements are never run again
+
+
+def test_version_two_checks_the_schema_before_it_reaches_sql() -> None:
+    recorder = Recorder()
+    with pytest.raises(InvalidSchemaNameError):
+        chassis_schema_v2(recorder, "probe; DROP")
+    assert recorder.statements == []

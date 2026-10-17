@@ -413,7 +413,7 @@ def test_migrate_brings_every_schema_to_head_grants_the_relay_and_writes_the_sub
     fresh: Fresh, probe: ProbeModule
 ) -> None:
     fresh.migrate(probe)
-    assert fresh.rows("SELECT version_num FROM platform.alembic_version") == [("0001",)]
+    assert fresh.rows("SELECT version_num FROM platform.alembic_version") == [("0002",)]
     assert fresh.rows("SELECT version_num FROM probe.alembic_version") == [("r0001",)]
     assert fresh.rows("SELECT version_num FROM other.alembic_version") == [("r0001",)]
     assert fresh.rows("SELECT consumer, event_type, active FROM probe.subscriptions") == [
@@ -452,7 +452,7 @@ async def test_a_migration_waits_for_the_lock_of_the_schema_it_migrates(
         assert not migrating.done()
         _ = holder.execute("SELECT pg_advisory_unlock(%s)", (key,))
     await migrating
-    assert fresh.rows("SELECT version_num FROM platform.alembic_version") == [("0001",)]
+    assert fresh.rows("SELECT version_num FROM platform.alembic_version") == [("0002",)]
     assert fresh.rows("SELECT version_num FROM probe.alembic_version") == [("r0001",)]
     assert fresh.rows("SELECT version_num FROM other.alembic_version") == [("r0001",)]
     assert fresh.rows("SELECT consumer, event_type, active FROM probe.subscriptions") == [

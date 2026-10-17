@@ -165,6 +165,13 @@ def chassis_tables(schema: str) -> ChassisTables:
         Index(
             "jobs_parked", "kind", "company_id", "parked_reason", postgresql_where=text("status = 'parked'")
         ),
+        Index(
+            "jobs_deadline",
+            "kind",
+            "deadline_at",
+            postgresql_where=text("status IN ('ready','running') AND deadline_at IS NOT NULL"),
+        ),
+        Index("jobs_done", "updated_at", postgresql_where=text("status = 'done'")),
     )
     subscriptions = Table(
         "subscriptions",

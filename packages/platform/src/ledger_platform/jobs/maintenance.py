@@ -14,11 +14,13 @@ from datetime import timedelta
 from typing import Final
 lazy from collections.abc import Awaitable, Callable, Sequence
 
-from sqlalchemy import delete, func, select, tuple_
+from sqlalchemy import Text, any_, delete, func, literal_column, select
+lazy from sqlalchemy import Delete
 
 from ledger_platform.config.options import require_at_least
 from ledger_platform.jobs.outcomes import Done, JobSpec
 lazy from ledger_platform.data.bound import BoundDatabase
+lazy from ledger_platform.data.database import AnyTable
 lazy from ledger_platform.jobs.outcomes import Job, JobOutcome
 
 PURGE_IDEMPOTENCY_KEYS: Final = "platform.purge_idempotency_keys"
@@ -30,24 +32,50 @@ type _Purge = Callable[[BoundDatabase, int], Awaitable[int]]
 """Deletes up to a batch of rows of one schema in a transaction of its own; how many it deleted."""
 
 
+def purge_expired_keys_statement(keys: AnyTable, batch: int) -> Delete:
+    """Delete up to ``batch`` idempotency keys past their expiry, the longest expired first."""
+    old = (
+        select(_ROW)
+        .select_from(keys)
+        .where(keys.c.expires_at < func.now())
+        .order_by(keys.c.expires_at)
+        .limit(batch)
+    )
+    return delete(keys).where(any_(func.array(old.scalar_subquery())) == _ROW)
+
+
 async def _expired_keys(database: BoundDatabase, batch: int) -> int:
-    keys = database.tables.idempotency_keys
-    identity = (keys.c.organization_id, keys.c.mode, keys.c.principal, keys.c.route, keys.c.key)
-    expired = select(*identity).where(keys.c.expires_at < func.now()).limit(batch)
     async with database.purging() as connection:
-        purged = await connection.execute(delete(keys).where(tuple_(*identity).in_(expired)))
+        purged = await connection.execute(
+            purge_expired_keys_statement(database.tables.idempotency_keys, batch)
+        )
     return purged.rowcount
 
 
-async def _done_jobs(database: BoundDatabase, batch: int) -> int:
-    jobs = database.tables.jobs
+_ROW: Final = literal_column("ctid", type_=Text())
+"""A row's physical address: what one statement may delete the rows it has just chosen by, without a join.
+
+Deleting ``WHERE (primary key) IN (SELECT ... LIMIT n)`` lets the planner join the whole table to the batch (a
+sequential scan of every row for each batch of a few thousand). Within one statement the chosen addresses
+cannot be reused by another row (the snapshot holds them), and a row changed meanwhile is simply not deleted.
+"""
+
+
+def purge_done_jobs_statement(jobs: AnyTable, batch: int) -> Delete:
+    """Delete up to ``batch`` jobs done more than ``DONE_JOBS_KEPT`` ago, the oldest of the index's order."""
     old = (
-        select(jobs.c.kind, jobs.c.key)
+        select(_ROW)
+        .select_from(jobs)
         .where(jobs.c.status == "done", jobs.c.updated_at < func.now() - DONE_JOBS_KEPT)
+        .order_by(jobs.c.updated_at)
         .limit(batch)
     )
+    return delete(jobs).where(any_(func.array(old.scalar_subquery())) == _ROW)
+
+
+async def _done_jobs(database: BoundDatabase, batch: int) -> int:
     async with database.unit(None) as unit:
-        purged = await unit.connection.execute(delete(jobs).where(tuple_(jobs.c.kind, jobs.c.key).in_(old)))
+        purged = await unit.connection.execute(purge_done_jobs_statement(database.tables.jobs, batch))
     return purged.rowcount
 
 
