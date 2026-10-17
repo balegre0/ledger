@@ -8,7 +8,8 @@
   is proven first: an unauthenticated request never has a company looked up. The header must be sent once
   (else 422 ``invalid_header``), and a route whose path has a ``company_id`` takes its company from there,
   never from the header: one that declares both is a defect (``AmbiguousCompanyError``, at its first request).
-* ``allowed(in_company, permission)``, ``holding(caller, role)`` and ``in_organization(caller)``: what a route
+* ``allowed(in_company, permission)``, ``holding(caller, role)``, ``in_organization(caller)`` and
+  ``any_principal(caller)``: what a route
   requires, declared as its first dependency: a permission in the request's company (403 without it, after
   the 404 of no role there), a role the identity provider granted in the organization (403), or no more than
   being a principal of the organization, for a route about the organization as a whole. ``unguarded_routes``
@@ -91,12 +92,12 @@ caller and the source, the caller's access to that company."""
 type Allowed = Callable[[CompanyAccess], Coroutine[object, object, CompanyAccess]]
 """The dependency ``allowed`` makes: the caller's access to the request's company, its permission checked."""
 type InOrganization = Callable[[Principal], Coroutine[object, object, Principal]]
-"""The dependency ``holding`` or ``in_organization`` makes: the caller, acting in its whole organization."""
+"""The dependency ``holding``, ``in_organization`` or ``any_principal`` makes: the caller."""
 
 _GUARDS: Final[WeakSet[object]] = WeakSet()
-"""Every dependency ``allowed``, ``holding`` and ``in_organization`` made: how ``unguarded_routes`` tells a
-route that declares what it requires."""
-_NO_REQUIREMENT: Final = "declares no requirement (allowed, holding or in_organization)"
+"""Every dependency ``allowed``, ``holding``, ``in_organization`` and ``any_principal`` made: how
+``unguarded_routes`` tells a route that declares what it requires."""
+_NO_REQUIREMENT: Final = "declares no requirement (allowed, holding, in_organization or any_principal)"
 
 
 class InvalidHeaderError(InvalidInputError):
@@ -266,6 +267,20 @@ def in_organization(caller: Caller) -> InOrganization:
 
     _GUARDS.add(member)
     return member
+
+
+def any_principal(caller: Caller) -> InOrganization:
+    """The dependency giving the caller, for a route that publishes what every principal may read.
+
+    Reference data (the law of the countries installed, §9.8) belongs to no organization or company: it needs
+    a verified token and nothing more, and this says so.
+    """
+
+    async def anyone(principal: Annotated[Principal, Depends(caller)]) -> Principal:
+        return principal
+
+    _GUARDS.add(anyone)
+    return anyone
 
 
 def _calls(dependant: Dependant) -> Iterator[object]:

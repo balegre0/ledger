@@ -1,6 +1,80 @@
 {
   "components": {
     "schemas": {
+      "ChannelBody": {
+        "additionalProperties": false,
+        "description": "A channel that serves the regime: the format and the authority's endpoints it speaks.",
+        "properties": {
+          "directions": {
+            "items": {
+              "$ref": "#/components/schemas/Direction"
+            },
+            "title": "Directions",
+            "type": "array"
+          },
+          "document_kinds": {
+            "items": {
+              "$ref": "#/components/schemas/DocumentKind"
+            },
+            "title": "Document Kinds",
+            "type": "array"
+          },
+          "environments": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Environments",
+            "type": "array"
+          },
+          "key": {
+            "examples": [
+              "do-ecf-v1"
+            ],
+            "title": "Key",
+            "type": "string"
+          },
+          "live_environments": {
+            "description": "The environments whose documents have legal effect.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Live Environments",
+            "type": "array"
+          },
+          "tier": {
+            "$ref": "#/components/schemas/Tier"
+          },
+          "valid_from": {
+            "format": "date",
+            "title": "Valid From",
+            "type": "string"
+          },
+          "valid_until": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid Until"
+          }
+        },
+        "required": [
+          "key",
+          "valid_from",
+          "valid_until",
+          "environments",
+          "live_environments",
+          "document_kinds",
+          "directions",
+          "tier"
+        ],
+        "title": "ChannelBody",
+        "type": "object"
+      },
       "CompanyChanges": {
         "additionalProperties": false,
         "description": "What can change in a company.",
@@ -107,6 +181,233 @@
         "title": "CompanyView",
         "type": "object"
       },
+      "CountryBody": {
+        "additionalProperties": false,
+        "description": "A country in full: every regime installed for it and every channel that serves it.",
+        "properties": {
+          "channel_details": {
+            "items": {
+              "$ref": "#/components/schemas/ChannelBody"
+            },
+            "title": "Channel Details",
+            "type": "array"
+          },
+          "channels": {
+            "description": "The keys of the channels that serve it.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Channels",
+            "type": "array"
+          },
+          "country": {
+            "description": "ISO 3166-1 alpha-2, upper case.",
+            "examples": [
+              "DO"
+            ],
+            "title": "Country",
+            "type": "string"
+          },
+          "labels": {
+            "$ref": "#/components/schemas/Labels"
+          },
+          "regime_details": {
+            "items": {
+              "$ref": "#/components/schemas/RegimeBody"
+            },
+            "title": "Regime Details",
+            "type": "array"
+          },
+          "regimes": {
+            "description": "Its regimes' keys: the national one first.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Regimes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "country",
+          "labels",
+          "regimes",
+          "channels",
+          "regime_details",
+          "channel_details"
+        ],
+        "title": "CountryBody",
+        "type": "object"
+      },
+      "CountryList": {
+        "additionalProperties": false,
+        "description": "The countries installed, by code.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CountrySummary"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "CountryList",
+        "type": "object"
+      },
+      "CountrySummary": {
+        "additionalProperties": false,
+        "description": "A country some regime is installed for.",
+        "properties": {
+          "channels": {
+            "description": "The keys of the channels that serve it.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Channels",
+            "type": "array"
+          },
+          "country": {
+            "description": "ISO 3166-1 alpha-2, upper case.",
+            "examples": [
+              "DO"
+            ],
+            "title": "Country",
+            "type": "string"
+          },
+          "labels": {
+            "$ref": "#/components/schemas/Labels"
+          },
+          "regimes": {
+            "description": "Its regimes' keys: the national one first.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Regimes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "country",
+          "labels",
+          "regimes",
+          "channels"
+        ],
+        "title": "CountrySummary",
+        "type": "object"
+      },
+      "DatedValueBody": {
+        "additionalProperties": false,
+        "description": "A value in effect from ``since`` (inclusive) until ``until`` (exclusive, or the next newer value).",
+        "properties": {
+          "since": {
+            "format": "date",
+            "title": "Since",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "until": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Until"
+          },
+          "value": {
+            "description": "A rate in percent or a parameter, as a string.",
+            "examples": [
+              "18"
+            ],
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "since",
+          "until",
+          "value",
+          "source"
+        ],
+        "title": "DatedValueBody",
+        "type": "object"
+      },
+      "Direction": {
+        "description": "Sales, or a self-billed purchase issued on a supplier's behalf.",
+        "enum": [
+          "sales",
+          "purchase"
+        ],
+        "title": "Direction",
+        "type": "string"
+      },
+      "DocumentKind": {
+        "description": "The commercial kind of a document (§7.5).",
+        "enum": [
+          "invoice",
+          "credit_note",
+          "debit_note"
+        ],
+        "title": "DocumentKind",
+        "type": "string"
+      },
+      "DocumentTypeBody": {
+        "additionalProperties": false,
+        "description": "A document type the law defines, and which types it may correct.",
+        "properties": {
+          "code": {
+            "examples": [
+              "31"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "corrects": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Corrects",
+            "type": "array"
+          },
+          "direction": {
+            "$ref": "#/components/schemas/Direction"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DocumentKind"
+          },
+          "labels": {
+            "$ref": "#/components/schemas/Labels"
+          },
+          "requires_buyer_tax_id": {
+            "title": "Requires Buyer Tax Id",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "labels",
+          "kind",
+          "direction",
+          "requires_buyer_tax_id",
+          "corrects"
+        ],
+        "title": "DocumentTypeBody",
+        "type": "object"
+      },
       "EstablishmentRef": {
         "pattern": "^est_[0-7][0-9a-hjkmnp-tv-z]{25}$",
         "type": "string"
@@ -150,6 +451,46 @@
         "title": "EstablishmentView",
         "type": "object"
       },
+      "FieldBody": {
+        "additionalProperties": false,
+        "description": "A law-level field a request may carry under ``fiscal.<regime>``.",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/FieldKind"
+          },
+          "labels": {
+            "$ref": "#/components/schemas/Labels"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "required": {
+            "title": "Required",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "labels",
+          "kind",
+          "required"
+        ],
+        "title": "FieldBody",
+        "type": "object"
+      },
+      "FieldKind": {
+        "description": "What a country field holds on the wire (``fiscal.<regime>.<field>``).",
+        "enum": [
+          "text",
+          "code",
+          "date",
+          "decimal",
+          "object"
+        ],
+        "title": "FieldKind",
+        "type": "string"
+      },
       "JurisdictionBody": {
         "additionalProperties": false,
         "description": "Where a company is: a country and, where law differs inside it, a subdivision.",
@@ -186,6 +527,12 @@
           "country"
         ],
         "title": "JurisdictionBody",
+        "type": "object"
+      },
+      "Labels": {
+        "additionalProperties": {
+          "type": "string"
+        },
         "type": "object"
       },
       "MembershipRef": {
@@ -508,6 +855,102 @@
         "title": "Page[MembershipView]",
         "type": "object"
       },
+      "RegimeBody": {
+        "additionalProperties": false,
+        "description": "A jurisdiction's tax law as data.",
+        "properties": {
+          "currency": {
+            "description": "ISO 4217: the currency its law is written in.",
+            "examples": [
+              "DOP"
+            ],
+            "title": "Currency",
+            "type": "string"
+          },
+          "document_types": {
+            "items": {
+              "$ref": "#/components/schemas/DocumentTypeBody"
+            },
+            "title": "Document Types",
+            "type": "array"
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/FieldBody"
+            },
+            "title": "Fields",
+            "type": "array"
+          },
+          "jurisdiction": {
+            "$ref": "#/components/schemas/JurisdictionBody"
+          },
+          "key": {
+            "examples": [
+              "do"
+            ],
+            "title": "Key",
+            "type": "string"
+          },
+          "labels": {
+            "$ref": "#/components/schemas/Labels"
+          },
+          "parameters": {
+            "additionalProperties": {
+              "items": {
+                "$ref": "#/components/schemas/DatedValueBody"
+              },
+              "type": "array"
+            },
+            "title": "Parameters",
+            "type": "object"
+          },
+          "rounding": {
+            "$ref": "#/components/schemas/RoundingBody"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourceBody"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "tax_categories": {
+            "items": {
+              "$ref": "#/components/schemas/TaxCategoryBody"
+            },
+            "title": "Tax Categories",
+            "type": "array"
+          },
+          "tax_id_schemes": {
+            "items": {
+              "$ref": "#/components/schemas/TaxIdSchemeBody"
+            },
+            "title": "Tax Id Schemes",
+            "type": "array"
+          },
+          "time_zone": {
+            "description": "The IANA zone its tax points are judged in.",
+            "title": "Time Zone",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "jurisdiction",
+          "currency",
+          "time_zone",
+          "labels",
+          "tax_id_schemes",
+          "tax_categories",
+          "document_types",
+          "rounding",
+          "fields",
+          "parameters",
+          "sources"
+        ],
+        "title": "RegimeBody",
+        "type": "object"
+      },
       "RegisteredCompany": {
         "additionalProperties": false,
         "description": "A company just registered, and what the registration accepted with a warning.",
@@ -647,6 +1090,136 @@
         "title": "RoleAssignment",
         "type": "object"
       },
+      "RoundingBody": {
+        "additionalProperties": false,
+        "description": "How and where the regime rounds, and how far a document may stray per line.",
+        "properties": {
+          "line_tolerance": {
+            "title": "Line Tolerance",
+            "type": "string"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/RoundingMode"
+          },
+          "places": {
+            "title": "Places",
+            "type": "integer"
+          },
+          "points": {
+            "items": {
+              "$ref": "#/components/schemas/RoundingPoint"
+            },
+            "title": "Points",
+            "type": "array"
+          }
+        },
+        "required": [
+          "mode",
+          "points",
+          "places",
+          "line_tolerance"
+        ],
+        "title": "RoundingBody",
+        "type": "object"
+      },
+      "RoundingMode": {
+        "description": "How an amount is rounded when a regime asks for it (``RoundingRule``).",
+        "enum": [
+          "half_up",
+          "half_even",
+          "down",
+          "up"
+        ],
+        "title": "RoundingMode",
+        "type": "string"
+      },
+      "RoundingPoint": {
+        "description": "Where amounts are rounded: each line's tax, each category's total, the document's total.",
+        "enum": [
+          "line",
+          "category",
+          "document"
+        ],
+        "title": "RoundingPoint",
+        "type": "string"
+      },
+      "SourceBody": {
+        "additionalProperties": false,
+        "description": "Where a value comes from: a law, a regulation, an authority's technical document.",
+        "properties": {
+          "retrieved_on": {
+            "format": "date",
+            "title": "Retrieved On",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "url",
+          "version",
+          "retrieved_on"
+        ],
+        "title": "SourceBody",
+        "type": "object"
+      },
+      "TaxCategoryBody": {
+        "additionalProperties": false,
+        "description": "A tax category and its rates over time, newest first.",
+        "properties": {
+          "key": {
+            "examples": [
+              "do.itbis.standard"
+            ],
+            "title": "Key",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/TaxCategoryKind"
+          },
+          "labels": {
+            "$ref": "#/components/schemas/Labels"
+          },
+          "rates": {
+            "items": {
+              "$ref": "#/components/schemas/DatedValueBody"
+            },
+            "title": "Rates",
+            "type": "array"
+          }
+        },
+        "required": [
+          "key",
+          "labels",
+          "kind",
+          "rates"
+        ],
+        "title": "TaxCategoryBody",
+        "type": "object"
+      },
+      "TaxCategoryKind": {
+        "description": "The generic kind of a tax category, for formats (UBL) that speak generically.",
+        "enum": [
+          "standard",
+          "reduced",
+          "zero",
+          "exempt",
+          "outside_scope"
+        ],
+        "title": "TaxCategoryKind",
+        "type": "string"
+      },
       "TaxIdBody": {
         "additionalProperties": false,
         "description": "A tax id qualified by its scheme, which says how the value is read and checked.",
@@ -676,6 +1249,53 @@
         ],
         "title": "TaxIdBody",
         "type": "object"
+      },
+      "TaxIdSchemeBody": {
+        "additionalProperties": false,
+        "description": "A tax id scheme: how a value is written and whether a check digit mismatch refuses it.",
+        "properties": {
+          "check_digit_enforced": {
+            "title": "Check Digit Enforced",
+            "type": "boolean"
+          },
+          "key": {
+            "examples": [
+              "do.rnc"
+            ],
+            "title": "Key",
+            "type": "string"
+          },
+          "labels": {
+            "$ref": "#/components/schemas/Labels"
+          },
+          "peppol_icd": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peppol Icd"
+          }
+        },
+        "required": [
+          "key",
+          "labels",
+          "check_digit_enforced",
+          "peppol_icd"
+        ],
+        "title": "TaxIdSchemeBody",
+        "type": "object"
+      },
+      "Tier": {
+        "enum": [
+          "bronze",
+          "silver",
+          "gold"
+        ],
+        "type": "string"
       }
     },
     "securitySchemes": {
@@ -5512,6 +6132,443 @@
         "summary": "Assign Role",
         "tags": [
           "memberships"
+        ]
+      }
+    },
+    "/v1/countries": {
+      "get": {
+        "description": "The countries a regime is installed for, with the keys of their regimes and channels.",
+        "operationId": "list_countries_v1_countries_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CountryList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "description": "An RFC 9457 problem document: what every failure answers. A code may add members of its own.",
+                  "properties": {
+                    "code": {
+                      "description": "The stable code to match on.",
+                      "title": "Code",
+                      "type": "string"
+                    },
+                    "detail": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Detail"
+                    },
+                    "request_id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "The request's id, also its Request-Id header.",
+                      "title": "Request Id"
+                    },
+                    "status": {
+                      "title": "Status",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "title": "Title",
+                      "type": "string"
+                    },
+                    "type": {
+                      "description": "urn:ledger:error:<code>",
+                      "title": "Type",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "title": "Problem",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "description": "An RFC 9457 problem document: what every failure answers. A code may add members of its own.",
+                  "properties": {
+                    "code": {
+                      "description": "The stable code to match on.",
+                      "title": "Code",
+                      "type": "string"
+                    },
+                    "detail": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Detail"
+                    },
+                    "request_id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "The request's id, also its Request-Id header.",
+                      "title": "Request Id"
+                    },
+                    "status": {
+                      "title": "Status",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "title": "Title",
+                      "type": "string"
+                    },
+                    "type": {
+                      "description": "urn:ledger:error:<code>",
+                      "title": "Type",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "title": "Problem",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Countries",
+        "tags": [
+          "countries"
+        ]
+      }
+    },
+    "/v1/countries/{country_code}": {
+      "get": {
+        "description": "A country's regimes (its tax law as data) and the channels that serve it.\n\nThe code is ISO 3166-1 alpha-2, upper case; anything else finds no country.",
+        "operationId": "read_country_v1_countries__country_code__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "country_code",
+            "required": true,
+            "schema": {
+              "title": "Country Code",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CountryBody"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "description": "An RFC 9457 problem document: what every failure answers. A code may add members of its own.",
+                  "properties": {
+                    "code": {
+                      "description": "The stable code to match on.",
+                      "title": "Code",
+                      "type": "string"
+                    },
+                    "detail": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Detail"
+                    },
+                    "request_id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "The request's id, also its Request-Id header.",
+                      "title": "Request Id"
+                    },
+                    "status": {
+                      "title": "Status",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "title": "Title",
+                      "type": "string"
+                    },
+                    "type": {
+                      "description": "urn:ledger:error:<code>",
+                      "title": "Type",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "title": "Problem",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "description": "An RFC 9457 problem document: what every failure answers. A code may add members of its own.",
+                  "properties": {
+                    "code": {
+                      "description": "The stable code to match on.",
+                      "title": "Code",
+                      "type": "string"
+                    },
+                    "detail": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Detail"
+                    },
+                    "request_id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "The request's id, also its Request-Id header.",
+                      "title": "Request Id"
+                    },
+                    "status": {
+                      "title": "Status",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "title": "Title",
+                      "type": "string"
+                    },
+                    "type": {
+                      "description": "urn:ledger:error:<code>",
+                      "title": "Type",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "title": "Problem",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "description": "An RFC 9457 problem document: what every failure answers. A code may add members of its own.",
+                  "properties": {
+                    "code": {
+                      "description": "The stable code to match on.",
+                      "title": "Code",
+                      "type": "string"
+                    },
+                    "detail": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Detail"
+                    },
+                    "request_id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "The request's id, also its Request-Id header.",
+                      "title": "Request Id"
+                    },
+                    "status": {
+                      "title": "Status",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "title": "Title",
+                      "type": "string"
+                    },
+                    "type": {
+                      "description": "urn:ledger:error:<code>",
+                      "title": "Type",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "title": "Problem",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "description": "An RFC 9457 problem document: what every failure answers. A code may add members of its own.",
+                  "properties": {
+                    "code": {
+                      "description": "The stable code to match on.",
+                      "title": "Code",
+                      "type": "string"
+                    },
+                    "detail": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Detail"
+                    },
+                    "request_id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "The request's id, also its Request-Id header.",
+                      "title": "Request Id"
+                    },
+                    "status": {
+                      "title": "Status",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "title": "Title",
+                      "type": "string"
+                    },
+                    "type": {
+                      "description": "urn:ledger:error:<code>",
+                      "title": "Type",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "title": "Problem",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Read Country",
+        "tags": [
+          "countries"
         ]
       }
     },

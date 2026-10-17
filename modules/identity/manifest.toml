@@ -74,4 +74,4 @@ version = 1
 
 [http]
 mounted_in = ["api"]
-prefixes = ["/v1/organization", "/v1/companies"]
+prefixes = ["/v1/organization", "/v1/companies", "/v1/countries"]

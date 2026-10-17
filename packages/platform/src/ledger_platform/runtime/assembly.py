@@ -44,6 +44,7 @@ from ledger_platform.runtime.sections import Declared, read_sections
 lazy from ledger_kernel.clock import Clock
 lazy from ledger_platform.config.manifest import (
     AppRole,
+    ChannelEntry,
     EventsSection,
     JobDecl,
     PackageManifest,
@@ -374,17 +375,29 @@ def _member(handed: Handed) -> Member:
 class _Assembly:
     """One assembly's directories and bound databases (see the module)."""
 
-    __slots__ = ("_apis", "_bound", "_channels", "_extensions", "_ports", "_regimes", "_sections", "_shared")
+    __slots__ = (
+        "_apis",
+        "_bound",
+        "_channels",
+        "_entries",
+        "_extensions",
+        "_ports",
+        "_regimes",
+        "_sections",
+        "_shared",
+    )
 
     def __init__(
         self,
         shared: Shared,
         regimes: Regimes,
+        entries: tuple[ChannelEntry, ...],
         bound: Mapping[str, BoundDatabase],
         sections: Mapping[str, PackageSettings],
     ) -> None:
         self._shared = shared
         self._regimes = regimes
+        self._entries = entries
         self._bound = bound
         self._sections = sections
         self._apis = Directory("api")
@@ -405,6 +418,7 @@ class _Assembly:
             clock=shared.clock,
             regimes=self._regimes,
             channels=self._channels,
+            channel_entries=self._entries,
             apis=api_view(manifest, self._apis),
             extensions=extension_view(manifest, self._extensions),
             telemetry=Telemetry.of(name, shared.tracing, shared.registry),
@@ -498,7 +512,13 @@ def assemble(shared: Shared, discover: Discover) -> Assembled:
         )
     )
     bound = {schema: _bound(shared, schema, claim) for schema, claim in _claims(modules, packs).items()}
-    assembly = _Assembly(shared, regimes, bound, sections)
+    assembly = _Assembly(
+        shared,
+        regimes,
+        tuple(sorted((pack.entry for pack in packs), key=lambda entry: entry.key)),
+        bound,
+        sections,
+    )
     handed = [assembly.module(module) for module in modules]
     assembly.require_bindings(modules)
     provided = frozenset(port for module in modules for port in module.manifest.extension_points.provides)

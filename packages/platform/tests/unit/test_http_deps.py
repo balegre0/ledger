@@ -28,6 +28,7 @@ from ledger_platform.http.deps import (
     COMPANY_HEADER,
     IfMatch,
     allowed,
+    any_principal,
     authenticated,
     company_in_header,
     company_in_path,
@@ -147,7 +148,7 @@ def add_defective_routes(routes: APIRouter, in_path: InCompany, in_header: InCom
 
 
 ADMIN: Final = "ledger.organization.admin"
-UNDECLARED: Final = "declares no requirement (allowed, holding or in_organization)"
+UNDECLARED: Final = "declares no requirement (allowed, holding, in_organization or any_principal)"
 
 
 def add_guarded_routes(routes: APIRouter, caller: Caller, in_path: InCompany) -> None:
@@ -166,6 +167,10 @@ def add_guarded_routes(routes: APIRouter, caller: Caller, in_path: InCompany) ->
     @routes.get("/mine")
     async def mine(principal: Annotated[Principal, Depends(in_organization(caller))]) -> str:
         return str(principal.organization)
+
+    @routes.get("/reference")
+    async def reference(principal: Annotated[Principal, Depends(any_principal(caller))]) -> str:
+        return principal.subject
 
 
 def router(verifier: TokenVerifier, grants: Grants) -> APIRouter:
@@ -441,10 +446,19 @@ async def test_a_route_of_the_whole_organization_takes_any_of_its_principals(
     assert (anonymous.status_code, problem_code(anonymous)) == (401, "missing_token")
 
 
+async def test_reference_data_takes_any_verified_principal_and_no_other(
+    client: httpx.AsyncClient, local_issuer: LocalIssuer
+) -> None:
+    response = await client.get("/reference", headers=bearer(local_issuer.token()))
+    assert (response.status_code, response.json()) == (200, SUBJECT)
+    anonymous = await client.get("/reference")
+    assert (anonymous.status_code, problem_code(anonymous)) == (401, "missing_token")
+
+
 def test_the_guarded_routes_are_the_ones_that_need_a_token_and_declare_what_they_require(
     app: FastAPI,
 ) -> None:
-    for guarded in ("/companies/{company_id}/managed", "/registered", "/mine"):
+    for guarded in ("/companies/{company_id}/managed", "/registered", "/mine", "/reference"):
         assert unguarded_routes(app.routes, prefix=guarded) == ()
     assert unguarded_routes(app.routes, prefix="/whoami") == (f"GET /whoami: {UNDECLARED}",)
     assert unguarded_routes(app.routes, prefix="/versions") == (

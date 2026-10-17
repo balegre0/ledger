@@ -9,6 +9,7 @@ lazy from ledger_identity.domain.text import TimeZone
 lazy from ledger_kernel.jurisdiction import Jurisdiction
 lazy from ledger_kernel.regimes import TaxIdSchemes
 lazy from ledger_platform.auth import PermissionSource
+lazy from ledger_platform.config.manifest import ChannelEntry
 lazy from ledger_platform.data import BoundDatabase
 lazy from ledger_platform.http import Authentication, Caller, InCompany
 lazy from ledger_platform.runtime.registries import Regimes
@@ -26,6 +27,8 @@ class ApiContext:
     idempotency: Idempotency
     regimes: Regimes
     """The installed regimes: their schemes read a client's ``{scheme, value}``, their zones default."""
+    channels: tuple[ChannelEntry, ...]
+    """The manifest entries of the installed channels, by key: what ``/v1/countries`` says of them."""
 
     @property
     def tax_ids(self) -> TaxIdSchemes:
@@ -44,7 +47,12 @@ class ApiContext:
 
     @classmethod
     def build(
-        cls, *, database: BoundDatabase, authentication: Authentication, regimes: Regimes
+        cls,
+        *,
+        database: BoundDatabase,
+        authentication: Authentication,
+        regimes: Regimes,
+        channels: tuple[ChannelEntry, ...],
     ) -> ApiContext:
         """The context of the routes: the caller from the chassis, its access from identity's memberships."""
         caller = authentication.caller
@@ -59,4 +67,5 @@ class ApiContext:
             in_company=company_in_path(caller, permission_source),
             idempotency=Idempotency(),
             regimes=regimes,
+            channels=channels,
         )

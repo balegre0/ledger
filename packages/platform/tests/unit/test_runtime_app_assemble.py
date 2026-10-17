@@ -367,6 +367,7 @@ def test_channels_assemble_after_modules_with_the_ports_modules_provide() -> Non
 
     def alpha(context: ModuleContext) -> ModuleParts:
         seen["channels"] = context.channels
+        seen["entries"] = context.channel_entries  # data: known while the module assembles
         try:
             context.channels.get("us-probe-v1")
         except ChannelsNotAssembledError as error:
@@ -394,6 +395,7 @@ def test_channels_assemble_after_modules_with_the_ports_modules_provide() -> Non
     channels = seen["channels"]
     assert isinstance(channels, AssembledChannels)
     assert channels.get("us-probe-v1") == "the us probe channel"
+    assert seen["entries"] == (channel_entry(),)
     assert isinstance(seen["port"], Signer)
     assert (seen["regime"], seen["schema"]) == ("us", "us_probe")
 

@@ -90,7 +90,7 @@ def test_the_document_is_openapi_3_1_and_every_post_takes_an_idempotency_key_in_
 def test_the_document_holds_identity_s_paths_only() -> None:
     paths = DOCUMENT.validate_json(document())["paths"]
     assert paths
-    assert all(path.startswith(("/v1/organization", "/v1/companies")) for path in paths)
+    assert all(path.startswith(("/v1/organization", "/v1/companies", "/v1/countries")) for path in paths)
 
 
 def operations() -> list[Operation]:

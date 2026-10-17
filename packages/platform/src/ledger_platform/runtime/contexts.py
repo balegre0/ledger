@@ -178,6 +178,8 @@ class ModuleContext:
     """Every installed regime, validated and frozen."""
     channels: AssembledChannels
     """Filled after channel assembly: read at call time, never during ``assemble``."""
+    channel_entries: tuple[ChannelEntry, ...] = ()
+    """The manifest entries of every installed channel, by key: data, known while the module assembles."""
     apis: ApiDirectory
     """Other modules' APIs: only those of declared dependencies."""
     extensions: ExtensionDirectory

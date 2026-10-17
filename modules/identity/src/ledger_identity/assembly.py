@@ -10,7 +10,7 @@ schemes of the installed regimes: identity names no country, and is not ready wh
 from typing import ClassVar, Final
 
 from ledger_identity._manifest import MANIFEST
-from ledger_identity.adapters.http import companies, establishments, memberships, organization
+from ledger_identity.adapters.http import companies, countries, establishments, memberships, organization
 from ledger_identity.adapters.http.context import ApiContext
 from ledger_identity.adapters.postgres.schema import migrations
 from ledger_identity.adapters.postgres.unit import PgUnits
@@ -36,9 +36,11 @@ def assemble(context: ModuleContext) -> ModuleParts:
         database=context.database,
         authentication=context.auth,
         regimes=context.regimes,
+        channels=context.channel_entries,
     )
     routers = (
         organization.router(api),
+        countries.router(api),
         companies.router(api),
         establishments.router(api),
         memberships.router(api),

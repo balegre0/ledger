@@ -76,6 +76,15 @@ class EstablishmentNotFoundError(NotFoundError):
         )
 
 
+class CountryNotFoundError(NotFoundError):
+    """No regime is installed for the country asked for (or what was asked for is no country code)."""
+
+    code: ClassVar[str] = "country_not_found"
+
+    def __init__(self) -> None:
+        super().__init__("no regime is installed for this country")  # what was sent is not repeated
+
+
 class MembershipNotFoundError(NotFoundError):
     """The subject holds no role in the company."""
 

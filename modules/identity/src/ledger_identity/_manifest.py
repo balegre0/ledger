@@ -126,6 +126,7 @@ MANIFEST: Final = PackageManifest.model_validate(
             "prefixes": [
                 "/v1/organization",
                 "/v1/companies",
+                "/v1/countries",
             ],
         },
     }

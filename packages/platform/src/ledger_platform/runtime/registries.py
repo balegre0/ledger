@@ -125,6 +125,10 @@ class Regimes:
         """The installed regimes' keys, sorted."""
         return tuple(self._by_key)
 
+    def all(self) -> tuple[RegimeDef, ...]:
+        """Every installed regime, in key order."""
+        return tuple(self._by_key.values())
+
     def __contains__(self, key: object) -> bool:
         """Whether a regime of ``key`` is installed."""
         return key in self._by_key

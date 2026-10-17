@@ -4,7 +4,8 @@ Organizations, companies, their establishments, memberships and roles (spec §7.
 
 - Owns schema `identity` (roles `identity_owner`, `identity_rw`, `identity_purge`), id prefixes `org`, `cmp`,
   `mbr`, the `identity.*` permissions (granted by its role table, `domain/roles.py`) and events.
-- Public API: HTTP under `/v1/organization` and `/v1/companies`, mounted by `api` (snapshot:
+- Public API: HTTP under `/v1/organization`, `/v1/companies` and `/v1/countries` (the installed regimes and
+  channels as data), mounted by `api` (snapshot:
   [`openapi.json`](openapi.json)); events `identity.company.*`, `identity.membership.*`; and, for the other
   modules, `IdentityApi` ([`api.py`](src/ledger_identity/api.py)): company by id, company by tax id,
   permissions of a principal, lock the fiscal profile.
