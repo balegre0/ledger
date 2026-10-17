@@ -26,6 +26,8 @@ layout) and a Dominican pack that is closer to a spike than to a channel. `signe
 | A public caller's `baggage` is carried to outbound calls | `fix(http): a public caller's baggage goes with its trace` |
 | `test_two_migrations_at_once_serialize` raced on alembic's process-global `op` | `test: serialize migrations through the database lock, not two threads` |
 | A company holds one tax id and no jurisdiction or currency; two organizations could register one taxpayer | `feat(identity): …` fiscal profile, qualified tax ids, the global `tax_registrations` registry |
+| No in-process API for other modules | `feat(identity): IdentityApi for the other modules` (company by id and by tax id, permissions, lock the fiscal profile; a principal's call sees only its organization) |
+| Internal UUIDs in the API and in error messages | `feat(identity): public ids are TypeIDs` (a path naming anything but the public id is a 404 that repeats nothing; the kernel's `CompanyNotFoundError` names a company by its public id) |
 | Branches and emission points are Dominican shapes in identity | `feat(identity): establishments replace branches and emission points` (code, name, time zone; `MAIN` from registration; the company's regime gives its zone). Spec §6.3 listed establishments under the *company* RLS scope; they are under the *organization* scope like memberships and tax ids, because registering a company writes its `MAIN` in the unit that creates the company, before a company scope exists. The spec line is amended; flagged for the owner. |
 
 ## Recorded in the spec as limits of what is built
@@ -66,7 +68,6 @@ layout) and a Dominican pack that is closer to a spike than to a channel. `signe
 | Inbox claims a batch of 20 under one 60 s lease and handles it one row at a time | Needs a per-consumer concurrency and lease design |
 | Metrics for queue depth, oldest event and dead rows; the `ledger-worker replay` command | Not built yet; the spec lists them |
 | `Settings` refuses unknown `LEDGER_<SECTION>_*` variables, which can crash old pods during a rollout | Needs a decision on the rollout contract |
-| Identity: tax-id uniqueness is an index, not the `tax_registrations` table the spec describes; no establishments, TypeIDs or `IdentityApi` | Planned as v2-M2; redo `r0001` then, since nothing is in production |
 | DGII client: no circuit breaker, no negative caching of authentication, retries after 429 ignore `Retry-After` | v2-M3 |
 | CI is one serial job; `.importlinter` grows quadratically with packages; no dependency, image or migration scanning | See the tooling review; split CI before the next modules |
 
