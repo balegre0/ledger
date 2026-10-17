@@ -41,6 +41,10 @@ from ledger_identity.domain.roles import (
     COMPANIES_MANAGE,
     COMPANIES_READ,
     EVERYTHING,
+    INVOICES_CREATE,
+    INVOICES_ISSUE,
+    INVOICES_READ,
+    INVOICES_VOID,
     MEMBERSHIPS_MANAGE,
     MEMBERSHIPS_READ,
     OWNERSHIP_MANAGE,
@@ -194,13 +198,18 @@ def test_what_each_role_may_do() -> None:
         "identity.memberships.read",
         "identity.memberships.manage",
         "identity.ownership.manage",
+        "invoicing.invoices.read",
+        "invoicing.invoices.create",
+        "invoicing.invoices.issue",
+        "invoicing.invoices.void",
     } == EVERYTHING
+    issuing = frozenset({COMPANIES_READ, INVOICES_READ, INVOICES_CREATE, INVOICES_ISSUE})
     expected = {
         Role.OWNER: EVERYTHING,
         Role.ADMIN: EVERYTHING - {OWNERSHIP_MANAGE},
-        Role.ACCOUNTANT: frozenset({COMPANIES_READ, MEMBERSHIPS_READ}),
-        Role.ISSUER: frozenset({COMPANIES_READ}),
-        Role.VIEWER: frozenset({COMPANIES_READ}),
+        Role.ACCOUNTANT: issuing | {MEMBERSHIPS_READ, INVOICES_VOID},
+        Role.ISSUER: issuing,
+        Role.VIEWER: frozenset({COMPANIES_READ, INVOICES_READ}),
     }
     assert expected == PERMISSIONS
     assert {COMPANIES_MANAGE, MEMBERSHIPS_MANAGE} <= PERMISSIONS[Role.ADMIN]
@@ -211,6 +220,7 @@ def test_the_roles_grant_exactly_what_the_manifest_declares() -> None:
     granted = {
         permission: frozenset(role.value for role in Role if permission in permissions_of(role))
         for permission in EVERYTHING
+        if permission.startswith("identity.")
     }
     assert granted == declared
 
@@ -627,7 +637,9 @@ def test_other_services_may_let_a_member_of_a_deactivated_company_read_only() ->
     company = registered()
     issuer = member(company, "3001", Role.ISSUER)
     assert permissions_in(company, issuer) == permissions_of(Role.ISSUER)
-    assert permissions_in(company.deactivate(now=LATER)[0], issuer) == frozenset({COMPANIES_READ})
+    assert permissions_in(company.deactivate(now=LATER)[0], issuer) == frozenset(
+        {COMPANIES_READ, INVOICES_READ}
+    )
     owner, _ = found(company, FOUNDER, now=NOW)
     assert permissions_in(company.deactivate(now=LATER)[0], owner) == READ_ONLY
     revoked, _ = revoke(Roster(company, issuer.subject, issuer, owners=1), actor=OWNER, now=NOW)

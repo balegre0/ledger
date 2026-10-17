@@ -2,8 +2,7 @@
 
 The roles are the kernel's (``ledger_kernel.access.Role``). The permissions are the codes manifests declare
 (``[[permissions]]``), each with the roles that hold it; this table says the same, and a workspace test holds
-it equal to every manifest until the table is generated (v2-M2). The invoice permissions arrive with
-invoicing's manifest.
+it equal to every manifest until the table is generated (v2-M2).
 """
 
 from types import MappingProxyType
@@ -23,24 +22,43 @@ MEMBERSHIPS_MANAGE: Final = parse_permission("identity.memberships.manage")
 """Grant and revoke every role but the owner's."""
 OWNERSHIP_MANAGE: Final = parse_permission("identity.ownership.manage")
 """Grant and revoke the owner role."""
+INVOICES_READ: Final = parse_permission("invoicing.invoices.read")
+"""Read commercial documents (invoicing's manifest declares it, and the three below)."""
+INVOICES_CREATE: Final = parse_permission("invoicing.invoices.create")
+"""Create documents, as drafts or issued."""
+INVOICES_ISSUE: Final = parse_permission("invoicing.invoices.issue")
+"""Issue a draft."""
+INVOICES_VOID: Final = parse_permission("invoicing.invoices.void")
+"""Void an issued document no channel accepted."""
 EVERYTHING: Final = frozenset(
-    {COMPANIES_READ, COMPANIES_MANAGE, MEMBERSHIPS_READ, MEMBERSHIPS_MANAGE, OWNERSHIP_MANAGE}
+    {
+        COMPANIES_READ,
+        COMPANIES_MANAGE,
+        MEMBERSHIPS_READ,
+        MEMBERSHIPS_MANAGE,
+        OWNERSHIP_MANAGE,
+        INVOICES_READ,
+        INVOICES_CREATE,
+        INVOICES_ISSUE,
+        INVOICES_VOID,
+    }
 )
-"""Every permission identity declares."""
+"""Every permission the manifests declare."""
+_ISSUING: Final = frozenset({COMPANIES_READ, INVOICES_READ, INVOICES_CREATE, INVOICES_ISSUE})
 
 
 PERMISSIONS: Final[Mapping[Role, frozenset[Permission]]] = MappingProxyType(
     {
         Role.OWNER: EVERYTHING,
         Role.ADMIN: EVERYTHING - {OWNERSHIP_MANAGE},
-        Role.ACCOUNTANT: frozenset({COMPANIES_READ, MEMBERSHIPS_READ}),
-        Role.ISSUER: frozenset({COMPANIES_READ}),
-        Role.VIEWER: frozenset({COMPANIES_READ}),
+        Role.ACCOUNTANT: _ISSUING | {MEMBERSHIPS_READ, INVOICES_VOID},
+        Role.ISSUER: _ISSUING,
+        Role.VIEWER: frozenset({COMPANIES_READ, INVOICES_READ}),
     }
 )
 
 
-READ_ONLY: Final = frozenset({COMPANIES_READ, MEMBERSHIPS_READ})
+READ_ONLY: Final = frozenset({COMPANIES_READ, MEMBERSHIPS_READ, INVOICES_READ})
 """What identity's roles still allow other modules to do for a deactivated company: read."""
 _READ_VERB: Final = ".read"
 

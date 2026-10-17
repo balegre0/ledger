@@ -23,13 +23,17 @@ lazy from collections.abc import Sequence
 from pydantic import SecretStr
 
 from ledger_kernel.errors import LedgerError
+from ledger_platform.config.manifest import PackageKind
 from ledger_platform.config.names import PLATFORM
 from ledger_platform.config.settings import Settings
 from ledger_platform.data.migrations import platform_migrations
+from ledger_platform.runtime.packs import installed_modules
+from ledger_platform.runtime.registries import MODULES, installed
 from ledger_testing.database import bootstrap, migrate
 lazy from ledger_platform.config.manifest import PackageManifest
 lazy from ledger_platform.data.migrations import SchemaMigrations
 lazy from ledger_platform.data.notifier import Channel
+lazy from ledger_platform.runtime.registries import Discover, Discovered
 lazy from ledger_testing.issuer import LocalIssuer
 lazy from ledger_testing.postgres import Template
 
@@ -50,6 +54,8 @@ class ModuleUnderTest:
 
     manifest: PackageManifest
     migrations: SchemaMigrations
+    needs: tuple[SchemaMigrations, ...] = ()
+    """The schemas of the modules it depends on: the app that serves it assembles them too."""
 
     def __post_init__(self) -> None:
         if self.manifest.schema_name is None:
@@ -62,19 +68,52 @@ class ModuleUnderTest:
 
     @property
     def schemas(self) -> tuple[str, ...]:
-        """The platform's schema, then the package's: what its migrations need, in migration order."""
-        return tuple(dict.fromkeys((PLATFORM, self.schema)))
+        """The platform's schema, those it needs, then the package's: in migration order."""
+        return tuple(dict.fromkeys((PLATFORM, *(need.schema for need in self.needs), self.schema)))
+
+    @property
+    def owned(self) -> tuple[str, ...]:
+        """The schemas a test empties: the package's, and those it needs (its tests write to them too)."""
+        return tuple(dict.fromkeys((self.schema, *(need.schema for need in self.needs))))
 
     @property
     def publishes(self) -> frozenset[str]:
         """The event types the package's units may publish."""
         return frozenset(event.type for event in self.manifest.events.publishes)
 
+    def discovering(self, discover: Discover = installed) -> Discover:
+        """``discover`` as the app that serves this module's tests finds it: this module and what it needs.
+
+        Every module installed in the workspace is an entry point, so an app that found them all would need
+        every schema in every module's test database. A module under test is served with the modules it
+        depends on (transitively, by their manifests) and nothing else; entry points that are not modules
+        (regimes, channels) are as installed. A package that is not a module is served with every module.
+        """
+        if self.manifest.package.kind is not PackageKind.MODULE:
+            return discover
+        manifests = {module.manifest.package.name: module.manifest for module in installed_modules(discover)}
+        wanted: set[str] = set()
+        pending = [self.manifest.package.name]
+        while pending:
+            name = pending.pop()
+            if name not in wanted:
+                wanted.add(name)
+                needed = manifests[name].dependencies.modules if name in manifests else ()
+                pending.extend(needed)
+
+        def only(group: str) -> Sequence[Discovered]:
+            found = discover(group)
+            return tuple(entry for entry in found if entry.name in wanted) if group == MODULES else found
+
+        return only
+
     def prepare(self, template: Template) -> None:
         """The roles and the schemas, each at head as ``ledger_migrator`` with the relay granted."""
         bootstrap(template, self.schemas)
         revisions: Sequence[SchemaMigrations] = (
-            (self.migrations,) if self.schema == PLATFORM else (platform_migrations(), self.migrations)
+            (self.migrations,)
+            if self.schema == PLATFORM
+            else (platform_migrations(), *self.needs, self.migrations)
         )
         migrate(template, *revisions)
 

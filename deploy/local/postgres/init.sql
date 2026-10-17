@@ -19,12 +19,21 @@ DO $$ BEGIN CREATE ROLE "identity_rw"; EXCEPTION WHEN duplicate_object THEN NULL
 ALTER ROLE "identity_rw" WITH NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT -1 VALID UNTIL 'infinity' PASSWORD NULL;
 DO $$ BEGIN CREATE ROLE "identity_purge"; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ALTER ROLE "identity_purge" WITH NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT -1 VALID UNTIL 'infinity' PASSWORD NULL;
+DO $$ BEGIN CREATE ROLE "invoicing_owner"; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER ROLE "invoicing_owner" WITH NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT -1 VALID UNTIL 'infinity' PASSWORD NULL;
+DO $$ BEGIN CREATE ROLE "invoicing_rw"; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER ROLE "invoicing_rw" WITH NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT -1 VALID UNTIL 'infinity' PASSWORD NULL;
+DO $$ BEGIN CREATE ROLE "invoicing_purge"; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER ROLE "invoicing_purge" WITH NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT -1 VALID UNTIL 'infinity' PASSWORD NULL;
 GRANT "platform_owner" TO "ledger_migrator" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
 GRANT "platform_rw" TO "ledger_app" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
 GRANT "platform_purge" TO "ledger_app" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
 GRANT "identity_owner" TO "ledger_migrator" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
 GRANT "identity_rw" TO "ledger_app" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
 GRANT "identity_purge" TO "ledger_app" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
+GRANT "invoicing_owner" TO "ledger_migrator" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
+GRANT "invoicing_rw" TO "ledger_app" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
+GRANT "invoicing_purge" TO "ledger_app" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
 GRANT "ledger_relay" TO "ledger_app" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
 DO $$ DECLARE stray record; BEGIN
 FOR stray IN
@@ -33,10 +42,10 @@ FOR stray IN
     JOIN pg_roles AS granted ON granted.oid = membership.roleid
     JOIN pg_roles AS member ON member.oid = membership.member
     JOIN pg_roles AS grantor ON grantor.oid = membership.grantor
-    WHERE NOT ((granted.rolname, member.rolname) IN (('platform_owner', 'ledger_migrator'), ('platform_rw', 'ledger_app'), ('platform_purge', 'ledger_app'), ('identity_owner', 'ledger_migrator'), ('identity_rw', 'ledger_app'), ('identity_purge', 'ledger_app'), ('ledger_relay', 'ledger_app'))
+    WHERE NOT ((granted.rolname, member.rolname) IN (('platform_owner', 'ledger_migrator'), ('platform_rw', 'ledger_app'), ('platform_purge', 'ledger_app'), ('identity_owner', 'ledger_migrator'), ('identity_rw', 'ledger_app'), ('identity_purge', 'ledger_app'), ('invoicing_owner', 'ledger_migrator'), ('invoicing_rw', 'ledger_app'), ('invoicing_purge', 'ledger_app'), ('ledger_relay', 'ledger_app'))
                AND NOT membership.admin_option AND NOT membership.inherit_option AND membership.set_option)
       AND member.rolname <> current_user
-      AND (granted.rolname IN ('ledger_relay', 'platform_owner', 'platform_rw', 'platform_purge', 'identity_owner', 'identity_rw', 'identity_purge', 'ledger_app', 'ledger_migrator') OR member.rolname IN ('ledger_relay', 'platform_owner', 'platform_rw', 'platform_purge', 'identity_owner', 'identity_rw', 'identity_purge') OR (member.rolname = 'ledger_app' AND granted.rolname !~ '_(rw|purge)$') OR (member.rolname = 'ledger_migrator' AND granted.rolname !~ '_owner$') OR (member.rolname = 'ledger_signer' AND granted.rolname !~ '_(rw|purge)$'))
+      AND (granted.rolname IN ('ledger_relay', 'platform_owner', 'platform_rw', 'platform_purge', 'identity_owner', 'identity_rw', 'identity_purge', 'invoicing_owner', 'invoicing_rw', 'invoicing_purge', 'ledger_app', 'ledger_migrator') OR member.rolname IN ('ledger_relay', 'platform_owner', 'platform_rw', 'platform_purge', 'identity_owner', 'identity_rw', 'identity_purge', 'invoicing_owner', 'invoicing_rw', 'invoicing_purge') OR (member.rolname = 'ledger_app' AND granted.rolname !~ '_(rw|purge)$') OR (member.rolname = 'ledger_migrator' AND granted.rolname !~ '_owner$') OR (member.rolname = 'ledger_signer' AND granted.rolname !~ '_(rw|purge)$'))
 LOOP
     EXECUTE format('REVOKE %I FROM %I GRANTED BY %I CASCADE', stray.role, stray.member, stray.grantor);
 END LOOP;
@@ -58,3 +67,8 @@ GRANT USAGE ON SCHEMA "identity" TO "identity_rw", "identity_purge", "ledger_rel
 ALTER DEFAULT PRIVILEGES FOR ROLE "identity_owner" IN SCHEMA "identity" GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "identity_rw";
 ALTER DEFAULT PRIVILEGES FOR ROLE "identity_owner" IN SCHEMA "identity" GRANT USAGE, SELECT ON SEQUENCES TO "identity_rw";
 ALTER DEFAULT PRIVILEGES FOR ROLE "identity_owner" REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+CREATE SCHEMA IF NOT EXISTS "invoicing" AUTHORIZATION "invoicing_owner";
+GRANT USAGE ON SCHEMA "invoicing" TO "invoicing_rw", "invoicing_purge", "ledger_relay";
+ALTER DEFAULT PRIVILEGES FOR ROLE "invoicing_owner" IN SCHEMA "invoicing" GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "invoicing_rw";
+ALTER DEFAULT PRIVILEGES FOR ROLE "invoicing_owner" IN SCHEMA "invoicing" GRANT USAGE, SELECT ON SEQUENCES TO "invoicing_rw";
+ALTER DEFAULT PRIVILEGES FOR ROLE "invoicing_owner" REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;

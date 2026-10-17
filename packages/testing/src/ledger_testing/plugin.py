@@ -172,7 +172,7 @@ def clock() -> ManualClock:
 def migrated(worker_database: WorkerDatabase, module_under_test: ModuleUnderTest) -> Iterator[WorkerDatabase]:
     """This worker's database; every row a test left in the module's schema is removed after it."""
     yield worker_database
-    worker_database.truncate((module_under_test.schema,))
+    worker_database.truncate(module_under_test.owned)
 
 
 @pytest.fixture
@@ -221,9 +221,9 @@ def settings(migrated: WorkerDatabase, local_issuer: LocalIssuer) -> Settings:
 
 
 @pytest.fixture
-def api(settings: Settings) -> App:
-    """The ``api`` app, every installed module mounted in it (found by their entry points)."""
-    return App("api", settings=settings)
+def api(settings: Settings, module_under_test: ModuleUnderTest) -> App:
+    """The ``api`` app, the module under test and what it depends on mounted in it (``discovering``)."""
+    return App("api", settings=settings, discover=module_under_test.discovering())
 
 
 @pytest.fixture

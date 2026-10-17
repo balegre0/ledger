@@ -31,6 +31,7 @@ from ledger_testing.migrations import (
     tables_of,
 )
 lazy from ledger_platform.config.settings import Settings
+lazy from ledger_testing.modules import ModuleUnderTest
 lazy from ledger_testing.postgres import WorkerDatabase
 
 S: Final = "identity"
@@ -67,10 +68,12 @@ def version_of(url: str, schema: str) -> str:
 
 
 def test_the_migrate_app_brings_identity_s_schema_to_head_from_nothing(
-    fresh: Settings, fresh_admin_url: str
+    fresh: Settings,
+    fresh_admin_url: str,
+    module_under_test: ModuleUnderTest,
 ) -> None:
     assert tables_of(fresh_admin_url, schema=S) == set()
-    App("migrate", settings=fresh).migrate()
+    App("migrate", settings=fresh, discover=module_under_test.discovering()).migrate()
     assert tables_of(fresh_admin_url, schema=S) == {
         *IDENTITY_TABLES,
         *OUTSIDE_RLS,
@@ -84,9 +87,11 @@ def test_the_migrate_app_brings_identity_s_schema_to_head_from_nothing(
     assert pending_changes(fresh_admin_url, MODELS, schema=S) is None
 
 
-def test_migrating_again_changes_nothing(fresh: Settings, fresh_admin_url: str) -> None:
-    App("migrate", settings=fresh).migrate()
-    App("migrate", settings=fresh).migrate()
+def test_migrating_again_changes_nothing(
+    fresh: Settings, fresh_admin_url: str, module_under_test: ModuleUnderTest
+) -> None:
+    App("migrate", settings=fresh, discover=module_under_test.discovering()).migrate()
+    App("migrate", settings=fresh, discover=module_under_test.discovering()).migrate()
     assert version_of(fresh_admin_url, S) == MIGRATIONS.head
     assert pending_changes(fresh_admin_url, MODELS, schema=S) is None
 
@@ -106,7 +111,15 @@ def test_two_migrations_started_at_once_both_succeed(fresh: Settings, fresh_admi
         "LEDGER_DATABASE_URL": fresh.database_url.get_secret_value(),
         "LEDGER_DATABASE_DIRECT_URL": fresh.database_direct_url.get_secret_value(),
     }
-    command = [sys.executable, "-c", "from ledger_app_migrate.main import main; raise SystemExit(main())"]
+    script = (
+        "from ledger_platform.config.settings import Settings\n"
+        "from ledger_platform.runtime.app import App\n"
+        "from ledger_platform.runtime.registries import MODULES, installed\n"
+        "def only_identity(group):\n"
+        "    return [e for e in installed(group) if group != MODULES or e.name == 'identity']\n"
+        "App('migrate', settings=Settings(), discover=only_identity).migrate()\n"
+    )
+    command = [sys.executable, "-c", script]
     runs = [subprocess.Popen(command, env=environment) for _ in range(2)]
     assert [run.wait(timeout=120) for run in runs] == [0, 0]
     assert tables_of(fresh_admin_url, schema=S) == {
@@ -122,8 +135,10 @@ def test_the_migrated_schema_is_exactly_the_models(migrated: WorkerDatabase) -> 
     assert pending_changes(superuser(migrated), MODELS, schema=S) is None
 
 
-def test_a_schema_that_differs_from_the_models_is_noticed(fresh: Settings, fresh_admin_url: str) -> None:
-    App("migrate", settings=fresh).migrate()
+def test_a_schema_that_differs_from_the_models_is_noticed(
+    fresh: Settings, fresh_admin_url: str, module_under_test: ModuleUnderTest
+) -> None:
+    App("migrate", settings=fresh, discover=module_under_test.discovering()).migrate()
     engine = create_engine(fresh_admin_url, poolclass=NullPool)
     try:
         with engine.begin() as connection:
