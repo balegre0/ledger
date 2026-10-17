@@ -9,6 +9,7 @@ from pydantic import TypeAdapter
 lazy import httpx
 lazy import psycopg
 
+from ledger_kernel.ids import COMPANY_PREFIX, parse_id
 from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_testing.api import TestPrincipal, created, document
 lazy from ledger_testing.issuer import LocalIssuer
@@ -16,7 +17,12 @@ lazy from ledger_testing.issuer import LocalIssuer
 ORGANIZATION: Final = organization_of("1001")
 TRACE_ID: Final = "4bf92f3577b34da6a3ce929d0e0e4736"
 TRACEPARENT: Final = f"00-{TRACE_ID}-b7ad6b7169203331-01"
-DUARTE: Final = {"tax_id": {"scheme": "do.rnc", "value": "101850043"}, "legal_name": "Duarte"}
+DUARTE: Final = {
+    "jurisdiction": {"country": "DO"},
+    "functional_currency": "DOP",
+    "tax_ids": [{"scheme": "do.rnc", "value": "101850043"}],
+    "legal_name": "Duarte",
+}
 OUTBOX: Final = """
     SELECT type, version, source, organization_id, company_id, mode, subject, aggregate_version, traceparent,
            payload
@@ -37,7 +43,7 @@ async def outbox(admin: psycopg.AsyncConnection) -> list[Row]:
 async def test_a_new_company_and_its_owner_are_announced_with_the_change(
     client: httpx.AsyncClient, owner: TestPrincipal, admin: psycopg.AsyncConnection
 ) -> None:
-    company = UUID(await created(client, "/v1/companies", DUARTE, owner.posting("c-1")))
+    company = parse_id(COMPANY_PREFIX, await created(client, "/v1/companies", DUARTE, owner.posting("c-1")))
     registered, granted = await outbox(admin)
     assert registered[:8] == (
         "identity.company.registered",
@@ -49,7 +55,12 @@ async def test_a_new_company_and_its_owner_are_announced_with_the_change(
         company,
         1,
     )
-    assert registered[9] == {"tax_id": {"scheme": "do.rnc", "value": "101850043"}, "legal_name": "Duarte"}
+    assert registered[9] == {
+        "jurisdiction": {"country": "DO", "subdivision": None},
+        "functional_currency": "DOP",
+        "tax_ids": [{"scheme": "do.rnc", "value": "101850043"}],
+        "legal_name": "Duarte",
+    }
     membership = granted[6]
     assert granted[:6] == ("identity.membership.granted", 1, "identity", ORGANIZATION, company, None)
     assert (granted[7], granted[9]) == (1, {"member": "2001", "role": "owner", "previous": None})
@@ -84,15 +95,20 @@ async def test_renames_and_deactivations_are_announced_at_the_company_s_versions
     )
     assert (renamed.status_code, unchanged.status_code, off.status_code) == (200, 200, 200)
     events = [(row[0], row[5], row[6], row[7], row[9]) for row in (await outbox(admin))[2:]]
+    inside = parse_id(COMPANY_PREFIX, company)  # the outbox keeps internal ids
     assert events == [
         (
             "identity.company.updated",
             None,
-            UUID(company),
+            inside,
             2,
-            {"tax_id": {"scheme": "do.rnc", "value": "101850043"}, "legal_name": "Duarte SRL"},
+            {
+                "tax_ids": [{"scheme": "do.rnc", "value": "101850043"}],
+                "legal_name": "Duarte SRL",
+                "fiscal_profile_locked": False,
+            },
         ),
-        ("identity.company.deactivated", None, UUID(company), 3, {}),  # a live request: still no mode
+        ("identity.company.deactivated", None, inside, 3, {}),  # a live request: still no mode
     ]
 
 

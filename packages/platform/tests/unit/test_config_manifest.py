@@ -289,3 +289,33 @@ def test_extension_points_name_protocols_and_qualified_implementations() -> None
         with pytest.raises(InvalidManifestError) as caught:
             load_manifest(MODULE + f"[extension_points]\n{bad}\n")
         assert caught.value.problems[0].startswith(f"{location}: ")
+
+
+def test_an_implementation_may_say_where_it_goes_in_the_chain_and_defaults_to_one_hundred() -> None:
+    declared = MODULE + (
+        '[extension_points]\nimplements = ["fiscal.IssuePolicy", "stock.IssuePolicy"]\n'
+        '[extension_points.order]\n"fiscal.IssuePolicy" = 10\n'
+    )
+    points = load_manifest(declared).extension_points
+    assert (points.order_of("fiscal.IssuePolicy"), points.order_of("stock.IssuePolicy")) == (10, 100)
+
+
+@pytest.mark.parametrize(
+    ("order", "location"),
+    [
+        ('"fiscal.IssuePolicy" = -1', "extension_points.order"),
+        ('"fiscal.IssuePolicy" = 1001', "extension_points.order"),
+        ('"stock.IssuePolicy" = 5', "extension_points"),
+    ],
+    ids=["negative", "over-a-thousand", "names-a-point-it-does-not-implement"],
+)
+def test_an_order_is_between_zero_and_a_thousand_and_for_a_point_the_module_implements(
+    order: str, location: str
+) -> None:
+    declared = (
+        MODULE
+        + f'[extension_points]\nimplements = ["fiscal.IssuePolicy"]\n[extension_points.order]\n{order}\n'
+    )
+    with pytest.raises(InvalidManifestError) as caught:
+        load_manifest(declared)
+    assert caught.value.problems[0].startswith(f"{location}")

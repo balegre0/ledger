@@ -1,0 +1,40 @@
+[package]
+name = "invoicing"
+kind = "module"
+summary = "Commercial documents: invoices, credit and debit notes, their lines and totals."
+owners = ["@balegre0"]
+
+[dependencies]
+packages = ["platform"]
+python = ["alembic>=1.20.0"]
+
+[data]
+schema = "invoicing"
+
+[[ids]]
+prefix = "inv"
+resource = "invoice"
+
+[[permissions]]
+code = "invoicing.invoices.read"
+summary = "Read commercial documents and their fiscal status."
+roles = ["owner", "admin", "accountant", "issuer", "viewer"]
+
+[[permissions]]
+code = "invoicing.invoices.create"
+summary = "Create invoices, credit notes and debit notes, as drafts or issued."
+roles = ["owner", "admin", "accountant", "issuer"]
+
+[[permissions]]
+code = "invoicing.invoices.issue"
+summary = "Issue a draft."
+roles = ["owner", "admin", "accountant", "issuer"]
+
+[[permissions]]
+code = "invoicing.invoices.void"
+summary = "Void an issued document no channel accepted."
+roles = ["owner", "admin", "accountant"]
+
+[http]
+mounted_in = ["api"]
+prefixes = ["/v1/invoices"]

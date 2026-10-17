@@ -150,7 +150,7 @@ def regime(**changes: Unpack[Changes]) -> RegimeDef:
 
 
 def line(amount: str, key: TaxCategoryKey = STANDARD_KEY, currency: Currency = USD) -> TaxLine:
-    return TaxLine(base=Money.of(amount, currency), category=key)
+    return TaxLine(base=Money.of(amount, currency), categories=(key,))
 
 
 # ── Tax ids ───────────────────────────────────────────────────────────────────────
@@ -410,6 +410,52 @@ def test_an_unknown_category_is_refused() -> None:
         TaxCalculator(regime()).totals([line("1", TaxCategoryKey("us.sales.none"))], DAY)
 
 
+LUXURY_KEY: Final = TaxCategoryKey("us.sales.luxury")
+STACKED: Final = regime(tax_categories=(STANDARD, REDUCED, category("us.sales.luxury", "10")))
+
+
+def test_taxes_stacked_on_one_line_are_both_charged_on_its_base_and_the_base_is_counted_once() -> None:
+    both = TaxLine(base=Money.of("100", USD), categories=(STANDARD_KEY, LUXURY_KEY))
+    totals = TaxCalculator(STACKED).totals([both], DAY)
+    assert (totals.net, totals.tax, totals.gross) == (
+        Money.of("100", USD),
+        Money.of("28", USD),
+        Money.of("128", USD),
+    )
+    assert [(total.category, total.base, total.tax) for total in totals.categories] == [
+        (LUXURY_KEY, Money.of("100", USD), Money.of("10", USD)),  # listed by key
+        (STANDARD_KEY, Money.of("100", USD), Money.of("18", USD)),
+    ]
+
+
+def test_the_order_of_the_categories_of_a_line_never_changes_the_totals() -> None:
+    forward = TaxLine(base=Money.of("100", USD), categories=(STANDARD_KEY, LUXURY_KEY))
+    backward = TaxLine(base=Money.of("100", USD), categories=(LUXURY_KEY, STANDARD_KEY))
+    calculator = TaxCalculator(STACKED)
+    assert calculator.totals([forward], DAY) == calculator.totals([backward], DAY)
+
+
+def test_stacked_and_single_lines_total_together_by_category() -> None:
+    lines = [
+        TaxLine(base=Money.of("100", USD), categories=(STANDARD_KEY, LUXURY_KEY)),
+        line("50", STANDARD_KEY),
+    ]
+    totals = TaxCalculator(STACKED).totals(lines, DAY)
+    assert (totals.net, totals.tax) == (Money.of("150", USD), Money.of("37", USD))  # 27 + 10
+
+
+@pytest.mark.parametrize(
+    "categories_of_the_line",
+    [(), (STANDARD_KEY, STANDARD_KEY)],
+    ids=["none", "the-same-twice"],
+)
+def test_a_line_taxed_in_no_category_or_twice_in_one_is_a_defect(
+    categories_of_the_line: tuple[TaxCategoryKey, ...],
+) -> None:
+    with pytest.raises(InvalidValueError, match=r"^tax_line\.categories must be"):
+        TaxLine(base=Money.of("1", USD), categories=categories_of_the_line)
+
+
 def test_no_lines_total_nothing_in_the_regime_currency() -> None:
     totals = TaxCalculator(regime()).totals([], DAY)
     assert (totals.net, totals.tax, totals.gross, totals.categories) == (
@@ -427,8 +473,9 @@ precise = st.decimals(min_value=Decimal(-(10**16)), max_value=Decimal(10**16), p
     lambda value: Money(value, USD)
 )
 categories = st.sampled_from([STANDARD_KEY, REDUCED_KEY])
-tax_lines = st.lists(st.builds(TaxLine, base=amounts, category=categories), max_size=30)
-precise_lines = st.lists(st.builds(TaxLine, base=precise, category=categories), max_size=5)
+stacks = st.lists(categories, min_size=1, max_size=2, unique=True).map(tuple)
+tax_lines = st.lists(st.builds(TaxLine, base=amounts, categories=stacks), max_size=30)
+precise_lines = st.lists(st.builds(TaxLine, base=precise, categories=stacks), max_size=5)
 rounding_points = st.frozensets(st.sampled_from(list(RoundingPoint)))
 rounding_modes = st.sampled_from(list(RoundingMode))
 
@@ -439,7 +486,7 @@ def test_the_total_is_the_sum_of_its_parts(
 ) -> None:
     totals = TaxCalculator(regime(points=rounding, mode=mode)).totals(items, DAY)
     assert totals.gross == totals.net + totals.tax
-    assert totals.net == sum((total.base for total in totals.categories), start=Money.zero(USD))
+    assert totals.net == sum((item.base for item in items), start=Money.zero(USD))  # each base counted once
 
 
 @given(tax_lines, rounding_points, st.permutations(range(30)))

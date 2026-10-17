@@ -143,6 +143,7 @@ def test_regimes_load_validate_and_freeze() -> None:
     assert regimes.get("us").key == "us"
     assert regimes.get("mx") is mexico
     assert regimes.keys() == ("mx", "us")
+    assert regimes.all() == (mexico, regimes.get("us"))  # in key order
     assert regimes.tax_id_schemes.parse("us.probe", "1234").tax_id.value == "1234"
     assert regimes.tax_id_schemes.parse("mx.probe", "5678").tax_id.value == "5678"
     with pytest.raises(RegimeUnknownError, match="'fr'"):

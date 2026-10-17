@@ -201,6 +201,10 @@ class Settings(_ClosedSettings):
     token_algorithms: frozenset[TokenAlgorithm] = Field(default=frozenset({"RS256"}), min_length=1)
     token_leeway_seconds: Annotated[int, Field(ge=0, le=300)] = 60
     """How far the provider's clock and ours may disagree, for ``exp``, ``nbf`` and ``iat``."""
+    rate_limit_per_second: Annotated[float, Field(gt=0, le=100_000)] = 50.0
+    """Requests a second one credential may make in this replica: the backstop behind the ingress's limit."""
+    rate_limit_burst: Annotated[int, Field(ge=1, le=100_000)] = 100
+    """How many requests one credential may make at once before it is held to ``rate_limit_per_second``."""
 
     @field_validator("database_url", "database_direct_url")
     @classmethod

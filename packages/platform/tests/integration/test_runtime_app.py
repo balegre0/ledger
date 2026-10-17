@@ -7,7 +7,6 @@ them, and the modules ``probe`` (a route, a consumer, a job kind, a schedule and
 
 import asyncio
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -37,6 +36,7 @@ from ledger_platform.jobs.outcomes import Done, JobSpec
 from ledger_platform.runtime.app import App
 from ledger_platform.runtime.contexts import Module, ModuleParts
 from ledger_platform.runtime.registries import MODULES, Discovered
+from ledger_testing import waiting
 from ledger_testing.database import TEST_LOGINS, fresh_database
 from ledger_testing.issuer import SUBJECT
 lazy from ledger_kernel.access import Principal
@@ -413,7 +413,7 @@ def test_migrate_brings_every_schema_to_head_grants_the_relay_and_writes_the_sub
     fresh: Fresh, probe: ProbeModule
 ) -> None:
     fresh.migrate(probe)
-    assert fresh.rows("SELECT version_num FROM platform.alembic_version") == [("0001",)]
+    assert fresh.rows("SELECT version_num FROM platform.alembic_version") == [("0002",)]
     assert fresh.rows("SELECT version_num FROM probe.alembic_version") == [("r0001",)]
     assert fresh.rows("SELECT version_num FROM other.alembic_version") == [("r0001",)]
     assert fresh.rows("SELECT consumer, event_type, active FROM probe.subscriptions") == [
@@ -436,17 +436,29 @@ def test_migrate_again_changes_nothing_but_the_routing_version(fresh: Fresh, pro
     assert fresh.rows("SELECT version FROM platform.routing") == [(2,)]
 
 
-def test_two_migrations_at_once_serialize(fresh: Fresh, probe: ProbeModule) -> None:
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        for run in [pool.submit(fresh.migrate, probe) for _ in range(2)]:
-            run.result()
-    assert fresh.rows("SELECT version_num FROM platform.alembic_version") == [("0001",)]
+async def test_a_migration_waits_for_the_lock_of_the_schema_it_migrates(
+    fresh: Fresh, probe: ProbeModule
+) -> None:
+    """One migration blocked by a held lock, then released: the race is the database's, not a pair of threads.
+
+    Alembic's ``op`` is global to a process, so two migrations in two threads of the test's process would race
+    on it; two ``migrate`` processes, which is what runs, cannot.
+    """
+    key = SchemaMigrations(schema="probe", scripts=f"{probe.scripts}/probe").lock_key
+    with fresh.admin() as holder:
+        _ = holder.execute("SELECT pg_advisory_lock(%s)", (key,))
+        migrating = asyncio.create_task(asyncio.to_thread(fresh.migrate, probe))
+        await waiting.eventually(partial(waiting.waits_for_a_lock, fresh.migrator_url))
+        assert not migrating.done()
+        _ = holder.execute("SELECT pg_advisory_unlock(%s)", (key,))
+    await migrating
+    assert fresh.rows("SELECT version_num FROM platform.alembic_version") == [("0002",)]
     assert fresh.rows("SELECT version_num FROM probe.alembic_version") == [("r0001",)]
     assert fresh.rows("SELECT version_num FROM other.alembic_version") == [("r0001",)]
     assert fresh.rows("SELECT consumer, event_type, active FROM probe.subscriptions") == [
         ("probe.echo", "probe.thing.renamed", True)
     ]
-    assert fresh.rows("SELECT version FROM platform.routing") == [(2,)]
+    assert fresh.rows("SELECT version FROM platform.routing") == [(1,)]
 
 
 def test_a_removed_consumer_is_deactivated_not_deleted(fresh: Fresh, probe: ProbeModule) -> None:

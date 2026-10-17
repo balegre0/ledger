@@ -359,10 +359,21 @@ class TaxIdSchemes:
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TaxLine:
-    """A line's taxable base and the category it is taxed in."""
+    """A line's taxable base and the categories taxed on it: one or more, each charged on the whole base.
+
+    A line taxed twice (a sales tax and a selective consumption tax, a tip) lists both categories; its base is
+    counted once in the net. Taxes stacked this way do not compound: a tax charged on a base that already
+    includes another is not expressible yet.
+    """
 
     base: Money
-    category: TaxCategoryKey
+    categories: tuple[TaxCategoryKey, ...]
+
+    def __post_init__(self) -> None:
+        if not self.categories or len(set(self.categories)) != len(self.categories):
+            raise InvalidValueError(
+                field="tax_line.categories", requirement="one or more distinct categories"
+            )
 
 
 @final
@@ -403,11 +414,14 @@ class TaxCalculator:
         """The totals of ``lines`` at the rates in effect on ``tax_point``, rounded where the regime says.
 
         Every line is in one currency (``CurrencyMismatchError`` otherwise); no lines total zero in the
-        regime's. Categories are listed by key, so the order of the lines never changes the result.
+        regime's. Categories are listed by key, so the order of the lines, and of a line's categories, never
+        changes the result. The net is the sum of the lines' bases, each counted once however many categories
+        tax it.
 
-        A line's tax is its base times the rate, computed exactly and rounded once: to the rule's places where
-        the regime rounds each line, to the finest scale money holds otherwise. Any base money holds is taxed
-        without an error (a 24-place base times a 6-place rate has 32 places: it is never left unrounded).
+        A line's tax in a category is its base times the rate, computed exactly and rounded once: to the
+        rule's places where the regime rounds each line, to the finest scale money holds otherwise. Any base
+        money holds is taxed without an error (a 24-place base times a 6-place rate has 32 places: it is never
+        left unrounded).
         """
         rule = self._regime.rounding
         currency = lines[0].base.currency if lines else self._regime.currency
@@ -417,14 +431,15 @@ class TaxCalculator:
         taxes: dict[TaxCategoryKey, Money] = {}
         percents: dict[TaxCategoryKey, Decimal] = {}
         for line in lines:
-            category = self._categories.get(line.category)
-            if category is None:
-                raise TaxCategoryUnknownError(line.category)
-            percent = category.rates.at(tax_point).percent
-            tax = line.base.times(percent.scaleb(-2), line_places, rule.mode)
-            bases[category.key] = bases.get(category.key, zero) + line.base
-            taxes[category.key] = taxes.get(category.key, zero) + tax
-            percents[category.key] = percent
+            for key in line.categories:
+                category = self._categories.get(key)
+                if category is None:
+                    raise TaxCategoryUnknownError(key)
+                percent = category.rates.at(tax_point).percent
+                tax = line.base.times(percent.scaleb(-2), line_places, rule.mode)
+                bases[category.key] = bases.get(category.key, zero) + line.base
+                taxes[category.key] = taxes.get(category.key, zero) + tax
+                percents[category.key] = percent
         categories = tuple(
             CategoryTotal(
                 category=key,
@@ -436,7 +451,7 @@ class TaxCalculator:
             )
             for key in sorted(bases)
         )
-        net = sum((category.base for category in categories), start=zero)
+        net = sum((line.base for line in lines), start=zero)  # a base taxed twice is still one base
         tax_total = sum((category.tax for category in categories), start=zero)
         if RoundingPoint.DOCUMENT in rule.points:
             tax_total = tax_total.quantized(rule.places, rule.mode)

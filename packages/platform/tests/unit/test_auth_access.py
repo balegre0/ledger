@@ -11,7 +11,7 @@ from ledger_kernel.access import (
     parse_permission,
 )
 from ledger_kernel.errors import ErrorKind
-from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_kernel.ids import COMPANY_PREFIX, CompanyId, OrganizationId, format_id, new_id
 from ledger_kernel.tenancy import Tenant
 from ledger_platform import auth
 from ledger_platform.auth.access import CompanyAccess
@@ -49,6 +49,6 @@ def test_the_access_errors_are_the_kernel_s_one_class_per_code() -> None:
     assert (error.kind, error.code, str(error)) == (
         ErrorKind.NOT_FOUND,
         "company_not_found",
-        f"company {COMPANY} was not found",
+        f"company {format_id(COMPANY_PREFIX, COMPANY)} was not found",
     )
     assert Permission("x.y.read") == "x.y.read"

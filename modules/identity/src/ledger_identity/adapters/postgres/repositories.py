@@ -1,48 +1,60 @@
 """identity's repositories: the ports of ``application.ports`` over one transaction (SQLAlchemy Core).
 
-Every repository is bound to the organization of its unit and names it in every read, update and upsert; the
-repositories of a company's rows (branches, emission points) are bound to the unit's company as well, and name
-it too. Row-level security enforces the unit's scope again. Tenancy is checked
+Every repository is bound to the organization of its unit and names it in every read, update and upsert.
+Row-level security enforces the unit's scope again. Tenancy is checked
 twice (§2): a statement that forgot its filter still sees nothing of another tenant, and a policy dropped by
 mistake still leaves every read and change inside the organization. An insert that could collide uses ``ON
 CONFLICT DO NOTHING`` against the constraint or unique index that would refuse it, and reads the outcome from
 ``RETURNING``: a taken tax id or code is an answer, not an exception to parse. The index decides even where
-row-level security hides the row that holds the value (an active company of another organization). A row of
+row-level security hides the row that holds the value (the registry holds every organization's). A row of
 another organization handed to a repository to keep is refused before any statement (``ForeignTenantError``):
 a defect of the caller, which row-level security would refuse as well. A list is read in the direction of
 its page (``ledger_platform.data.paging``): backwards for a page that ends before a cursor.
 """
 
 from typing import ClassVar, final, override
-lazy from datetime import datetime
+lazy from collections.abc import Sequence
+lazy from datetime import date, datetime
 lazy from uuid import UUID
 
-from sqlalchemy import and_, false, func, select, update
+from sqlalchemy import and_, case, delete, false, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 lazy from sqlalchemy import ColumnElement, Row, Select
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
-lazy from sqlalchemy.orm import InstrumentedAttribute
 
 from ledger_identity.adapters.postgres.tables import (
-    BranchRecord,
+    ApiClientRecord,
     CompanyRecord,
-    EmissionPointRecord,
+    CompanyTaxIdRecord,
+    EstablishmentRecord,
     MembershipRecord,
     OrganizationRecord,
+    TaxRegistrationRecord,
 )
-from ledger_identity.application.ports import Branches, Companies, EmissionPoints, Memberships, Organizations
-from ledger_identity.domain.branches import Branch, EmissionPoint
-from ledger_identity.domain.company import Company, CompanyStatus
-from ledger_identity.domain.ids import BranchId, EmissionPointId, MembershipId
+from ledger_identity.application.ports import (
+    ApiClients,
+    Companies,
+    Establishments,
+    Holder,
+    Memberships,
+    Organizations,
+    TaxRegistry,
+)
+from ledger_identity.domain.api_clients import ApiClient, ApiClientStatus
+from ledger_identity.domain.company import Company, CompanyStatus, FiscalProfile
+from ledger_identity.domain.establishments import Establishment
+from ledger_identity.domain.ids import ApiClientId, EstablishmentId, MembershipId
 from ledger_identity.domain.membership import Membership, MembershipStatus
 from ledger_identity.domain.organization import Organization
-from ledger_identity.domain.text import Code, LegalName, Name
+from ledger_identity.domain.text import Code, LegalName, Name, TimeZone
 from ledger_kernel.access import Role, SubjectId
 from ledger_kernel.errors import LedgerError
 from ledger_kernel.ids import CompanyId, OrganizationId
+from ledger_kernel.jurisdiction import CountryCode, Jurisdiction
+from ledger_kernel.money import Currency
 from ledger_kernel.pagination import page_of
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
-from ledger_kernel.tenancy import Tenant
+from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.data import paged
 lazy from ledger_kernel.pagination import Page, PageRequest
 
@@ -62,50 +74,51 @@ def _require_own(organization: OrganizationId, unit: OrganizationId) -> None:
         raise ForeignTenantError
 
 
-def _require_own_company(tenant: Tenant, organization: OrganizationId, company: CompanyId | None) -> None:
-    """Refuse a company's row in a unit of another organization or company, or of no company at all."""
-    if company is None or tenant != Tenant(organization, company, None):
-        raise ForeignTenantError
+def _in_the_unit_s_mode(mode: Mode | None) -> ColumnElement[bool]:
+    """A moded row is the unit's mode's; a unit with no mode sees none (row-level security's own rule)."""
+    return false() if mode is None else ApiClientRecord.mode == mode.value
 
 
-def _in_the_unit_s_company(
-    column: InstrumentedAttribute[UUID], company: CompanyId | None
-) -> ColumnElement[bool]:
-    """``column`` is the unit's company; a unit scoped to a whole organization sees no company's row.
-
-    Row-level security's own rule for the rows a company owns: the application states it again.
-    """
-    return false() if company is None else column == company
-
-
-_ORGANIZATION = select(OrganizationRecord.id, OrganizationRecord.provider_id, OrganizationRecord.created_at)
+_API_CLIENT = select(
+    ApiClientRecord.id,
+    ApiClientRecord.organization_id,
+    ApiClientRecord.mode,
+    ApiClientRecord.subject,
+    ApiClientRecord.name,
+    ApiClientRecord.api_version,
+    ApiClientRecord.status,
+    ApiClientRecord.created_at,
+    ApiClientRecord.created_by,
+    ApiClientRecord.revoked_at,
+)
+_ORGANIZATION = select(
+    OrganizationRecord.id,
+    OrganizationRecord.provider_id,
+    OrganizationRecord.created_at,
+    OrganizationRecord.api_version,
+)
 _COMPANY = select(
     CompanyRecord.id,
     CompanyRecord.organization_id,
-    CompanyRecord.tax_scheme,
-    CompanyRecord.tax_value,
+    CompanyRecord.country,
+    CompanyRecord.subdivision,
+    CompanyRecord.currency,
     CompanyRecord.legal_name,
     CompanyRecord.status,
+    CompanyRecord.fiscal_profile_locked_at,
     CompanyRecord.version,
     CompanyRecord.created_at,
     CompanyRecord.updated_at,
 )
-_BRANCH = select(
-    BranchRecord.id,
-    BranchRecord.organization_id,
-    BranchRecord.company_id,
-    BranchRecord.code,
-    BranchRecord.name,
-    BranchRecord.created_at,
-)
-_POINT = select(
-    EmissionPointRecord.id,
-    EmissionPointRecord.organization_id,
-    EmissionPointRecord.company_id,
-    EmissionPointRecord.branch_id,
-    EmissionPointRecord.code,
-    EmissionPointRecord.name,
-    EmissionPointRecord.created_at,
+type CompanyRow = Row[UUID, UUID, str, str | None, str, str, str, datetime | None, int, datetime, datetime]
+_ESTABLISHMENT = select(
+    EstablishmentRecord.id,
+    EstablishmentRecord.organization_id,
+    EstablishmentRecord.company_id,
+    EstablishmentRecord.code,
+    EstablishmentRecord.name,
+    EstablishmentRecord.time_zone,
+    EstablishmentRecord.created_at,
 )
 _MEMBERSHIP = select(
     MembershipRecord.id,
@@ -121,41 +134,70 @@ _MEMBERSHIP = select(
 _ACTIVE = MembershipRecord.status == MembershipStatus.ACTIVE.value
 
 
-def _organization(row: Row[UUID, str, datetime]) -> Organization:
-    identifier, provider_id, created_at = row
-    return Organization(id=OrganizationId(identifier), provider_id=provider_id, created_at=created_at)
+def _organization(row: Row[UUID, str, datetime, date]) -> Organization:
+    identifier, provider_id, created_at, api_version = row
+    return Organization(
+        id=OrganizationId(identifier), provider_id=provider_id, created_at=created_at, api_version=api_version
+    )
 
 
-def _company(row: Row[UUID, UUID, str, str, str, str, int, datetime, datetime]) -> Company:
-    identifier, organization, scheme, value, legal_name, status, version, created_at, updated_at = row
+def _company(row: CompanyRow, tax_ids: tuple[TaxId, ...]) -> Company:
+    (
+        identifier,
+        organization,
+        country,
+        subdivision,
+        currency,
+        legal_name,
+        status,
+        locked_at,
+        version,
+        created_at,
+        updated_at,
+    ) = row
     return Company(
         id=CompanyId(identifier),
         organization=OrganizationId(organization),
-        tax_id=TaxId(TaxIdScheme(scheme), value),
+        profile=FiscalProfile(
+            jurisdiction=Jurisdiction(CountryCode(country), subdivision),
+            functional_currency=Currency.of(currency),
+            tax_ids=tax_ids,
+        ),
         legal_name=LegalName(legal_name),
         status=CompanyStatus(status),
+        fiscal_profile_locked_at=locked_at,
         version=version,
         created_at=created_at,
         updated_at=updated_at,
     )
 
 
-def _branch(row: Row[UUID, UUID, UUID, str, str, datetime]) -> Branch:
-    identifier, organization, company, code, name, created_at = row
-    tenant = Tenant(OrganizationId(organization), CompanyId(company), None)
-    return Branch(
-        id=BranchId(identifier), tenant=tenant, code=Code(code), name=Name(name), created_at=created_at
+def _api_client(row: Row[UUID, UUID, str, str, str, date, str, datetime, str, datetime | None]) -> ApiClient:
+    identifier, organization, mode, subject, name, api_version, status, created_at, created_by, revoked_at = (
+        row
+    )
+    return ApiClient(
+        id=ApiClientId(identifier),
+        organization=OrganizationId(organization),
+        mode=Mode(mode),
+        subject=SubjectId(subject),
+        name=Name(name),
+        api_version=api_version,
+        status=ApiClientStatus(status),
+        created_at=created_at,
+        created_by=SubjectId(created_by),
+        revoked_at=revoked_at,
     )
 
 
-def _point(row: Row[UUID, UUID, UUID, UUID, str, str, datetime]) -> EmissionPoint:
-    identifier, organization, company, branch, code, name, created_at = row
-    return EmissionPoint(
-        id=EmissionPointId(identifier),
+def _establishment(row: Row[UUID, UUID, UUID, str, str, str, datetime]) -> Establishment:
+    identifier, organization, company, code, name, time_zone, created_at = row
+    return Establishment(
+        id=EstablishmentId(identifier),
         tenant=Tenant(OrganizationId(organization), CompanyId(company), None),
-        branch=BranchId(branch),
         code=Code(code),
         name=Name(name),
+        time_zone=TimeZone(time_zone),
         created_at=created_at,
     )
 
@@ -190,7 +232,10 @@ class PgOrganizations(Organizations):
         await self._connection.execute(
             insert(OrganizationRecord)
             .values(
-                id=organization.id, provider_id=organization.provider_id, created_at=organization.created_at
+                id=organization.id,
+                provider_id=organization.provider_id,
+                created_at=organization.created_at,
+                api_version=organization.api_version,
             )
             .on_conflict_do_nothing(index_elements=[OrganizationRecord.id])
         )
@@ -217,37 +262,73 @@ class PgCompanies(Companies):
     @override
     async def add(self, company: Company) -> bool:
         _require_own(company.organization, self._organization)
-        added = await self._connection.execute(
-            insert(CompanyRecord)
-            .values(
+        profile = company.profile
+        attempt = (
+            await self._connection.begin_nested()
+        )  # a taken tax id leaves no company and no registration
+        await self._connection.execute(
+            insert(CompanyRecord).values(
                 id=company.id,
                 organization_id=company.organization,
-                tax_scheme=company.tax_id.scheme,
-                tax_value=company.tax_id.value,
+                country=profile.jurisdiction.country,
+                subdivision=profile.jurisdiction.subdivision,
+                currency=profile.functional_currency.code,
                 legal_name=company.legal_name,
                 status=company.status.value,
+                fiscal_profile_locked_at=company.fiscal_profile_locked_at,
                 version=company.version,
                 created_at=company.created_at,
                 updated_at=company.updated_at,
             )
-            # The index, not a lookup: another organization's company is a row this unit cannot see.
-            .on_conflict_do_nothing(
-                index_elements=[CompanyRecord.tax_scheme, CompanyRecord.tax_value],
-                index_where=CompanyRecord.status == CompanyStatus.ACTIVE.value,
-            )
-            .returning(CompanyRecord.id)
         )
-        return added.first() is not None
+        await self._connection.execute(
+            insert(CompanyTaxIdRecord).values(
+                [
+                    {
+                        "organization_id": company.organization,
+                        "company_id": company.id,
+                        "position": position,
+                        "scheme": tax_id.scheme,
+                        "value": tax_id.value,
+                    }
+                    for position, tax_id in enumerate(profile.tax_ids)
+                ]
+            )
+        )
+        # The registry's key, not a lookup: another organization's company is a row this unit cannot see.
+        registered = await self._connection.execute(
+            insert(TaxRegistrationRecord)
+            .values(
+                [
+                    {
+                        "scheme": tax_id.scheme,
+                        "value": tax_id.value,
+                        "organization_id": company.organization,
+                        "company_id": company.id,
+                    }
+                    for tax_id in profile.tax_ids
+                ]
+            )
+            .on_conflict_do_nothing(
+                index_elements=[TaxRegistrationRecord.scheme, TaxRegistrationRecord.value]
+            )
+            .returning(TaxRegistrationRecord.scheme)
+        )
+        if len(registered.all()) != len(profile.tax_ids):  # any one tax id held refuses the whole company
+            await attempt.rollback()
+            return False
+        await attempt.commit()
+        return True
 
     @override
     async def get(self, company: CompanyId) -> Company | None:
-        row = (await self._connection.execute(self._one(company))).first()
-        return None if row is None else _company(row)
+        rows = (await self._connection.execute(self._one(company))).all()
+        return (await self._companies(rows))[0] if rows else None
 
     @override
     async def locked(self, company: CompanyId) -> Company | None:
-        row = (await self._connection.execute(self._one(company).with_for_update())).first()
-        return None if row is None else _company(row)
+        rows = (await self._connection.execute(self._one(company).with_for_update())).all()
+        return (await self._companies(rows))[0] if rows else None
 
     @override
     async def update(self, company: Company, *, version: int) -> bool:
@@ -262,11 +343,21 @@ class PgCompanies(Companies):
             .values(
                 legal_name=company.legal_name,
                 status=company.status.value,
+                fiscal_profile_locked_at=company.fiscal_profile_locked_at,
                 version=company.version,
                 updated_at=company.updated_at,
             )
         )
-        return changed.rowcount == 1
+        if changed.rowcount != 1:
+            return False
+        if company.status is CompanyStatus.INACTIVE:  # its tax ids are free for any organization to register
+            await self._connection.execute(
+                delete(TaxRegistrationRecord).where(
+                    TaxRegistrationRecord.organization_id == self._organization,
+                    TaxRegistrationRecord.company_id == company.id,
+                )
+            )
+        return True
 
     @override
     async def of_member(self, subject: SubjectId, request: PageRequest) -> Page[Company]:
@@ -278,112 +369,187 @@ class PgCompanies(Companies):
             CompanyRecord.organization_id == self._organization, MembershipRecord.subject == subject, _ACTIVE
         )
         rows = (await self._connection.execute(paged(statement, CompanyRecord.id, request))).all()
-        return page_of([_company(row) for row in rows], request, key=lambda company: company.id)
+        return page_of(await self._companies(rows), request, key=lambda company: company.id)
 
-    def _one(self, company: CompanyId) -> Select[UUID, UUID, str, str, str, str, int, datetime, datetime]:
+    async def _companies(self, rows: Sequence[CompanyRow]) -> list[Company]:
+        """The companies of ``rows``, each with its tax ids in their order (one read for all of them)."""
+        found = await self._connection.execute(
+            select(CompanyTaxIdRecord.company_id, CompanyTaxIdRecord.scheme, CompanyTaxIdRecord.value)
+            .where(
+                CompanyTaxIdRecord.organization_id == self._organization,
+                CompanyTaxIdRecord.company_id.in_([row[0] for row in rows]),
+            )
+            .order_by(CompanyTaxIdRecord.company_id, CompanyTaxIdRecord.position)
+        )
+        tax_ids: dict[UUID, list[TaxId]] = {}
+        for company, scheme, value in found.all():
+            tax_ids.setdefault(company, []).append(TaxId(TaxIdScheme(scheme), value))
+        return [_company(row, tuple(tax_ids[row[0]])) for row in rows]
+
+    def _one(
+        self, company: CompanyId
+    ) -> Select[UUID, UUID, str, str | None, str, str, str, datetime | None, int, datetime, datetime]:
         return _COMPANY.where(
             CompanyRecord.organization_id == self._organization, CompanyRecord.id == company
         )
 
 
 @final
-class PgBranches(Branches):
-    """The branches of the unit's company, in PostgreSQL: none in a unit of a whole organization."""
+class PgTaxRegistry(TaxRegistry):
+    """The tax ids active companies hold, in PostgreSQL: no tenant's, so no organization is named."""
 
-    __slots__ = ("_company", "_connection", "_organization")
+    __slots__ = ("_connection",)
 
-    def __init__(
-        self, connection: AsyncConnection, organization: OrganizationId, company: CompanyId | None
-    ) -> None:
+    def __init__(self, connection: AsyncConnection) -> None:
         self._connection = connection
-        self._organization = organization
-        self._company = company
 
     @override
-    async def add(self, branch: Branch) -> bool:
-        _require_own_company(branch.tenant, self._organization, self._company)
-        added = await self._connection.execute(
-            insert(BranchRecord)
-            .values(
-                id=branch.id,
-                organization_id=branch.tenant.organization,
-                company_id=branch.tenant.company,
-                code=branch.code,
-                name=branch.name,
-                created_at=branch.created_at,
+    async def holder_of(self, tax_id: TaxId) -> Holder | None:
+        row = (
+            await self._connection.execute(
+                select(TaxRegistrationRecord.organization_id, TaxRegistrationRecord.company_id).where(
+                    TaxRegistrationRecord.scheme == tax_id.scheme, TaxRegistrationRecord.value == tax_id.value
+                )
             )
-            .on_conflict_do_nothing(constraint="uq_branches_code")
-            .returning(BranchRecord.id)
+        ).first()
+        return None if row is None else Holder(OrganizationId(row[0]), CompanyId(row[1]))
+
+
+@final
+class PgEstablishments(Establishments):
+    """The establishments of the companies of the unit's organization, in PostgreSQL."""
+
+    __slots__ = ("_connection", "_organization")
+
+    def __init__(self, connection: AsyncConnection, organization: OrganizationId) -> None:
+        self._connection = connection
+        self._organization = organization
+
+    @override
+    async def add(self, establishment: Establishment) -> bool:
+        _require_own(establishment.tenant.organization, self._organization)
+        added = await self._connection.execute(
+            insert(EstablishmentRecord)
+            .values(
+                id=establishment.id,
+                organization_id=establishment.tenant.organization,
+                company_id=establishment.tenant.company,
+                code=establishment.code,
+                name=establishment.name,
+                time_zone=establishment.time_zone,
+                created_at=establishment.created_at,
+            )
+            .on_conflict_do_nothing(constraint="uq_establishments_code")
+            .returning(EstablishmentRecord.id)
         )
         return added.first() is not None
 
     @override
-    async def get(self, company: CompanyId, branch: BranchId) -> Branch | None:
-        row = (await self._connection.execute(self._of(company).where(BranchRecord.id == branch))).first()
-        return None if row is None else _branch(row)
+    async def get(self, company: CompanyId, establishment: EstablishmentId) -> Establishment | None:
+        found = self._of(company).where(EstablishmentRecord.id == establishment)
+        row = (await self._connection.execute(found)).first()
+        return None if row is None else _establishment(row)
 
     @override
-    async def page(self, company: CompanyId, request: PageRequest) -> Page[Branch]:
-        rows = (await self._connection.execute(paged(self._of(company), BranchRecord.id, request))).all()
-        return page_of([_branch(row) for row in rows], request, key=lambda branch: branch.id)
+    async def by_code(self, company: CompanyId, code: Code) -> Establishment | None:
+        row = (
+            await self._connection.execute(self._of(company).where(EstablishmentRecord.code == code))
+        ).first()
+        return None if row is None else _establishment(row)
 
-    def _of(self, company: CompanyId) -> Select[UUID, UUID, UUID, str, str, datetime]:
-        return _BRANCH.where(
-            BranchRecord.organization_id == self._organization,
-            _in_the_unit_s_company(BranchRecord.company_id, self._company),
-            BranchRecord.company_id == company,
+    @override
+    async def page(self, company: CompanyId, request: PageRequest) -> Page[Establishment]:
+        statement = paged(self._of(company), EstablishmentRecord.id, request)
+        rows = (await self._connection.execute(statement)).all()
+        return page_of([_establishment(row) for row in rows], request, key=lambda found: found.id)
+
+    def _of(self, company: CompanyId) -> Select[UUID, UUID, UUID, str, str, str, datetime]:
+        return _ESTABLISHMENT.where(
+            EstablishmentRecord.organization_id == self._organization,
+            EstablishmentRecord.company_id == company,
         )
 
 
 @final
-class PgEmissionPoints(EmissionPoints):
-    """The emission points of the unit's company, in PostgreSQL: none in a unit of a whole organization."""
+class PgApiClients(ApiClients):
+    """The API clients of the unit's organization and mode, in PostgreSQL: none in a unit with no mode."""
 
-    __slots__ = ("_company", "_connection", "_organization")
+    __slots__ = ("_connection", "_mode", "_organization")
 
-    def __init__(
-        self, connection: AsyncConnection, organization: OrganizationId, company: CompanyId | None
-    ) -> None:
+    def __init__(self, connection: AsyncConnection, organization: OrganizationId, mode: Mode | None) -> None:
         self._connection = connection
         self._organization = organization
-        self._company = company
+        self._mode = mode
 
     @override
-    async def add(self, point: EmissionPoint) -> bool:
-        _require_own_company(point.tenant, self._organization, self._company)
+    async def add(self, client: ApiClient) -> bool:
+        _require_own(client.organization, self._organization)
+        if client.mode is not self._mode:
+            raise ForeignTenantError
+        # The index decides, even where row-level security hides the other mode's client of the machine user.
         added = await self._connection.execute(
-            insert(EmissionPointRecord)
+            insert(ApiClientRecord)
             .values(
-                id=point.id,
-                organization_id=point.tenant.organization,
-                company_id=point.tenant.company,
-                branch_id=point.branch,
-                code=point.code,
-                name=point.name,
-                created_at=point.created_at,
+                id=client.id,
+                organization_id=client.organization,
+                mode=client.mode.value,
+                subject=client.subject,
+                name=client.name,
+                api_version=client.api_version,
+                status=client.status.value,
+                created_at=client.created_at,
+                created_by=client.created_by,
+                revoked_at=client.revoked_at,
             )
-            .on_conflict_do_nothing(constraint="uq_emission_points_code")
-            .returning(EmissionPointRecord.id)
+            .on_conflict_do_nothing(
+                index_elements=[ApiClientRecord.organization_id, ApiClientRecord.subject],
+                index_where=ApiClientRecord.status == ApiClientStatus.ACTIVE.value,
+            )
+            .returning(ApiClientRecord.id)
         )
         return added.first() is not None
 
     @override
-    async def get(self, company: CompanyId, point: EmissionPointId) -> EmissionPoint | None:
-        statement = self._of(company).where(EmissionPointRecord.id == point)
-        row = (await self._connection.execute(statement)).first()
-        return None if row is None else _point(row)
+    async def get(self, client: ApiClientId) -> ApiClient | None:
+        row = (await self._connection.execute(self._mine().where(ApiClientRecord.id == client))).first()
+        return None if row is None else _api_client(row)
 
     @override
-    async def page(self, company: CompanyId, branch: BranchId, request: PageRequest) -> Page[EmissionPoint]:
-        mine = self._of(company).where(EmissionPointRecord.branch_id == branch)
-        rows = (await self._connection.execute(paged(mine, EmissionPointRecord.id, request))).all()
-        return page_of([_point(row) for row in rows], request, key=lambda point: point.id)
+    async def revoked(self, client: ApiClient) -> bool:
+        _require_own(client.organization, self._organization)
+        changed = await self._connection.execute(
+            update(ApiClientRecord)
+            .where(
+                ApiClientRecord.organization_id == self._organization,
+                ApiClientRecord.id == client.id,
+                ApiClientRecord.status == ApiClientStatus.ACTIVE.value,
+                _in_the_unit_s_mode(self._mode),
+            )
+            .values(status=client.status.value, revoked_at=client.revoked_at)
+        )
+        return changed.rowcount == 1
 
-    def _of(self, company: CompanyId) -> Select[UUID, UUID, UUID, UUID, str, str, datetime]:
-        return _POINT.where(
-            EmissionPointRecord.organization_id == self._organization,
-            _in_the_unit_s_company(EmissionPointRecord.company_id, self._company),
-            EmissionPointRecord.company_id == company,
+    @override
+    async def page(self, request: PageRequest) -> Page[ApiClient]:
+        rows = (await self._connection.execute(paged(self._mine(), ApiClientRecord.id, request))).all()
+        return page_of([_api_client(row) for row in rows], request, key=lambda found: found.id)
+
+    @override
+    async def of_subject(self, subject: SubjectId) -> ApiClient | None:
+        newest_active_first = (
+            case((ApiClientRecord.status == ApiClientStatus.ACTIVE.value, 0), else_=1),
+            ApiClientRecord.id.desc(),
+        )
+        row = (
+            await self._connection.execute(
+                self._mine().where(ApiClientRecord.subject == subject).order_by(*newest_active_first).limit(1)
+            )
+        ).first()
+        return None if row is None else _api_client(row)
+
+    def _mine(self) -> Select[UUID, UUID, str, str, str, date, str, datetime, str, datetime | None]:
+        return _API_CLIENT.where(
+            ApiClientRecord.organization_id == self._organization, _in_the_unit_s_mode(self._mode)
         )
 
 

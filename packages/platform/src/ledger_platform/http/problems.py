@@ -36,6 +36,7 @@ lazy from fastapi import FastAPI, Request
 
 from ledger_kernel.errors import ErrorKind, InvalidInputError, LedgerError, described, truncate
 from ledger_platform.http.metrics import declared_route
+from ledger_platform.http.rate import RateLimitedError
 from ledger_platform.http.request_fields import remembered
 from ledger_platform.observability.logs import MAX_ISSUES, location_of
 
@@ -123,9 +124,24 @@ class BadRequestError(InvalidInputError):
     code: ClassVar[str] = "bad_request"
 
 
+class PayloadTooLargeError(InvalidInputError):
+    """A request body over the limit (``http.limits``): answered 413, its kind ``INVALID``."""
+
+    code: ClassVar[str] = "payload_too_large"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"The request body is larger than {limit} bytes.")
+
+
 def status_of(error: LedgerError) -> HTTPStatus:
-    """400 for a ``BadRequestError``, else the status of the error's kind (§9.6)."""
-    return HTTPStatus.BAD_REQUEST if isinstance(error, BadRequestError) else _STATUS[error.kind]
+    """400 for a ``BadRequestError``, 413 for a body too large, 429 for a rate limit, else by kind (§9.6)."""
+    if isinstance(error, BadRequestError):
+        return HTTPStatus.BAD_REQUEST
+    if isinstance(error, PayloadTooLargeError):
+        return HTTPStatus.CONTENT_TOO_LARGE
+    if isinstance(error, RateLimitedError):
+        return HTTPStatus.TOO_MANY_REQUESTS
+    return _STATUS[error.kind]
 
 
 class _ValidationIssue(TypedDict):
@@ -197,6 +213,11 @@ def _problem(
     if request_id is not None:
         body["request_id"] = answered[REQUEST_ID_HEADER] = request_id
     return JSONResponse(body, status_code=status, headers=answered, media_type=PROBLEM_JSON)
+
+
+def refusal(error: LedgerError) -> JSONResponse:
+    """The problem document ``error`` is answered with, for a layer that answers before a route runs."""
+    return _problem(status_of(error), error.code, detail=str(error) or None)
 
 
 def current_request_id() -> str | None:
@@ -273,6 +294,8 @@ def install_problem_handlers(app: FastAPI, *, route_of: RouteOf = declared_route
             _report_defect(request, error, error.code, route_of)
             return _problem(status, INTERNAL_CODE)
         challenge = _challenge(error.code) if error.kind is ErrorKind.UNAUTHENTICATED else None
+        if isinstance(error, RateLimitedError):
+            challenge = {"Retry-After": str(error.retry_after)}
         return _problem(status, error.code, detail=str(error) or None, headers=challenge)
 
     @app.exception_handler(RequestValidationError)

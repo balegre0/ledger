@@ -10,18 +10,23 @@ from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
 from typing import Literal, Protocol, final
 lazy from collections.abc import Mapping
+lazy from contextlib import AbstractAsyncContextManager
 lazy from datetime import datetime
 lazy from uuid import UUID
 
-lazy from ledger_identity.domain.branches import Branch, EmissionPoint
+lazy from ledger_identity.domain.api_clients import ApiClient
 lazy from ledger_identity.domain.company import Company
-lazy from ledger_identity.domain.ids import BranchId, EmissionPointId
+lazy from ledger_identity.domain.establishments import Establishment
+lazy from ledger_identity.domain.ids import ApiClientId, EstablishmentId
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_identity.domain.organization import Organization
+lazy from ledger_identity.domain.text import Code
 lazy from ledger_identity.events import IdentityEvent
 lazy from ledger_kernel.access import SubjectId
 lazy from ledger_kernel.ids import CompanyId, OrganizationId
 lazy from ledger_kernel.pagination import Page, PageRequest
+lazy from ledger_kernel.tax_ids import TaxId
+lazy from ledger_kernel.tenancy import Scope
 
 
 class Organizations(Protocol, metaclass=ABCMeta):
@@ -51,7 +56,7 @@ class Companies(Protocol, metaclass=ABCMeta):
     async def locked(self, company: CompanyId) -> Company | None:
         """The company, locked until the unit ends.
 
-        Whatever is decided on it (its memberships, its being active, a new branch or emission point) waits
+        Whatever is decided on it (its memberships, its being active, a new establishment) waits
         for the other units that lock it.
         """
 
@@ -64,36 +69,24 @@ class Companies(Protocol, metaclass=ABCMeta):
         """The companies of the unit's organization in which ``subject`` holds an active role, in id order."""
 
 
-class Branches(Protocol, metaclass=ABCMeta):
-    """The branches of the unit's company."""
+class Establishments(Protocol, metaclass=ABCMeta):
+    """The establishments of the unit's company."""
 
     @abstractmethod
-    async def add(self, branch: Branch) -> bool:
-        """Keep a new branch; false when its company has a branch with its code."""
+    async def add(self, establishment: Establishment) -> bool:
+        """Keep a new establishment; false when its company has one with its code."""
 
     @abstractmethod
-    async def get(self, company: CompanyId, branch: BranchId) -> Branch | None:
-        """The branch of ``company``, or ``None``."""
+    async def get(self, company: CompanyId, establishment: EstablishmentId) -> Establishment | None:
+        """The establishment of ``company``, or ``None``."""
 
     @abstractmethod
-    async def page(self, company: CompanyId, request: PageRequest) -> Page[Branch]:
-        """The branches of ``company``, in id order."""
-
-
-class EmissionPoints(Protocol, metaclass=ABCMeta):
-    """The emission points of the unit's company."""
+    async def by_code(self, company: CompanyId, code: Code) -> Establishment | None:
+        """The establishment of ``company`` known by ``code``, or ``None``."""
 
     @abstractmethod
-    async def add(self, point: EmissionPoint) -> bool:
-        """Keep a new emission point; false when its branch has one with its code."""
-
-    @abstractmethod
-    async def get(self, company: CompanyId, point: EmissionPointId) -> EmissionPoint | None:
-        """The emission point of ``company``, or ``None``."""
-
-    @abstractmethod
-    async def page(self, company: CompanyId, branch: BranchId, request: PageRequest) -> Page[EmissionPoint]:
-        """The emission points of ``branch``, in id order."""
+    async def page(self, company: CompanyId, request: PageRequest) -> Page[Establishment]:
+        """The establishments of ``company``, in id order."""
 
 
 class Memberships(Protocol, metaclass=ABCMeta):
@@ -116,6 +109,30 @@ class Memberships(Protocol, metaclass=ABCMeta):
         """The active memberships of ``company``, in id order."""
 
 
+class ApiClients(Protocol, metaclass=ABCMeta):
+    """The API clients of the unit's organization, in the unit's mode: none in a unit that has no mode."""
+
+    @abstractmethod
+    async def add(self, client: ApiClient) -> bool:
+        """Keep a new API client; false when its machine user is an active client of the organization."""
+
+    @abstractmethod
+    async def get(self, client: ApiClientId) -> ApiClient | None:
+        """The API client of the unit's mode, or ``None``."""
+
+    @abstractmethod
+    async def revoked(self, client: ApiClient) -> bool:
+        """Keep ``client``, revoked, in place of the active one; false when it was not active any more."""
+
+    @abstractmethod
+    async def page(self, request: PageRequest) -> Page[ApiClient]:
+        """The API clients of the unit's mode, revoked ones too, in id order."""
+
+    @abstractmethod
+    async def of_subject(self, subject: SubjectId) -> ApiClient | None:
+        """The active API client of the machine user in the unit's mode, else its last revoked one."""
+
+
 class Events(Protocol, metaclass=ABCMeta):
     """What the unit announces once it commits."""
 
@@ -128,10 +145,12 @@ type AuditAction = Literal[
     "company.register",
     "company.rename",
     "company.deactivate",
+    "company.lock_fiscal_profile",
+    "api_client.register",
+    "api_client.revoke",
     "membership.grant",
     "membership.revoke",
-    "branch.open",
-    "emission_point.open",
+    "establishment.open",
 ]
 """What a use case records it did (§10: identity's changes are audited); the part before the dot names the
 kind of subject."""
@@ -166,10 +185,39 @@ class IdentityUnit:
 
     organizations: Organizations
     companies: Companies
-    branches: Branches
-    emission_points: EmissionPoints
+    establishments: Establishments
     memberships: Memberships
+    api_clients: ApiClients
     events: Events
     audit: Audit
     now: datetime
     """The unit's time: everything it records and announces happened then, as one transaction does."""
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class Holder:
+    """The company that holds a tax id, and the organization it is of."""
+
+    organization: OrganizationId
+    company: CompanyId
+
+
+class TaxRegistry(Protocol, metaclass=ABCMeta):
+    """The tax ids the active companies of every organization hold: what identity keeps across them."""
+
+    @abstractmethod
+    async def holder_of(self, tax_id: TaxId) -> Holder | None:
+        """The active company that holds ``tax_id``, or ``None``."""
+
+
+class IdentityUnits(Protocol, metaclass=ABCMeta):
+    """Where the facade gets the units it works in, one for each thing it does."""
+
+    @abstractmethod
+    def unit(self, scope: Scope) -> AbstractAsyncContextManager[IdentityUnit]:
+        """A unit scoped to an organization or one of its companies; it commits when its block ends."""
+
+    @abstractmethod
+    def registry(self) -> AbstractAsyncContextManager[TaxRegistry]:
+        """A unit that reads the registry, which no organization owns, and nothing else."""

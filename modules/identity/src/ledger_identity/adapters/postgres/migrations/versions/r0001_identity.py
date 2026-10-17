@@ -1,11 +1,11 @@
 """Revision 0001 of schema ``identity``: the chassis's tables, then identity's, under row-level security.
 
-v1's two revisions squashed into one (nothing was in production, §6.5): one active company per tax id in every
-organization is the index ``ux_companies_active_tax_id`` from the start, over the tax id's scheme and value
-(§7.3: a tax id is qualified by its scheme). Every type, length, word and
-constraint is spelled out (a revision records what was done and must not move with the models); the tests
-keep the models equal to it. The chassis's tables and the row-level security policies come from their
-versioned builders, whose output never changes (``chassis_schema_v1``, ``rls.policy``).
+v1's two revisions squashed into one (nothing was in production, §6.5): one active company per tax id in
+every organization is the primary key of ``tax_registrations`` from the start, over the tax id's scheme and
+value (§7.3: a tax id is qualified by its scheme), a table outside row-level security (§6.3). Every type,
+length, word and constraint is spelled out (a revision records what was done and must not move with the
+models); the tests keep the models equal to it. The chassis's tables and the row-level security policies
+come from their versioned builders, whose output never changes (``chassis_schema_v1``, ``rls.policy``).
 """
 
 from typing import Final
@@ -26,9 +26,10 @@ S: Final = "identity"
 ISOLATION: Final = (
     ("organizations", RlsScope.ORGANIZATION, "id"),
     ("companies", RlsScope.ORGANIZATION, "organization_id"),
+    ("company_tax_ids", RlsScope.ORGANIZATION, "organization_id"),
     ("memberships", RlsScope.ORGANIZATION, "organization_id"),
-    ("branches", RlsScope.COMPANY, "organization_id"),
-    ("emission_points", RlsScope.COMPANY, "organization_id"),
+    ("establishments", RlsScope.ORGANIZATION, "organization_id"),
+    ("api_clients", RlsScope.MODED_ORGANIZATION, "organization_id"),
 )
 """Whose rows each table holds, and the column naming the organization (an organization is its own)."""
 
@@ -46,23 +47,26 @@ def _of_company(table: str) -> sa.ForeignKeyConstraint:
 
 
 def upgrade() -> None:
-    """The chassis's tables, identity's, their policies, and one active company per tax id everywhere."""
+    """The chassis's tables, identity's, their policies, and the registry of one active company per tax id."""
     chassis_schema_v1(op, S)
     op.create_table(
         "organizations",
         sa.Column("id", sa.Uuid(), primary_key=True),
         sa.Column("provider_id", sa.String(128), nullable=False),
         _moment("created_at"),
+        sa.Column("api_version", sa.Date(), nullable=False),
         schema=S,
     )
     op.create_table(
         "companies",
         sa.Column("id", sa.Uuid(), primary_key=True),
         sa.Column("organization_id", sa.Uuid(), sa.ForeignKey(f"{S}.organizations.id"), nullable=False),
-        sa.Column("tax_scheme", sa.String(34), nullable=False),
-        sa.Column("tax_value", sa.String(40), nullable=False),
+        sa.Column("country", sa.String(2), nullable=False),
+        sa.Column("subdivision", sa.String(6), nullable=True),
+        sa.Column("currency", sa.String(3), nullable=False),
         sa.Column("legal_name", sa.String(300), nullable=False),
         sa.Column("status", sa.String(16), nullable=False),
+        sa.Column("fiscal_profile_locked_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("version", sa.BigInteger(), nullable=False),
         _moment("created_at"),
         _moment("updated_at"),
@@ -71,14 +75,30 @@ def upgrade() -> None:
         sa.CheckConstraint("version > 0", name="ck_companies_version"),
         schema=S,
     )
-    op.create_index(
-        "ux_companies_active_tax_id",
-        "companies",
-        ["tax_scheme", "tax_value"],
-        unique=True,
-        postgresql_where=sa.text("status = 'active'"),
+    op.create_table(
+        "company_tax_ids",
+        sa.Column("organization_id", sa.Uuid(), nullable=False),
+        sa.Column("company_id", sa.Uuid(), nullable=False),
+        sa.Column("position", sa.SmallInteger(), nullable=False),
+        sa.Column("scheme", sa.String(34), nullable=False),
+        sa.Column("value", sa.String(40), nullable=False),
+        sa.PrimaryKeyConstraint("company_id", "position", name="company_tax_ids_pkey"),
+        sa.UniqueConstraint("company_id", "scheme", "value", name="uq_company_tax_ids_value"),
+        _of_company("company_tax_ids"),
+        sa.CheckConstraint("position >= 0", name="ck_company_tax_ids_position"),
         schema=S,
     )
+    op.create_table(
+        "tax_registrations",
+        sa.Column("scheme", sa.String(34), nullable=False),
+        sa.Column("value", sa.String(40), nullable=False),
+        sa.Column("organization_id", sa.Uuid(), nullable=False),
+        sa.Column("company_id", sa.Uuid(), nullable=False),
+        sa.PrimaryKeyConstraint("scheme", "value", name="tax_registrations_pkey"),
+        _of_company("tax_registrations"),
+        schema=S,
+    )
+    op.create_index("ix_tax_registrations_company", "tax_registrations", ["company_id"], schema=S)
     op.create_table(
         "memberships",
         sa.Column("id", sa.Uuid(), primary_key=True),
@@ -102,37 +122,43 @@ def upgrade() -> None:
     op.create_index("ix_memberships_subject", "memberships", ["organization_id", "subject"], schema=S)
     op.create_index("ix_memberships_company", "memberships", ["company_id", "id"], schema=S)
     op.create_table(
-        "branches",
+        "establishments",
         sa.Column("id", sa.Uuid(), primary_key=True),
         sa.Column("organization_id", sa.Uuid(), nullable=False),
         sa.Column("company_id", sa.Uuid(), nullable=False),
         sa.Column("code", sa.String(10), nullable=False),
         sa.Column("name", sa.String(100), nullable=False),
+        sa.Column("time_zone", sa.String(64), nullable=False),
         _moment("created_at"),
-        sa.UniqueConstraint("company_id", "code", name="uq_branches_code"),
-        sa.UniqueConstraint("company_id", "id", name="uq_branches_company"),
-        _of_company("branches"),
+        sa.UniqueConstraint("company_id", "code", name="uq_establishments_code"),
+        _of_company("establishments"),
         schema=S,
     )
     op.create_table(
-        "emission_points",
+        "api_clients",
         sa.Column("id", sa.Uuid(), primary_key=True),
-        sa.Column("organization_id", sa.Uuid(), nullable=False),
-        sa.Column("company_id", sa.Uuid(), nullable=False),
-        sa.Column("branch_id", sa.Uuid(), nullable=False),
-        sa.Column("code", sa.String(10), nullable=False),
+        sa.Column("organization_id", sa.Uuid(), sa.ForeignKey(f"{S}.organizations.id"), nullable=False),
+        sa.Column("mode", sa.String(16), nullable=False),
+        sa.Column("subject", sa.String(128), nullable=False),
         sa.Column("name", sa.String(100), nullable=False),
+        sa.Column("api_version", sa.Date(), nullable=False),
+        sa.Column("status", sa.String(16), nullable=False),
         _moment("created_at"),
-        sa.UniqueConstraint("branch_id", "code", name="uq_emission_points_code"),
-        _of_company("emission_points"),
-        sa.ForeignKeyConstraint(
-            ["company_id", "branch_id"],
-            [f"{S}.branches.company_id", f"{S}.branches.id"],
-            name="fk_emission_points_branch",
-        ),
+        sa.Column("created_by", sa.String(128), nullable=False),
+        sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
+        sa.CheckConstraint("mode IN ('test', 'live')", name="ck_api_clients_mode"),
+        sa.CheckConstraint("status IN ('active', 'revoked')", name="ck_api_clients_status"),
         schema=S,
     )
-    op.create_index("ix_emission_points_branch", "emission_points", ["branch_id", "id"], schema=S)
+    op.create_index(
+        "uq_api_clients_active_subject",
+        "api_clients",
+        ["organization_id", "subject"],
+        unique=True,
+        schema=S,
+        postgresql_where=sa.text("status = 'active'"),
+    )
+    op.create_index("ix_api_clients_subject", "api_clients", ["organization_id", "subject"], schema=S)
     for table, scope, column in ISOLATION:
         for statement in policy(f"{S}.{table}", scope, organization_column=column):
             op.execute(statement)

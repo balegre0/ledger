@@ -3,27 +3,32 @@
 from dataclasses import dataclass
 from typing import final
 lazy from collections.abc import Callable
+lazy from datetime import date
 
-from ledger_identity.application.queries import branch
-from ledger_identity.domain.branches import Branch, EmissionPoint
+from ledger_identity.application.queries import main_establishment
+from ledger_identity.domain.api_clients import ApiClient
 from ledger_identity.domain.company import Company
 from ledger_identity.domain.errors import (
-    BranchCodeTakenError,
-    EmissionPointCodeTakenError,
+    ApiClientExistsError,
+    ApiClientNotFoundError,
+    EstablishmentCodeTakenError,
     StaleVersionError,
     TaxIdTakenError,
 )
+from ledger_identity.domain.establishments import Establishment
 from ledger_identity.domain.membership import Actor, Roster, found, grant, revoke
 from ledger_identity.domain.organization import Organization, require_organization_admin
 from ledger_identity.domain.roles import COMPANIES_MANAGE
 from ledger_kernel.access import CompanyNotFoundError
 lazy from ledger_identity.application.ports import AuditAction, IdentityUnit
-lazy from ledger_identity.domain.ids import BranchId
+lazy from ledger_identity.domain.api_clients import ApiClientSpec
+lazy from ledger_identity.domain.company import FiscalProfile
+lazy from ledger_identity.domain.ids import ApiClientId
 lazy from ledger_identity.domain.membership import Membership
-lazy from ledger_identity.domain.text import Code, LegalName, Name
+lazy from ledger_identity.domain.text import Code, LegalName, Name, TimeZone
 lazy from ledger_kernel.access import Principal, Role, SubjectId
 lazy from ledger_kernel.ids import CompanyId
-lazy from ledger_kernel.tax_ids import TaxId
+lazy from ledger_kernel.tenancy import Mode
 
 type Admits = Callable[[int], bool]
 """Whether a change may apply to a company at a version: the client's ``If-Match``."""
@@ -32,10 +37,38 @@ type Admits = Callable[[int], bool]
 @final
 @dataclass(frozen=True, slots=True)
 class Opening:
-    """What a branch or an emission point opens under: its code, unique where it opens, and its name."""
+    """What an establishment opens under: its code, unique in the company, its name and its time zone.
+
+    No time zone is the one of the company's ``MAIN`` establishment.
+    """
 
     code: Code
     name: Name
+    time_zone: TimeZone | None
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Registration:
+    """What a company is registered with.
+
+    Its fiscal profile, its name, the zone its main establishment keeps, and the API version its organization
+    is pinned to if this is the organization's first company.
+    """
+
+    profile: FiscalProfile
+    legal_name: LegalName
+    time_zone: TimeZone
+    api_version: date
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ClientRegistration:
+    """An API client to register: what it is registered as, and the mode it is bound to."""
+
+    spec: ApiClientSpec
+    mode: Mode
 
 
 @final
@@ -47,34 +80,48 @@ class Granted:
     created: bool
 
 
-async def create_company(
-    unit: IdentityUnit, founder: Principal, *, tax_id: TaxId, legal_name: LegalName
-) -> Company:
+async def create_company(unit: IdentityUnit, founder: Principal, registration: Registration) -> Company:
     """Register a company of the founder's organization, with the founder as its first owner.
 
-    The founder must be an administrator of the organization (``require_organization_admin``).
+    It is opened with its ``MAIN`` establishment, in the registration's time zone. The organization, kept with
+    its first company, is pinned to the registration's API version; a later company leaves it as it was.
+
+    The founder must be an administrator of the organization (``require_organization_admin``). Any one of the
+    profile's tax ids that an active company holds refuses the registration (``TaxIdTakenError``).
     """
     require_organization_admin(founder)
-    await unit.organizations.add(Organization.of(founder, now=unit.now))
+    await unit.organizations.add(Organization.of(founder, now=unit.now, api_version=registration.api_version))
     registered, created = Company.register(
-        organization=founder.organization, tax_id=tax_id, legal_name=legal_name, now=unit.now
+        organization=founder.organization,
+        profile=registration.profile,
+        legal_name=registration.legal_name,
+        now=unit.now,
     )
     if not await unit.companies.add(registered):
         raise TaxIdTakenError
     owner, granted = found(registered, founder, now=unit.now)
     await unit.memberships.put(owner)
+    main = Establishment.main(registered, time_zone=registration.time_zone, now=unit.now)
+    _ = await unit.establishments.add(main)  # the first of a new company: its code cannot be taken
     unit.events.publish(created)
     unit.events.publish(granted)
     unit.audit.record("company.register", registered.id, before=None, after=registered)
     _audit_membership(unit, "membership.grant", None, owner)
+    _audit_establishment(unit, main)
     return registered
 
 
 def _audit_membership(
     unit: IdentityUnit, action: AuditAction, before: Membership | None, after: Membership
 ) -> None:
-    """Record a change of a membership, naming its member and the role it holds (or held) after it."""
+    """Record a change of a membership: its member, its role after it, and the role it replaced.
+
+    The replaced role is in the record because the hashes cannot say it, and the event that carried it is gone
+    once delivered: without it nobody can tell who demoted a member from owner, and from what.
+    """
     detail = {"member": after.subject, "role": after.role.value}
+    if before is not None and before.active and before.role is not after.role:
+        detail["previous_role"] = before.role.value
     unit.audit.record(action, after.id, before=before, after=after, detail=detail)
 
 
@@ -120,30 +167,95 @@ async def deactivate_company(
     return inactive
 
 
-async def open_branch(
+async def register_api_client(
+    unit: IdentityUnit, admin: Principal, registration: ClientRegistration
+) -> ApiClient:
+    """Register a machine user as an API client of the admin's organization, bound to the registration's mode.
+
+    The admin must be an administrator of the organization (``require_organization_admin``). A machine user
+    that is an active API client already, in either mode, is refused (``ApiClientExistsError``): one
+    credential carries one mode. The unit's mode is the registration's. An organization identity has not seen
+    yet is kept now, pinned to the client's version, as its first company would have kept it.
+    """
+    require_organization_admin(admin)
+    await unit.organizations.add(
+        Organization.of(admin, now=unit.now, api_version=registration.spec.api_version)
+    )
+    client = ApiClient.register(
+        registration.spec,
+        organization=admin.organization,
+        mode=registration.mode,
+        actor=admin.subject,
+        now=unit.now,
+    )
+    if not await unit.api_clients.add(client):
+        raise ApiClientExistsError
+    unit.audit.record(
+        "api_client.register", client.id, before=None, after=client, detail=_client_detail(client)
+    )
+    return client
+
+
+async def revoke_api_client(unit: IdentityUnit, admin: Principal, client_id: ApiClientId) -> ApiClient:
+    """Revoke an API client of the unit's mode: its tokens stop counting. Idempotent.
+
+    The admin must be an administrator of the organization. Revoking a client that is revoked already changes
+    and records nothing; an id the organization has no client by, in this mode, is not found.
+    """
+    require_organization_admin(admin)
+    current = await unit.api_clients.get(client_id)
+    if current is None:
+        raise ApiClientNotFoundError(client_id)
+    revoked = current.revoke(now=unit.now)
+    if revoked is not current and await unit.api_clients.revoked(revoked):
+        unit.audit.record(
+            "api_client.revoke", current.id, before=current, after=revoked, detail=_client_detail(revoked)
+        )
+    return revoked
+
+
+def _client_detail(client: ApiClient) -> dict[str, str]:
+    """What an API client's audit rows say of it besides its hashes: ids and words, never its name."""
+    return {"subject": client.subject, "mode": client.mode.value}
+
+
+async def lock_fiscal_profile(unit: IdentityUnit, company_id: CompanyId) -> Company:
+    """Lock the company's fiscal profile: its jurisdiction, functional currency and primary tax id.
+
+    The platform's call, before a company's first numbered document; one already locked stays as it was, so a
+    retry changes and announces nothing.
+    """
+    current = await _locked(unit, company_id)
+    locked, updated = current.lock_fiscal_profile(now=unit.now)
+    if updated is not None:
+        await _replace(unit, current, locked)
+        unit.events.publish(updated)
+        unit.audit.record("company.lock_fiscal_profile", current.id, before=current, after=locked)
+    return locked
+
+
+async def open_establishment(
     unit: IdentityUnit, company_id: CompanyId, opening: Opening, *, actor: SubjectId
-) -> Branch:
-    """Open a branch of the company under a code it does not use yet, as ``actor`` may."""
+) -> Establishment:
+    """Open an establishment of the company under a code it does not use yet, as ``actor`` may.
+
+    Without a time zone of its own it works in the one of the company's ``MAIN`` establishment.
+    """
     company = await _managed(unit, company_id, actor)
-    opened = Branch.open(company, code=opening.code, name=opening.name, now=unit.now)
-    if not await unit.branches.add(opened):
-        raise BranchCodeTakenError
-    unit.audit.record("branch.open", opened.id, before=None, after=opened, detail={"code": opened.code})
+    time_zone = opening.time_zone or (await main_establishment(unit, company_id)).time_zone
+    opened = Establishment.open(
+        company, code=opening.code, name=opening.name, time_zone=time_zone, now=unit.now
+    )
+    if not await unit.establishments.add(opened):
+        raise EstablishmentCodeTakenError
+    _audit_establishment(unit, opened)
     return opened
 
 
-async def open_emission_point(
-    unit: IdentityUnit, company_id: CompanyId, branch_id: BranchId, opening: Opening, *, actor: SubjectId
-) -> EmissionPoint:
-    """Open an emission point of one of the company's branches, under a code the branch does not use yet."""
-    company = await _managed(unit, company_id, actor)
-    within = await branch(unit, company_id, branch_id)
-    opened = EmissionPoint.open(company, within, code=opening.code, name=opening.name, now=unit.now)
-    if not await unit.emission_points.add(opened):
-        raise EmissionPointCodeTakenError
-    detail = {"branch_id": str(within.id), "code": opened.code}
-    unit.audit.record("emission_point.open", opened.id, before=None, after=opened, detail=detail)
-    return opened
+def _audit_establishment(unit: IdentityUnit, opened: Establishment) -> None:
+    """Record that ``opened`` was opened, naming its code and time zone."""
+    detail = {"code": opened.code, "time_zone": opened.time_zone}
+    unit.audit.record("establishment.open", opened.id, before=None, after=opened, detail=detail)
 
 
 async def _managed(unit: IdentityUnit, company_id: CompanyId, actor: SubjectId) -> Company:

@@ -45,15 +45,16 @@ lazy from datetime import datetime
 
 import structlog
 from pydantic import AwareDatetime, BaseModel, ConfigDict, TypeAdapter
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 lazy from prometheus_client import CollectorRegistry
 lazy from sqlalchemy import RowMapping, Update
 
-from ledger_kernel.errors import ErrorKind, LedgerError
+from ledger_kernel.errors import ErrorKind, LedgerError, UnavailableError
 from ledger_platform.data.audit import Actor, acting_as
 from ledger_platform.data.codec import JsonValue
 from ledger_platform.data.queue import DEFAULT_BACKOFF, RELEASE_TIMEOUT, claim, parked, recover, release
 from ledger_platform.data.scopes import scope_of
+from ledger_platform.data.unit_of_work import WOKEN_WHILE_RUNNING
 from ledger_platform.jobs.outcomes import Done, Job, Park, RunAgain
 from ledger_platform.observability.metrics import counter
 lazy from ledger_platform.config.manifest import JobDecl
@@ -127,9 +128,34 @@ def _job_of(row: RowMapping) -> Job:
     )
 
 
+async def _bounded(job: Job, decl: JobDecl, handler: JobHandler) -> JobOutcome:
+    """``handler``'s outcome, or ``JobTimedOutError`` when it takes longer than the kind's ``timeout``.
+
+    A ``TimeoutError`` the handler raises itself (a call of its own that timed out) is its own failure, not
+    the job's: only the limit this function set is told apart.
+    """
+    limit = asyncio.timeout(decl.timeout.total_seconds())
+    try:
+        async with limit:
+            return await handler(job)
+    except TimeoutError as error:
+        if limit.expired():
+            raise JobTimedOutError(job.kind) from error
+        raise
+
+
 def _code_of(error: Exception) -> str:
     """The error's stable code, ``internal`` when none names it: rows and logs never hold a message."""
     return error.code if isinstance(error, LedgerError) else "internal"
+
+
+class JobTimedOutError(UnavailableError):
+    """A handler ran past its kind's ``timeout``: the run is stopped and retried, as any retryable failure."""
+
+    code: ClassVar[str] = "job_timed_out"
+
+    def __init__(self, kind: str) -> None:
+        super().__init__(f"a {kind} job's handler ran past its timeout")
 
 
 class _StoppingError(LedgerError):
@@ -388,7 +414,7 @@ class JobRunner:
         holding = self._holding.get(job.lease_token)
         if holding is not None:  # claimed by ``run`` (``run_due`` holds nothing to give back)
             holding.started = True
-        work = asyncio.ensure_future(handler(job))
+        work = asyncio.ensure_future(_bounded(job, decl, handler))
         lost = asyncio.Event()
         keeper = asyncio.create_task(self._keep(job, decl, work, lost))
         try:
@@ -425,7 +451,9 @@ class JobRunner:
         keys = ("kind", "key")
         async with self._database.unit(None) as unit:
             passed = len(
-                _CODES.validate_python((await unit.connection.execute(_bury(jobs, kind))).scalars().all())
+                _CODES.validate_python(
+                    (await unit.connection.execute(bury_statement(jobs, kind))).scalars().all()
+                )
             )
             recovered = await recover(
                 unit.connection,
@@ -485,7 +513,12 @@ class JobRunner:
                     jobs.c.lease_token == job.lease_token,
                     jobs.c.status == "running",
                 )
-                .values(lease_until=None, lease_token=None, updated_at=unit.now, **values)
+                .values(
+                    lease_until=None,
+                    lease_token=None,
+                    updated_at=unit.now,
+                    **_settled(jobs, values, unit.now),
+                )
                 .returning(jobs.c.key)
             )
             kept = recorded.first() is not None
@@ -499,7 +532,23 @@ class JobRunner:
         self._lease_lost.labels(kind=job.kind).inc()
 
 
-def _bury(jobs: AnyTable, kind: str) -> Update:
+def _settled(jobs: AnyTable, values: _Values, now: datetime) -> _Values:
+    """``values`` as written: a ``Park`` after a wake that arrived while the handler ran is ``ready`` at once.
+
+    Nothing parked yet could have been woken, so without this the job would wait for a wake that has passed.
+    Any other outcome clears the mark a wake left.
+    """
+    if values["status"] != "parked":
+        return {"parked_reason": None, **values}
+    woken = jobs.c.parked_reason == WOKEN_WHILE_RUNNING
+    return {
+        "status": case((woken, "ready"), else_="parked"),
+        "parked_reason": case((woken, None), else_=values["parked_reason"]),
+        "run_at": case((woken, now), else_=jobs.c.run_at),
+    }
+
+
+def bury_statement(jobs: AnyTable, kind: str) -> Update:
     """Jobs of ``kind`` whose deadline has passed, due or abandoned: dead (``deadline_passed``), their codes.
 
     A handler would run past the deadline. Jobs whose lease ran out otherwise are the queue's (``recover``).

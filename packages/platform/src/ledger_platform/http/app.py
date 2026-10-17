@@ -20,6 +20,7 @@ instead (``caller_trace="adopt"``).
 """
 
 from dataclasses import dataclass
+from datetime import date
 from typing import Final, Literal, final, override
 lazy from collections.abc import Callable, MutableMapping, Sequence
 lazy from contextlib import AbstractAsyncContextManager
@@ -37,6 +38,8 @@ lazy from opentelemetry.trace import TracerProvider
 lazy from prometheus_client import CollectorRegistry
 lazy from starlette.types import ASGIApp, Receive, Scope, Send
 
+from ledger_platform.config.options import require_at_least
+from ledger_platform.http.limits import MAX_BODY_BYTES, BodyLimit
 from ledger_platform.http.metrics import ROUTE_KEY, UNMATCHED, Measure, RouteLabels
 from ledger_platform.http.mode import require_mode_header
 from ledger_platform.http.probes import OPERATIONAL_PATHS, add_probes
@@ -47,6 +50,13 @@ from ledger_platform.http.problems import (
     install_problem_handlers,
 )
 from ledger_platform.http.request_fields import remembered
+from ledger_platform.http.versions import (
+    CURRENT_VERSION,
+    VERSION_HEADER,
+    VERSION_KEY,
+    document_version_header,
+    sent_version,
+)
 lazy from ledger_platform.http.metrics import AsgiApp, AsgiMessage, AsgiReceive, AsgiScope, AsgiSend
 lazy from ledger_platform.observability.health import Health
 
@@ -55,6 +65,8 @@ type CallerTrace = Literal["adopt", "link"]
 
 _TRACEPARENT: Final = "traceparent"
 _TRACESTATE: Final = "tracestate"
+_BAGGAGE: Final = "baggage"
+"""Written by the caller too, and carried by the propagator to every call the request makes."""
 _MAX_TRACEPARENT_LENGTH: Final = 55
 """A version 00 ``traceparent``; a longer value is never handed to the propagator (its pattern backtracks)."""
 _CALLER_SPAN: Final = "ledger.caller_span"
@@ -130,11 +142,12 @@ def _caller_span(traceparent: str) -> SpanContext | None:
 
 
 def _without_the_caller_s_trace(scope: AsgiScope) -> None:
-    """Take the caller's trace headers off the request, keeping the span they name for a link."""
+    """Take the caller's trace headers and baggage off the request, keeping the span they name for a link."""
     headers = MutableHeaders(scope=scope)
     caller = headers.get(_TRACEPARENT)
     del headers[_TRACEPARENT]
     del headers[_TRACESTATE]
+    del headers[_BAGGAGE]
     span = None if caller is None else _caller_span(caller)
     if span is not None:
         scope[_CALLER_SPAN] = span
@@ -142,12 +155,14 @@ def _without_the_caller_s_trace(scope: AsgiScope) -> None:
 
 @final
 class _Named:
-    """Inside the request's span: link it to the caller's, and name the request on its answer.
+    """Inside the request's span: link it to the caller's, and name the request and its version on its answer.
 
-    The answer names its request in ``Request-Id``.
+    The answer names its request in ``Request-Id`` and the version of the API it speaks in ``Ledger-Version``
+    (``http.versions``): the one the request names, else the current, until a route settles it (its caller's
+    pin). The operational routes are neither traced nor versioned.
 
     Every response that starts while the request is traced carries the trace id, unless it names its request
-    already (a problem does). The operational routes are not traced, so they carry none.
+    already (a problem does).
     """
 
     __slots__ = ("_app",)
@@ -163,13 +178,19 @@ class _Named:
         if isinstance(caller, SpanContext):
             trace.get_current_span().add_link(caller)
         request_id = current_request_id()
+        versioned = not _is_operational(scope)
+        if versioned:
+            scope[VERSION_KEY] = sent_version(scope) or CURRENT_VERSION  # a route that reads it may settle it
 
         async def named(message: AsgiMessage) -> None:
-            if request_id is not None and message["type"] == "http.response.start":
+            if message["type"] == "http.response.start":
                 message.setdefault("headers", [])
                 headers = MutableHeaders(scope=message)
-                if REQUEST_ID_HEADER not in headers:
+                if request_id is not None and REQUEST_ID_HEADER not in headers:
                     headers.append(REQUEST_ID_HEADER, request_id)
+                version = scope.get(VERSION_KEY)
+                if versioned and isinstance(version, date):
+                    headers[VERSION_HEADER] = version.isoformat()
             await send(message)
 
         await self._app(scope, receive, named)
@@ -190,7 +211,9 @@ class _ChassisApp(FastAPI):
     def openapi(self) -> dict[str, object]:
         """FastAPI's document, made once, with what the chassis's dependencies need said of them."""
         if self.openapi_schema is None:
-            require_mode_header(super().openapi())
+            document = super().openapi()
+            require_mode_header(document)
+            document_version_header(document)
         return super().openapi()
 
     @override
@@ -234,8 +257,11 @@ def create_app(
     observability: Observability,
     lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]],
     routers: Sequence[APIRouter] = (),
+    max_body_bytes: int = MAX_BODY_BYTES,
 ) -> FastAPI:
     """A FastAPI application with ``routers`` plus ``/livez``, ``/readyz`` and ``/metrics``, traced.
+
+    A request body over ``max_body_bytes`` is refused 413 as it is read (``http.limits``).
 
     Raises ``AmbiguousRouteError`` when one route is mounted under two different templates. Routes must be
     complete before this returns: a route added afterwards, to the app or to a router already included, is
@@ -247,6 +273,7 @@ def create_app(
         lifespan=lifespan,
         telemetry=_telemetry(observability.tracer_provider),
     )
+    require_at_least("http", "max_body_bytes", max_body_bytes)
     app.caller_trace = observability.caller_trace
     add_probes(app, observability.health, observability.registry)
     for router in routers:
@@ -258,6 +285,7 @@ def create_app(
         ["method", "route", "status"],
         registry=observability.registry,
     )
+    app.add_middleware(BodyLimit, limit=max_body_bytes)
     app.add_middleware(Measure, duration=duration, labels=labels)
     install_problem_handlers(app, route_of=labels.of_scope)
     return app

@@ -1,8 +1,9 @@
 """``chassis_schema_v1`` (§6.4): the tables every module, channel and the platform keep in their own schema.
 
 Called by each schema's first revision, as the schema's owner. Versioned and immutable: a change ships
-``chassis_schema_v2`` and every schema adds a revision that calls it (audit D20). The DDL is the spec's,
-statement for statement; ``{s}`` is the schema, checked before it is substituted.
+``chassis_schema_v2`` and every schema adds a revision that calls it (audit D20). Version 1's DDL is the
+spec's, statement for statement; version 2 adds the two indexes the job queue's housekeeping reads
+(``jobs_deadline``, ``jobs_done``). ``{s}`` is the schema, checked before it is substituted.
 """
 
 from abc import ABCMeta, abstractmethod
@@ -83,6 +84,17 @@ _V1: Final = (
 the DDL holds ``'{}'``); the doubled braces above are the f-strings' own escapes."""
 
 
+_V2: Final = (
+    (
+        "CREATE INDEX jobs_deadline ON {s}.jobs (kind, deadline_at)"
+        " WHERE status IN ('ready','running') AND deadline_at IS NOT NULL"
+    ),
+    "CREATE INDEX jobs_done ON {s}.jobs (updated_at) WHERE status = 'done'",
+)
+"""What version 2 adds: the deadline sweep reads only jobs that have a deadline and are not finished, and the
+done-job purge reads the finished ones oldest first; neither scans the table."""
+
+
 class Executes(Protocol, metaclass=ABCMeta):
     """What the functions here need of Alembic's ``op`` (the module's proxy) or an ``Operations``."""
 
@@ -110,6 +122,16 @@ def chassis_schema_v1(op: Executes, schema: str) -> None:
     for statement in policy(f"{roles.schema}.audit_events", RlsScope.ORGANIZATION, append_only=True):
         op.execute(statement)
     op.execute(f"REVOKE UPDATE, DELETE, TRUNCATE ON {quoted}.audit_events FROM {identifier(roles.rw)}")
+
+
+def chassis_schema_v2(op: Executes, schema: str) -> None:
+    """Add to ``schema``'s chassis tables the indexes of the deadline sweep and the done-job purge.
+
+    After ``chassis_schema_v1``, as the schema's owner; version 1's statements are never run again.
+    """
+    quoted = identifier(SchemaRoles(schema=schema).schema)
+    for statement in _V2:
+        op.execute(statement.replace("{s}", quoted))
 
 
 def platform_schema_v1(op: Executes) -> None:

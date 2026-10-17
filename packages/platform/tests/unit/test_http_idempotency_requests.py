@@ -1,5 +1,6 @@
 """The request side of ``Idempotency-Key`` (§9.5): the header, the route a key is scoped to, the answer."""
 
+import uuid
 from contextlib import asynccontextmanager
 from typing import Annotated, ClassVar, Final
 lazy from collections.abc import AsyncGenerator
@@ -14,6 +15,7 @@ from structlog.testing import capture_logs
 lazy from fastapi import Request
 
 from ledger_kernel.access import Principal, SubjectId
+from ledger_kernel.ids import CompanyId
 from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_platform.http.app import ApiInfo, Observability, create_app
 from ledger_platform.http.idempotency import (
@@ -63,7 +65,7 @@ def keyed(prefix: str = "") -> APIRouter:
         request: Request, item_id: int, note: Note, key: Annotated[str, Depends(idempotency_key)]
     ) -> Seen:
         del item_id
-        tried = attempt_of(request, CALLER, key, note)
+        tried = attempt_of(request, CALLER, key, note, company=None)
         return Seen(
             route=tried.route, key=tried.key, principal=tried.principal, request_hash=tried.request_hash.hex()
         )
@@ -165,7 +167,7 @@ async def test_a_route_added_after_the_app_was_built_has_no_key_scope() -> None:
 
     @late.post("/late")
     async def handle(request: Request, key: Annotated[str, Depends(idempotency_key)]) -> None:
-        attempt_of(request, CALLER, key)
+        attempt_of(request, CALLER, key, company=None)
 
     async with client_of(app) as client:
         with capture_logs() as logs:
@@ -196,7 +198,13 @@ async def test_a_post_without_a_usable_key_is_refused_without_repeating_it(heade
 @pytest.mark.parametrize("key", ["", "a b", "é", "k" * (MAX_KEY_LENGTH + 1)])
 def test_an_attempt_refuses_a_key_no_header_could_carry_and_never_repeats_it(key: str) -> None:
     with pytest.raises(InvalidIdempotencyKeyError) as caught:
-        Attempt.of(CALLER, key, route="POST /v1/x", target=Target.of("/v1/x"), body=canonical_body(None))
+        Attempt.of(
+            CALLER,
+            key,
+            route="POST /v1/x",
+            target=Target.of("/v1/x"),
+            body=canonical_body(None),
+        )
     assert caught.value.code == "invalid_idempotency_key"
     assert key not in str(caught.value) or not key
 
@@ -219,3 +227,20 @@ def test_a_replay_is_answered_byte_for_byte_and_marked() -> None:
     assert REPLAYED_HEADER not in first.headers
     assert (again.body, again.headers[REPLAYED_HEADER]) == (first.body, "true")
     assert again.headers["location"] == "/v1/notes/1"
+
+
+def test_the_company_a_request_acts_for_is_part_of_the_request() -> None:
+    """A company named by a header is in neither path nor body: another company is another request."""
+
+    def fingerprint(company: CompanyId | None) -> bytes:
+        return Attempt.of(
+            CALLER,
+            "k",
+            route="POST /v1/invoices",
+            target=Target.of("/v1/invoices", company=company),
+            body=canonical_body(None),
+        ).request_hash
+
+    first, second = CompanyId(uuid.uuid7()), CompanyId(uuid.uuid7())
+    assert len({fingerprint(first), fingerprint(second), fingerprint(None)}) == 3
+    assert fingerprint(first) == fingerprint(first)

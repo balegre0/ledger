@@ -19,7 +19,7 @@ lazy from datetime import datetime
 from ledger_identity.domain.company import CompanyStatus
 from ledger_identity.domain.errors import LastOwnerError, MembershipNotFoundError, OwnersOnlyError
 from ledger_identity.domain.ids import MembershipId
-from ledger_identity.domain.roles import MEMBERSHIPS_MANAGE, OWNERSHIP_MANAGE, READ_ONLY, permissions_of
+from ledger_identity.domain.roles import MEMBERSHIPS_MANAGE, OWNERSHIP_MANAGE, only_reads, permissions_of
 from ledger_identity.events import MembershipGranted, MembershipRevoked
 from ledger_kernel.access import PermissionDeniedError, Role
 from ledger_kernel.errors import InvalidValueError
@@ -221,8 +221,8 @@ def permissions_in(company: Company, membership: Membership) -> frozenset[Permis
     """What other modules may let ``membership``'s holder do for ``company``.
 
     Its role's permissions while it is active; of those, only the ones that read once the company is
-    deactivated (other modules cannot tell, and must not issue for it); nothing once it is revoked.
+    deactivated (``only_reads``: other modules must not issue for it); nothing once it is revoked.
     """
     if company.status is CompanyStatus.INACTIVE:
-        return membership.permissions & READ_ONLY
+        return only_reads(membership.permissions)
     return membership.permissions

@@ -1,6 +1,6 @@
 import unicodedata
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Final
 from uuid import UUID
 
@@ -9,16 +9,15 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from ledger_identity._manifest import MANIFEST
-from ledger_identity.domain.branches import Branch, EmissionPoint
-from ledger_identity.domain.company import Company, CompanyStatus
+from ledger_identity.domain.api_clients import ApiClient, ApiClientSpec, ApiClientStatus
+from ledger_identity.domain.company import Company, CompanyStatus, FiscalProfile
 from ledger_identity.domain.errors import (
-    BranchCodeTakenError,
-    BranchNotFoundError,
     CompanyInactiveError,
-    EmissionPointCodeTakenError,
-    EmissionPointNotFoundError,
+    EstablishmentCodeTakenError,
+    EstablishmentNotFoundError,
     InvalidCodeError,
     InvalidNameError,
+    InvalidTimeZoneError,
     LastOwnerError,
     MembershipNotFoundError,
     OrganizationNotFoundError,
@@ -26,6 +25,8 @@ from ledger_identity.domain.errors import (
     StaleVersionError,
     TaxIdTakenError,
 )
+from ledger_identity.domain.establishments import MAIN_CODE, MAIN_NAME, Establishment
+from ledger_identity.domain.ids import API_CLIENT_PREFIX, ESTABLISHMENT_PREFIX, MEMBERSHIP_PREFIX
 from ledger_identity.domain.membership import (
     Actor,
     MembershipStatus,
@@ -40,11 +41,16 @@ from ledger_identity.domain.roles import (
     COMPANIES_MANAGE,
     COMPANIES_READ,
     EVERYTHING,
+    INVOICES_CREATE,
+    INVOICES_ISSUE,
+    INVOICES_READ,
+    INVOICES_VOID,
     MEMBERSHIPS_MANAGE,
     MEMBERSHIPS_READ,
     OWNERSHIP_MANAGE,
     PERMISSIONS,
     READ_ONLY,
+    only_reads,
     permissions_of,
 )
 from ledger_identity.domain.text import (
@@ -55,6 +61,7 @@ from ledger_identity.domain.text import (
     parse_code,
     parse_legal_name,
     parse_name,
+    parse_time_zone,
 )
 from ledger_identity.events import (
     CompanyDeactivated,
@@ -63,11 +70,27 @@ from ledger_identity.events import (
     MembershipGranted,
     MembershipRevoked,
 )
-from ledger_kernel.access import CompanyNotFoundError, PermissionDeniedError, Principal, Role, SubjectId
+from ledger_kernel.access import (
+    CompanyNotFoundError,
+    PermissionDeniedError,
+    Principal,
+    Role,
+    SubjectId,
+    parse_permission,
+)
 from ledger_kernel.errors import ErrorKind, InvalidValueError
-from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_kernel.ids import (
+    COMPANY_PREFIX,
+    ORGANIZATION_PREFIX,
+    CompanyId,
+    OrganizationId,
+    format_id,
+    new_id,
+)
+from ledger_kernel.jurisdiction import parse_jurisdiction
+from ledger_kernel.money import Currency
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
-from ledger_kernel.tenancy import Tenant
+from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.data.codec import payload_of
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_kernel.errors import LedgerError
@@ -77,14 +100,24 @@ LATER: Final = NOW + timedelta(hours=1)
 ORGANIZATION: Final = OrganizationId(new_id())
 FOUNDER: Final = Principal(subject=SubjectId("2001"), organization=ORGANIZATION, provider_organization="1001")
 RNC: Final = TaxId(TaxIdScheme("do.rnc"), "101850043")
+CEDULA: Final = TaxId(TaxIdScheme("do.cedula"), "00113918205")
+DOMINICAN: Final = parse_jurisdiction("DO")
+PESO: Final = Currency.of("DOP")
 OWNER: Final = Actor(SubjectId("2001"), permissions_of(Role.OWNER))
 ADMIN: Final = Actor(SubjectId("2002"), permissions_of(Role.ADMIN))
 VIEWER: Final = Actor(SubjectId("2003"), permissions_of(Role.VIEWER))
 
 
+def profile(*tax_ids: TaxId) -> FiscalProfile:
+    return FiscalProfile(jurisdiction=DOMINICAN, functional_currency=PESO, tax_ids=tax_ids)
+
+
 def registered() -> Company:
     company, _ = Company.register(
-        organization=ORGANIZATION, tax_id=RNC, legal_name=parse_legal_name("Ferretería Duarte"), now=NOW
+        organization=ORGANIZATION,
+        profile=profile(RNC),
+        legal_name=parse_legal_name("Ferretería Duarte"),
+        now=NOW,
     )
     return company
 
@@ -129,8 +162,8 @@ def test_a_name_that_cannot_be_shown_is_refused_without_being_echoed(text: str, 
 
 def test_other_names_say_which_field_and_have_their_own_limit() -> None:
     assert parse_name("Sucursal Santiago") == "Sucursal Santiago"
-    with pytest.raises(InvalidNameError, match=r"^branch_name is longer than 100 characters$"):
-        parse_name("x" * (MAX_NAME + 1), field="branch_name")
+    with pytest.raises(InvalidNameError, match=r"^establishment_name is longer than 100 characters$"):
+        parse_name("x" * (MAX_NAME + 1), field="establishment_name")
 
 
 @given(st.text(max_size=200))
@@ -165,13 +198,18 @@ def test_what_each_role_may_do() -> None:
         "identity.memberships.read",
         "identity.memberships.manage",
         "identity.ownership.manage",
+        "invoicing.invoices.read",
+        "invoicing.invoices.create",
+        "invoicing.invoices.issue",
+        "invoicing.invoices.void",
     } == EVERYTHING
+    issuing = frozenset({COMPANIES_READ, INVOICES_READ, INVOICES_CREATE, INVOICES_ISSUE})
     expected = {
         Role.OWNER: EVERYTHING,
         Role.ADMIN: EVERYTHING - {OWNERSHIP_MANAGE},
-        Role.ACCOUNTANT: frozenset({COMPANIES_READ, MEMBERSHIPS_READ}),
-        Role.ISSUER: frozenset({COMPANIES_READ}),
-        Role.VIEWER: frozenset({COMPANIES_READ}),
+        Role.ACCOUNTANT: issuing | {MEMBERSHIPS_READ, INVOICES_VOID},
+        Role.ISSUER: issuing,
+        Role.VIEWER: frozenset({COMPANIES_READ, INVOICES_READ}),
     }
     assert expected == PERMISSIONS
     assert {COMPANIES_MANAGE, MEMBERSHIPS_MANAGE} <= PERMISSIONS[Role.ADMIN]
@@ -182,6 +220,7 @@ def test_the_roles_grant_exactly_what_the_manifest_declares() -> None:
     granted = {
         permission: frozenset(role.value for role in Role if permission in permissions_of(role))
         for permission in EVERYTHING
+        if permission.startswith("identity.")
     }
     assert granted == declared
 
@@ -195,14 +234,17 @@ def test_every_role_reads_its_company_and_only_owners_manage_ownership() -> None
 
 
 def test_an_organization_is_the_one_its_principal_acts_in() -> None:
-    assert Organization.of(FOUNDER, now=NOW) == Organization(
-        id=ORGANIZATION, provider_id="1001", created_at=NOW
+    assert Organization.of(FOUNDER, now=NOW, api_version=date(2026, 10, 13)) == Organization(
+        id=ORGANIZATION, provider_id="1001", created_at=NOW, api_version=date(2026, 10, 13)
     )
 
 
 def test_a_registered_company_is_active_at_its_first_version_and_says_so() -> None:
     company, created = Company.register(
-        organization=ORGANIZATION, tax_id=RNC, legal_name=parse_legal_name("Duarte"), now=NOW
+        organization=ORGANIZATION,
+        profile=profile(RNC, CEDULA),
+        legal_name=parse_legal_name("Duarte"),
+        now=NOW,
     )
     assert (company.status, company.version, company.created_at, company.updated_at) == (
         CompanyStatus.ACTIVE,
@@ -210,13 +252,18 @@ def test_a_registered_company_is_active_at_its_first_version_and_says_so() -> No
         NOW,
         NOW,
     )
+    assert (company.profile.jurisdiction, company.profile.functional_currency) == (DOMINICAN, PESO)
+    assert (company.profile.tax_ids, company.profile.primary_tax_id) == ((RNC, CEDULA), RNC)
+    assert company.fiscal_profile_locked_at is None
     assert company.tenant == Tenant(ORGANIZATION, company.id, None)
     assert company.id.version == 7
     assert created == CompanyRegistered(
         scope=company.tenant,
         subject=company.id,
         aggregate_version=1,
-        tax_id=RNC,
+        jurisdiction=DOMINICAN,
+        functional_currency=PESO,
+        tax_ids=(RNC, CEDULA),
         legal_name=LegalName("Duarte"),
     )
     assert (created.TYPE, created.VERSION, created.scope) == (
@@ -224,6 +271,35 @@ def test_a_registered_company_is_active_at_its_first_version_and_says_so() -> No
         1,
         company.tenant,
     )
+
+
+@pytest.mark.parametrize("tax_ids", [(), (RNC, RNC)], ids=["none", "the-same-twice"])
+def test_a_fiscal_profile_holds_one_or_more_distinct_tax_ids(tax_ids: tuple[TaxId, ...]) -> None:
+    with pytest.raises(InvalidValueError, match=r"^fiscal_profile\.tax_ids must be"):
+        profile(*tax_ids)
+
+
+def test_a_company_locks_its_fiscal_profile_once_at_a_new_version() -> None:
+    company = registered()
+    locked, updated = company.lock_fiscal_profile(now=LATER)
+    assert (locked.fiscal_profile_locked_at, locked.version, locked.updated_at) == (LATER, 2, LATER)
+    assert locked.profile == company.profile  # what the lock holds fixed
+    assert updated == CompanyUpdated(
+        scope=company.tenant,
+        subject=company.id,
+        aggregate_version=2,
+        tax_ids=(RNC,),
+        legal_name=company.legal_name,
+        fiscal_profile_locked=True,
+    )
+    assert updated is not None
+    assert updated.fiscal_profile_locked  # what a consumer reads to know the profile no longer moves
+    assert locked.lock_fiscal_profile(now=LATER + timedelta(hours=1)) == (locked, None)  # locked once
+
+
+def test_a_deactivated_company_locks_nothing() -> None:
+    with pytest.raises(CompanyInactiveError):
+        deactivated().lock_fiscal_profile(now=LATER)
 
 
 def test_renaming_a_company_makes_a_new_version() -> None:
@@ -239,8 +315,9 @@ def test_renaming_a_company_makes_a_new_version() -> None:
         scope=company.tenant,
         subject=company.id,
         aggregate_version=2,
-        tax_id=RNC,
+        tax_ids=(RNC,),
         legal_name=LegalName("Duarte Hermanos"),
+        fiscal_profile_locked=False,
     )
 
 
@@ -261,37 +338,81 @@ def test_a_deactivated_company_says_so_and_changes_no_more() -> None:
         inactive.deactivate(now=LATER)
 
 
-# ── Branches and emission points ───────────────────────────────────────────────
+# ── Establishments ─────────────────────────────────────────────────────────────
+
+SANTO_DOMINGO: Final = parse_time_zone("America/Santo_Domingo")
 
 
-def test_a_branch_and_its_emission_points_belong_to_the_company() -> None:
+def test_an_establishment_belongs_to_the_company_and_keeps_its_time_zone() -> None:
     company = registered()
-    branch = Branch.open(company, code=parse_code("SUC1"), name=parse_name("Santiago"), now=NOW)
-    point = EmissionPoint.open(company, branch, code=parse_code("001"), name=parse_name("Caja 1"), now=NOW)
-    assert (branch.tenant, branch.code, branch.name, branch.created_at) == (
-        company.tenant,
-        "SUC1",
-        "Santiago",
-        NOW,
+    establishment = Establishment.open(
+        company, code=parse_code("SUC1"), name=parse_name("Santiago"), time_zone=SANTO_DOMINGO, now=NOW
     )
-    assert (point.tenant, point.branch, point.code) == (company.tenant, branch.id, "001")
+    assert (
+        establishment.tenant,
+        establishment.code,
+        establishment.name,
+        establishment.time_zone,
+        establishment.created_at,
+    ) == (company.tenant, "SUC1", "Santiago", "America/Santo_Domingo", NOW)
+    assert establishment.id.version == 7
+
+
+def test_every_company_gets_a_main_establishment_in_its_time_zone() -> None:
+    company = registered()
+    main = Establishment.main(company, time_zone=SANTO_DOMINGO, now=NOW)
+    assert (main.tenant, main.code, main.name, main.time_zone) == (
+        company.tenant,
+        MAIN_CODE,
+        MAIN_NAME,
+        SANTO_DOMINGO,
+    )
+    assert (MAIN_CODE, MAIN_NAME) == ("MAIN", "Main")
 
 
 def test_nothing_opens_in_a_deactivated_company() -> None:
-    company = registered()
-    branch = Branch.open(company, code=parse_code("SUC1"), name=parse_name("Santiago"), now=NOW)
-    inactive = company.deactivate(now=LATER)[0]
+    inactive = registered().deactivate(now=LATER)[0]
     with pytest.raises(CompanyInactiveError):
-        Branch.open(inactive, code=parse_code("SUC2"), name=parse_name("Bonao"), now=LATER)
-    with pytest.raises(CompanyInactiveError):
-        EmissionPoint.open(inactive, branch, code=parse_code("002"), name=parse_name("Caja 2"), now=LATER)
+        Establishment.open(
+            inactive, code=parse_code("SUC2"), name=parse_name("Bonao"), time_zone=SANTO_DOMINGO, now=LATER
+        )
 
 
-def test_an_emission_point_cannot_open_in_a_branch_of_another_company() -> None:
-    company, other = registered(), registered()
-    branch = Branch.open(other, code=parse_code("SUC1"), name=parse_name("Santiago"), now=NOW)
-    with pytest.raises(BranchNotFoundError):
-        EmissionPoint.open(company, branch, code=parse_code("001"), name=parse_name("Caja 1"), now=NOW)
+@pytest.mark.parametrize("text", ["America/Santo_Domingo", "UTC", "Europe/Madrid", "Etc/GMT+5"])
+def test_a_time_zone_is_the_name_of_an_iana_zone(text: str) -> None:
+    assert parse_time_zone(text) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "Santo Domingo",
+        "America/Nowhere",
+        "../etc/passwd",
+        "/etc/passwd",
+        "UTC\x00",
+        "America/" + "x" * 80,
+        "America/Santo_Domingo ",
+        "América/Santo_Domingo",
+    ],
+    ids=[
+        "empty",
+        "space",
+        "unknown",
+        "relative-path",
+        "absolute-path",
+        "nul",
+        "too-long",
+        "trailing-space",
+        "non-ascii",
+    ],
+)
+def test_anything_else_is_no_time_zone_and_is_not_echoed(text: str) -> None:
+    with pytest.raises(InvalidTimeZoneError) as caught:
+        parse_time_zone(text)
+    assert (caught.value.kind, caught.value.code) == (ErrorKind.INVALID, "invalid_time_zone")
+    assert str(caught.value) == "a time zone is the name of an IANA zone, such as America/Santo_Domingo"
 
 
 # ── Memberships ─────────────────────────────────────────────────────────────────
@@ -493,11 +614,32 @@ def test_a_revoked_owner_is_revoked_again_by_an_owner_only() -> None:
     )
 
 
+def test_what_reads_is_decided_by_the_verb_so_every_module_s_permissions_are_covered() -> None:
+    """A deactivated company keeps its data readable in every module, not only in identity."""
+    held = frozenset(
+        parse_permission(code)
+        for code in (
+            "identity.companies.read",
+            "invoicing.invoices.read",
+            "invoicing.invoices.issue",
+            "do_ecf.ranges.manage",
+            "fiscal.enrollments.read",
+        )
+    )
+    assert only_reads(held) == frozenset(
+        parse_permission(code)
+        for code in ("identity.companies.read", "invoicing.invoices.read", "fiscal.enrollments.read")
+    )
+    assert only_reads(frozenset()) == frozenset()
+
+
 def test_other_services_may_let_a_member_of_a_deactivated_company_read_only() -> None:
     company = registered()
     issuer = member(company, "3001", Role.ISSUER)
     assert permissions_in(company, issuer) == permissions_of(Role.ISSUER)
-    assert permissions_in(company.deactivate(now=LATER)[0], issuer) == frozenset({COMPANIES_READ})
+    assert permissions_in(company.deactivate(now=LATER)[0], issuer) == frozenset(
+        {COMPANIES_READ, INVOICES_READ}
+    )
     owner, _ = found(company, FOUNDER, now=NOW)
     assert permissions_in(company.deactivate(now=LATER)[0], owner) == READ_ONLY
     revoked, _ = revoke(Roster(company, issuer.subject, issuer, owners=1), actor=OWNER, now=NOW)
@@ -553,25 +695,19 @@ SOME_ID: Final = UUID("01a134e5-8363-74c7-9f6c-aa195c5ba397")
             OrganizationNotFoundError(SOME_ID),
             ErrorKind.NOT_FOUND,
             "organization_not_found",
-            f"organization {SOME_ID} has no company yet",
+            f"organization {format_id(ORGANIZATION_PREFIX, SOME_ID)} has no company yet",
         ),
         (
             CompanyNotFoundError(CompanyId(SOME_ID)),
             ErrorKind.NOT_FOUND,
             "company_not_found",
-            f"company {SOME_ID} was not found",
+            f"company {format_id(COMPANY_PREFIX, SOME_ID)} was not found",
         ),
         (
-            BranchNotFoundError(SOME_ID),
+            EstablishmentNotFoundError(SOME_ID),
             ErrorKind.NOT_FOUND,
-            "branch_not_found",
-            f"branch {SOME_ID} was not found",
-        ),
-        (
-            EmissionPointNotFoundError(SOME_ID),
-            ErrorKind.NOT_FOUND,
-            "emission_point_not_found",
-            f"emission point {SOME_ID} was not found",
+            "establishment_not_found",
+            f"establishment {format_id(ESTABLISHMENT_PREFIX, SOME_ID)} was not found",
         ),
         (
             TaxIdTakenError(),
@@ -580,28 +716,22 @@ SOME_ID: Final = UUID("01a134e5-8363-74c7-9f6c-aa195c5ba397")
             "an active company already holds this tax id",
         ),
         (
-            BranchCodeTakenError(),
+            EstablishmentCodeTakenError(),
             ErrorKind.CONFLICT,
-            "branch_code_taken",
-            "the company already has a branch with this code",
-        ),
-        (
-            EmissionPointCodeTakenError(),
-            ErrorKind.CONFLICT,
-            "emission_point_code_taken",
-            "the branch already has an emission point with this code",
+            "establishment_code_taken",
+            "the company already has an establishment with this code",
         ),
         (
             StaleVersionError(SOME_ID),
             ErrorKind.CONFLICT,
             "stale_version",
-            f"company {SOME_ID} is not at the version the request names",
+            f"company {format_id(COMPANY_PREFIX, SOME_ID)} is not at the version the request names",
         ),
         (
             CompanyInactiveError(SOME_ID),
             ErrorKind.CONFLICT,
             "company_inactive",
-            f"company {SOME_ID} is inactive",
+            f"company {format_id(COMPANY_PREFIX, SOME_ID)} is inactive",
         ),
         (
             LastOwnerError(),
@@ -709,3 +839,63 @@ def test_an_event_s_payload_is_its_own_fields_as_json() -> None:
     _, granted = found(company, FOUNDER, now=NOW)
     assert payload_of(event) == {}
     assert payload_of(granted) == {"member": "2001", "role": "owner", "previous": None}
+
+
+def test_identity_names_its_entities_by_the_prefixes_its_manifest_declares() -> None:
+    assert (ESTABLISHMENT_PREFIX, MEMBERSHIP_PREFIX) == ("est", "mbr")
+    declared = {entry.prefix: entry.resource for entry in MANIFEST.ids}
+    assert declared == {
+        API_CLIENT_PREFIX: "api_client",
+        ORGANIZATION_PREFIX: "organization",
+        COMPANY_PREFIX: "company",
+        MEMBERSHIP_PREFIX: "membership",
+        ESTABLISHMENT_PREFIX: "establishment",
+    }
+
+
+def test_an_establishment_that_cannot_even_be_named_is_not_found_without_naming_it() -> None:
+    error = EstablishmentNotFoundError()
+    assert (str(error), error.code) == ("establishment was not found", "establishment_not_found")
+
+
+# ── API clients ─────────────────────────────────────────────────────────────────
+
+MACHINE: Final = SubjectId("4001")
+
+
+def an_api_client() -> ApiClient:
+    spec = ApiClientSpec(subject=MACHINE, name=parse_name("Odoo connector"), api_version=date(2026, 10, 13))
+    return ApiClient.register(spec, organization=ORGANIZATION, mode=Mode.LIVE, actor=FOUNDER.subject, now=NOW)
+
+
+def test_an_api_client_is_registered_active_in_its_mode_and_pinned() -> None:
+    client = an_api_client()
+    assert (client.organization, client.mode, client.subject, client.name) == (
+        ORGANIZATION,
+        Mode.LIVE,
+        MACHINE,
+        "Odoo connector",
+    )
+    assert (client.status, client.active, client.api_version) == (
+        ApiClientStatus.ACTIVE,
+        True,
+        date(2026, 10, 13),
+    )
+    assert (client.created_at, client.created_by, client.revoked_at) == (NOW, FOUNDER.subject, None)
+    assert client.id != an_api_client().id  # every registration is a new client
+
+
+def test_revoking_an_api_client_keeps_it_revoked_since_the_first_time() -> None:
+    client = an_api_client()
+    revoked = client.revoke(now=LATER)
+    assert (revoked.status, revoked.active, revoked.revoked_at) == (ApiClientStatus.REVOKED, False, LATER)
+    assert revoked.id == client.id
+    assert revoked.revoke(now=LATER + timedelta(hours=1)) is revoked  # already revoked: nothing changes
+
+
+def test_an_api_client_of_an_organization_is_not_one_of_another() -> None:
+    assert an_api_client().organization == ORGANIZATION
+
+
+def test_an_api_client_has_an_id_the_public_prefix_names() -> None:
+    assert API_CLIENT_PREFIX == "cli"

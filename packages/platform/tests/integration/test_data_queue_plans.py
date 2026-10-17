@@ -13,12 +13,14 @@ import psycopg
 import pytest
 from pydantic import JsonValue, TypeAdapter
 from sqlalchemy import and_, create_engine, func
-lazy from sqlalchemy import Update
+lazy from sqlalchemy import Delete, Update
 
 from ledger_platform.data.queue import DEFAULT_BACKOFF, claim_statement, recovery_statement
 from ledger_platform.data.tables import chassis_tables
 from ledger_platform.events.consumers import Consumer
 from ledger_platform.events.inbox import claimable
+from ledger_platform.jobs.maintenance import purge_done_jobs_statement, purge_expired_keys_statement
+from ledger_platform.jobs.runner import bury_statement
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
 lazy from ledger_platform.events.consumers import RawEvent
 lazy from ledger_testing.postgres import WorkerDatabase
@@ -39,7 +41,27 @@ FILL: Final = (
            CASE WHEN n % 2 = 0 THEN NULL ELSE now() - interval '1 hour' END
     FROM generate_series(1, 200000) AS n
     """,
+    """
+    INSERT INTO probe.jobs (kind, key, status, run_at, max_attempts, created_at, updated_at, deadline_at)
+    SELECT 'probe.export', 'd' || n, 'ready', now() + interval '1 hour', 10, now(), now(),
+           now() + interval '1 day'
+    FROM generate_series(1, 50000) AS n
+    """,
+    """
+    INSERT INTO probe.jobs (kind, key, status, run_at, max_attempts, created_at, updated_at)
+    SELECT 'probe.export', 'x' || n, 'done', now() - interval '30 days', 10, now(),
+           now() - interval '30 days' + n * interval '1 second'
+    FROM generate_series(1, 100000) AS n
+    """,
+    """
+    INSERT INTO probe.idempotency_keys (organization_id, mode, principal, route, key, request_hash,
+                                        created_at, expires_at)
+    SELECT gen_random_uuid(), 'test', 'p', 'POST /v1/things', 'k' || n, '\\x00', now(),
+           now() - interval '1 day' + n * interval '1 second'
+    FROM generate_series(1, 100000) AS n
+    """,
     "ANALYZE probe.jobs",
+    "ANALYZE probe.idempotency_keys",
     "ANALYZE other.inbox",
 )
 _PLAN: Final = TypeAdapter(list[dict[str, JsonValue]])
@@ -68,7 +90,7 @@ def nodes(node: dict[str, JsonValue]) -> Iterator[dict[str, JsonValue]]:
 
 
 async def plan(
-    connection: psycopg.AsyncConnection, statement: Update, *, analyze: bool = False
+    connection: psycopg.AsyncConnection, statement: Update | Delete, *, analyze: bool = False
 ) -> list[dict[str, JsonValue]]:
     compiled = statement.compile(dialect=_DIALECT, compile_kwargs={"render_postcompile": True})
     options = "ANALYZE, FORMAT JSON" if analyze else "FORMAT JSON"
@@ -188,3 +210,29 @@ async def test_an_ordered_claim_on_a_hot_subject_reads_its_heads_once(
 
 async def never_called(event: RawEvent, unit: UnitOfWork) -> None:
     raise AssertionError((event, unit))
+
+
+async def test_the_deadline_sweep_reads_the_index_of_jobs_that_have_one(
+    filled: psycopg.AsyncConnection,
+) -> None:
+    """On 350 000 jobs of which 50 000 have a deadline that has not passed, the sweep reads none else."""
+    jobs = chassis_tables("probe").jobs
+    found = await plan(filled, bury_statement(jobs, "probe.export"))
+    assert "jobs_deadline" in [node.get("Index Name") for node in found]
+    assert "Seq Scan" not in [node["Node Type"] for node in found]
+
+
+async def test_the_done_jobs_purge_reads_the_index_of_done_jobs_under_a_limit(
+    filled: psycopg.AsyncConnection,
+) -> None:
+    jobs = chassis_tables("probe").jobs
+    found = await plan(filled, purge_done_jobs_statement(jobs, 5000))
+    assert_reads_the_index_under_a_limit(found, "jobs_done")
+
+
+async def test_the_expired_keys_purge_reads_the_expiry_index_under_a_limit(
+    filled: psycopg.AsyncConnection,
+) -> None:
+    keys = chassis_tables("probe").idempotency_keys
+    found = await plan(filled, purge_expired_keys_statement(keys, 5000))
+    assert_reads_the_index_under_a_limit(found, "idempotency_expiry")

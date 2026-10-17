@@ -112,7 +112,7 @@ These replace v1's ten rules. Each is enforced by a tool where a tool can enforc
 | # | Rule | Enforced by |
 |---|---|---|
 | 1 | **A module owns its data.** One PostgreSQL schema and one DML role per module; no cross-schema foreign key, join or query. Data crosses modules through the owner's `api` (commands and queries) or its `events`. | DB grants (§6.2); import-linter (§4.6) |
-| 2 | **Commands are in-process calls through a Protocol, facts are events.** `ledger_<m>.api` holds typed Protocols and DTOs; `ledger_<m>.events` holds frozen event types. Nothing else of a module is importable by another. **Consuming an event is a dependency edge exactly like an import**: the module graph, imports and subscriptions together must be acyclic. | import-linter `protected`; `ledger-devtools check` on the manifest graph |
+| 2 | **Commands are in-process calls through a Protocol, facts are events.** `ledger_<m>.api` holds typed Protocols and DTOs; `ledger_<m>.events` holds frozen event types. Nothing else of a module is importable by another. **Consuming an event is a dependency edge exactly like an import**: the module graph, imports and subscriptions together must be acyclic. A process that coordinates several modules is a **flow** (`flows/<name>`), a leaf above modules that no module depends on (ADR 0011). | import-linter `protected`; `ledger-devtools check` on the manifest graph |
 | 3 | **Every state change and the event announcing it commit together** (outbox in the producer's schema). | `UnitOfWork.publish` is the only way to emit |
 | 4 | **Every consumer and every job is idempotent** (inbox keyed by consumer and event id; jobs keyed by kind and key); facade commands callable from consumers or jobs take an idempotency token or a version. | chassis tables' primary keys; facade signatures |
 | 5 | **Every external write is idempotent**: `Idempotency-Key` (7 days, scoped per route) on the public API and a permanent business key (`external_reference`). | http dependencies; unique indexes |
@@ -315,6 +315,13 @@ type wait in the inbox for the next roll forward (alerted by age), never fail.
  retryable failure: next_attempt_at = backoff(attempts) ; INVALID or attempts = max: status = 'dead' (kept)
 ```
 
+- **A consumer handles its event inside a unit (as built, v2-M1).** The handler and the delete of its inbox row
+  share one transaction, which is what makes the effect exactly once. A facade call inside it raises
+  `UnitOpenError` (rule 13), so until an "outside" consumer style exists (the handler runs with no unit and the
+  runner deletes the row in a second unit under its token, the facade command carrying the event id as its
+  idempotency token), a consumer writes its own schema and enqueues a job for any cross-module call. The
+  consumers §8.5 shows calling `InvoicingApi.apply_fiscal_status` (`fiscal.channel_documents`) need the outside
+  style first.
 - **Exactly-once effects over at-least-once delivery.** Fan-out inserts and the outbox delete commit together,
   so one outbox row is fanned out once; the inbox primary key `(consumer, event_id)` absorbs any repeat. A
   handled inbox row is deleted in the handler's transaction (nothing can deliver it again: its outbox row is
@@ -340,6 +347,12 @@ type wait in the inbox for the next roll forward (alerted by age), never fail.
   transaction-level advisory lock per schema), so a subject's rows reach the inbox in id order. A dead row no
   longer blocks its subject (the rows behind it go on); replaying it is refused while an earlier live row of its
   subject waits. Events without a subject are not ordered.
+  **As built (v2-M1), known limit:** subject order holds while the fan-out is healthy. When the row-by-row path
+  skips a row (its target refused it) or sets one aside (10 failures), later events of the same subject go on to
+  an ordered consumer's inbox ahead of it, and run first; the earlier one arrives late as the subject's new head.
+  Before the first ordered consumer ships, the fan-out must hold a subject back behind a skipped or set-aside
+  row of its own (skip later rows of that subject in the pass; let a set-aside row block its subject), or the
+  consumer must be a version-monotonic upsert, which does not depend on order.
 - **Retries**: backoff 1 s, 10 s, 1 min, 5 min, then every 10 min; `max_attempts` 10 (overridable per
   consumer); then `dead`. A row whose worker died (its lease ran out) is retried the same way, a backoff after
   the lease ran out, and is `dead` with `worker_lost` once its attempts are spent (one rule for inboxes and
@@ -376,6 +389,9 @@ state machines** (ADR 0003).
   a lost lease (another worker reclaimed it) makes the late writer's record a no-op and it logs
   `job_lease_lost`. Business writes of a step re-read their row under lock and are idempotent, so a zombie step
   cannot do harm before it records.
+- **A handler has a time of its own** (`timeout` in the manifest, default 15 min): a run past it is stopped
+  and retried as a retryable failure (`job_timed_out`), so a hung call cannot hold its slot and renew its lease
+  for ever.
 - **Outcomes**: `Done`; `RunAgain(at)` (polling: does not count as a failure; attempts reset); `Park(reason)`
   (waiting for an outside fact; `uow.jobs.wake(kind, key)` or `uow.jobs.wake_all(kind, company, reason)` makes
   matching parked jobs `ready`); a retryable error → `ready` at the kind's backoff; an `INVALID`/`CONFLICT`
@@ -556,7 +572,7 @@ Assembly fails the start, never a later call, when: two packages claim one schem
 a consumer or job kind is declared without a handler or handed over undeclared; a declared extension point
 has no implementation or a declared port no provider after every module assembled (a channel reads its ports
 while it assembles, so a missing one fails there); an API, extension point implementation or port has a public
-coroutine that is not a `@facade`. A name is bound once: **one implementation per extension point** and one
+coroutine that is not a `@facade`. A name is bound once: one provider per port, and an extension point's implementations are **chained** in `(order, module name)` order (ADR 0011, which replaces the former one-implementation rule); one
 provider per port; a point that needs several (a chain of policies) gets a directory of its own when one does.
 
 ---
@@ -673,6 +689,7 @@ ordered = false                                 # optional: head-of-line claim p
 [[jobs]]
 kind = "invoicing.export"           # <module>.<verb_or_noun>
 lease = "60s"                       # optional (default 60s)
+timeout = "15m"                     # optional (default 15m): the longest one run may take; past it, stopped and retried
 max_attempts = 20                   # optional (default 20)
 deadline = "72h"                    # optional
 concurrency = 8                     # optional: per worker process (default 8)
@@ -685,6 +702,8 @@ enqueues = "invoicing.purge_drafts"
 [extension_points]
 declares = ["IssuePolicy"]          # Protocols in this module's api.py that other modules may implement
 implements = []                     # "<module>.<Protocol>" this module implements (bound by apps)
+# [extension_points.order]          # optional: where each implementation goes in the point's chain, lowest first
+# "invoicing.IssuePolicy" = 10      # 0-1000, default 100, ties by module name (ADR 0011)
 provides = []                       # fiscal-kit ports this module provides to channels: "SignerPort", "CompanyDirectory"
 
 [http]
@@ -829,6 +848,7 @@ only the public surfaces and the layering are mandated.
 | 7 | Module public surface | `protected` (one per module) | `ledger_<m>.*` importable only by `ledger_<m>` itself, except `ledger_<m>.api` and `ledger_<m>.events` (by declared dependents) and `ledger_<m>.assembly` (by apps) |
 | 8 | Declared module edges only | `forbidden` (one per module) | `ledger_<m>` → every module not in its `dependencies.modules` |
 | 9 | Acyclic modules | `acyclic_siblings` | over the module set (subscription edges checked by `ledger-devtools check`) |
+| 9b | Flows are leaves | `forbidden` | `ledger_<module>` → `ledger_flow_*` (ADR 0011); flows reach modules through `api`, `events` and declared edges only |
 | 10 | Layers inside each package | `layers` with `containers` | §4.5 per module, per channel |
 | 11 | Domain purity | `forbidden` (one per package) | `*.domain`, `*.events`, `*.application` → third-party |
 | 12 | Signer custody | `forbidden` | everything but `ledger_app_signer` and `ledger_signer` → `ledger_signer.adapters.custody` |
@@ -961,9 +981,10 @@ pooled connection has seen the setting, and `''::uuid` would raise:
 USING (organization_id = (SELECT NULLIF(current_setting('ledger.organization_id', true), '')::uuid)
    AND company_id      = (SELECT NULLIF(current_setting('ledger.company_id', true), '')::uuid)
    AND mode            = (SELECT NULLIF(current_setting('ledger.mode', true), '')))
--- scope "company": organization_id, company_id; a company's rows shared by both modes (establishments, branches)
--- scope "organization": organization_id only (organizations, companies, memberships); visible to the
---   organization's transactions and to those of its companies
+-- scope "company": organization_id, company_id; a company's rows shared by both modes
+-- scope "organization": organization_id only (organizations, companies, tax ids, memberships, establishments);
+--   visible to the organization's transactions and to those of its companies. A company's establishments are
+--   here because registering a company writes its `MAIN` one in the same unit, before any company scope exists
 -- scope "moded_organization": organization_id + mode (API clients, organization-level idempotency keys)
 ```
 
@@ -1033,6 +1054,10 @@ CREATE TABLE {s}.jobs (
 CREATE INDEX jobs_due     ON {s}.jobs (kind, run_at)        WHERE status = 'ready';
 CREATE INDEX jobs_expired ON {s}.jobs (kind, lease_until)   WHERE status = 'running';
 CREATE INDEX jobs_parked  ON {s}.jobs (kind, company_id, parked_reason) WHERE status = 'parked';
+-- chassis_schema_v2 (a revision in every schema) adds the two the housekeeping reads, as built:
+CREATE INDEX jobs_deadline ON {s}.jobs (kind, deadline_at)
+  WHERE status IN ('ready','running') AND deadline_at IS NOT NULL;  -- the deadline sweep
+CREATE INDEX jobs_done ON {s}.jobs (updated_at) WHERE status = 'done'; -- the done-job purge, oldest first
 -- done jobs are deleted by the purge after 7 days unless the kind keeps them; dead jobs are kept
 
 CREATE TABLE {s}.subscriptions (
@@ -2036,6 +2061,7 @@ Written as `docs/adr/NNNN-*.md` (MADR, short), status *Proposed* until the owner
 | [0008](../../adr/0008-dated-api-versions.md) | `/v1` path major plus pinned dated versions (transforms deferred); TypeID public ids; thin Standard Webhooks |
 | [0009](../../adr/0009-manifest-driven-workspace.md) | A uv workspace with one package per unit, `manifest.toml` as the source of truth, generated lists and contracts, devtools sync/check (gate deferred) |
 | [0010](../../adr/0010-signer-isolation.md) | Private keys only in a separate signer process, reached over gRPC with per-caller allowlists; two signing backends (local key, remote INDOTEL-authorized entity) |
+| [0011](../../adr/0011-flows-and-chained-extension-points.md) | Flows (`flows/<name>`) coordinate several modules as leaves above them; extension points are chained by declared order |
 
 ## 18. Risks
 

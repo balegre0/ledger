@@ -404,7 +404,7 @@ def test_the_version_table_is_read_only_for_the_rw_role(chassis: WorkerDatabase)
     with app(chassis) as connection, connection.transaction():
         as_role(connection, "platform_rw")
         assert connection.execute("SELECT version_num FROM platform.alembic_version").fetchall() == [
-            ("0001",)
+            ("0002",)
         ]
         for statement in (
             b"UPDATE platform.alembic_version SET version_num = 'ffff'",

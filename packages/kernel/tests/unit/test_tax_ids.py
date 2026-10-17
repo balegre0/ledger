@@ -7,6 +7,7 @@ from ledger_kernel.tax_ids import (
     TaxId,
     TaxIdCheck,
     TaxIdScheme,
+    masked,
     parse_scheme,
 )
 
@@ -71,3 +72,12 @@ def test_an_error_names_the_scheme_and_the_problem_never_the_value() -> None:
     error = InvalidTaxIdError(TaxIdScheme("do.rnc"), TaxIdCheck.INVALID_FORMAT)
     assert str(error) == "not a valid do.rnc identifier: invalid_format"
     assert error.code == "invalid_tax_id"
+
+
+def test_masked_shows_only_the_last_three_characters_of_a_value() -> None:
+    assert masked("101850043") == "******043"
+    assert masked("1234") == "*234"
+
+
+def test_masked_shows_nothing_of_a_value_of_three_characters_or_fewer() -> None:
+    assert (masked("123"), masked("1"), masked("")) == ("***", "***", "***")

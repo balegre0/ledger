@@ -116,8 +116,8 @@ def lock_holder(fresh: Fresh) -> Iterator[psycopg.Connection]:
 def test_the_platform_schema_migrates_to_head_and_a_rerun_does_nothing(fresh: Fresh) -> None:
     PLATFORM_MIGRATIONS.upgrade(fresh.url())
     PLATFORM_MIGRATIONS.upgrade(fresh.url())
-    assert PLATFORM_MIGRATIONS.head == "0001"
-    assert fresh.one(b"SELECT array_agg(version_num) FROM platform.alembic_version") == (["0001"],)
+    assert PLATFORM_MIGRATIONS.head == "0002"
+    assert fresh.one(b"SELECT array_agg(version_num) FROM platform.alembic_version") == (["0002"],)
     assert fresh.one(b"SELECT array_agg(version) FROM platform.routing") == ([0],)
 
 
@@ -174,7 +174,7 @@ def test_a_second_migrator_waits_for_the_first_then_finds_head(
         PLATFORM_MIGRATIONS.upgrade(fresh.url(), lock_wait=timedelta(seconds=30))
     finally:
         released.join()
-    assert fresh.one(b"SELECT version_num FROM platform.alembic_version") == ("0001",)
+    assert fresh.one(b"SELECT version_num FROM platform.alembic_version") == ("0002",)
 
 
 def test_two_migrators_at_once_migrate_once(fresh: Fresh) -> None:
@@ -182,7 +182,7 @@ def test_two_migrators_at_once_migrate_once(fresh: Fresh) -> None:
         runs = [pool.submit(PLATFORM_MIGRATIONS.upgrade, fresh.url()) for _ in range(2)]
         for run in runs:
             run.result()
-    assert fresh.one(b"SELECT array_agg(version_num) FROM platform.alembic_version") == (["0001"],)
+    assert fresh.one(b"SELECT array_agg(version_num) FROM platform.alembic_version") == (["0002"],)
     assert fresh.one(b"SELECT array_agg(version) FROM platform.routing") == ([0],)
 
 

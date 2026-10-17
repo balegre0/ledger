@@ -16,7 +16,7 @@ from psycopg import sql
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
 
-from ledger_platform.data.chassis_schema import chassis_schema_v1
+from ledger_platform.data.chassis_schema import chassis_schema_v1, chassis_schema_v2
 from ledger_platform.data.roles import (
     APP,
     MIGRATOR,
@@ -49,13 +49,15 @@ def migrate(template: Template, *migrations: SchemaMigrations) -> None:
 
 
 def create_chassis(template: Template, schema: str) -> None:
-    """``chassis_schema_v1`` and the relay's grants in a test schema, as its owner (for platform tests)."""
+    """The chassis (versions 1 and 2) and the relay's grants in a test schema, as its owner."""
     owner = SchemaRoles(schema=schema).owner
     engine = create_engine(template.url(role=MIGRATOR, password=TEST_LOGINS.migrator), poolclass=NullPool)
     try:
         with engine.begin() as connection:
             connection.execute(text(f"SET LOCAL ROLE {identifier(owner)}"))
-            chassis_schema_v1(Operations(MigrationContext.configure(connection)), schema)
+            operations = Operations(MigrationContext.configure(connection))
+            chassis_schema_v1(operations, schema)
+            chassis_schema_v2(operations, schema)
             for statement in relay_statements(schema):
                 connection.execute(text(statement))
     finally:

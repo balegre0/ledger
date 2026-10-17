@@ -1,5 +1,6 @@
 """The module fixtures (``ledger_testing.modules``), exercised with the platform as the module under test."""
 
+from functools import partial
 from http import HTTPStatus
 
 import psycopg
@@ -12,10 +13,14 @@ from ledger_platform._manifest import MANIFEST
 from ledger_platform.config.manifest import load_manifest
 from ledger_platform.data.migrations import SchemaMigrations, platform_migrations
 from ledger_platform.data.notifier import OUTBOX
+from ledger_platform.runtime.contexts import Module, ModuleParts
+from ledger_platform.runtime.registries import MODULES, REGIMES, Discovered
 from ledger_testing.modules import ModuleUnderTest, QuietSignals, SchemaLessModuleError
 lazy from ledger_platform.config.settings import Settings
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.runtime.app import App
+lazy from ledger_platform.runtime.contexts import ModuleContext
+lazy from ledger_platform.runtime.registries import Discover
 lazy from ledger_testing.postgres import WorkerDatabase
 
 _COUNT = TypeAdapter(int)
@@ -34,6 +39,63 @@ def test_a_module_s_schemas_are_the_platform_s_then_its_own() -> None:
     books = ModuleUnderTest(MANIFEST, SchemaMigrations(schema="books", scripts="books_unused:migrations"))
     assert (books.schema, books.schemas) == ("books", ("platform", "books"))
     assert platform.publishes == frozenset()
+
+
+def test_the_schemas_of_the_modules_a_module_needs_are_migrated_before_its_own() -> None:
+    dependency = SchemaMigrations(schema="people", scripts="people_unused:migrations")
+    books = SchemaMigrations(schema="books", scripts="books_unused:migrations")
+    needing = ModuleUnderTest(MANIFEST, books, needs=(dependency,))
+    assert needing.schemas == ("platform", "people", "books")
+    assert (needing.schema, needing.owned) == ("books", ("books", "people"))  # the schemas a test empties
+    assert ModuleUnderTest(MANIFEST, books).owned == ("books",)
+
+
+def a_module(name: str, *depends: str) -> Module:
+    declared = ", ".join(f'"{dependency}"' for dependency in depends)
+    text = (
+        f'[package]\nname = "{name}"\nkind = "module"\nsummary = "A module."\nowners = ["@o"]\n'
+        f'[dependencies]\npackages = ["platform"]\nmodules = [{declared}]\n[data]\nschema = "{name}"\n'
+    )
+
+    def assemble(context: ModuleContext) -> ModuleParts:
+        return ModuleParts(migrations=SchemaMigrations(schema=context.database.schema, scripts="unused:x"))
+
+    return Module(manifest=load_manifest(text), assemble=assemble)
+
+
+def found(*modules: Module) -> Discover:
+    """The entry points of a group: these modules (their dependencies are theirs to name), one regime key."""
+    groups: dict[str, tuple[Discovered, ...]] = {
+        MODULES: tuple(Discovered(m.manifest.package.name, partial(identity, m)) for m in modules),
+        REGIMES: (Discovered("zz", partial(identity, "a regime")),),
+    }
+    return lambda group: groups.get(group, ())
+
+
+def identity(value: object) -> object:
+    return value
+
+
+def test_the_app_a_module_is_tested_in_assembles_it_and_the_modules_it_depends_on_only() -> None:
+    alpha, beta, gamma = a_module("alpha", "beta", "delta"), a_module("beta", "delta"), a_module("gamma")
+    delta = a_module("delta")
+    everything = found(alpha, beta, gamma, delta)
+    migrations = SchemaMigrations(schema="alpha", scripts="unused:x")
+    tested = ModuleUnderTest(alpha.manifest, migrations).discovering(everything)
+    assert [entry.name for entry in tested(MODULES)] == [
+        "alpha",
+        "beta",
+        "delta",
+    ]  # transitively, once each; not gamma
+    assert [entry.name for entry in tested(REGIMES)] == ["zz"]  # what is not a module is as installed
+    alone = ModuleUnderTest(gamma.manifest, migrations).discovering(everything)
+    assert [entry.name for entry in alone(MODULES)] == ["gamma"]
+
+
+def test_a_package_that_is_not_a_module_is_tested_in_the_app_of_every_installed_module() -> None:
+    everything = found(a_module("alpha"), a_module("beta"))
+    tested = ModuleUnderTest(MANIFEST, platform_migrations()).discovering(everything)
+    assert [entry.name for entry in tested(MODULES)] == ["alpha", "beta"]
 
 
 def test_quiet_signals_tell_no_one() -> None:

@@ -1,23 +1,39 @@
 """The shapes of identity's public API: what clients send (unknown fields refused) and what they receive.
 
-Ids are UUID strings, times ISO 8601 with their offset (UTC), enumerations their lowercase words. A list
-answers a ``Page`` of its views (``ledger_platform.http.models.Page``, §9.7).
+Ids are TypeIDs (``cmp_…``, §9.4: ``public``), times ISO 8601 with their offset (UTC), enumerations their
+lowercase words. A list answers a ``Page`` of its views (``ledger_platform.http.models.Page``, §9.7).
 """
 
-from datetime import datetime
-from typing import ClassVar, Self
-from uuid import UUID
+from datetime import date, datetime
+from typing import ClassVar, Final, Self
+lazy from collections.abc import Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ledger_identity.adapters.http.public import (
+    ApiClientRef,
+    CompanyRef,
+    EstablishmentRef,
+    MembershipRef,
+    OrganizationRef,
+    api_client_ref,
+    company_ref,
+    establishment_ref,
+    membership_ref,
+    organization_ref,
+)
+from ledger_identity.domain.api_clients import ApiClientStatus
 from ledger_identity.domain.company import CompanyStatus
-from ledger_identity.domain.text import MAX_LEGAL_NAME
-from ledger_kernel.access import Role
+from ledger_identity.domain.text import MAX_LEGAL_NAME, MAX_NAME
+from ledger_kernel.access import MAX_SUBJECT_LENGTH, Role
 from ledger_kernel.tax_ids import MAX_TAX_ID_LENGTH
-lazy from ledger_identity.domain.branches import Branch, EmissionPoint
+from ledger_kernel.tenancy import Mode
+lazy from ledger_identity.domain.api_clients import ApiClient
 lazy from ledger_identity.domain.company import Company
+lazy from ledger_identity.domain.establishments import Establishment
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_identity.domain.organization import Organization
+lazy from ledger_kernel.jurisdiction import Jurisdiction
 lazy from ledger_kernel.tax_ids import TaxId
 
 
@@ -47,12 +63,59 @@ class TaxIdBody(_Shape):
         return cls(scheme=tax_id.scheme, value=tax_id.value)
 
 
+class JurisdictionBody(_Shape):
+    """Where a company is: a country and, where law differs inside it, a subdivision."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    country: str = Field(
+        min_length=2, max_length=2, description="ISO 3166-1 alpha-2, upper case.", examples=["DO"]
+    )
+    subdivision: str | None = Field(
+        default=None,
+        min_length=4,
+        max_length=6,
+        description="ISO 3166-2, where law differs inside the country.",
+        examples=["US-CA"],
+    )
+
+    @classmethod
+    def of(cls, jurisdiction: Jurisdiction) -> Self:
+        """The body of ``jurisdiction``."""
+        return cls(country=jurisdiction.country, subdivision=jurisdiction.subdivision)
+
+
+MAX_TAX_IDS: Final = 5
+"""How many tax ids a company lists: a taxpayer has few (an RNC, a cédula, a foreign id)."""
+
+
 class NewCompany(_Shape):
     """A company to register."""
 
-    tax_id: TaxIdBody
+    jurisdiction: JurisdictionBody
+    functional_currency: str = Field(
+        min_length=3,
+        max_length=3,
+        description="ISO 4217: the currency its books are kept in.",
+        examples=["DOP"],
+    )
+    tax_ids: list[TaxIdBody] = Field(
+        min_length=1,
+        max_length=MAX_TAX_IDS,
+        description="One or more, each once; the first is its primary one.",
+    )
     legal_name: str = Field(
         min_length=1, max_length=MAX_LEGAL_NAME, description="As registered with the tax authority."
+    )
+    time_zone: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description=(
+            "An IANA zone: where the days of its main establishment begin and end. "
+            "Absent: its regime's; required where no regime is installed."
+        ),
+        examples=["America/Santo_Domingo"],
     )
 
 
@@ -65,11 +128,16 @@ class CompanyChanges(_Shape):
 class CompanyView(_Shape):
     """A company, at its current version (its ``ETag``)."""
 
-    id: UUID
-    organization_id: UUID
-    tax_id: TaxIdBody
+    id: CompanyRef
+    organization_id: OrganizationRef
+    jurisdiction: JurisdictionBody
+    functional_currency: str
+    tax_ids: list[TaxIdBody] = Field(description="The first is its primary one.")
     legal_name: str
     status: CompanyStatus
+    fiscal_profile_locked_at: datetime | None = Field(
+        description="When its jurisdiction, currency and primary tax id became immutable, if they did."
+    )
     version: int
     created_at: datetime
     updated_at: datetime
@@ -78,91 +146,157 @@ class CompanyView(_Shape):
     def of(cls, company: Company) -> Self:
         """The view of ``company``."""
         return cls(
-            id=company.id,
-            organization_id=company.organization,
-            tax_id=TaxIdBody.of(company.tax_id),
+            id=company_ref(company.id),
+            organization_id=organization_ref(company.organization),
+            jurisdiction=JurisdictionBody.of(company.profile.jurisdiction),
+            functional_currency=company.profile.functional_currency.code,
+            tax_ids=[TaxIdBody.of(tax_id) for tax_id in company.profile.tax_ids],
             legal_name=company.legal_name,
             status=company.status,
+            fiscal_profile_locked_at=company.fiscal_profile_locked_at,
             version=company.version,
             created_at=company.created_at,
             updated_at=company.updated_at,
         )
 
 
+class RegistrationWarning(_Shape):
+    """Something the registration accepted that its sender may want to look at again (§7.3)."""
+
+    code: str = Field(description="What to match on.", examples=["tax_id_checksum_mismatch"])
+    field: str = Field(description="Where in the request.", examples=["tax_ids.0"])
+
+
+class RegisteredCompany(CompanyView):
+    """A company just registered, and what the registration accepted with a warning."""
+
+    warnings: list[RegistrationWarning] = Field(
+        description="Empty unless something was accepted with a doubt, such as a tax id's check digit."
+    )
+
+    @classmethod
+    def registered(cls, company: Company, warnings: Sequence[RegistrationWarning]) -> Self:
+        """The view of ``company`` with the ``warnings`` its registration raised."""
+        view = CompanyView.of(company)
+        return cls(
+            id=view.id,
+            organization_id=view.organization_id,
+            jurisdiction=view.jurisdiction,
+            functional_currency=view.functional_currency,
+            tax_ids=view.tax_ids,
+            legal_name=view.legal_name,
+            status=view.status,
+            fiscal_profile_locked_at=view.fiscal_profile_locked_at,
+            version=view.version,
+            created_at=view.created_at,
+            updated_at=view.updated_at,
+            warnings=list(warnings),
+        )
+
+
 class OrganizationView(_Shape):
     """The caller's organization."""
 
-    id: UUID
+    id: OrganizationRef
     provider_id: str = Field(description="The identity provider's (Zitadel's) id of the organization.")
     created_at: datetime
+    api_version: date = Field(
+        description=(
+            "The dated version of the API it speaks unless a request or API client says otherwise: "
+            "the current one when the organization was created, fixed since."
+        ),
+        examples=["2026-10-13"],
+    )
 
     @classmethod
     def of(cls, organization: Organization) -> Self:
         """The view of ``organization``."""
         return cls(
-            id=organization.id, provider_id=organization.provider_id, created_at=organization.created_at
+            id=organization_ref(organization.id),
+            provider_id=organization.provider_id,
+            created_at=organization.created_at,
+            api_version=organization.api_version,
         )
 
 
-class NewBranch(_Shape):
-    """A branch to open."""
+class NewEstablishment(_Shape):
+    """An establishment to open."""
 
     code: str = Field(
         min_length=1, max_length=10, description="1 to 10 upper-case letters and digits.", examples=["SUC1"]
     )
     name: str = Field(min_length=1, max_length=200)
+    time_zone: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description="An IANA zone: where its days begin and end. Absent: the company's main establishment's.",
+        examples=["America/Santo_Domingo"],
+    )
 
 
-class BranchView(_Shape):
-    """A branch of a company."""
+class EstablishmentView(_Shape):
+    """An establishment of a company."""
 
-    id: UUID
-    company_id: UUID
+    id: EstablishmentRef
+    company_id: CompanyRef
     code: str
     name: str
+    time_zone: str
     created_at: datetime
 
     @classmethod
-    def of(cls, branch: Branch) -> Self:
-        """The view of ``branch``."""
+    def of(cls, establishment: Establishment) -> Self:
+        """The view of ``establishment``."""
         return cls(
-            id=branch.id,
-            company_id=branch.tenant.company,
-            code=branch.code,
-            name=branch.name,
-            created_at=branch.created_at,
+            id=establishment_ref(establishment.id),
+            company_id=company_ref(establishment.tenant.company),
+            code=establishment.code,
+            name=establishment.name,
+            time_zone=establishment.time_zone,
+            created_at=establishment.created_at,
         )
 
 
-class NewEmissionPoint(_Shape):
-    """An emission point to open."""
+class NewApiClient(_Shape):
+    """A machine user to register as an API client, for the mode of the request."""
 
-    code: str = Field(
-        min_length=1, max_length=10, description="1 to 10 upper-case letters and digits.", examples=["001"]
+    subject: str = Field(
+        min_length=1,
+        max_length=MAX_SUBJECT_LENGTH,
+        description="The identity provider's (Zitadel's) id of the machine user: its tokens' `sub`.",
     )
-    name: str = Field(min_length=1, max_length=200)
+    name: str = Field(min_length=1, max_length=MAX_NAME, description="What the integration is known as.")
 
 
-class EmissionPointView(_Shape):
-    """An emission point of a branch."""
+class ApiClientView(_Shape):
+    """An API client: a machine user bound to a mode and pinned to a version of the API."""
 
-    id: UUID
-    company_id: UUID
-    branch_id: UUID
-    code: str
+    id: ApiClientRef
+    mode: Mode = Field(description="The mode its credential acts in: it needs no `Ledger-Mode`.")
+    subject: str
     name: str
+    api_version: date = Field(
+        description="The dated version of the API it speaks unless a request says otherwise."
+    )
+    status: ApiClientStatus
     created_at: datetime
+    created_by: str
+    revoked_at: datetime | None
 
     @classmethod
-    def of(cls, point: EmissionPoint) -> Self:
-        """The view of ``point``."""
+    def of(cls, client: ApiClient) -> Self:
+        """The view of ``client``."""
         return cls(
-            id=point.id,
-            company_id=point.tenant.company,
-            branch_id=point.branch,
-            code=point.code,
-            name=point.name,
-            created_at=point.created_at,
+            id=api_client_ref(client.id),
+            mode=client.mode,
+            subject=client.subject,
+            name=client.name,
+            api_version=client.api_version,
+            status=client.status,
+            created_at=client.created_at,
+            created_by=client.created_by,
+            revoked_at=client.revoked_at,
         )
 
 
@@ -175,8 +309,8 @@ class RoleAssignment(_Shape):
 class MembershipView(_Shape):
     """A principal's role in a company: an active membership, whose last change is the grant of its role."""
 
-    id: UUID
-    company_id: UUID
+    id: MembershipRef
+    company_id: CompanyRef
     subject: str = Field(description="The identity provider's id of the user or machine.")
     role: Role
     version: int = Field(description="One more with every change; a role granted again continues it.")
@@ -187,8 +321,8 @@ class MembershipView(_Shape):
     def of(cls, membership: Membership) -> Self:
         """The view of ``membership``, which is active."""
         return cls(
-            id=membership.id,
-            company_id=membership.tenant.company,
+            id=membership_ref(membership.id),
+            company_id=company_ref(membership.tenant.company),
             subject=membership.subject,
             role=membership.role,
             version=membership.version,

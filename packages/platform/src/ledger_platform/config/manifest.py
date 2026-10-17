@@ -89,6 +89,10 @@ type ProtocolName = Annotated[str, Field(pattern=r"^[A-Z][A-Za-z0-9]{1,63}$")]
 """An extension point or a port: the name of a Protocol (``IssuePolicy``, ``SignerPort``)."""
 type QualifiedProtocol = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*\.[A-Z][A-Za-z0-9]{1,63}$")]
 """An extension point another module declares: ``<module>.<Protocol>``."""
+DEFAULT_EXTENSION_ORDER: Final = 100
+"""Where an implementation goes in its point's chain when its manifest does not say (ADR 0011)."""
+type ExtensionOrder = Annotated[int, Field(ge=0, le=1000)]
+"""A place in a chain of implementations: the lowest runs first, ties by the implementer's name."""
 type PublicName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")]
 type Dotted = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")]
 """A consumer (``<module>.<purpose>``), a job kind or a schedule name (``<module or channel>.<name>``)."""
@@ -225,6 +229,8 @@ class JobDecl(_Section):
 
     kind: Dotted
     lease: Duration = timedelta(seconds=60)
+    timeout: Duration = timedelta(minutes=15)
+    """The longest one run of the handler may take: past it the run is stopped and retried (a hung call)."""
     max_attempts: int = Field(default=20, ge=1)
     deadline: Duration | None = None
     concurrency: int = Field(default=8, ge=1)
@@ -246,6 +252,11 @@ class ScheduleDecl(_Section):
         return self
 
 
+class _OrderWithoutImplementationError(ValueError):
+    def __init__(self) -> None:
+        super().__init__("an order names only an extension point the module implements")
+
+
 class _CadenceError(ValueError):
     def __init__(self) -> None:
         super().__init__("a schedule has exactly one of every and cron")
@@ -258,8 +269,21 @@ class ExtensionPoints(_Section):
     """Protocols of the module's ``api`` that other modules may implement."""
     implements: tuple[QualifiedProtocol, ...] = ()
     """Extension points of other modules it implements: ``<module>.<Protocol>``."""
+    order: dict[QualifiedProtocol, ExtensionOrder] = Field(default_factory=dict)
+    """Where its implementation goes in each chain, lowest first (default ``DEFAULT_EXTENSION_ORDER``)."""
     provides: tuple[ProtocolName, ...] = ()
     """Ports it provides to channels (``SignerPort``, ``CompanyDirectory``)."""
+
+    @model_validator(mode="after")
+    def order_only_what_is_implemented(self) -> Self:
+        """An order names a point the module implements: one it does not is a typo, not a setting."""
+        if not set(self.order) <= set(self.implements):
+            raise _OrderWithoutImplementationError
+        return self
+
+    def order_of(self, point: str) -> int:
+        """Where its implementation of ``point`` goes in the chain."""
+        return self.order.get(point, DEFAULT_EXTENSION_ORDER)
 
 
 class HttpSection(_Section):

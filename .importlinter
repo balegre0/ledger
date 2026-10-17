@@ -9,6 +9,7 @@ root_packages =
     ledger_country_do_testing
     ledger_devtools
     ledger_identity
+    ledger_invoicing
     ledger_kernel
     ledger_platform
     ledger_testing
@@ -19,6 +20,7 @@ name = Workspace layers
 type = layers
 layers =
     ledger_app_api | ledger_app_migrate | ledger_app_worker
+    ledger_invoicing
     ledger_identity
     ledger_country_do
     ledger_platform
@@ -87,6 +89,7 @@ forbidden_modules =
     ledger_country_do_testing
     ledger_devtools
     ledger_identity
+    ledger_invoicing
     ledger_kernel
     ledger_testing
 allow_indirect_imports = True
@@ -103,6 +106,7 @@ forbidden_modules =
     ledger_country_do_testing
     ledger_devtools
     ledger_identity
+    ledger_invoicing
     ledger_kernel
     ledger_testing
 allow_indirect_imports = True
@@ -119,6 +123,7 @@ forbidden_modules =
     ledger_country_do_testing
     ledger_devtools
     ledger_identity
+    ledger_invoicing
     ledger_kernel
     ledger_testing
 allow_indirect_imports = True
@@ -135,6 +140,7 @@ forbidden_modules =
     ledger_country_do_testing
     ledger_devtools
     ledger_identity
+    ledger_invoicing
     ledger_platform
     ledger_testing
 allow_indirect_imports = True
@@ -150,6 +156,7 @@ forbidden_modules =
     ledger_app_worker
     ledger_devtools
     ledger_identity
+    ledger_invoicing
     ledger_platform
     ledger_testing
 allow_indirect_imports = True
@@ -166,6 +173,7 @@ forbidden_modules =
     ledger_country_do
     ledger_country_do_testing
     ledger_identity
+    ledger_invoicing
     ledger_testing
 allow_indirect_imports = True
 
@@ -181,6 +189,24 @@ forbidden_modules =
     ledger_country_do
     ledger_country_do_testing
     ledger_devtools
+    ledger_invoicing
+    ledger_testing
+allow_indirect_imports = True
+
+[importlinter:contract:invoicing-declared-edges]
+name = invoicing imports only the workspace packages it declares
+type = forbidden
+source_modules =
+    ledger_invoicing
+forbidden_modules =
+    ledger_app_api
+    ledger_app_migrate
+    ledger_app_worker
+    ledger_country_do
+    ledger_country_do_testing
+    ledger_devtools
+    ledger_identity
+    ledger_kernel
     ledger_testing
 allow_indirect_imports = True
 
@@ -197,6 +223,7 @@ forbidden_modules =
     ledger_country_do_testing
     ledger_devtools
     ledger_identity
+    ledger_invoicing
     ledger_platform
     ledger_testing
 allow_indirect_imports = True
@@ -214,6 +241,7 @@ forbidden_modules =
     ledger_country_do_testing
     ledger_devtools
     ledger_identity
+    ledger_invoicing
     ledger_testing
 allow_indirect_imports = True
 
@@ -230,6 +258,7 @@ forbidden_modules =
     ledger_country_do_testing
     ledger_devtools
     ledger_identity
+    ledger_invoicing
 allow_indirect_imports = True
 
 [importlinter:contract:do-regime-is-pure]
@@ -252,6 +281,7 @@ forbidden_modules =
     ledger_country_do_testing
     ledger_devtools
     ledger_identity
+    ledger_invoicing
     ledger_platform
     ledger_testing
     lxml
@@ -304,6 +334,7 @@ forbidden_modules =
     ledger_country_do_testing
     ledger_devtools
     ledger_identity
+    ledger_invoicing
     ledger_platform
     ledger_testing
     lxml
@@ -330,6 +361,7 @@ name = Modules never import countries
 type = forbidden
 source_modules =
     ledger_identity
+    ledger_invoicing
 forbidden_modules =
     ledger_country_do
 
@@ -340,12 +372,14 @@ source_modules =
     ledger_country_do
 forbidden_modules =
     ledger_identity
+    ledger_invoicing
 
 [importlinter:contract:identity-is-protected]
 name = Only identity imports its insides
 type = forbidden
 source_modules =
     ledger_country_do
+    ledger_invoicing
     ledger_kernel
     ledger_platform
 forbidden_modules =
@@ -366,6 +400,7 @@ layers =
     assembly
     adapters
     application
+    api
     domain
     events
     _manifest
@@ -390,6 +425,7 @@ forbidden_modules =
     ledger_country_do
     ledger_country_do_testing
     ledger_devtools
+    ledger_invoicing
     ledger_platform
     ledger_testing
     lxml
@@ -446,6 +482,111 @@ forbidden_modules =
     xmlschema
 allow_indirect_imports = True
 
+[importlinter:contract:invoicing-is-protected]
+name = Only invoicing imports its insides
+type = forbidden
+source_modules =
+    ledger_country_do
+    ledger_identity
+    ledger_kernel
+    ledger_platform
+forbidden_modules =
+    ledger_invoicing.domain
+    ledger_invoicing.application
+    ledger_invoicing.adapters
+    ledger_invoicing.assembly
+    ledger_invoicing._manifest
+allow_indirect_imports = True
+
+[importlinter:contract:invoicing-layers]
+name = invoicing is layered
+type = layers
+containers =
+    ledger_invoicing
+exhaustive = True
+layers =
+    assembly
+    adapters
+    application
+    domain
+    _manifest
+
+[importlinter:contract:invoicing-domain-is-pure]
+name = invoicing's domain and events import the kernel and the standard library only
+type = forbidden
+source_modules =
+    ledger_invoicing.domain
+forbidden_modules =
+    alembic
+    cryptography
+    fastapi
+    granian
+    grpc
+    httpx
+    joserfc
+    ledger_app_api
+    ledger_app_migrate
+    ledger_app_worker
+    ledger_country_do
+    ledger_country_do_testing
+    ledger_devtools
+    ledger_identity
+    ledger_platform
+    ledger_testing
+    lxml
+    multipart
+    opentelemetry
+    pathspec
+    prometheus_client
+    psycopg
+    py
+    pydantic
+    pydantic_settings
+    pytest
+    python_multipart
+    signxml
+    sqlalchemy
+    starlette
+    structlog
+    testcontainers
+    tzdata
+    xmlschema
+
+[importlinter:contract:invoicing-application-is-pure]
+name = invoicing's use cases import no third party, adapter or country
+type = forbidden
+source_modules =
+    ledger_invoicing.application
+forbidden_modules =
+    alembic
+    cryptography
+    fastapi
+    granian
+    grpc
+    httpx
+    joserfc
+    ledger_country_do
+    ledger_invoicing.adapters
+    lxml
+    multipart
+    opentelemetry
+    pathspec
+    prometheus_client
+    psycopg
+    py
+    pydantic
+    pydantic_settings
+    pytest
+    python_multipart
+    signxml
+    sqlalchemy
+    starlette
+    structlog
+    testcontainers
+    tzdata
+    xmlschema
+allow_indirect_imports = True
+
 [importlinter:contract:production-never-imports-test-tooling]
 name = Production code never imports test tooling
 type = forbidden
@@ -455,6 +596,7 @@ source_modules =
     ledger_app_worker
     ledger_country_do
     ledger_identity
+    ledger_invoicing
     ledger_kernel
     ledger_platform
 forbidden_modules =
@@ -484,6 +626,9 @@ forbidden_modules =
     ledger_identity.adapters
     ledger_identity.application
     ledger_identity.domain
+    ledger_invoicing.adapters
+    ledger_invoicing.application
+    ledger_invoicing.domain
     ledger_platform._manifest
     ledger_platform.auth
     ledger_platform.config

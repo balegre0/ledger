@@ -5,6 +5,7 @@ import pytest
 from ledger_platform.runtime.keys import (
     BindingMissingError,
     BindingTypeError,
+    ChainDirectory,
     Directory,
     DuplicateBindingError,
     Key,
@@ -77,3 +78,51 @@ def test_a_binder_binds_only_what_it_declares() -> None:
         directory.add(GREETER.bind(English()), by="invoicing", declared=frozenset({"other"}))
     with pytest.raises(BindingMissingError):
         directory.view(GREETERS).get(GREETER)
+
+
+class French:
+    def greet(self) -> str:
+        return "bonjour"
+
+
+class German:
+    def greet(self) -> str:
+        return "hallo"
+
+
+def greetings(chain: ChainDirectory) -> list[str]:
+    return [greeter.greet() for greeter in chain.view(GREETERS).all(GREETER)]
+
+
+def test_implementations_of_one_point_are_chained_by_order_then_by_implementer() -> None:
+    chain = ChainDirectory("extensions")
+    chain.add(GREETER.bind(French()), by="zeta", declared=GREETERS, order=100)
+    chain.add(GREETER.bind(English()), by="beta", declared=GREETERS, order=100)
+    chain.add(GREETER.bind(German()), by="omega", declared=GREETERS, order=5)
+    chain.add(GREETER.bind(English()), by="alpha", declared=GREETERS, order=200)
+    assert greetings(chain) == ["hallo", "hello", "bonjour", "hello"]  # 5, then 100 (beta, zeta), then 200
+
+
+def test_an_implementer_gives_one_implementation_per_point() -> None:
+    chain = ChainDirectory("extensions")
+    chain.add(GREETER.bind(English()), by="beta", declared=GREETERS, order=100)
+    with pytest.raises(DuplicateBindingError, match="extensions 'greeter'"):
+        chain.add(GREETER.bind(French()), by="beta", declared=GREETERS, order=50)
+
+
+def test_a_chain_is_bound_only_by_those_declaring_it_and_read_only_by_those_declaring_it() -> None:
+    chain = ChainDirectory("extensions")
+    with pytest.raises(UndeclaredBindingError, match="extensions 'greeter' is bound by 'fiscal'"):
+        chain.add(GREETER.bind(English()), by="fiscal", declared=frozenset(), order=100)
+    chain.add(GREETER.bind(English()), by="fiscal", declared=GREETERS, order=100)
+    with pytest.raises(UndeclaredDependencyError, match="greeter"):
+        chain.view(frozenset()).all(GREETER)
+
+
+def test_a_chain_with_no_implementation_is_a_defect_and_a_wrong_type_in_it_is_too() -> None:
+    chain = ChainDirectory("extensions")
+    with pytest.raises(BindingMissingError, match="extensions 'greeter'"):
+        chain.view(GREETERS).all(GREETER)
+    chain.add(Key[object]("greeter", anything).bind(42), by="fiscal", declared=GREETERS, order=100)
+    with pytest.raises(BindingTypeError, match="greeter"):
+        chain.view(GREETERS).all(GREETER)

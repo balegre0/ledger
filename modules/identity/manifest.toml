@@ -1,7 +1,7 @@
 [package]
 name = "identity"
 kind = "module"
-summary = "Organizations, companies, their branches and emission points, memberships and roles."
+summary = "Organizations, companies, their establishments, memberships and roles."
 owners = ["@balegre0"]
 
 [dependencies]
@@ -23,14 +23,22 @@ resource = "company"
 prefix = "mbr"
 resource = "membership"
 
+[[ids]]
+prefix = "est"
+resource = "establishment"
+
+[[ids]]
+prefix = "cli"
+resource = "api_client"
+
 [[permissions]]
 code = "identity.companies.read"
-summary = "Read the company, its branches and its emission points."
+summary = "Read the company and its establishments."
 roles = ["owner", "admin", "accountant", "issuer", "viewer"]
 
 [[permissions]]
 code = "identity.companies.manage"
-summary = "Change or deactivate the company; open branches and emission points."
+summary = "Change or deactivate the company; open establishments."
 roles = ["owner", "admin"]
 
 [[permissions]]
@@ -70,4 +78,4 @@ version = 1
 
 [http]
 mounted_in = ["api"]
-prefixes = ["/v1/organization", "/v1/companies"]
+prefixes = ["/v1/organization", "/v1/companies", "/v1/countries", "/v1/api_clients"]

@@ -9,7 +9,9 @@ wrong (``ledger_kernel.errors``).
 from typing import ClassVar
 lazy from uuid import UUID
 
+from ledger_identity.domain.ids import API_CLIENT_PREFIX, ESTABLISHMENT_PREFIX
 from ledger_kernel.errors import ConflictError, ForbiddenError, InvalidInputError, NotFoundError, excerpt
+from ledger_kernel.ids import COMPANY_PREFIX, ORGANIZATION_PREFIX, format_id
 lazy from ledger_kernel.access import SubjectId
 
 
@@ -20,6 +22,26 @@ class InvalidNameError(InvalidInputError):
 
     def __init__(self, field: str, problem: str) -> None:
         super().__init__(f"{field} {problem}")
+
+
+class InvalidTimeZoneError(InvalidInputError):
+    """Text that is not the name of an IANA time zone."""
+
+    code: ClassVar[str] = "invalid_time_zone"
+
+    def __init__(self) -> None:
+        super().__init__("a time zone is the name of an IANA zone, such as America/Santo_Domingo")
+
+
+class TimeZoneRequiredError(InvalidInputError):
+    """A company of a jurisdiction no regime is installed for, registered without the zone its days run in."""
+
+    code: ClassVar[str] = "time_zone_required"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "a time zone is required: no installed regime says where this jurisdiction's days run"
+        )
 
 
 class InvalidCodeError(InvalidInputError):
@@ -37,25 +59,53 @@ class OrganizationNotFoundError(NotFoundError):
     code: ClassVar[str] = "organization_not_found"
 
     def __init__(self, organization: UUID) -> None:
-        super().__init__(f"organization {organization} has no company yet")
+        super().__init__(f"organization {format_id(ORGANIZATION_PREFIX, organization)} has no company yet")
 
 
-class BranchNotFoundError(NotFoundError):
-    """No branch by this id in the company."""
+class EstablishmentNotFoundError(NotFoundError):
+    """No establishment by this id in the company."""
 
-    code: ClassVar[str] = "branch_not_found"
+    code: ClassVar[str] = "establishment_not_found"
 
-    def __init__(self, branch: UUID) -> None:
-        super().__init__(f"branch {branch} was not found")
+    def __init__(self, establishment: UUID | None = None) -> None:
+        """``establishment`` is named by its public id; none when what was sent names no establishment."""
+        super().__init__(
+            "establishment was not found"
+            if establishment is None
+            else f"establishment {format_id(ESTABLISHMENT_PREFIX, establishment)} was not found"
+        )
 
 
-class EmissionPointNotFoundError(NotFoundError):
-    """No emission point by this id in the branch."""
+class CountryNotFoundError(NotFoundError):
+    """No regime is installed for the country asked for (or what was asked for is no country code)."""
 
-    code: ClassVar[str] = "emission_point_not_found"
+    code: ClassVar[str] = "country_not_found"
 
-    def __init__(self, point: UUID) -> None:
-        super().__init__(f"emission point {point} was not found")
+    def __init__(self) -> None:
+        super().__init__("no regime is installed for this country")  # what was sent is not repeated
+
+
+class ApiClientNotFoundError(NotFoundError):
+    """No API client by this id in the organization, in the mode asked."""
+
+    code: ClassVar[str] = "api_client_not_found"
+
+    def __init__(self, client: UUID | None = None) -> None:
+        """``client`` is named by its public id; none when what was sent names no API client."""
+        super().__init__(
+            "API client was not found"
+            if client is None
+            else f"API client {format_id(API_CLIENT_PREFIX, client)} was not found"
+        )
+
+
+class ApiClientExistsError(ConflictError):
+    """The machine user is an API client of the organization already."""
+
+    code: ClassVar[str] = "api_client_exists"
+
+    def __init__(self) -> None:
+        super().__init__("this machine user is an active API client of the organization already")
 
 
 class MembershipNotFoundError(NotFoundError):
@@ -79,22 +129,22 @@ class TaxIdTakenError(ConflictError):
         super().__init__("an active company already holds this tax id")
 
 
-class BranchCodeTakenError(ConflictError):
-    """The company already has a branch with this code."""
+class DuplicateTaxIdError(InvalidInputError):
+    """A company lists the same tax id twice (once normalized: separators and case do not tell them apart)."""
 
-    code: ClassVar[str] = "branch_code_taken"
-
-    def __init__(self) -> None:
-        super().__init__("the company already has a branch with this code")
-
-
-class EmissionPointCodeTakenError(ConflictError):
-    """The branch already has an emission point with this code."""
-
-    code: ClassVar[str] = "emission_point_code_taken"
+    code: ClassVar[str] = "tax_id_duplicated"
 
     def __init__(self) -> None:
-        super().__init__("the branch already has an emission point with this code")
+        super().__init__("a company lists each of its tax ids once")
+
+
+class EstablishmentCodeTakenError(ConflictError):
+    """The company already has an establishment with this code."""
+
+    code: ClassVar[str] = "establishment_code_taken"
+
+    def __init__(self) -> None:
+        super().__init__("the company already has an establishment with this code")
 
 
 class CompanyInactiveError(ConflictError):
@@ -103,7 +153,7 @@ class CompanyInactiveError(ConflictError):
     code: ClassVar[str] = "company_inactive"
 
     def __init__(self, company: UUID) -> None:
-        super().__init__(f"company {company} is inactive")
+        super().__init__(f"company {format_id(COMPANY_PREFIX, company)} is inactive")
 
 
 class StaleVersionError(ConflictError):
@@ -112,7 +162,9 @@ class StaleVersionError(ConflictError):
     code: ClassVar[str] = "stale_version"
 
     def __init__(self, company: UUID) -> None:
-        super().__init__(f"company {company} is not at the version the request names")
+        super().__init__(
+            f"company {format_id(COMPANY_PREFIX, company)} is not at the version the request names"
+        )
 
 
 class LastOwnerError(ConflictError):

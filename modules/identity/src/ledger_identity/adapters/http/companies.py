@@ -11,19 +11,26 @@ sets; a version that moved on meanwhile answers 412.
 
 from http import HTTPStatus
 from typing import Annotated
+lazy from collections.abc import Sequence
 
 from fastapi import APIRouter, Depends
 lazy from fastapi import Request, Response
 
-from ledger_identity.adapters.http.models import CompanyView
+from ledger_identity.adapters.http.models import CompanyView, RegisteredCompany, RegistrationWarning
+from ledger_identity.adapters.http.public import company_ref
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import commands, queries
-from ledger_identity.domain.errors import StaleVersionError
+from ledger_identity.domain.company import FiscalProfile
+from ledger_identity.domain.errors import DuplicateTaxIdError, StaleVersionError, TimeZoneRequiredError
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN
 from ledger_identity.domain.roles import COMPANIES_MANAGE, COMPANIES_READ
-from ledger_identity.domain.text import parse_legal_name
+from ledger_identity.domain.text import parse_legal_name, parse_time_zone
+from ledger_kernel.jurisdiction import parse_jurisdiction
+from ledger_kernel.money import Currency
+from ledger_kernel.tax_ids import TaxIdCheck
 from ledger_kernel.tenancy import OrganizationScope, Tenant
 from ledger_platform.http import (
+    CURRENT_VERSION,
     REPLAYED_HEADER,
     Page,
     allowed,
@@ -53,12 +60,18 @@ lazy from ledger_platform.auth import CompanyAccess
 lazy from ledger_platform.http import IfMatch, StoredResponse
 
 
-def stored(status: HTTPStatus, company: Company) -> StoredResponse:
-    """A company's answer, as kept for replays: its view and version, and where it lives once created."""
+def stored(
+    status: HTTPStatus, company: Company, warnings: Sequence[RegistrationWarning] | None = None
+) -> StoredResponse:
+    """A company's answer, as kept for replays: its view and version, and where it lives once created.
+
+    A registration (``warnings`` given, perhaps none) also says what it accepted with a warning.
+    """
     headers = {"ETag": etag(company.version)}
     if status is HTTPStatus.CREATED:
-        headers["Location"] = f"/v1/companies/{company.id}"
-    return json_response(status, CompanyView.of(company), headers)
+        headers["Location"] = f"/v1/companies/{company_ref(company.id)}"
+    view = CompanyView.of(company) if warnings is None else RegisteredCompany.registered(company, warnings)
+    return json_response(status, view, headers)
 
 
 def router(context: ApiContext) -> APIRouter:
@@ -75,7 +88,7 @@ def router(context: ApiContext) -> APIRouter:
     @companies.post(
         "",
         status_code=HTTPStatus.CREATED,
-        response_model=CompanyView,
+        response_model=RegisteredCompany,
         responses=problems(400, 401, 403, 409, 422)
         | success(HTTPStatus.CREATED, "Location", "ETag", REPLAYED_HEADER),
     )
@@ -91,16 +104,44 @@ def router(context: ApiContext) -> APIRouter:
         The caller must hold the identity provider's project role ``ledger.organization.admin``. The request
         acts in ``Ledger-Mode``: its ``Idempotency-Key`` is kept per mode. The company is both modes'.
         """
-        tax_id = context.tax_ids.parse(body.tax_id.scheme, body.tax_id.value).tax_id
+        read = [context.tax_ids.parse(item.scheme, item.value) for item in body.tax_ids]
+        tax_ids = tuple(item.tax_id for item in read)
+        if len(set(tax_ids)) != len(tax_ids):
+            raise DuplicateTaxIdError
+        jurisdiction = parse_jurisdiction(body.jurisdiction.country, body.jurisdiction.subdivision)
+        time_zone = (
+            context.default_time_zone(jurisdiction)
+            if body.time_zone is None
+            else parse_time_zone(body.time_zone)
+        )
+        if time_zone is None:
+            raise TimeZoneRequiredError
+        profile = FiscalProfile(
+            jurisdiction=jurisdiction,
+            functional_currency=Currency.of(body.functional_currency),
+            tax_ids=tax_ids,
+        )
+        warnings = [
+            RegistrationWarning(code="tax_id_checksum_mismatch", field=f"tax_ids.{position}")
+            for position, item in enumerate(read)
+            if item.check is TaxIdCheck.CHECKSUM_MISMATCH
+        ]
         legal_name = parse_legal_name(body.legal_name)
-        attempt = attempt_of(request, principal, key, body)
+        attempt = attempt_of(request, principal, key, body, company=None)
         async with database.unit(OrganizationScope(principal.organization, mode)) as unit:
 
             async def register() -> StoredResponse:
                 created = await commands.create_company(
-                    bind(unit), principal, tax_id=tax_id, legal_name=legal_name
+                    bind(unit),
+                    principal,
+                    commands.Registration(
+                        profile=profile,
+                        legal_name=legal_name,
+                        time_zone=time_zone,
+                        api_version=CURRENT_VERSION,
+                    ),
                 )
-                return stored(HTTPStatus.CREATED, created)
+                return stored(HTTPStatus.CREATED, created, warnings)
 
             outcome = await context.idempotency.once(unit, attempt, register)
         return answer(outcome)
@@ -173,7 +214,7 @@ def router(context: ApiContext) -> APIRouter:
 
         The request acts in ``Ledger-Mode``: its ``Idempotency-Key`` is kept per mode.
         """
-        attempt = attempt_of(request, access.principal, key)
+        attempt = attempt_of(request, access.principal, key, company=access.tenant.company)
         tenant = Tenant(access.tenant.organization, access.tenant.company, mode)
         with precondition_checked(StaleVersionError):
             async with database.unit(tenant) as unit:

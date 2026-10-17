@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from typing import Final, final, override
 
@@ -14,6 +14,7 @@ from ledger_country_do.channels.ecf_v1.application.emission import (
     SETTLE_DELAY,
     CertificateNotValidError,
     Emitter,
+    SequenceExpiredError,
     SettleTooShortError,
     SigningSkewError,
     Unknown,
@@ -37,7 +38,7 @@ from ledger_country_do.channels.ecf_v1.domain.routing import Route
 from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage, EcfState, NumberFate
 from ledger_country_do.regime import REGIME
 from ledger_country_do.regime.rounding import ROUNDING
-from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
+from ledger_country_do_testing.samples import SEQUENCE_EXPIRES_ON, consumer_invoice, credit_invoice
 from ledger_kernel.money import RoundingMode
 from ledger_testing.clock import ManualClock
 lazy from ledger_country_do.channels.ecf_v1.application.emission import Signed
@@ -435,6 +436,34 @@ async def test_a_certificate_must_cover_the_moment_of_signing_and_the_skew_after
     edges = WatchedSigner(signer, clock, validity=CertificateValidity(NOW, NOW + MAX_SIGNING_SKEW))
     signed = await emitter(ScriptedAuthority(), edges, clock=clock).sign(credit_invoice())
     assert (edges.signed, signed.signed_at) == (1, NOW)
+
+
+async def test_a_range_that_expired_before_the_moment_of_signing_is_not_signed(
+    signer: KeyPairSigner,
+) -> None:
+    """A document numbered on the last day and parked for days must not be signed after its range ended."""
+    last_day_ends = datetime.combine(SEQUENCE_EXPIRES_ON + timedelta(days=1), time(4), tzinfo=UTC)
+    # 04:00 UTC is midnight in Santo Domingo (UTC-4): the range ran up to that day, inclusive.
+    for moment, expired in ((last_day_ends - timedelta(minutes=1), False), (last_day_ends, True)):
+        clock = ManualClock(moment)
+        window = CertificateValidity(moment - timedelta(days=1), moment + timedelta(days=400))
+        watched = WatchedSigner(signer, clock, validity=window)
+        built = emitter(ScriptedAuthority(), watched, clock=clock)
+        if expired:
+            with pytest.raises(SequenceExpiredError, match="expired before the moment of signing"):
+                await built.sign(credit_invoice())
+            assert watched.signed == 0
+        else:
+            assert (await built.sign(credit_invoice())).signed_at == moment
+
+
+async def test_a_type_whose_numbers_do_not_expire_is_signed_whenever(signer: KeyPairSigner) -> None:
+    moment = datetime.combine(SEQUENCE_EXPIRES_ON + timedelta(days=400), time(15), tzinfo=UTC)
+    clock = ManualClock(moment)
+    window = CertificateValidity(moment - timedelta(days=1), moment + timedelta(days=400))
+    watched = WatchedSigner(signer, clock, validity=window)
+    signed = await emitter(ScriptedAuthority(), watched, clock=clock).sign(consumer_invoice())
+    assert signed.signed_at == moment
 
 
 async def test_a_signature_far_from_its_moment_of_signing_is_never_sent(signer: KeyPairSigner) -> None:

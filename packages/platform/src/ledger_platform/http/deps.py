@@ -8,7 +8,8 @@
   is proven first: an unauthenticated request never has a company looked up. The header must be sent once
   (else 422 ``invalid_header``), and a route whose path has a ``company_id`` takes its company from there,
   never from the header: one that declares both is a defect (``AmbiguousCompanyError``, at its first request).
-* ``allowed(in_company, permission)``, ``holding(caller, role)`` and ``in_organization(caller)``: what a route
+* ``allowed(in_company, permission)``, ``holding(caller, role)``, ``in_organization(caller)`` and
+  ``any_principal(caller)``: what a route
   requires, declared as its first dependency: a permission in the request's company (403 without it, after
   the 404 of no role there), a role the identity provider granted in the organization (403), or no more than
   being a principal of the organization, for a route about the organization as a whole. ``unguarded_routes``
@@ -28,7 +29,7 @@ its subject, in the call its request id names, or in a call of its own (a UUIDv7
 """
 
 from abc import ABCMeta, abstractmethod
-from contextlib import contextmanager
+from contextlib import aclosing, contextmanager
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Annotated, ClassVar, Final, Protocol, final
@@ -38,23 +39,30 @@ lazy from collections.abc import AsyncGenerator, Callable, Coroutine, Generator,
 import structlog
 from fastapi import Depends, Header, Path
 from fastapi.routing import APIRoute, iter_route_contexts
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import HTTPBearer
 from starlette.exceptions import HTTPException
 lazy from fastapi import Request
 lazy from fastapi.dependencies.models import Dependant
+lazy from fastapi.security import HTTPAuthorizationCredentials
 lazy from starlette.routing import BaseRoute
 
 from ledger_kernel.access import CompanyNotFoundError
 from ledger_kernel.errors import ForbiddenError, InvalidInputError, LedgerError
-from ledger_kernel.ids import CompanyId, new_id, parse_uuid
+from ledger_kernel.ids import COMPANY_PREFIX, CompanyId, InvalidPublicIdError, new_id, parse_id
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.access import CompanyAccess
 from ledger_platform.auth.tokens import MissingTokenError
 from ledger_platform.data.audit import Actor, acting_as
+from ledger_platform.http.mode import MODE_KEY
 from ledger_platform.http.problems import current_request_id
+from ledger_platform.http.rate import RateLimitedError
 from ledger_platform.http.request_fields import remember
+from ledger_platform.http.standing import ApiClientRevokedError, resolve
+from ledger_platform.http.versions import VERSION_HEADER, VERSION_KEY, VersionUnknownError, parse_version
 lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_platform.auth.access import PermissionSource
+lazy from ledger_platform.http.rate import RateLimiter
+lazy from ledger_platform.http.standing import Standings
 
 COMPANY_HEADER: Final = "Ledger-Company"
 IF_MATCH: Final = "If-Match"
@@ -79,7 +87,8 @@ class Verifier(Protocol, metaclass=ABCMeta):
 
 
 type Caller = Callable[[Request, HTTPAuthorizationCredentials | None], AsyncGenerator[Principal]]
-"""The dependency ``authenticated`` makes: a route declares ``Annotated[Principal, Depends(caller)]``."""
+"""The dependency ``authenticated`` makes (``with_standing`` wraps it): a route declares
+``Annotated[Principal, Depends(caller)]``."""
 type PermissionsDependency[**P] = Callable[P, Coroutine[object, object, PermissionSource]]
 """A dependency handing the module's ``PermissionSource``; its parameters (``P``) are dependencies of its
 own, such as the module's context."""
@@ -89,12 +98,12 @@ caller and the source, the caller's access to that company."""
 type Allowed = Callable[[CompanyAccess], Coroutine[object, object, CompanyAccess]]
 """The dependency ``allowed`` makes: the caller's access to the request's company, its permission checked."""
 type InOrganization = Callable[[Principal], Coroutine[object, object, Principal]]
-"""The dependency ``holding`` or ``in_organization`` makes: the caller, acting in its whole organization."""
+"""The dependency ``holding``, ``in_organization`` or ``any_principal`` makes: the caller."""
 
 _GUARDS: Final[WeakSet[object]] = WeakSet()
-"""Every dependency ``allowed``, ``holding`` and ``in_organization`` made: how ``unguarded_routes`` tells a
-route that declares what it requires."""
-_NO_REQUIREMENT: Final = "declares no requirement (allowed, holding or in_organization)"
+"""Every dependency ``allowed``, ``holding``, ``in_organization`` and ``any_principal`` made: how
+``unguarded_routes`` tells a route that declares what it requires."""
+_NO_REQUIREMENT: Final = "declares no requirement (allowed, holding, in_organization or any_principal)"
 
 
 class InvalidHeaderError(InvalidInputError):
@@ -133,8 +142,12 @@ def _bound(request: Request, **fields: str) -> Generator[None]:
         yield
 
 
-def authenticated(verifier: Verifier) -> Caller:
-    """The dependency that gives a route its caller, proven by the request's bearer token."""
+def authenticated(verifier: Verifier, limiter: RateLimiter | None = None) -> Caller:
+    """The dependency that gives a route its caller, proven by the request's bearer token.
+
+    With a ``limiter``, a caller over its rate is refused (429) once it is proven: nobody is counted, and so
+    nobody can be limited, by presenting a token that does not verify.
+    """
 
     async def caller(
         request: Request,
@@ -143,6 +156,11 @@ def authenticated(verifier: Verifier) -> Caller:
         if credentials is None:
             raise MissingTokenError
         principal = await verifier.verify(credentials.credentials)
+        if (
+            limiter is not None
+            and (wait := limiter.wait(f"{principal.organization}:{principal.subject}")) > 0
+        ):
+            raise RateLimitedError(wait)
         call = current_request_id() or str(new_id())
         with (
             _bound(request, organization_id=str(principal.organization), subject=principal.subject),
@@ -154,8 +172,15 @@ def authenticated(verifier: Verifier) -> Caller:
 
 
 async def _granted(principal: Principal, company_id: str, source: PermissionSource) -> CompanyAccess:
-    """``principal``'s access to the company ``company_id`` names; ``CompanyNotFoundError`` without a role."""
-    company = CompanyId(parse_uuid(company_id))
+    """``principal``'s access to the company ``company_id`` names; ``CompanyNotFoundError`` without a role.
+
+    A company is named by its public id (``cmp_…``, §9.4): any other text, an internal UUID or another type's
+    id included, names no company, and is not repeated.
+    """
+    try:
+        company = CompanyId(parse_id(COMPANY_PREFIX, company_id))
+    except InvalidPublicIdError:
+        raise CompanyNotFoundError from None
     permissions = await source.permissions(principal, company)
     if not permissions:
         raise CompanyNotFoundError(company)
@@ -208,7 +233,9 @@ def allowed(in_company: InCompany, permission: Permission) -> Allowed:
     """The dependency giving the caller's access to the request's company, if it holds ``permission`` there.
 
     Declared before any other dependency of the route: a caller without the permission is refused (403) before
-    the request's preconditions (``If-Match``, ``Idempotency-Key``) or its body are read.
+    the request's preconditions (``If-Match``, ``Idempotency-Key``) are read. FastAPI reads and parses a body
+    before it runs any dependency, so what keeps an unauthorized caller from making the app hold a huge one is
+    the body limit (``http.limits``), not this order.
     """
 
     async def checked(access: Annotated[CompanyAccess, Depends(in_company)]) -> CompanyAccess:
@@ -246,6 +273,50 @@ def in_organization(caller: Caller) -> InOrganization:
 
     _GUARDS.add(member)
     return member
+
+
+def with_standing(caller: Caller, standings: Standings) -> Caller:
+    """``caller``, which also settles what the request is as its caller stands (``standing``).
+
+    The caller is proven first (401), then asked its standing: an API client that was revoked is refused
+    (401 ``api_client_revoked``); the mode its API client is bound to becomes the request's (``ledger_mode``);
+    and the version it speaks is settled: a ``Ledger-Version`` the request names is read (400
+    ``version_unknown`` for one that does not exist, or for two), else the pins decide. The answer to every
+    request, this one's or not, names its version (``create_app``).
+    """
+
+    async def standing(
+        request: Request,
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_BEARER)],
+    ) -> AsyncGenerator[Principal]:
+        async with aclosing(caller(request, credentials)) as proven:
+            principal = await anext(proven)
+            known = await standings.of(principal)
+            if known.revoked:
+                raise ApiClientRevokedError
+            sent = request.headers.getlist(VERSION_HEADER)
+            if len(sent) > 1:
+                raise VersionUnknownError
+            request.scope[VERSION_KEY] = resolve(parse_version(sent[0]) if sent else None, known)
+            if known.mode is not None:
+                request.scope[MODE_KEY] = known.mode
+            yield principal
+
+    return standing
+
+
+def any_principal(caller: Caller) -> InOrganization:
+    """The dependency giving the caller, for a route that publishes what every principal may read.
+
+    Reference data (the law of the countries installed, §9.8) belongs to no organization or company: it needs
+    a verified token and nothing more, and this says so.
+    """
+
+    async def anyone(principal: Annotated[Principal, Depends(caller)]) -> Principal:
+        return principal
+
+    _GUARDS.add(anyone)
+    return anyone
 
 
 def _calls(dependant: Dependant) -> Iterator[object]:

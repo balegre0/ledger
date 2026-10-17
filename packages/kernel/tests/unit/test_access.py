@@ -20,7 +20,7 @@ from ledger_kernel.access import (
     parse_subject,
 )
 from ledger_kernel.errors import ErrorKind, InvalidValueError
-from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_kernel.ids import COMPANY_PREFIX, CompanyId, OrganizationId, format_id, new_id
 
 SUBJECTS = st.from_regex(rf"[A-Za-z0-9._@:-]{{1,{MAX_SUBJECT_LENGTH}}}", fullmatch=True)
 
@@ -118,8 +118,13 @@ def test_a_denied_permission_is_named_and_forbidden() -> None:
 def test_a_company_the_caller_may_not_see_is_not_found() -> None:
     company = CompanyId(new_id())
     error = CompanyNotFoundError(company)
-    assert str(error) == f"company {company} was not found"
+    assert str(error) == f"company {format_id(COMPANY_PREFIX, company)} was not found"
     assert (error.kind, error.code) == (ErrorKind.NOT_FOUND, "company_not_found")
+
+
+def test_a_company_that_cannot_even_be_named_is_not_found_without_naming_it() -> None:
+    error = CompanyNotFoundError()
+    assert (str(error), error.code) == ("company was not found", "company_not_found")
 
 
 def test_a_principal_is_an_immutable_value_without_roles_by_default() -> None:

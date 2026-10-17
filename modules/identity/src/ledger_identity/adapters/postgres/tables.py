@@ -1,14 +1,14 @@
 """identity's tables, typed for SQLAlchemy Core: what the migrations create and the repositories use.
 
-Organizations own their companies and the memberships in them (``organization_id``); companies own their
-branches and emission points (``organization_id`` and ``company_id``). The migrations put each table under the
-isolation of its owner. A row refers to another through a foreign key that carries the tenant
-(``(organization_id, company_id)`` to a company, ``(company_id, branch_id)`` to a branch): PostgreSQL's
-referential checks bypass row-level security, so a single-column key would let a row of one organization
-point at another's company. Every table is in schema ``identity`` (§6.2): identity's role reaches no other.
+Organizations own their companies and what belongs to them: tax ids, memberships, establishments and API
+clients (``organization_id``, and ``company_id`` for the company a row is of). The migrations put each table
+under the isolation of its organization. A row refers to another through a foreign key that carries the tenant
+(``(organization_id, company_id)`` to a company): PostgreSQL's referential checks bypass row-level security,
+so a single-column key would let a row of one organization point at another's company. Every table is in
+schema ``identity`` (§6.2): identity's role reaches no other.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Final
 from uuid import UUID
 lazy from enum import StrEnum
@@ -16,10 +16,12 @@ lazy from enum import StrEnum
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    SmallInteger,
     String,
     UniqueConstraint,
     text,
@@ -27,19 +29,27 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.schema import SchemaItem
 
+from ledger_identity.domain.api_clients import ApiClientStatus
 from ledger_identity.domain.company import CompanyStatus
 from ledger_identity.domain.membership import MembershipStatus
 from ledger_identity.domain.text import MAX_CODE, MAX_LEGAL_NAME, MAX_NAME
 from ledger_kernel.access import MAX_PROVIDER_ORGANIZATION_LENGTH, MAX_SUBJECT_LENGTH, Role
 from ledger_kernel.tax_ids import MAX_TAX_ID_LENGTH
+from ledger_kernel.tenancy import Mode
 from ledger_platform.data import ModuleTable
 
 SCHEMA: Final = "identity"
 """identity's schema: its tables and the chassis's (``chassis_schema_v1``), under its roles."""
 TAX_SCHEME_LENGTH: Final = 34
 """The longest scheme key ``ledger_kernel.tax_ids`` reads: a country code, a dot and 31 characters."""
-ACTIVE_TAX_ID: Final = "ux_companies_active_tax_id"
-"""One active company per tax id (its scheme and value), in every organization: a tax id is one taxpayer."""
+COUNTRY_LENGTH: Final = 2
+"""An ISO 3166-1 alpha-2 code."""
+SUBDIVISION_LENGTH: Final = 6
+"""An ISO 3166-2 code as the kernel reads it: the country, a dash and up to three characters."""
+CURRENCY_LENGTH: Final = 3
+"""An ISO 4217 code."""
+TIME_ZONE_LENGTH: Final = 64
+"""The longest IANA zone name ``ledger_identity.domain.text`` reads."""
 WORD_LENGTH: Final = 16
 """For a status or a role: a short word of a closed list, which a check constraint names."""
 
@@ -75,34 +85,71 @@ class OrganizationRecord(IdentityTable):
     id: Mapped[UUID] = mapped_column(primary_key=True)
     provider_id: Mapped[str] = mapped_column(String(MAX_PROVIDER_ORGANIZATION_LENGTH))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    api_version: Mapped[date] = mapped_column(Date)
 
 
 class CompanyRecord(IdentityTable):
-    """A company of an organization, at its current version; its tax id is no other active company's."""
+    """A company of an organization, at its current version (its tax id is held in ``tax_registrations``)."""
 
     __tablename__: str = "companies"
     __table_args__: tuple[SchemaItem, ...] = (
         UniqueConstraint("organization_id", "id", name="uq_companies_organization"),
-        Index(
-            ACTIVE_TAX_ID,
-            "tax_scheme",
-            "tax_value",
-            unique=True,
-            postgresql_where=text(f"status = '{CompanyStatus.ACTIVE.value}'"),
-        ),
         _one_of("status", CompanyStatus, name="ck_companies_status"),
         _positive_version("companies"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True)
     organization_id: Mapped[UUID] = mapped_column(ForeignKey(f"{SCHEMA}.organizations.id"))
-    tax_scheme: Mapped[str] = mapped_column(String(TAX_SCHEME_LENGTH))
-    tax_value: Mapped[str] = mapped_column(String(MAX_TAX_ID_LENGTH))
+    country: Mapped[str] = mapped_column(String(COUNTRY_LENGTH))
+    subdivision: Mapped[str | None] = mapped_column(String(SUBDIVISION_LENGTH))
+    currency: Mapped[str] = mapped_column(String(CURRENCY_LENGTH))
     legal_name: Mapped[str] = mapped_column(String(MAX_LEGAL_NAME))
     status: Mapped[str] = mapped_column(String(WORD_LENGTH))
+    fiscal_profile_locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     version: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class CompanyTaxIdRecord(IdentityTable):
+    """One of a company's tax ids, at its place in the company's list (the first is the primary one).
+
+    Kept for as long as the company is: a deactivated company still shows its tax ids, though its registry
+    rows (``tax_registrations``) are released.
+    """
+
+    __tablename__: str = "company_tax_ids"
+    __table_args__: tuple[SchemaItem, ...] = (
+        UniqueConstraint("company_id", "scheme", "value", name="uq_company_tax_ids_value"),
+        _of_company("company_tax_ids"),
+        CheckConstraint("position >= 0", name="ck_company_tax_ids_position"),
+    )
+
+    organization_id: Mapped[UUID] = mapped_column()
+    company_id: Mapped[UUID] = mapped_column(primary_key=True)
+    position: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    scheme: Mapped[str] = mapped_column(String(TAX_SCHEME_LENGTH))
+    value: Mapped[str] = mapped_column(String(MAX_TAX_ID_LENGTH))
+
+
+class TaxRegistrationRecord(IdentityTable):
+    """The tax id an active company holds: one taxpayer is one active company, in every organization (§7.3).
+
+    The global registry, outside row-level security by design (§6.3): the one thing identity keeps across
+    organizations, and the table a future cell router and the receiver look a taxpayer up by. A company's row
+    here lives while the company is active; its deactivation releases the tax id.
+    """
+
+    __tablename__: str = "tax_registrations"
+    __table_args__: tuple[SchemaItem, ...] = (
+        _of_company("tax_registrations"),
+        Index("ix_tax_registrations_company", "company_id"),
+    )
+
+    scheme: Mapped[str] = mapped_column(String(TAX_SCHEME_LENGTH), primary_key=True)
+    value: Mapped[str] = mapped_column(String(MAX_TAX_ID_LENGTH), primary_key=True)
+    organization_id: Mapped[UUID] = mapped_column()
+    company_id: Mapped[UUID] = mapped_column()
 
 
 class MembershipRecord(IdentityTable):
@@ -130,43 +177,52 @@ class MembershipRecord(IdentityTable):
     changed_by: Mapped[str] = mapped_column(String(MAX_SUBJECT_LENGTH))
 
 
-class BranchRecord(IdentityTable):
-    """A branch of a company."""
+class ApiClientRecord(IdentityTable):
+    """An API client: a machine user of an organization for one mode, or the one it was until revoked.
 
-    __tablename__: str = "branches"
+    Under the organization's row-level security in one mode: a unit sees the clients of its mode only. One
+    machine user is one active client of an organization (the partial unique index), whatever its mode.
+    """
+
+    __tablename__: str = "api_clients"
     __table_args__: tuple[SchemaItem, ...] = (
-        UniqueConstraint("company_id", "code", name="uq_branches_code"),
-        UniqueConstraint("company_id", "id", name="uq_branches_company"),
-        _of_company("branches"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True)
-    organization_id: Mapped[UUID] = mapped_column()
-    company_id: Mapped[UUID] = mapped_column()
-    code: Mapped[str] = mapped_column(String(MAX_CODE))
-    name: Mapped[str] = mapped_column(String(MAX_NAME))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-
-
-class EmissionPointRecord(IdentityTable):
-    """An emission point of a branch."""
-
-    __tablename__: str = "emission_points"
-    __table_args__: tuple[SchemaItem, ...] = (
-        UniqueConstraint("branch_id", "code", name="uq_emission_points_code"),
-        Index("ix_emission_points_branch", "branch_id", "id"),
-        _of_company("emission_points"),
-        ForeignKeyConstraint(
-            ["company_id", "branch_id"],
-            [f"{SCHEMA}.branches.company_id", f"{SCHEMA}.branches.id"],
-            name="fk_emission_points_branch",
+        _one_of("mode", Mode, name="ck_api_clients_mode"),
+        _one_of("status", ApiClientStatus, name="ck_api_clients_status"),
+        Index(
+            "uq_api_clients_active_subject",
+            "organization_id",
+            "subject",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
         ),
+        Index("ix_api_clients_subject", "organization_id", "subject"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    organization_id: Mapped[UUID] = mapped_column(ForeignKey(f"{SCHEMA}.organizations.id"))
+    mode: Mapped[str] = mapped_column(String(WORD_LENGTH))
+    subject: Mapped[str] = mapped_column(String(MAX_SUBJECT_LENGTH))
+    name: Mapped[str] = mapped_column(String(MAX_NAME))
+    api_version: Mapped[date] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(WORD_LENGTH))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str] = mapped_column(String(MAX_SUBJECT_LENGTH))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class EstablishmentRecord(IdentityTable):
+    """An establishment of a company, known by a code unique in the company."""
+
+    __tablename__: str = "establishments"
+    __table_args__: tuple[SchemaItem, ...] = (
+        UniqueConstraint("company_id", "code", name="uq_establishments_code"),
+        _of_company("establishments"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True)
     organization_id: Mapped[UUID] = mapped_column()
     company_id: Mapped[UUID] = mapped_column()
-    branch_id: Mapped[UUID] = mapped_column()
     code: Mapped[str] = mapped_column(String(MAX_CODE))
     name: Mapped[str] = mapped_column(String(MAX_NAME))
+    time_zone: Mapped[str] = mapped_column(String(TIME_ZONE_LENGTH))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
