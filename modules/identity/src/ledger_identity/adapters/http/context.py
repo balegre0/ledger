@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from typing import Final, final
 
 from ledger_identity.adapters.permissions import MembershipPermissions
-from ledger_identity.adapters.pins import IdentityPins
-from ledger_platform.http import CachedPins, Idempotency, company_in_path
+from ledger_identity.adapters.standings import IdentityStandings
+from ledger_platform.http import CachedStandings, Idempotency, company_in_path
 lazy from ledger_identity.domain.text import TimeZone
 lazy from ledger_kernel.jurisdiction import Jurisdiction
 lazy from ledger_kernel.regimes import TaxIdSchemes
@@ -15,10 +15,10 @@ lazy from ledger_platform.data import BoundDatabase
 lazy from ledger_platform.http import Authentication, Caller, InCompany
 lazy from ledger_platform.runtime.registries import Regimes
 
-PIN_TTL: Final = 30.0
-"""Seconds a caller's pins are remembered: a pin is fixed at creation, so a new one shows within this."""
-PIN_CACHE: Final = 10_000
-"""How many callers' pins are remembered at most."""
+STANDING_TTL: Final = 30.0
+"""Seconds how a caller stands is remembered: a change (an API client revoked) shows within this."""
+STANDING_CACHE: Final = 10_000
+"""How many callers' standings are remembered at most."""
 
 
 @final
@@ -61,7 +61,8 @@ class ApiContext:
         channels: tuple[ChannelEntry, ...],
     ) -> ApiContext:
         """The context of the routes: the caller from the chassis, its access from identity's memberships."""
-        caller = authentication.versioned(CachedPins(IdentityPins(database), ttl=PIN_TTL, size=PIN_CACHE))
+        standings = CachedStandings(IdentityStandings(database), ttl=STANDING_TTL, size=STANDING_CACHE)
+        caller = authentication.with_standing(standings)
         permissions = MembershipPermissions(database)
 
         async def permission_source() -> PermissionSource:

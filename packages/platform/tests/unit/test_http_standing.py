@@ -1,4 +1,8 @@
-"""``Ledger-Version`` (§9.2): header parsing, the pins' precedence and the echo on every answer."""
+"""How a caller stands (§9.2, §9.7): the version it speaks, the mode its credential carries, revocation.
+
+Identity answers ``Standings``; ``with_standing`` settles the request by it, and every answer names the
+version the request speaks (``Ledger-Version``).
+"""
 
 from contextlib import asynccontextmanager
 from datetime import date
@@ -13,6 +17,7 @@ lazy from fastapi import FastAPI
 lazy from prometheus_client import CollectorRegistry
 
 from ledger_kernel.access import SubjectId
+from ledger_kernel.tenancy import Mode
 from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_platform.auth.tokens import TokenPolicy, TokenVerifier
 from ledger_platform.config.options import InvalidOptionError
@@ -20,17 +25,21 @@ from ledger_platform.http import create_app
 from ledger_platform.http.app import ApiInfo, Observability
 from ledger_platform.http.authentication import Authentication
 from ledger_platform.http.deps import authenticated
+from ledger_platform.http.mode import ledger_mode
+from ledger_platform.http.standing import (
+    ApiClientRevokedError,
+    CachedStandings,
+    Standing,
+    Standings,
+    resolve,
+)
 from ledger_platform.http.versions import (
     CURRENT_VERSION,
     KNOWN_VERSIONS,
     VERSION_HEADER,
     ApiVersion,
-    CachedPins,
-    Pinned,
-    Pins,
     VersionUnknownError,
     parse_version,
-    resolve,
 )
 from ledger_platform.observability.health import Health
 from ledger_testing.issuer import AUDIENCE, ISSUER
@@ -41,26 +50,28 @@ lazy from ledger_testing.issuer import LocalIssuer
 OLDER: Final = ApiVersion(date(2026, 1, 1))
 NEWER: Final = ApiVersion(date(2026, 6, 1))
 PROBLEM: Final = TypeAdapter(dict[str, object])
+FULLWIDTH: Final = "".join(chr(0xFF10 + int(digit)) if digit.isdigit() else digit for digit in "2026-10-13")
+"""A date written in digits that are not ASCII."""
 
 
 @final
-class Pinning(Pins):
-    """What the caller's client and organization are pinned to; counts the questions."""
+class Knowing(Standings):
+    """What is known of the caller; counts the questions."""
 
     def __init__(self) -> None:
-        self.pinned = Pinned(client=None, organization=None)
+        self.standing = Standing()
         self.asked = 0
 
     @override
-    async def of(self, principal: Principal) -> Pinned:
+    async def of(self, principal: Principal) -> Standing:
         del principal
         self.asked += 1
-        return self.pinned
+        return self.standing
 
 
 @pytest.fixture
-def pins() -> Pinning:
-    return Pinning()
+def standings() -> Knowing:
+    return Knowing()
 
 
 @asynccontextmanager
@@ -70,21 +81,30 @@ async def nothing_to_start(app: FastAPI) -> AsyncGenerator[None]:
 
 
 @pytest.fixture
-def app(local_issuer: LocalIssuer, pins: Pinning, registry: CollectorRegistry, tracing: Tracing) -> FastAPI:
+def app(
+    local_issuer: LocalIssuer, standings: Knowing, registry: CollectorRegistry, tracing: Tracing
+) -> FastAPI:
     verifier = TokenVerifier(TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=local_issuer.keys_url))
-    caller = Authentication(authenticated(verifier), None).versioned(pins)
+    caller = Authentication(authenticated(verifier), None).with_standing(standings)
     routes = APIRouter()
 
     @routes.get("/thing")
     async def thing(principal: Annotated[Principal, Depends(caller)]) -> str:
         return principal.subject
 
+    @routes.get("/moded")
+    async def moded(
+        principal: Annotated[Principal, Depends(caller)], mode: Annotated[Mode, Depends(ledger_mode)]
+    ) -> str:
+        del principal
+        return mode.value
+
     @routes.get("/open")
     async def anyone() -> str:
         return "open"
 
     return create_app(
-        info=ApiInfo(title="versions", version="1.0"),
+        info=ApiInfo(title="standing", version="1.0"),
         observability=Observability(health=Health(), registry=registry, tracer_provider=tracing.provider),
         lifespan=nothing_to_start,
         routers=(routes,),
@@ -110,7 +130,7 @@ def raw(local_issuer: LocalIssuer, version: str) -> list[tuple[bytes, bytes]]:
     ]
 
 
-# ── Reading ─────────────────────────────────────────────────────────────────────
+# ── Reading a version ───────────────────────────────────────────────────────────
 
 
 def test_a_version_is_a_known_date_in_its_one_written_form() -> None:
@@ -133,7 +153,7 @@ def test_a_version_is_a_known_date_in_its_one_written_form() -> None:
         "2026-10-13T00:00:00",
         "20261013",
         "2026-1-3",
-        "\uff12\uff10\uff12\uff16-\uff11\uff10-\uff11\uff13",  # digits that are not ASCII
+        FULLWIDTH,  # digits that are not ASCII
         "+2026-10-13",
         "x" * 500,
     ],
@@ -151,41 +171,40 @@ def test_the_error_names_the_versions_there_are() -> None:
 
 
 def test_the_request_s_version_beats_its_client_s_pin_which_beats_its_organization_s() -> None:
-    both = Pinned(client=OLDER, organization=NEWER)
+    both = Standing(client=OLDER, organization=NEWER)
     assert resolve(NEWER, both) == NEWER
     assert resolve(None, both) == OLDER
-    assert resolve(None, Pinned(client=None, organization=NEWER)) == NEWER
-    assert resolve(None, Pinned(client=None, organization=None)) == CURRENT_VERSION
+    assert resolve(None, Standing(organization=NEWER)) == NEWER
+    assert resolve(None, Standing()) == CURRENT_VERSION
 
 
-# ── On the wire ─────────────────────────────────────────────────────────────────
+# ── The version on the wire ─────────────────────────────────────────────────────
 
 
 async def test_without_a_header_or_a_pin_a_request_gets_the_current_version(
-    client: httpx.AsyncClient, local_issuer: LocalIssuer, pins: Pinning
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, standings: Knowing
 ) -> None:
     response = await client.get("/thing", headers=bearer(local_issuer))
     assert (response.status_code, response.headers[VERSION_HEADER]) == (200, CURRENT_VERSION.isoformat())
-    assert pins.asked == 1
+    assert standings.asked == 1
 
 
-async def test_a_request_that_names_a_version_gets_it_and_asks_nobody_s_pin(
-    client: httpx.AsyncClient, local_issuer: LocalIssuer, pins: Pinning
+async def test_a_request_that_names_a_version_gets_it_whatever_its_pins(
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, standings: Knowing
 ) -> None:
-    pins.pinned = Pinned(client=OLDER, organization=NEWER)
+    standings.standing = Standing(client=OLDER, organization=NEWER)
     sent = CURRENT_VERSION.isoformat()
     for name in (VERSION_HEADER, VERSION_HEADER.lower()):  # header names are case-insensitive
         response = await client.get("/thing", headers=bearer(local_issuer) | {name: sent})
         assert (response.status_code, response.headers[VERSION_HEADER]) == (200, sent)
-    assert pins.asked == 0
 
 
 async def test_without_a_header_the_pins_decide(
-    client: httpx.AsyncClient, local_issuer: LocalIssuer, pins: Pinning
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, standings: Knowing
 ) -> None:
-    pins.pinned = Pinned(client=None, organization=NEWER)
+    standings.standing = Standing(organization=NEWER)
     organization = await client.get("/thing", headers=bearer(local_issuer))
-    pins.pinned = Pinned(client=OLDER, organization=NEWER)
+    standings.standing = Standing(client=OLDER, organization=NEWER)
     both = await client.get("/thing", headers=bearer(local_issuer))
     assert (organization.headers[VERSION_HEADER], both.headers[VERSION_HEADER]) == (
         NEWER.isoformat(),
@@ -193,22 +212,19 @@ async def test_without_a_header_the_pins_decide(
     )
 
 
-@pytest.mark.parametrize(
-    "text",
-    ["2020-01-01", "tomorrow", "2026-13-45", "x" * 500, "\uff12\uff10\uff12\uff16-\uff11\uff10-\uff11\uff13"],
-)
+@pytest.mark.parametrize("text", ["2020-01-01", "tomorrow", "2026-13-45", "x" * 500, FULLWIDTH])
 async def test_a_version_that_does_not_exist_is_refused_once_the_caller_is_proven(
-    client: httpx.AsyncClient, local_issuer: LocalIssuer, pins: Pinning, text: str
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, standings: Knowing, text: str
 ) -> None:
     refused = await client.get("/thing", headers=raw(local_issuer, text))
     assert (refused.status_code, PROBLEM.validate_json(refused.content)["code"]) == (400, "version_unknown")
     assert len(text) < 20 or text not in refused.text
-    assert pins.asked == 0
     anonymous = await client.get("/thing", headers=raw(local_issuer, text)[1:])
     assert (anonymous.status_code, PROBLEM.validate_json(anonymous.content)["code"]) == (
         401,
         "missing_token",
     )
+    assert standings.asked == 1  # the proven caller's; nobody was asked about the anonymous one
 
 
 async def test_two_versions_sent_are_refused_rather_than_one_of_them_chosen(
@@ -259,7 +275,36 @@ def test_the_document_says_every_route_takes_the_header(app: FastAPI) -> None:
     assert not {"/livez", "/readyz", "/metrics"} & set(paths)  # the probes are not in the document
 
 
-# ── Remembering pins ────────────────────────────────────────────────────────────
+# ── The mode and the revocation of an API client ────────────────────────────────
+
+
+async def test_a_human_names_its_mode_and_an_api_client_s_credential_carries_it(
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, standings: Knowing
+) -> None:
+    human = await client.get("/moded", headers=bearer(local_issuer))
+    assert (human.status_code, PROBLEM.validate_json(human.content)["code"]) == (400, "mode_required")
+    standings.standing = Standing(mode=Mode.LIVE)
+    bare = await client.get("/moded", headers=bearer(local_issuer))
+    repeated = await client.get("/moded", headers=bearer(local_issuer, **{"Ledger-Mode": "live"}))
+    assert (bare.json(), repeated.json()) == ("live", "live")
+    other = await client.get("/moded", headers=bearer(local_issuer, **{"Ledger-Mode": "test"}))
+    assert (other.status_code, PROBLEM.validate_json(other.content)["code"]) == (403, "mode_mismatch")
+
+
+async def test_a_revoked_api_client_is_refused_whatever_its_token_says(
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, standings: Knowing
+) -> None:
+    standings.standing = Standing(mode=Mode.TEST, revoked=True)
+    refused = await client.get("/thing", headers=bearer(local_issuer))
+    assert (refused.status_code, PROBLEM.validate_json(refused.content)["code"]) == (
+        401,
+        "api_client_revoked",
+    )
+    assert refused.headers["www-authenticate"].startswith("Bearer")
+    assert ApiClientRevokedError.code == "api_client_revoked"
+
+
+# ── Remembering a standing ──────────────────────────────────────────────────────
 
 
 def principal_of(subject: str, organization: str = "1001") -> Principal:
@@ -281,75 +326,75 @@ class Time:
         return self.now
 
 
-async def test_pins_are_asked_once_for_a_while_and_for_each_caller() -> None:
-    pins, time = Pinning(), Time()
-    cached = CachedPins(pins, ttl=30.0, size=10, clock=time)
+async def test_a_standing_is_asked_once_for_a_while_and_for_each_caller() -> None:
+    knowing, time = Knowing(), Time()
+    cached = CachedStandings(knowing, ttl=30.0, size=10, clock=time)
     ana, bob, other = principal_of("ana"), principal_of("bob"), principal_of("ana", "1002")
-    pins.pinned = Pinned(client=OLDER, organization=NEWER)
-    assert await cached.of(ana) == pins.pinned
-    assert await cached.of(ana) == pins.pinned
-    assert pins.asked == 1
+    knowing.standing = Standing(client=OLDER, organization=NEWER)
+    assert await cached.of(ana) == knowing.standing
+    assert await cached.of(ana) == knowing.standing
+    assert knowing.asked == 1
     await cached.of(bob)
     await cached.of(other)  # the same subject of another organization is another caller
-    assert pins.asked == 3
+    assert knowing.asked == 3
     time.now += 29.9
     await cached.of(ana)
-    assert pins.asked == 3
-    time.now += 0.2  # past the ttl: asked again, and a changed pin shows
-    pins.pinned = Pinned(client=None, organization=NEWER)
-    assert await cached.of(ana) == pins.pinned
-    assert pins.asked == 4
+    assert knowing.asked == 3
+    time.now += 0.2  # past the ttl: asked again, and a change shows
+    knowing.standing = Standing(organization=NEWER, revoked=True)
+    assert await cached.of(ana) == knowing.standing
+    assert knowing.asked == 4
 
 
-async def test_the_pins_remembered_are_bounded_forgetting_the_oldest_first() -> None:
-    pins, time = Pinning(), Time()
-    pins.pinned = Pinned(client=None, organization=NEWER)
-    cached = CachedPins(pins, ttl=30.0, size=2, clock=time)
+async def test_the_standings_remembered_are_bounded_forgetting_the_oldest_first() -> None:
+    knowing, time = Knowing(), Time()
+    knowing.standing = Standing(organization=NEWER)
+    cached = CachedStandings(knowing, ttl=30.0, size=2, clock=time)
     one, two, three = principal_of("1"), principal_of("2"), principal_of("3")
     for caller in (one, two, three):
         await cached.of(caller)
-    assert pins.asked == 3
+    assert knowing.asked == 3
     await cached.of(three)
     await cached.of(two)
-    assert pins.asked == 3  # the two newest are kept
+    assert knowing.asked == 3  # the two newest are kept
     await cached.of(one)
-    assert pins.asked == 4  # the oldest was forgotten
+    assert knowing.asked == 4  # the oldest was forgotten
 
 
-async def test_a_caller_with_no_pins_is_asked_again_until_it_has_some() -> None:
-    """Its organization is not known yet; the next question must see it once it is."""
-    pins = Pinning()
-    cached = CachedPins(pins, ttl=30.0, size=10, clock=Time())
+async def test_a_caller_that_is_known_to_nobody_is_asked_again_until_it_is() -> None:
+    """Its organization is not known yet; the next question must see the organization once it is."""
+    knowing = Knowing()
+    cached = CachedStandings(knowing, ttl=30.0, size=10, clock=Time())
     ana = principal_of("ana")
-    assert await cached.of(ana) == Pinned(client=None, organization=None)
-    pins.pinned = Pinned(client=None, organization=NEWER)
-    assert await cached.of(ana) == Pinned(client=None, organization=NEWER)
-    assert await cached.of(ana) == Pinned(client=None, organization=NEWER)
-    assert pins.asked == 2
+    assert await cached.of(ana) == Standing()
+    knowing.standing = Standing(organization=NEWER)
+    assert await cached.of(ana) == Standing(organization=NEWER)
+    assert await cached.of(ana) == Standing(organization=NEWER)
+    assert knowing.asked == 2
 
 
 async def test_a_caller_that_failed_to_be_asked_is_asked_again() -> None:
     @final
-    class Failing(Pins):
+    class Failing(Standings):
         def __init__(self) -> None:
             self.asked = 0
 
         @override
-        async def of(self, principal: Principal) -> Pinned:
+        async def of(self, principal: Principal) -> Standing:
             del principal
             self.asked += 1
             if self.asked == 1:
                 raise ConnectionError
-            return Pinned(client=None, organization=None)
+            return Standing()
 
     failing = Failing()
-    cached = CachedPins(failing, ttl=30.0, size=2, clock=Time())
+    cached = CachedStandings(failing, ttl=30.0, size=2, clock=Time())
     with pytest.raises(ConnectionError):
         await cached.of(principal_of("ana"))
-    assert await cached.of(principal_of("ana")) == Pinned(client=None, organization=None)
+    assert await cached.of(principal_of("ana")) == Standing()
 
 
 def test_a_cache_that_remembers_nothing_is_a_mistake() -> None:
     for ttl, size in ((0.0, 1), (-1.0, 1), (30.0, 0)):
         with pytest.raises(InvalidOptionError):
-            CachedPins(Pinning(), ttl=ttl, size=size)
+            CachedStandings(Knowing(), ttl=ttl, size=size)

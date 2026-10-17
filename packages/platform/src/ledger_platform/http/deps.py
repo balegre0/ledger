@@ -53,20 +53,16 @@ from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.access import CompanyAccess
 from ledger_platform.auth.tokens import MissingTokenError
 from ledger_platform.data.audit import Actor, acting_as
+from ledger_platform.http.mode import MODE_KEY
 from ledger_platform.http.problems import current_request_id
 from ledger_platform.http.rate import RateLimitedError
 from ledger_platform.http.request_fields import remember
-from ledger_platform.http.versions import (
-    VERSION_HEADER,
-    VERSION_KEY,
-    VersionUnknownError,
-    parse_version,
-    resolve,
-)
+from ledger_platform.http.standing import ApiClientRevokedError, resolve
+from ledger_platform.http.versions import VERSION_HEADER, VERSION_KEY, VersionUnknownError, parse_version
 lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_platform.auth.access import PermissionSource
 lazy from ledger_platform.http.rate import RateLimiter
-lazy from ledger_platform.http.versions import Pins
+lazy from ledger_platform.http.standing import Standings
 
 COMPANY_HEADER: Final = "Ledger-Company"
 IF_MATCH: Final = "If-Match"
@@ -91,7 +87,7 @@ class Verifier(Protocol, metaclass=ABCMeta):
 
 
 type Caller = Callable[[Request, HTTPAuthorizationCredentials | None], AsyncGenerator[Principal]]
-"""The dependency ``authenticated`` makes (``versioned`` wraps it): a route declares
+"""The dependency ``authenticated`` makes (``with_standing`` wraps it): a route declares
 ``Annotated[Principal, Depends(caller)]``."""
 type PermissionsDependency[**P] = Callable[P, Coroutine[object, object, PermissionSource]]
 """A dependency handing the module's ``PermissionSource``; its parameters (``P``) are dependencies of its
@@ -279,31 +275,34 @@ def in_organization(caller: Caller) -> InOrganization:
     return member
 
 
-def versioned(caller: Caller, pins: Pins) -> Caller:
-    """``caller``, which also settles the version the request speaks and has its answer name it.
+def with_standing(caller: Caller, standings: Standings) -> Caller:
+    """``caller``, which also settles what the request is as its caller stands (``standing``).
 
-    The caller is proven first (401). A ``Ledger-Version`` the request names is then read (400
-    ``version_unknown`` for one that does not exist, or for two); without one, the caller's pins are asked and
-    decide. The answer to every request, this one's or not, names its version (``create_app``).
+    The caller is proven first (401), then asked its standing: an API client that was revoked is refused
+    (401 ``api_client_revoked``); the mode its API client is bound to becomes the request's (``ledger_mode``);
+    and the version it speaks is settled: a ``Ledger-Version`` the request names is read (400
+    ``version_unknown`` for one that does not exist, or for two), else the pins decide. The answer to every
+    request, this one's or not, names its version (``create_app``).
     """
 
-    async def with_version(
+    async def standing(
         request: Request,
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_BEARER)],
     ) -> AsyncGenerator[Principal]:
         async with aclosing(caller(request, credentials)) as proven:
             principal = await anext(proven)
+            known = await standings.of(principal)
+            if known.revoked:
+                raise ApiClientRevokedError
             sent = request.headers.getlist(VERSION_HEADER)
-            if not sent:
-                version = resolve(None, await pins.of(principal))
-            elif len(sent) == 1:
-                version = parse_version(sent[0])
-            else:
+            if len(sent) > 1:
                 raise VersionUnknownError
-            request.scope[VERSION_KEY] = version
+            request.scope[VERSION_KEY] = resolve(parse_version(sent[0]) if sent else None, known)
+            if known.mode is not None:
+                request.scope[MODE_KEY] = known.mode
             yield principal
 
-    return with_version
+    return standing
 
 
 def any_principal(caller: Caller) -> InOrganization:

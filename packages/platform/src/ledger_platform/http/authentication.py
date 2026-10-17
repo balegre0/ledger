@@ -15,12 +15,12 @@ lazy from prometheus_client import CollectorRegistry
 
 from ledger_platform.auth.keys import HttpKeys, PublishedKeys
 from ledger_platform.auth.tokens import TokenPolicy, TokenSettingsMissingError, TokenVerifier
-from ledger_platform.http.deps import Verifier, authenticated, versioned
+from ledger_platform.http.deps import Verifier, authenticated, with_standing
 from ledger_platform.http.rate import RateLimiter
 lazy from ledger_kernel.access import Principal
 lazy from ledger_platform.config.settings import Settings
 lazy from ledger_platform.http.deps import Caller
-lazy from ledger_platform.http.versions import Pins
+lazy from ledger_platform.http.standing import Standings
 
 _TOKEN_SETTINGS: Final = ("token_issuer", "token_audience", "token_jwks_url")
 
@@ -63,12 +63,13 @@ class Authentication:
         limiter = RateLimiter(rate=settings.rate_limit_per_second, burst=settings.rate_limit_burst)
         return cls(authenticated(verifier, limiter), keys)
 
-    def versioned(self, pins: Pins) -> Caller:
-        """The caller dependency of a module that knows the pins of its callers (identity keeps them).
+    def with_standing(self, standings: Standings) -> Caller:
+        """The caller dependency of a module that knows how its callers stand (identity keeps that).
 
-        It proves the caller as ``caller`` does and settles the version the request speaks (``versioned``).
+        It proves the caller as ``caller`` does and settles the request's version and mode, and refuses a
+        revoked API client (``with_standing``).
         """
-        return versioned(self.caller, pins)
+        return with_standing(self.caller, standings)
 
     def resources(self) -> tuple[AbstractAsyncContextManager[object], ...]:
         """What the app opens while it runs: the client that fetches the provider's keys, if any."""
