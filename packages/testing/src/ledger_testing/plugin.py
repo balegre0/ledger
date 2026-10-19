@@ -7,9 +7,9 @@
 - ``issuer_keys`` (session) and ``local_issuer`` (per test): an OpenID provider whose RSA key is made once.
 - ``clock``: a wall clock the test moves. ``restore_logging`` (autouse): the plain logging baseline.
 - A module's fixtures, for a suite whose conftest returns its ``ModuleUnderTest`` from ``module_under_test``
-  (``ledger_testing.modules``): ``migrated``, ``database``, ``signals``, ``module_database``, ``admin``,
-  ``settings``, ``api``, ``client``, ``fresh_database_name``, ``fresh``, ``fresh_admin_url``. A conftest's own
-  fixture of one of these names wins over the plugin's.
+  (``ledger_testing.modules``): ``migrated``, ``database``, ``app_database``, ``signals``,
+  ``module_database``, ``admin``, ``settings``, ``api``, ``client``, ``fresh_database_name``, ``fresh``,
+  ``fresh_admin_url``. A conftest's own fixture of one of these names wins over the plugin's.
 - A selector event loop: psycopg's async driver cannot run on Windows' proactor loop.
 
 pytest imports this module, and what its hook specification names, before coverage starts: the names it uses
@@ -38,7 +38,7 @@ lazy from ledger_platform.data.notifier import Signals
 lazy from ledger_platform.data.roles import APP, MIGRATOR
 lazy from ledger_platform.runtime.app import App
 lazy from ledger_testing.clock import ManualClock
-lazy from ledger_testing.database import TEST_LOGINS, app_url, fresh_database, migrator_url
+lazy from ledger_testing.database import TEST_LOGINS, app_url, fresh_database, migrator_url, signer_url
 lazy from ledger_testing.issuer import IssuerKeys, LocalIssuer
 lazy from ledger_testing.logs import restored_logging
 lazy from ledger_testing.modules import ModuleUnderTest, QuietSignals, app_settings
@@ -176,9 +176,24 @@ def migrated(worker_database: WorkerDatabase, module_under_test: ModuleUnderTest
 
 
 @pytest.fixture
-async def database(migrated: WorkerDatabase) -> AsyncGenerator[Database]:
-    """A pool of four connections as ``ledger_app``."""
-    opened = Database.create(app_url(migrated), pool_size=4)
+async def database(migrated: WorkerDatabase, module_under_test: ModuleUnderTest) -> AsyncGenerator[Database]:
+    """A pool of four connections as the module's login.
+
+    ``ledger_signer`` for a module isolated in the signer's role, whose schema no other login reaches; else
+    ``ledger_app``.
+    """
+    isolated = module_under_test.manifest.isolated_in == "signer"
+    opened = Database.create(signer_url(migrated) if isolated else app_url(migrated), pool_size=4)
+    try:
+        yield opened
+    finally:
+        await opened.aclose()
+
+
+@pytest.fixture
+async def app_database(migrated: WorkerDatabase) -> AsyncGenerator[Database]:
+    """A pool of two connections as ``ledger_app``: the login of every app but the signer."""
+    opened = Database.create(app_url(migrated), pool_size=2)
     try:
         yield opened
     finally:
@@ -243,7 +258,7 @@ def fresh_database_name(
 ) -> Iterator[str]:
     """A database of the test's own with the module's schemas, empty, as a first rollout finds it; dropped."""
     del worker_database  # its template made the roles a fresh database's schemas are owned by
-    name = fresh_database(postgres, module_under_test.schemas)
+    name = fresh_database(postgres, module_under_test.schemas, isolated=module_under_test.isolated)
     yield name
     with psycopg.connect(postgres.libpq(), autocommit=True) as connection:
         connection.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))

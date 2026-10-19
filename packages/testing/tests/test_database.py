@@ -17,6 +17,7 @@ from ledger_testing.database import (
     libpq_as,
     migrate,
     migrator_url,
+    signer_url,
 )
 from ledger_testing.postgres import PostgresServer, Template, WorkerDatabase
 
@@ -27,6 +28,7 @@ WORKER = WorkerDatabase(PostgresServer(host="db", port=5433, user="admin", passw
 def test_tests_connect_as_the_logins_the_apps_use() -> None:
     assert app_url(WORKER) == "postgresql+psycopg://ledger_app:app-password@db:5433/ledger_gw1"
     assert migrator_url(WORKER) == "postgresql+psycopg://ledger_migrator:migrator-password@db:5433/ledger_gw1"
+    assert signer_url(WORKER) == "postgresql+psycopg://ledger_signer:signer-password@db:5433/ledger_gw1"
     assert (
         libpq_as(WORKER, role="ledger_app", password="pw") == "postgresql://ledger_app:pw@db:5433/ledger_gw1"
     )
@@ -84,6 +86,39 @@ def test_a_fresh_database_has_the_schemas_and_nothing_in_them(
         fresh = postgres.libpq(name)
         assert schemas_of(fresh) == {"platform", "books"}
         assert tables_in(fresh, "books") == set()
+    finally:
+        with psycopg.connect(postgres.libpq(), autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+
+
+MEMBERSHIPS: Final = """
+SELECT granted.rolname, member.rolname
+FROM pg_auth_members AS membership
+JOIN pg_roles AS granted ON granted.oid = membership.roleid
+JOIN pg_roles AS member ON member.oid = membership.member
+WHERE granted.rolname IN ('platform_rw', 'vault_rw', 'vault_purge')
+  AND member.rolname IN ('ledger_app', 'ledger_signer')
+"""
+PAIRS: Final = TypeAdapter(set[tuple[str, str]])
+
+
+def test_the_template_grants_an_isolated_schema_to_the_signer_login(
+    template: Template, postgres: PostgresServer
+) -> None:
+    bootstrap(template, ("platform", "vault"), isolated=("vault",))
+    with psycopg.connect(postgres.libpq(template.name)) as connection:
+        pairs = PAIRS.validate_python(connection.execute(MEMBERSHIPS).fetchall())
+    assert pairs == {
+        ("platform_rw", "ledger_app"),
+        ("platform_rw", "ledger_signer"),  # schedule leases
+        ("vault_rw", "ledger_signer"),
+        ("vault_purge", "ledger_signer"),
+    }
+    name = fresh_database(postgres, ("platform", "vault"), isolated=("vault",))
+    try:
+        with psycopg.connect(postgres.libpq(name)) as connection:
+            row = connection.execute("SELECT has_database_privilege('ledger_signer', %s, 'CONNECT')", (name,))
+            assert row.fetchone() == (True,)
     finally:
         with psycopg.connect(postgres.libpq(), autocommit=True) as admin:
             admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))

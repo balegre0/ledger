@@ -128,7 +128,8 @@ def _literal(text: str) -> str:
 class SchemaRoles:
     """A schema and its roles.
 
-    ``signer``: its ``rw`` and ``purge`` roles belong to ``ledger_signer``, not to ``ledger_app``.
+    ``signer``: its ``rw`` and ``purge`` roles belong to ``ledger_signer``, not to ``ledger_app``. Callers set
+    it from the owner's manifest (``PackageManifest.isolated_in == "signer"``), never from the schema's name.
     """
 
     schema: str

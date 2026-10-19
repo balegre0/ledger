@@ -64,15 +64,28 @@ def test_a_module_that_needs_one_not_installed_or_without_revisions_is_a_defect_
         _ = ModuleUnderTest(alpha.manifest, migrations_of("alpha"), discover=found(alpha, beta)).needs
 
 
+def test_the_isolated_schemas_are_those_of_its_own_and_its_needs_manifests_that_isolate_them() -> None:
+    vault, alpha = a_module("vault", isolated=True), a_module("alpha", "vault")
+    everything = found(vault, alpha)
+    needing = ModuleUnderTest(alpha.manifest, migrations_of("alpha"), discover=everything)
+    assert (needing.schemas, needing.isolated) == (("platform", "vault", "alpha"), ("vault",))
+    assert ModuleUnderTest(vault.manifest, migrations_of("vault"), discover=everything).isolated == ("vault",)
+    alone = ModuleUnderTest(a_module("beta").manifest, migrations_of("beta"), discover=everything)
+    assert alone.isolated == ()
+    assert ModuleUnderTest(MANIFEST, platform_migrations(), discover=everything).isolated == ()
+
+
 def migrations_of(schema: str) -> SchemaMigrations:
     return SchemaMigrations(schema=schema, scripts=f"{schema}_unused:migrations")
 
 
-def a_module(name: str, *depends: str, migrated: bool = True) -> Module:
+def a_module(name: str, *depends: str, migrated: bool = True, isolated: bool = False) -> Module:
     declared = ", ".join(f'"{dependency}"' for dependency in depends)
+    isolation = 'isolated_in = "signer"\n' if isolated else ""
     text = (
         f'[package]\nname = "{name}"\nkind = "module"\nsummary = "A module."\nowners = ["@o"]\n'
         f'[dependencies]\npackages = ["platform"]\nmodules = [{declared}]\n[data]\nschema = "{name}"\n'
+        f"{isolation}"
     )
 
     def assemble(context: ModuleContext) -> ModuleParts:

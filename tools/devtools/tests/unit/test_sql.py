@@ -83,3 +83,30 @@ def test_a_channel_s_schema_gets_its_roles_too(tree: Path, write: Writer) -> Non
     assert 'CREATE ROLE "do_ecf_owner"' in text
     assert 'CREATE ROLE "do_ecf_rw"' in text
     assert 'CREATE SCHEMA IF NOT EXISTS "do_ecf" AUTHORIZATION "do_ecf_owner";' in text
+
+
+def isolated(name: str, *, isolated_in: str | None) -> str:
+    """A module owning schema ``name``, isolated in ``isolated_in``'s role if one is given."""
+    isolation = "" if isolated_in is None else f'isolated_in = "{isolated_in}"\n'
+    return (
+        f'[package]\nname = "{name}"\nkind = "module"\nsummary = "A module."\nowners = ["@o"]\n'
+        f'[dependencies]\npackages = ["kernel", "platform"]\n[data]\nschema = "{name}"\n{isolation}'
+    )
+
+
+def test_an_isolated_schema_belongs_to_the_signer_login(tree: Path, write: Writer) -> None:
+    write("modules/vault", isolated("vault", isolated_in="signer"), ())
+    text = init_sql_text(Workspace.load(tree))
+    assert 'GRANT "vault_rw" TO "ledger_signer"' in text
+    assert 'GRANT "vault_purge" TO "ledger_signer"' in text
+    assert 'GRANT "vault_rw" TO "ledger_app"' not in text
+    assert 'GRANT "identity_rw" TO "ledger_app"' in text
+    assert 'GRANT "platform_rw" TO "ledger_signer"' in text  # schedule leases
+    assert 'CREATE ROLE "ledger_signer"' in text
+
+
+def test_a_schema_named_signer_is_not_isolated_by_its_name(tree: Path, write: Writer) -> None:
+    write("modules/signer", isolated("signer", isolated_in=None), ())
+    text = init_sql_text(Workspace.load(tree))
+    assert 'GRANT "signer_rw" TO "ledger_app"' in text
+    assert 'CREATE ROLE "ledger_signer"' not in text

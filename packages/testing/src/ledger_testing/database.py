@@ -2,12 +2,14 @@
 
 The template's hook (``pytest_ledger_template``) calls ``bootstrap`` with every schema the package's tests
 use, then ``migrate`` with its migrations; tests connect as ``ledger_app`` (``app_url``) and enter a schema's
-``rw`` role per unit, as the apps do. Roles are the server's: every database on it shares them.
+``rw`` role per unit, as the apps do. A schema of a module isolated in the signer's role is the signer
+login's instead (``isolated``, ``signer_url``), as ``init.sql`` makes it. Roles are the server's: every
+database on it shares them.
 """
 
 import secrets
 from typing import Final
-lazy from collections.abc import Sequence
+lazy from collections.abc import Collection, Sequence
 
 import psycopg
 from alembic.migration import MigrationContext
@@ -20,6 +22,7 @@ from ledger_platform.data.chassis_schema import chassis_schema_v1, chassis_schem
 from ledger_platform.data.roles import (
     APP,
     MIGRATOR,
+    SIGNER,
     Logins,
     SchemaRoles,
     cluster_statements,
@@ -34,9 +37,17 @@ TEST_LOGINS: Final = Logins(app="app-password", migrator="migrator-password", si
 """The logins' passwords on test servers (``init.sql`` takes the local stack's from its environment)."""
 
 
-def bootstrap(template: Template, schemas: Sequence[str]) -> None:
-    """The cluster's roles and the template's schemas, as ``init.sql`` makes them."""
-    roles = tuple(SchemaRoles(schema=schema) for schema in schemas)
+def _roles(schemas: Sequence[str], isolated: Collection[str]) -> tuple[SchemaRoles, ...]:
+    """The roles of ``schemas``; those named in ``isolated`` are ``ledger_signer``'s."""
+    return tuple(SchemaRoles(schema=schema, signer=schema in isolated) for schema in schemas)
+
+
+def bootstrap(template: Template, schemas: Sequence[str], *, isolated: Collection[str] = ()) -> None:
+    """The cluster's roles and the template's schemas, as ``init.sql`` makes them.
+
+    ``isolated``: the schemas of modules isolated in the signer's role (``ModuleUnderTest.isolated``).
+    """
+    roles = _roles(schemas, isolated)
     template.execute(cluster_statements(roles, TEST_LOGINS), database="postgres")
     template.execute(database_statements(roles))
 
@@ -64,13 +75,13 @@ def create_chassis(template: Template, schema: str) -> None:
         engine.dispose()
 
 
-def fresh_database(server: PostgresServer, schemas: Sequence[str]) -> str:
+def fresh_database(server: PostgresServer, schemas: Sequence[str], *, isolated: Collection[str] = ()) -> str:
     """A new, empty database with ``schemas`` (their roles made already, by a template's ``bootstrap``)."""
     name = f"fresh_{secrets.token_hex(6)}"
     with psycopg.connect(server.libpq(), autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     with psycopg.connect(server.libpq(name), autocommit=True) as connection:
-        for statement in database_statements(tuple(SchemaRoles(schema=schema) for schema in schemas)):
+        for statement in database_statements(_roles(schemas, isolated)):
             connection.execute(statement.encode())
     return name
 
@@ -78,6 +89,11 @@ def fresh_database(server: PostgresServer, schemas: Sequence[str]) -> str:
 def app_url(worker: WorkerDatabase) -> str:
     """The worker's database as ``ledger_app`` (SQLAlchemy URL)."""
     return worker.url(role=APP, password=TEST_LOGINS.app)
+
+
+def signer_url(worker: WorkerDatabase) -> str:
+    """The worker's database as ``ledger_signer``, the login of the signer's role (SQLAlchemy URL)."""
+    return worker.url(role=SIGNER, password=TEST_LOGINS.signer or "")
 
 
 def migrator_url(worker: WorkerDatabase) -> str:

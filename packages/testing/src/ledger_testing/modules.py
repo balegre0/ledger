@@ -9,11 +9,12 @@ A module's ``conftest.py`` names what it tests and prepares the template with it
         UNDER_TEST.prepare(template)
 
 and returns ``UNDER_TEST`` from a ``module_under_test`` fixture. The plugin's fixtures then give its tests the
-worker's database migrated as production migrates it (``migrated``, emptied after each test), a pool as
-``ledger_app`` (``database``), the module's units in its own role (``module_database``), a superuser session
-(``admin``), the apps' settings (``settings``), the ``api`` app and a client of it (``api``, ``client``), and
-a fresh, empty database with the schemas (``fresh_database_name``, ``fresh``, ``fresh_admin_url``). No module
-copies another's conftest.
+worker's database migrated as production migrates it (``migrated``, emptied after each test), a pool as the
+module's login (``database``: ``ledger_signer`` for a module isolated in the signer's role, else
+``ledger_app``) and one as ``ledger_app`` (``app_database``), the module's units in its own role
+(``module_database``), a superuser session (``admin``), the apps' settings (``settings``), the ``api`` app
+and a client of it (``api``, ``client``), and a fresh, empty database with the schemas
+(``fresh_database_name``, ``fresh``, ``fresh_admin_url``). No module copies another's conftest.
 """
 
 import graphlib
@@ -84,6 +85,21 @@ class ModuleUnderTest:
         Read from the manifests, transitively, each module after those it depends on itself; each is the
         revisions its entry point names (``Module.migrations``). A package that is not a module needs none.
         """
+        return tuple(_revisions(module) for module in self._needed())
+
+    @property
+    def isolated(self) -> tuple[str, ...]:
+        """Those of its ``schemas`` that are the signer login's: of the modules isolated in the signer's role.
+
+        Its own, and those of the modules it needs, by their manifests (``[data] isolated_in``).
+        """
+        needed = tuple(
+            _revisions(module).schema for module in self._needed() if _is_isolated(module.manifest)
+        )
+        return (*needed, self.schema) if _is_isolated(self.manifest) else needed
+
+    def _needed(self) -> tuple[Module, ...]:
+        """The modules it depends on, transitively, each after those it depends on itself."""
         if self.manifest.package.kind is not PackageKind.MODULE:
             return ()
         modules = {module.manifest.package.name: module for module in installed_modules(self.discover)}
@@ -98,7 +114,7 @@ class ModuleUnderTest:
             graph[name] = modules[name].manifest.dependencies.modules
             pending.extend(graph[name])
         order = tuple(graphlib.TopologicalSorter(graph).static_order())
-        return tuple(_revisions(modules[name]) for name in order)
+        return tuple(modules[name] for name in order)
 
     @property
     def schemas(self) -> tuple[str, ...]:
@@ -144,13 +160,18 @@ class ModuleUnderTest:
 
     def prepare(self, template: Template) -> None:
         """The roles and the schemas, each at head as ``ledger_migrator`` with the relay granted."""
-        bootstrap(template, self.schemas)
+        bootstrap(template, self.schemas, isolated=self.isolated)
         revisions: Sequence[SchemaMigrations] = (
             (self.migrations,)
             if self.schema == PLATFORM
             else (platform_migrations(), *self.needs, self.migrations)
         )
         migrate(template, *revisions)
+
+
+def _is_isolated(manifest: PackageManifest) -> bool:
+    """Whether ``manifest``'s module is isolated in the signer's role: its schema is ``ledger_signer``'s."""
+    return manifest.isolated_in == "signer"
 
 
 def _revisions(module: Module) -> SchemaMigrations:

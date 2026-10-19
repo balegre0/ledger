@@ -157,3 +157,37 @@ def test_a_planted_module_and_country_need_no_hand_edit_outside_their_directorie
     assert "ledger-books = { workspace = true }\n" in root
     assert '    "ledger-country-zz-testing",\n' in root  # the workspace group: a dev-only package
     assert '    "ledger_country_zz",\n' in root  # known-first-party
+
+
+VAULT: Final = """[package]
+name = "vault"
+kind = "module"
+summary = "A module planted by a test: keys, isolated in the signer's role."
+owners = ["@o"]
+
+[dependencies]
+packages = ["kernel", "platform"]
+
+[data]
+schema = "vault"
+isolated_in = "signer"
+"""
+
+
+def test_a_planted_isolated_module_gets_the_signer_login_and_a_custody_contract(
+    repository: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = repository / "modules/vault/src/ledger_vault"
+    (source / "adapters").mkdir(parents=True)
+    (repository / "modules/vault/manifest.toml").write_text(VAULT, encoding="utf-8", newline="\n")
+    for package in (source, source / "adapters"):
+        (package / "__init__.py").write_text('"""Planted."""\n', encoding="utf-8", newline="\n")
+    assert main(["sync", "--root", str(repository)]) == 0
+    capsys.readouterr()
+    assert main(["check", "--root", str(repository)]) == 0, capsys.readouterr().out
+    init_sql = (repository / "deploy/local/postgres/init.sql").read_text(encoding="utf-8")
+    assert 'GRANT "vault_rw" TO "ledger_signer"' in init_sql
+    assert 'GRANT "vault_rw" TO "ledger_app"' not in init_sql
+    contracts = (repository / ".importlinter").read_text(encoding="utf-8")
+    assert "[importlinter:contract:vault-custody]\n" in contracts
+    assert "forbidden_modules =\n    ledger_vault.adapters.custody\n" in contracts

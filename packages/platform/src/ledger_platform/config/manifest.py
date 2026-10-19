@@ -182,6 +182,10 @@ class DataSection(_Section):
     """``[data]``: the PostgreSQL schema the package owns, which is also its roles' prefix."""
 
     schema_name: SchemaName = Field(alias="schema")
+    isolated_in: Literal["signer"] | None = None
+    """The one role whose app runs the module's consumers, jobs, schedules and server, and whose login alone
+    reaches its schema (spec §3.7, ADR 0010); every other role assembles it as a client and only relays its
+    outbox and inbox. ``signer`` is the only such role."""
 
 
 class IdPrefix(_Section):
@@ -378,6 +382,7 @@ class _KindRule(StrEnum):
     REGIMES = "regimes"
     COUNTRY_MODULES = "dependencies.modules"
     DATA = "data"
+    ISOLATED = "data.isolated_in"
     SETTINGS = "package.settings"
 
 
@@ -387,6 +392,7 @@ _KIND_RULES: Final[Mapping[_KindRule, str]] = {
     _KindRule.REGIMES: "only a country declares regimes and channels",
     _KindRule.COUNTRY_MODULES: "a country may not depend on a module",
     _KindRule.DATA: "only a module or the platform owns a schema, events, jobs or schedules",
+    _KindRule.ISOLATED: "only a module may be isolated",
     _KindRule.SETTINGS: "only a module declares a settings section of its own",
 }
 
@@ -446,6 +452,8 @@ class PackageManifest(_Section):
         )
         if owns_data and kind not in {PackageKind.MODULE, PackageKind.PACKAGE}:
             raise _KindRuleError(_KindRule.DATA)
+        if self.isolated_in is not None and kind is not PackageKind.MODULE:
+            raise _KindRuleError(_KindRule.ISOLATED)
         if self.package.settings and kind is not PackageKind.MODULE:
             raise _KindRuleError(_KindRule.SETTINGS)
         return self
@@ -459,6 +467,11 @@ class PackageManifest(_Section):
     def schema_name(self) -> str | None:
         """The schema the package owns, if any."""
         return None if self.data is None else self.data.schema_name
+
+    @property
+    def isolated_in(self) -> AppRole | None:
+        """The role a module is isolated in (``[data] isolated_in``), if any; ``None`` for anything else."""
+        return None if self.data is None else self.data.isolated_in
 
     @property
     def distribution(self) -> str:

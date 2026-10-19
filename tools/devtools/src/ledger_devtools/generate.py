@@ -73,6 +73,9 @@ _CHANNEL_LAYERS: Final = ("adapters", "application", "domain")
 """A channel's layers, top to bottom (§4.6 contract 10)."""
 _CHANNEL_PURE: Final = ("application", "domain")
 """A channel's layers that know no third party (§4.6 contract 11)."""
+CUSTODY: Final = "adapters.custody"
+"""What an isolated module holds key material in: only the module and the apps of its role import it (§4.6
+contract 12, ADR 0010)."""
 _BARE_KEY: Final = re.compile(r"[A-Za-z0-9_-]+", re.ASCII)
 _PYTEST_PLUGIN: Final = ("ledger", "ledger_testing.plugin")
 """The shared pytest plugin's entry point (group ``pytest11``): the package named ``testing`` declares it."""
@@ -554,6 +557,32 @@ def _module_contracts(facts: _Facts, module: Package) -> Iterator[str | None]:
     )
 
 
+def _custody_contracts(facts: _Facts) -> Iterator[str | None]:
+    """Each isolated module's custody is imported by the module and the apps of its role only (ADR 0010).
+
+    Directly: every other app assembles the module as a client, and reaches its insides only through what the
+    module imports itself; that its client role builds no custody object is the runtime's to prove.
+    """
+    workspace = facts.workspace
+    for module in workspace.modules:
+        role = module.manifest.isolated_in
+        if role is None:
+            continue
+        serving = {
+            app.import_name
+            for app in workspace.apps
+            if app.manifest.app is not None and app.manifest.app.role == role
+        }
+        yield _contract(
+            f"{module.name}-custody",
+            f"Only {module.name} and the apps of the {role} role import {module.name}'s custody",
+            "forbidden",
+            ("source_modules", [root for root in facts.roots if root not in {module.import_name, *serving}]),
+            ("forbidden_modules", [f"{module.import_name}.{CUSTODY}"]),
+            ("allow_indirect_imports", "True"),
+        )
+
+
 def _closing_contracts(facts: _Facts) -> Iterator[str | None]:
     workspace = facts.workspace
     production = [package for package in workspace.packages if package.is_production]
@@ -604,6 +633,7 @@ def importlinter_text(workspace: Workspace) -> str:
         *_edge_contracts(facts),
         *_country_contracts(facts),
         *(contract for module in workspace.modules for contract in _module_contracts(facts, module)),
+        *_custody_contracts(facts),
         *_closing_contracts(facts),
     )
     return GENERATED_HEADER + "\n" + "\n".join(contract for contract in contracts if contract is not None)
