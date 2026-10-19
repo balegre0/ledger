@@ -46,15 +46,10 @@ from ledger_identity.domain.roles import (
     COMPANIES_MANAGE,
     COMPANIES_READ,
     EVERYTHING,
-    INVOICES_CREATE,
-    INVOICES_ISSUE,
-    INVOICES_READ,
-    INVOICES_VOID,
     MEMBERSHIPS_MANAGE,
     MEMBERSHIPS_READ,
     OWNERSHIP_MANAGE,
     PERMISSIONS,
-    READ_ONLY,
     only_reads,
     permissions_of,
 )
@@ -101,6 +96,12 @@ from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.data.codec import payload_of
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_kernel.errors import LedgerError
+
+INVOICES_READ: Final = parse_permission("invoicing.invoices.read")
+INVOICES_CREATE: Final = parse_permission("invoicing.invoices.create")
+INVOICES_ISSUE: Final = parse_permission("invoicing.invoices.issue")
+INVOICES_VOID: Final = parse_permission("invoicing.invoices.void")
+"""invoicing's codes, as its manifest declares them: the generated table holds them for identity."""
 
 NOW: Final = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
 LATER: Final = NOW + timedelta(hours=1)
@@ -721,7 +722,7 @@ def test_other_services_may_let_a_member_of_a_deactivated_company_read_only() ->
         {COMPANIES_READ, INVOICES_READ}
     )
     owner, _ = found(company, FOUNDER, now=NOW)
-    assert permissions_in(company.deactivate(now=LATER)[0], owner) == READ_ONLY
+    assert permissions_in(company.deactivate(now=LATER)[0], owner) == only_reads(EVERYTHING)
     revoked, _ = revoke(Roster(company, issuer.subject, issuer, owners=1), actor=OWNER, now=NOW)
     assert permissions_in(company, revoked) == frozenset()
 

@@ -14,6 +14,7 @@ from typing import Final, TypeIs, final
 lazy from collections.abc import Callable, Iterator, Mapping, Sequence
 
 from ledger_devtools.names import LOADED_BY_OTHERS, TEST_TOOLING, distribution_of, import_names, renamed
+from ledger_devtools.roles import role_grants_path, role_grants_text
 from ledger_devtools.root import ROOT_PYPROJECT, root_text
 from ledger_devtools.sql import init_sql_text
 from ledger_devtools.workspace import MANIFEST_GLOBS, MODULE_LAYERS
@@ -612,6 +613,9 @@ def targets(
     root = root_text(workspace)
     if root is not None:
         generated[Path(ROOT_PYPROJECT)] = root
+    grants = role_grants_path(workspace)
+    if grants is not None:
+        generated[grants] = role_grants_text(workspace)
     for package in workspace.packages:
         generated[package.directory / "pyproject.toml"] = pyproject_text(package, workspace)
         if has_manifest_module(package):

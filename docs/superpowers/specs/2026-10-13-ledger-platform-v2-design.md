@@ -868,12 +868,11 @@ metric ([02] Kraken).
 
 A workspace member under the full gate. Built now: `sync` and `check`. Deferred (§16.4): `gate` (`uv run poe
 check` is the gate, §14.3), `affected` and the CI matrix, `scaffold` (copier templates), CODEOWNERS, generated
-reference docs, identity's generated role table (v2-M2; a workspace test holds identity's hand table equal to
-every manifest's permissions) and event schema snapshots.
+reference docs and event schema snapshots. identity's role table is generated (§7.7).
 
 | Command | Does |
 |---|---|
-| `sync` | From manifests: each package's `pyproject.toml` (dependencies, entry points `ledger.modules`, `ledger.countries.regimes`, `ledger.countries.channels`, `ledger.settings`, console scripts, coverage targets, deptry's module map read from the installed distributions' metadata); `_manifest.py` for a module, a package with a schema and a country with a channel; `.importlinter`; `deploy/local/postgres/init.sql` (schemas, roles, grants, for modules, channels and platform); each module's `openapi.json`; the root `pyproject.toml`'s generated block (the `workspace` dependency group with every dev-only package and every manifest's test dependencies, `[tool.uv.sources]`, ruff's `known-first-party`), so adding a package touches only its directory and generated files |
+| `sync` | From manifests: each package's `pyproject.toml` (dependencies, entry points `ledger.modules`, `ledger.countries.regimes`, `ledger.countries.channels`, `ledger.settings`, console scripts, coverage targets, deptry's module map read from the installed distributions' metadata); `_manifest.py` for a module, a package with a schema and a country with a channel; identity's role table (`ledger_identity/domain/_role_grants.py`, §7.7); `.importlinter`; `deploy/local/postgres/init.sql` (schemas, roles, grants, for modules, channels and platform); each module's `openapi.json`; the root `pyproject.toml`'s generated block (the `workspace` dependency group with every dev-only package and every manifest's test dependencies, `[tool.uv.sources]`, ruff's `known-first-party`), so adding a package touches only its directory and generated files |
 | `check` | Validates every manifest (schema, name == directory, a country's `iso` == its directory and its regimes' keys its own, unique schema/prefix/permission/event type/consumer/job kind/schedule/http prefix, module and package DAGs including subscription edges, schedules enqueuing declared kinds, modules made of layers, settings sections apart from the platform's names and each other); fails if `sync` would change or delete any file; checks the repository around the manifests (the root's block, members without a manifest, image pins with digests, the build context). Deferred: event schema snapshots, channel `valid_from` ordering (deptry runs in the gate) |
 | `gate` | Deferred: `uv run poe check` runs the gate (§14.3) |
 
@@ -1267,7 +1266,8 @@ channel document      channel-specific state machine (do-ecf-v1: §8.6.4), one p
   value type; v1's closed enum and identity's hard-coded table are deleted (R4, [05] S1).
 - Built-in roles (`owner`, `admin`, `accountant`, `issuer`, `viewer`; five kept, owner ruling) are identity's
   vocabulary; each permission lists the built-in roles that hold it; `ledger-devtools sync` generates identity's
-  `ROLE_GRANTS` into `ledger_identity/_role_grants.py`; `check` validates role names. `owner` holds every
+  `ROLE_GRANTS` into `ledger_identity/domain/_role_grants.py` (domain data: it imports the kernel only; built);
+  `check` validates role names and fails while the table is stale. identity names only its own codes. `owner` holds every
   permission; `identity.ownership.manage` is `owner` only.
 - An organization-level Zitadel project role (`ledger.organization.admin`) registers companies (v1 kept).
 - Authorization per request (no cache): `IdentityApi.permissions(call, principal, company)`, one indexed read.

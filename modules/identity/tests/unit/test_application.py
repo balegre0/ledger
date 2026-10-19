@@ -37,7 +37,7 @@ from ledger_identity.domain.errors import (
     TaxIdTakenError,
 )
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN, Organization
-from ledger_identity.domain.roles import EVERYTHING, READ_ONLY
+from ledger_identity.domain.roles import EVERYTHING, only_reads
 from ledger_identity.domain.text import parse_code, parse_legal_name, parse_name, parse_time_zone
 from ledger_identity.events import (
     CompanyDeactivated,
@@ -1033,7 +1033,7 @@ async def test_permissions_are_the_role_s_or_none(state: State) -> None:
 async def test_other_services_get_the_reading_permissions_only_of_a_deactivated_company(state: State) -> None:
     company = await created(state)
     await commands.deactivate_company(state.unit(LATER), company.id, admits=anything, actor=OWNER)
-    assert await queries.permissions_of(state.unit(), company.id, OWNER) == READ_ONLY
+    assert await queries.permissions_of(state.unit(), company.id, OWNER) == only_reads(EVERYTHING)
     assert await queries.permissions_of(state.unit(), CompanyId(new_id()), OWNER) == frozenset()
 
 

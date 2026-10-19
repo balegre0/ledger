@@ -40,7 +40,7 @@ from ledger_identity.domain.errors import (
 from ledger_identity.domain.establishments import MAIN_CODE, Establishment
 from ledger_identity.domain.membership import found
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN, Organization
-from ledger_identity.domain.roles import EVERYTHING, READ_ONLY
+from ledger_identity.domain.roles import EVERYTHING, only_reads
 from ledger_identity.domain.text import parse_code, parse_legal_name, parse_name, parse_time_zone
 from ledger_kernel.access import CompanyNotFoundError, Principal, PrincipalKind, Role, SubjectId
 from ledger_kernel.ids import CompanyId, new_id
@@ -979,7 +979,7 @@ async def test_a_deactivated_company_lets_other_modules_read_only_and_identity_s
         OrganizationScope(FOUNDER.organization, None),
         lambda unit: queries.permissions_of(unit, company.id, OWNER),
     )
-    assert for_other_services == READ_ONLY
+    assert for_other_services == only_reads(EVERYTHING)
     permissions = MembershipPermissions(module_database)
     assert await permissions.permissions(FOUNDER, company.id) == EVERYTHING
     with pytest.raises(CompanyInactiveError):  # no role is granted there any more ...

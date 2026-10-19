@@ -23,7 +23,7 @@ from ledger_identity.application.facade import IdentityFacade
 from ledger_identity.application.ports import IdentityUnits
 from ledger_identity.domain.errors import CompanyInactiveError
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN
-from ledger_identity.domain.roles import EVERYTHING, READ_ONLY
+from ledger_identity.domain.roles import EVERYTHING, only_reads
 from ledger_identity.domain.text import parse_legal_name, parse_time_zone
 from ledger_kernel.access import CompanyNotFoundError, Principal, PrincipalKind, SubjectId
 from ledger_kernel.errors import InvalidValueError
@@ -276,7 +276,7 @@ async def test_a_principal_s_permissions_are_its_role_s_and_the_reading_ones_onc
         FOUNDER,
         lambda unit: commands.deactivate_company(unit, company.id, admits=anything, actor=FOUNDER.subject),
     )
-    assert await api.permissions(called_by(FOUNDER), FOUNDER, company.id) == READ_ONLY
+    assert await api.permissions(called_by(FOUNDER), FOUNDER, company.id) == only_reads(EVERYTHING)
     assert await api.permissions(called_by(STRANGER), STRANGER, company.id) == frozenset()
 
 

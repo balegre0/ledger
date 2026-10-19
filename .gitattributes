@@ -9,6 +9,7 @@ countries/*/testing/pyproject.toml linguist-generated=true
 apps/*/pyproject.toml linguist-generated=true
 tools/*/pyproject.toml linguist-generated=true
 **/_manifest.py linguist-generated=true
+modules/identity/src/ledger_identity/domain/_role_grants.py linguist-generated=true
 modules/*/openapi.json linguist-generated=true
 .importlinter linguist-generated=true
 deploy/local/postgres/init.sql linguist-generated=true
