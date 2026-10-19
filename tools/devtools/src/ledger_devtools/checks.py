@@ -15,6 +15,7 @@ lazy from collections.abc import Callable, Iterator, Mapping
 from pydantic import TypeAdapter
 
 from ledger_devtools.workspace import MODULE_LAYERS
+from ledger_kernel.access import Role
 from ledger_platform.config.manifest import PackageKind
 from ledger_platform.config.settings import Settings, section_prefix
 lazy from ledger_devtools.workspace import Package, Workspace
@@ -309,9 +310,20 @@ def _settings_sections_are_apart(workspace: Workspace) -> Iterator[Problem]:
             seen[section] = prefix
 
 
+def _the_owner_holds_every_permission(workspace: Workspace) -> Iterator[Problem]:
+    """The owner role holds every permission (§7.7): a manifest that does not grant it one is mistaken."""
+    for scope in _scopes(workspace):
+        for declared in scope.permissions:
+            if Role.OWNER not in declared.roles:
+                yield scope.problem(
+                    f"permission '{declared.code}' is not granted to the owner, who holds every permission"
+                )
+
+
 _RULES: Final[tuple[Callable[[Workspace], Iterator[Problem]], ...]] = (
     _names_are_directories,
     _values_are_unique,
+    _the_owner_holds_every_permission,
     _names_start_with_their_owner,
     _dependencies_exist,
     _consumed_types_are_published,

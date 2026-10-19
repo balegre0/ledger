@@ -48,6 +48,7 @@ resource = "ecf"
 [[channels.permissions]]
 code = "do_ecf.documents.read"
 summary = "Read e-CF documents."
+roles = ["owner"]
 
 [[channels.events.publishes]]
 type = "do_ecf.document.accepted"
@@ -140,6 +141,18 @@ def test_schemas_prefixes_permissions_events_consumers_jobs_and_http_prefixes_ar
         "modules/mirror/manifest.toml: http prefix '/v1/companies' is owned by identity too",
         "modules/mirror/manifest.toml: schema 'identity' is owned by identity too",
     ]
+
+
+def test_the_owner_holds_every_permission_a_manifest_declares(tree: Path, edit: Editor) -> None:
+    """The owner role holds everything (§7.7): a permission it is not granted is a manifest's mistake."""
+    edit(
+        IDENTITY,
+        "[data]",
+        '[[permissions]]\ncode = "identity.companies.read"\nsummary = "Read."\nroles = ["admin"]\n\n[data]',
+    )
+    where = "modules/identity/manifest.toml"
+    expected = f"{where}: permission 'identity.companies.read' is not granted to the owner, who holds every"
+    assert messages(tree) == [f"{expected} permission"]
 
 
 def test_what_a_channel_declares_is_unique_too(tree: Path, write: Writer) -> None:
