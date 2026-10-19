@@ -7,7 +7,7 @@ owners = ["@balegre0"]
 [dependencies]
 packages = ["kernel", "platform"]
 modules = ["identity"]
-python = ["alembic>=1.20.0", "pydantic>=2.14.1", "sqlalchemy>=2.1.4"]
+python = ["alembic>=1.20.0", "fastapi>=0.143.0", "pydantic>=2.14.1", "sqlalchemy>=2.1.4"]
 
 [data]
 schema = "invoicing"

@@ -30,6 +30,7 @@ from ledger_platform.http.idempotency import (
     Idempotency,
     IdempotencyKeyInUseError,
     IdempotencyKeyReusedError,
+    Outcome,
     OversizedStoredResponseError,
     ServerFailureResponseError,
     StoredResponse,
@@ -254,6 +255,33 @@ async def test_a_twin_that_waits_too_long_is_told_the_key_is_in_use(probe: Bound
         assert first_runs.holding is not None
         first_runs.holding.set()
         await first
+
+
+async def peek(probe: BoundDatabase, tried: Attempt, scope: Scope | None = None) -> Outcome | None:
+    """What ``replayed`` answers for ``tried`` in a unit of its own (by default test mode)."""
+    async with probe.unit(moded() if scope is None else scope) as unit:
+        return await Idempotency().replayed(unit, tried)
+
+
+async def test_a_retry_is_replayed_before_its_work_is_prepared_and_nothing_else_is(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection
+) -> None:
+    """For a route that asks other modules before its unit (rule 13): a retry is answered before it asks."""
+    assert await peek(probe, attempt()) is None
+    assert await count(admin, KEYS) == 0  # a look claims nothing
+    stored, _ = await run_once(probe, attempt(), Runs())
+    assert await peek(probe, attempt()) == Outcome(stored, replayed=True)
+    with pytest.raises(IdempotencyKeyReusedError):
+        await peek(probe, attempt(name="another body"))
+    assert await peek(probe, attempt(key="key-2")) is None
+    assert await peek(probe, attempt(), moded(Mode.LIVE)) is None
+    await admin.execute("UPDATE probe.idempotency_keys SET expires_at = now() - interval '1 second'")
+    assert await peek(probe, attempt()) is None  # an expired key is as good as unused
+
+
+async def test_a_unit_without_a_mode_cannot_look_for_a_key(probe: BoundDatabase) -> None:
+    with pytest.raises(UnmodedIdempotencyScopeError):
+        await peek(probe, attempt(), OrganizationScope(ORGANIZATION, None))
 
 
 async def test_an_expired_key_runs_again(probe: BoundDatabase, admin: psycopg.AsyncConnection) -> None:

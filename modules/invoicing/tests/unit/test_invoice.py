@@ -398,7 +398,6 @@ def test_errors_name_documents_by_their_public_id_and_repeat_nothing_sent() -> N
         "external_reference_taken",
         invoice,
     )
-    assert str(InvoiceNotFoundError(invoice)) == f"invoice {public} was not found"
     assert str(InvoiceNotFoundError()) == "invoice was not found"
     assert (InvoiceNotFoundError.kind, InvoiceNotFoundError.code) == (
         ErrorKind.NOT_FOUND,

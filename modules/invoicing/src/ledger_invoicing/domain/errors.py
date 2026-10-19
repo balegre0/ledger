@@ -7,6 +7,7 @@ client's data. ``InvalidValueError`` (``ledger_kernel.errors``) is for a value o
 
 from enum import StrEnum
 from typing import ClassVar
+lazy from collections.abc import Mapping
 lazy from uuid import UUID
 
 from ledger_invoicing.domain.ids import INVOICE_PREFIX
@@ -220,17 +221,21 @@ class ExternalReferenceTakenError(ConflictError):
         )
         self.existing_id = existing
 
+    def problem_members(self) -> Mapping[str, str]:
+        """``existing_id``, the holder's public id: what the problem adds (§9.6)."""
+        return {"existing_id": _public(self.existing_id)}
+
 
 class InvoiceNotFoundError(NotFoundError):
-    """No document by this id in the company and mode."""
+    """No document by this id in the company and mode.
+
+    What was asked for is never named: the id is the caller's, and may be another tenant's document.
+    """
 
     code: ClassVar[str] = "invoice_not_found"
 
-    def __init__(self, invoice: UUID | None = None) -> None:
-        """``invoice`` is named by its public id; none when what was sent names no document."""
-        super().__init__(
-            "invoice was not found" if invoice is None else f"invoice {_public(invoice)} was not found"
-        )
+    def __init__(self) -> None:
+        super().__init__("invoice was not found")
 
 
 class InvoiceNotIssuableError(ConflictError):
@@ -254,6 +259,15 @@ class InvoiceNotVoidableError(ConflictError):
         super().__init__(
             f"invoice {_public(invoice)} is not issued, a channel accepted it, or a note corrects it"
         )
+
+
+class InvoiceVersionStaleError(ConflictError):
+    """The document is not at a version the request admits (``If-Match``): answered 412 by the HTTP edge."""
+
+    code: ClassVar[str] = "invoice_version_stale"
+
+    def __init__(self, invoice: UUID) -> None:
+        super().__init__(f"invoice {_public(invoice)} is not at a version the request names")
 
 
 class InvoiceChangedError(ConflictError):

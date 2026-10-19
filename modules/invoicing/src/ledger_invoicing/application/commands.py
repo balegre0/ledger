@@ -4,12 +4,18 @@ Each use case asks identity what it needs first (the company, its establishment)
 prices the document with the regime of the company's jurisdiction, and then changes the state in one unit of
 the call's tenant, which commits the change, its event and its audit record together or none of them (rule 3).
 A refusal leaves nothing stored, announced or recorded.
+
+Each use case is also two steps: ``prepare_*`` does what happens outside any unit and gives back a ``Change``,
+which ``apply`` makes in a unit its caller opens. The HTTP edge needs that: it claims the request's
+``Idempotency-Key`` in the very unit of the change (§9.5), which no unit opened by the use case could share.
+``admits`` is what ``If-Match`` names (``IfMatch.admits``): a document at a version it does not admit is
+refused (``InvoiceVersionStaleError``) before anything is decided on it.
 """
 
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Final, final
-lazy from collections.abc import Callable
+lazy from collections.abc import Awaitable, Callable
 lazy from datetime import date
 lazy from decimal import Decimal
 lazy from uuid import UUID
@@ -23,6 +29,7 @@ from ledger_invoicing.domain.errors import (
     InvoiceChangedError,
     InvoiceNotFoundError,
     InvoiceNotIssuableError,
+    InvoiceVersionStaleError,
     RegimeMissingError,
 )
 from ledger_invoicing.domain.ids import InvoiceId
@@ -32,7 +39,7 @@ from ledger_invoicing.domain.pricing import Terms, local_date, price
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.tenancy import Tenant
 lazy from ledger_identity.api import CompanyInfo
-lazy from ledger_invoicing.application.ports import CompanyLookup, InvoicingUnits, RegimeOf
+lazy from ledger_invoicing.application.ports import CompanyLookup, InvoicingUnit, InvoicingUnits, RegimeOf
 lazy from ledger_invoicing.domain.lines import LineTerms
 lazy from ledger_invoicing.domain.parties import Party
 lazy from ledger_invoicing.domain.pricing import CountryFields, EstablishmentRef, Pricing
@@ -84,6 +91,25 @@ class Creation:
         )
 
 
+type Admits = Callable[[int], bool]
+"""Whether a change may apply to a document at a version (``If-Match``)."""
+
+
+def any_version(version: int) -> bool:
+    """What a request without ``If-Match`` admits: any version."""
+    del version
+    return True
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class Change:
+    """A change decided outside any unit, made by ``apply`` in a unit of ``tenant`` that its caller opened."""
+
+    tenant: Tenant
+    apply: Callable[[InvoicingUnit], Awaitable[Invoice]]
+
+
 def tenant_of(call: Call) -> Tenant:
     """The company and mode ``call`` acts in: a document exists in one mode of one company."""
     scope = call.scope
@@ -110,12 +136,24 @@ class InvoicingCommands:
     new_id: Callable[[], UUID]
 
     async def create(self, call: Call, creation: Creation) -> Invoice:
+        """Create the document ``creation`` asks for in the call's tenant (``prepare_create``), in a unit."""
+        return await self._made(await self.prepare_create(call, creation))
+
+    async def issue(self, call: Call, invoice: InvoiceId) -> Invoice:
+        """Issue the draft ``invoice`` (``prepare_issue``), in a unit."""
+        return await self._made(await self.prepare_issue(call, invoice))
+
+    async def void(self, call: Call, invoice: InvoiceId, reason: Reason | None) -> Invoice:
+        """Void the issued document ``invoice``, for ``reason`` if given (``prepare_void``), in a unit."""
+        return await self._made(self.prepare_void(call, invoice, reason))
+
+    async def prepare_create(self, call: Call, creation: Creation) -> Change:
         """Create the document ``creation`` asks for in the call's tenant: a draft, or issued at once.
 
         Refused without a trace: for an inactive company (``CompanyInactiveError``), an establishment it lacks
         (``EstablishmentUnknownError``), terms its regime refuses, a note whose invoice it cannot correct
         (``CorrectionInvalidError``), or a business key a document of its type holds
-        (``ExternalReferenceTakenError``).
+        (``ExternalReferenceTakenError``, when it is applied).
         """
         tenant = tenant_of(call)
         require_correction_named(creation.kind, named=creation.corrects is not None)
@@ -131,10 +169,12 @@ class InvoicingCommands:
             terms=terms,
         )
         seller = None if creation.draft else seller_of(company)
-        async with self.units.unit(tenant) as unit:
+        corrects = creation.corrects
+
+        async def apply(unit: InvoicingUnit) -> Invoice:
             # Locked: a void of the invoice waits for this unit, or this one sees it voided.
-            corrected = None if creation.corrects is None else await unit.invoices.locked(creation.corrects)
-            if creation.corrects is not None and corrected is None:
+            corrected = None if corrects is None else await unit.invoices.locked(corrects)
+            if corrects is not None and corrected is None:
                 raise CorrectionInvalidError(CorrectionProblem.NOT_FOUND)
             invoice, issued = Invoice.new(
                 opening, corrects=corrected, pricing=pricing, seller=seller, now=unit.now
@@ -146,58 +186,78 @@ class InvoicingCommands:
                 unit.events.publish(issued)
             detail = {"kind": invoice.kind.value, "status": invoice.status.value}
             unit.audit.record("invoice.create", invoice.id, before=None, after=invoice, detail=detail)
-        return invoice
+            return invoice
 
-    async def issue(self, call: Call, invoice: InvoiceId) -> Invoice:
+        return Change(tenant, apply)
+
+    async def prepare_issue(self, call: Call, invoice: InvoiceId, *, admits: Admits = any_version) -> Change:
         """Issue the draft ``invoice``, priced again on the day it is issued, sold by the company as it is.
 
-        ``InvoiceNotFoundError`` for no document of the tenant by that id; ``InvoiceNotIssuableError`` for one
-        that is not a draft, issued by another call meanwhile too; ``InvoiceChangedError`` when it changed
-        otherwise while it was priced. A note locks itself, then the invoice it corrects (the lock order).
+        ``InvoiceNotFoundError`` for no document of the tenant by that id; ``InvoiceVersionStaleError`` for
+        one at a version ``admits`` refuses; ``InvoiceNotIssuableError`` for one that is not a draft, issued
+        by another call meanwhile too; ``InvoiceChangedError`` when it changed otherwise while it was priced.
+        A note locks itself, then the invoice it corrects (the lock order).
         """
         tenant = tenant_of(call)
         async with self.units.unit(tenant) as unit:
             draft = await unit.invoices.get(invoice)
         if draft is None:
-            raise InvoiceNotFoundError(invoice)
+            raise InvoiceNotFoundError
+        if not admits(draft.version):
+            raise InvoiceVersionStaleError(invoice)
         if draft.status is not InvoiceStatus.DRAFT:
             raise InvoiceNotIssuableError(draft.id)
         company = await self._company(call, tenant)
         pricing = await self._priced(call, company, draft.terms)
-        async with self.units.unit(tenant) as unit:
+        seller = seller_of(company)
+
+        async def apply(unit: InvoicingUnit) -> Invoice:
             current = await unit.invoices.locked(invoice)
             if current is not None and current.status is not InvoiceStatus.DRAFT:
                 raise InvoiceNotIssuableError(current.id)  # issued (or voided) by another call meanwhile
             if current is None or current.version != draft.version:
                 raise InvoiceChangedError(invoice)
             corrected = None if current.corrects is None else await unit.invoices.locked(current.corrects)
-            issued, event = current.issue(
-                seller=seller_of(company), pricing=pricing, corrected=corrected, now=unit.now
-            )
+            issued, event = current.issue(seller=seller, pricing=pricing, corrected=corrected, now=unit.now)
             await unit.invoices.update(issued)
             unit.events.publish(event)
             detail = {"kind": issued.kind.value}
             unit.audit.record("invoice.issue", issued.id, before=current, after=issued, detail=detail)
-        return issued
+            return issued
 
-    async def void(self, call: Call, invoice: InvoiceId, reason: Reason | None) -> Invoice:
-        """Void the issued document ``invoice``, for ``reason`` if given.
+        return Change(tenant, apply)
 
-        ``InvoiceNotFoundError`` for no document of the tenant by that id; ``InvoiceNotVoidableError`` for one
-        not issued, one a channel accepted, or one a draft or issued note corrects (read once it is locked, so
-        a note made meanwhile is seen).
+    def prepare_void(
+        self, call: Call, invoice: InvoiceId, reason: Reason | None, *, admits: Admits = any_version
+    ) -> Change:
+        """Void the issued document ``invoice``, for ``reason`` if given: nothing to ask outside a unit.
+
+        ``InvoiceNotFoundError`` for no document of the tenant by that id; ``InvoiceVersionStaleError`` for
+        one at a version ``admits`` refuses, once locked; ``InvoiceNotVoidableError`` for one not issued, one
+        a channel accepted, or one a draft or issued note corrects (read once it is locked, so a note made
+        meanwhile is seen).
         """
-        async with self.units.unit(tenant_of(call)) as unit:
+
+        async def apply(unit: InvoicingUnit) -> Invoice:
             current = await unit.invoices.locked(invoice)
             if current is None:
-                raise InvoiceNotFoundError(invoice)
+                raise InvoiceNotFoundError
+            if not admits(current.version):
+                raise InvoiceVersionStaleError(invoice)
             noted = await unit.invoices.corrected_by(current.id)
             voided, event = current.void(reason=reason, corrected_by_a_note=noted, now=unit.now)
             await unit.invoices.update(voided)
             unit.events.publish(event)
             detail = {"kind": voided.kind.value}
             unit.audit.record("invoice.void", voided.id, before=current, after=voided, detail=detail)
-        return voided
+            return voided
+
+        return Change(tenant_of(call), apply)
+
+    async def _made(self, change: Change) -> Invoice:
+        """``change`` made in a unit of its own tenant."""
+        async with self.units.unit(change.tenant) as unit:
+            return await change.apply(unit)
 
     async def _company(self, call: Call, tenant: Tenant) -> CompanyInfo:
         """The tenant's company, which must be active to make or issue a document."""

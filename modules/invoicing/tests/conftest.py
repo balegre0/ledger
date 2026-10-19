@@ -20,6 +20,7 @@ from typing import Final
 lazy from collections.abc import Iterator
 
 import pytest
+lazy import httpx
 
 from ledger_invoicing._manifest import MANIFEST
 from ledger_invoicing.adapters.postgres.schema import MIGRATIONS
@@ -41,12 +42,24 @@ from ledger_kernel.regimes import (
     TaxCategoryKind,
 )
 from ledger_platform.data.audit import Actor, acting_as
+from ledger_testing.api import TestPrincipal, created
 from ledger_testing.modules import ModuleUnderTest
+lazy from ledger_testing.issuer import LocalIssuer
 lazy from ledger_testing.postgres import Template
 
 UNDER_TEST: Final = ModuleUnderTest(MANIFEST, MIGRATIONS)
 TEST_ACTOR: Final = Actor("system:test", "invoicing-tests")
 """Who the use cases a test calls itself act as; a request through the app acts as its caller instead."""
+ORGANIZATION_ADMIN: Final = "ledger.organization.admin"
+"""The identity provider's project role that registers companies (identity's)."""
+COMPANY: Final = {
+    "jurisdiction": {"country": "DO"},
+    "functional_currency": "DOP",
+    "tax_ids": [{"scheme": "do.rnc", "value": "101850043"}],
+    "legal_name": "Acme SRL",
+}
+"""What the ``company`` fixture registers through identity's API: its MAIN establishment keeps Santo
+Domingo's days."""
 
 
 def pytest_ledger_template(template: Template) -> None:
@@ -138,3 +151,15 @@ def regime_with_fields() -> RegimeDef:
 def rounding_variants() -> tuple[RegimeDef, ...]:
     """The test regime rounding where a regime may: at each category and the document, each line, nowhere."""
     return (build_regime(), build_regime(frozenset({RoundingPoint.LINE})), build_regime(frozenset()))
+
+
+@pytest.fixture
+def owner(local_issuer: LocalIssuer) -> TestPrincipal:
+    """Subject ``2001`` of the provider's organization ``1001``, its administrator: it owns its companies."""
+    return TestPrincipal(local_issuer, roles=(ORGANIZATION_ADMIN,))
+
+
+@pytest.fixture
+async def company(client: httpx.AsyncClient, owner: TestPrincipal) -> str:
+    """The public id of a company ``owner`` registered through identity's API (``COMPANY``)."""
+    return await created(client, "/v1/companies", COMPANY, owner.posting("company-1"))

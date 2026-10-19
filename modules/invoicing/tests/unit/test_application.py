@@ -20,10 +20,12 @@ from ledger_invoicing.application.ports import (
     Audit,
     CompanyLookup,
     Events,
+    InvoiceFilters,
     Invoices,
     InvoicingUnit,
     InvoicingUnits,
 )
+from ledger_invoicing.application.queries import InvoicingQueries
 from ledger_invoicing.domain.errors import (
     CorrectionInvalidError,
     CorrectionRequiredError,
@@ -34,9 +36,10 @@ from ledger_invoicing.domain.errors import (
     InvoiceNotFoundError,
     InvoiceNotIssuableError,
     InvoiceNotVoidableError,
+    InvoiceVersionStaleError,
     RegimeMissingError,
 )
-from ledger_invoicing.domain.ids import InvoiceId
+from ledger_invoicing.domain.ids import INVOICE_PREFIX, InvoiceId
 from ledger_invoicing.domain.invoice import InvoiceStatus
 from ledger_invoicing.domain.lines import LineTerms
 from ledger_invoicing.domain.parties import Seller
@@ -45,19 +48,19 @@ from ledger_invoicing.domain.text import parse_external_reference, parse_reason
 from ledger_invoicing.events import InvoiceIssued, InvoiceVoided
 from ledger_kernel.access import CompanyNotFoundError, Principal, PrincipalKind, SubjectId
 from ledger_kernel.errors import ErrorKind, InvalidValueError
-from ledger_kernel.ids import CompanyId, OrganizationId, new_id
+from ledger_kernel.ids import CompanyId, OrganizationId, format_id, new_id
 from ledger_kernel.jurisdiction import parse_jurisdiction
 from ledger_kernel.money import Currency, Money
-from ledger_kernel.pagination import page_of
+from ledger_kernel.pagination import PageRequest, page_of
 from ledger_kernel.regimes import Direction, DocumentKind
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Mode, OrganizationScope, Tenant
 from ledger_platform.runtime.calls import Call
-lazy from ledger_invoicing.application.ports import AuditAction, InvoiceFilters
+lazy from ledger_invoicing.application.ports import AuditAction
 lazy from ledger_invoicing.domain.invoice import Invoice
 lazy from ledger_invoicing.events import InvoicingEvent
 lazy from ledger_kernel.jurisdiction import Jurisdiction
-lazy from ledger_kernel.pagination import Page, PageRequest
+lazy from ledger_kernel.pagination import Page
 lazy from ledger_kernel.regimes import RegimeDef
 
 NOON: Final = datetime(2026, 10, 12, 16, 0, tzinfo=UTC)
@@ -314,6 +317,7 @@ class World:
             clock=self.clock,
             new_id=self.new_id,
         )
+        self.queries = InvoicingQueries(units=self.commands.units)
 
     def clock(self) -> datetime:
         return self.now
@@ -645,3 +649,76 @@ async def test_what_is_not_issued_or_not_there_is_not_voided(world: World) -> No
     with pytest.raises(InvoiceNotFoundError):
         await world.commands.void(CALL, InvoiceId(UUID(int=9)), None)
     assert (world.stored(), len(world.state.audited)) == ([draft], 1)
+
+
+# ── If-Match: the versions a change may apply to ────────────────────────────────
+
+
+def never(version: int) -> bool:
+    del version
+    return False
+
+
+async def test_a_draft_is_issued_only_at_a_version_the_caller_admits(world: World) -> None:
+    draft = await world.commands.create(CALL, DRAFT)
+    with pytest.raises(InvoiceVersionStaleError) as caught:
+        await world.commands.prepare_issue(CALL, draft.id, admits=never)
+    assert (caught.value.kind, caught.value.code) == (ErrorKind.CONFLICT, "invoice_version_stale")
+    assert world.directory.calls == [CALL, CALL]  # identity is not asked again for a stale request
+    with pytest.raises(InvoiceNotFoundError):  # an unknown document is not found, whatever the request names
+        await world.commands.prepare_issue(CALL, InvoiceId(UUID(int=9)), admits=never)
+    change = await world.commands.prepare_issue(CALL, draft.id, admits=lambda version: version == 1)
+    assert change.tenant == TENANT
+    async with world.commands.units.unit(change.tenant) as unit:
+        issued = await change.apply(unit)
+    assert (issued.status, world.stored()) == (InvoiceStatus.ISSUED, [issued])
+
+
+async def test_a_document_is_voided_only_at_a_version_the_caller_admits(world: World) -> None:
+    issued = await issued_one(world)
+    stale = world.commands.prepare_void(CALL, issued.id, None, admits=never)
+    with pytest.raises(InvoiceVersionStaleError):
+        async with world.commands.units.unit(stale.tenant) as unit:
+            await stale.apply(unit)
+    assert world.stored() == [issued]
+    missing = world.commands.prepare_void(CALL, InvoiceId(UUID(int=9)), None, admits=never)
+    with pytest.raises(InvoiceNotFoundError):
+        async with world.commands.units.unit(missing.tenant) as unit:
+            await missing.apply(unit)
+
+
+async def test_a_creation_prepared_outside_any_unit_is_applied_in_one(world: World) -> None:
+    change = await world.commands.prepare_create(CALL, INVOICE)
+    assert (change.tenant, world.state.units, world.directory.calls) == (TENANT, 0, [CALL, CALL])
+    async with world.commands.units.unit(change.tenant) as unit:
+        created = await change.apply(unit)
+    assert world.stored() == [created]
+
+
+def test_a_business_key_s_conflict_names_its_holder_in_a_member_of_its_problem() -> None:
+    holder = InvoiceId(new_id())
+    members = ExternalReferenceTakenError(holder).problem_members()
+    assert members == {"existing_id": format_id(INVOICE_PREFIX, holder)}
+
+
+# ── Reading ─────────────────────────────────────────────────────────────────────
+
+
+async def test_a_document_is_read_in_its_tenant_only(world: World) -> None:
+    issued = await issued_one(world)
+    assert await world.queries.document(CALL, issued.id) == issued
+    live = replace(CALL, scope=Tenant(ORGANIZATION, COMPANY, Mode.LIVE))
+    for call, invoice in ((live, issued.id), (CALL, InvoiceId(UUID(int=9)))):
+        with pytest.raises(InvoiceNotFoundError):
+            await world.queries.document(call, invoice)
+
+
+async def test_documents_are_listed_as_the_filters_name_them_page_by_page(world: World) -> None:
+    first, second = await issued_one(world), await issued_one(world)
+    draft = await world.commands.create(CALL, DRAFT)
+    every = await world.queries.documents(CALL, PageRequest(), InvoiceFilters())
+    assert every.items == tuple(sorted((first, second, draft), key=lambda invoice: invoice.id))
+    drafts = await world.queries.documents(CALL, PageRequest(), InvoiceFilters(status=InvoiceStatus.DRAFT))
+    assert drafts.items == (draft,)
+    before = await world.queries.documents(CALL, PageRequest(size=1, before=draft.id), InvoiceFilters())
+    assert before.items == (second,)

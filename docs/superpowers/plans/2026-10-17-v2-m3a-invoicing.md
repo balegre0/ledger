@@ -91,6 +91,29 @@ profile and its establishments come through `IdentityApi`.
   mirror exists (M3b) the repository refuses to keep a document a channel accepted
   (`invoice_acceptance_unmirrored`, a defect) rather than drop it silently.
 
+## Rules decided in Task 5 (HTTP; the owner reviews them)
+
+- **Two steps per use case**: `prepare_create` / `prepare_issue` / `prepare_void` do what happens outside any
+  unit (identity asked, the document priced) and return a `Change` that the route applies in the unit that
+  claims the `Idempotency-Key` (§9.5: key, document, event and audit commit together; rule 13 forbids asking
+  identity inside it). A retry is replayed before identity is asked again (`Idempotency.replayed`, a look that
+  claims nothing), so a company deactivated after the first answer does not turn its retry into a refusal.
+- **`If-Match` on issue and void** (§9.7, as identity's deactivation): 428 without it, 412 when the document is
+  not at a version it names; every answer of a document carries `ETag`. A replay comes before `If-Match` is
+  judged, so a retried change answers as it first did.
+- **Not found names nothing**: `invoice_not_found` never repeats the id that was asked for (it may be another
+  tenant's). A business key's conflict names its holder in the problem's `existing_id` member (§9.6), which the
+  platform now renders for any error that declares `problem_members()`.
+- **Bodies**: a document is created within the 1 MiB request limit (§10); its answer can be larger (1000 priced
+  lines), so an idempotency key keeps up to 4 MiB of answer (`MAX_STORED_BODY`, 1 MiB before). Limits are in
+  the schema: 1-1000 lines, 1-10 taxes per line, amounts as plain decimals with their places, country fields
+  bounded.
+- **Lists** take `type`, `direction`, `status` and `external_reference` filters with `page_query`.
+- **Response**: §9.3's envelope (`id`, `object: "invoice"`, `livemode`, `created`, `updated`), `version`, the
+  terms and their pricing, `functional_totals` for another currency, and `fiscal: []` (channel entries, M3b).
+  The country fields a request sent are stored but not answered: §9.8 puts country response fields in the
+  channels' entries, which M3b defines.
+
 ## Tasks (each ends with `uv run poe check` green, one commit)
 
 1. Plan and skeleton: this file; `modules/invoicing` (manifest, README, layers), `uv sync`, devtools sync.

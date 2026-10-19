@@ -29,7 +29,7 @@ from datetime import timedelta
 from types import MappingProxyType
 from typing import Annotated, ClassVar, Final, NewType, final
 from urllib.parse import urlencode
-lazy from collections.abc import Awaitable, Callable, Iterable, Mapping
+lazy from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 
 import psycopg
 from fastapi import Header, Response
@@ -39,21 +39,24 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import OperationalError
 lazy from fastapi import Request
 lazy from pydantic import BaseModel
-lazy from sqlalchemy import ColumnElement
+lazy from sqlalchemy import Select
 
 from ledger_kernel.errors import ConflictError, InvalidInputError, LedgerError
 from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.http.metrics import full_template
 lazy from ledger_kernel.access import Principal
 lazy from ledger_kernel.ids import CompanyId
+lazy from ledger_platform.data.database import AnyTable
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
 
 _COMPONENT: Final = "idempotency"
 """What this module's option errors name (``InvalidOptionError.component``)."""
 DEFAULT_RETENTION: Final = timedelta(days=7)
 MAX_KEY_LENGTH: Final = 255
-MAX_STORED_BODY: Final = 1024 * 1024
-"""Bytes of a response body a key keeps at most (1 MiB): a write's answer is a document, never a download."""
+MAX_STORED_BODY: Final = 4 * 1024 * 1024
+"""Bytes of a response body a key keeps at most (4 MiB): a write's answer is a document, never a download. An
+answer can outgrow its request (a document priced line by line answers more than its 1 MiB request sent), so a
+key keeps four times what a JSON request may hold."""
 REPLAYED_HEADER: Final = "Idempotent-Replayed"
 JSON: Final = "application/json"
 _SERVER_FAILURE: Final = 500
@@ -286,17 +289,8 @@ class Idempotency:
         ``IdempotencyKeyInUseError`` for the client; ``ServerFailureResponseError`` and
         ``OversizedStoredResponseError`` when the work's response is not to be stored.
         """
-        scope = unit.scope
-        if scope is None or scope.mode is None:
-            raise UnmodedIdempotencyScopeError
         keys = unit.tables.idempotency_keys
-        identity: dict[str, object] = {
-            "organization_id": scope.organization,
-            "mode": scope.mode.value,
-            "principal": attempt.principal,
-            "route": attempt.route,
-            "key": attempt.key,
-        }
+        identity = _identity(unit, attempt)
         row = [keys.c[column] == value for column, value in identity.items()]
         fresh = insert(keys).values(
             **identity,
@@ -323,7 +317,8 @@ class Idempotency:
                 raise IdempotencyKeyInUseError from error
             raise
         if not claimed:
-            return Outcome(await _stored(unit, row, attempt), replayed=True)
+            read = _read(keys).where(*row)
+            return Outcome(_answer((await unit.connection.execute(read)).one(), attempt), replayed=True)
         response = await work()
         await unit.connection.execute(
             update(keys)
@@ -336,14 +331,44 @@ class Idempotency:
         )
         return Outcome(response, replayed=False)
 
+    async def replayed(self, unit: UnitOfWork, attempt: Attempt) -> Outcome | None:
+        """The answer a committed first use of ``attempt``'s key stored, replayed; ``None`` if there is none.
 
-async def _stored(unit: UnitOfWork, row: list[ColumnElement[bool]], attempt: Attempt) -> StoredResponse:
-    """The response stored for the key, if the request is the one that first used it."""
-    keys = unit.tables.idempotency_keys
-    read = select(keys.c.request_hash, keys.c.response_status, keys.c.response_body, keys.c.response_headers)
-    request_hash, status, body, headers = _STORED.validate_python(
-        tuple((await unit.connection.execute(read.where(*row))).one())
-    )
+        For a route that asks other modules before the unit of its work (rule 13): a retry is answered before
+        it asks them, as it would be by ``once``, which the route still calls in the unit of its work. Nothing
+        is claimed or locked: a first use still in flight is not seen (``once`` then waits for it), and an
+        expired key is as good as unused. ``IdempotencyKeyReusedError`` for another request under the key;
+        ``UnmodedIdempotencyScopeError`` for a unit without a mode, before any statement.
+        """
+        keys = unit.tables.idempotency_keys
+        row = [keys.c[column] == value for column, value in _identity(unit, attempt).items()]
+        read = _read(keys).where(*row, keys.c.expires_at > unit.now)
+        found = (await unit.connection.execute(read)).first()
+        return None if found is None else Outcome(_answer(found, attempt), replayed=True)
+
+
+def _identity(unit: UnitOfWork, attempt: Attempt) -> dict[str, object]:
+    """The key's row: the unit's organization and mode, the caller, the route and the key."""
+    scope = unit.scope
+    if scope is None or scope.mode is None:
+        raise UnmodedIdempotencyScopeError
+    return {
+        "organization_id": scope.organization,
+        "mode": scope.mode.value,
+        "principal": attempt.principal,
+        "route": attempt.route,
+        "key": attempt.key,
+    }
+
+
+def _read(keys: AnyTable) -> Select[object, object, object, object]:
+    """What a key's row holds of its request and its answer."""
+    return select(keys.c.request_hash, keys.c.response_status, keys.c.response_body, keys.c.response_headers)
+
+
+def _answer(found: Sequence[object], attempt: Attempt) -> StoredResponse:
+    """The response stored in a key's row ``found``, if the request is the one that first used it."""
+    request_hash, status, body, headers = _STORED.validate_python(tuple(found))
     if request_hash != attempt.request_hash:
         raise IdempotencyKeyReusedError
     if status is None or body is None or headers is None:
