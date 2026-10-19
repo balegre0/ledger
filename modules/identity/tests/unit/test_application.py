@@ -45,7 +45,14 @@ from ledger_identity.events import (
     MembershipGranted,
     MembershipRevoked,
 )
-from ledger_kernel.access import CompanyNotFoundError, PermissionDeniedError, Principal, Role, SubjectId
+from ledger_kernel.access import (
+    CompanyNotFoundError,
+    PermissionDeniedError,
+    Principal,
+    PrincipalKind,
+    Role,
+    SubjectId,
+)
 from ledger_kernel.errors import ErrorKind
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.jurisdiction import parse_jurisdiction
@@ -71,15 +78,20 @@ FOUNDER: Final = Principal(
     organization=ORGANIZATION,
     provider_organization="1001",
     roles=frozenset({ORGANIZATION_ADMIN}),
+    kind=PrincipalKind.HUMAN,
 )
 STRANGER: Final = Principal(
     subject=SubjectId("9001"),
     organization=OrganizationId(new_id()),
     provider_organization="9",
     roles=frozenset({ORGANIZATION_ADMIN}),
+    kind=PrincipalKind.HUMAN,
 )
 NOT_ADMIN: Final = Principal(
-    subject=SubjectId("2002"), organization=ORGANIZATION, provider_organization="1001"
+    subject=SubjectId("2002"),
+    organization=ORGANIZATION,
+    provider_organization="1001",
+    kind=PrincipalKind.HUMAN,
 )
 OWNER: Final = FOUNDER.subject
 ADMIN: Final = SubjectId("2002")

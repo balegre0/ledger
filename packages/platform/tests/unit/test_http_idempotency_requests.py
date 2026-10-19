@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict
 from structlog.testing import capture_logs
 lazy from fastapi import Request
 
-from ledger_kernel.access import Principal, SubjectId
+from ledger_kernel.access import Principal, PrincipalKind, SubjectId
 from ledger_kernel.ids import CompanyId
 from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_platform.http.app import ApiInfo, Observability, create_app
@@ -37,7 +37,10 @@ from ledger_platform.http.problems import install_problem_handlers
 from ledger_platform.observability.health import Health
 
 CALLER: Final = Principal(
-    subject=SubjectId("2001"), organization=organization_of("1001"), provider_organization="1001"
+    subject=SubjectId("2001"),
+    organization=organization_of("1001"),
+    provider_organization="1001",
+    kind=PrincipalKind.HUMAN,
 )
 KEYED: Final = {"Idempotency-Key": "k", "Content-Type": "application/json"}
 

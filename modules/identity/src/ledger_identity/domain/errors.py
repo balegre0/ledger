@@ -108,6 +108,15 @@ class ApiClientExistsError(ConflictError):
         super().__init__("this machine user is an active API client of the organization already")
 
 
+class ApiClientHumanError(InvalidInputError):
+    """The subject to register is a person (the registering one): an API client is a machine user."""
+
+    code: ClassVar[str] = "api_client_human"
+
+    def __init__(self) -> None:
+        super().__init__("an API client is a machine user: this subject is a person")
+
+
 class MembershipNotFoundError(NotFoundError):
     """The subject holds no role in the company."""
 

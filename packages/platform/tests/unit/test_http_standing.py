@@ -16,7 +16,7 @@ from pydantic import TypeAdapter
 lazy from fastapi import FastAPI
 lazy from prometheus_client import CollectorRegistry
 
-from ledger_kernel.access import SubjectId
+from ledger_kernel.access import PrincipalKind, SubjectId
 from ledger_kernel.tenancy import Mode
 from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_platform.auth.tokens import TokenPolicy, TokenVerifier
@@ -28,6 +28,7 @@ from ledger_platform.http.deps import authenticated
 from ledger_platform.http.mode import ledger_mode_of
 from ledger_platform.http.standing import (
     ApiClientRevokedError,
+    ApiClientUnregisteredError,
     CachedStandings,
     Standing,
     Standings,
@@ -42,7 +43,7 @@ from ledger_platform.http.versions import (
     parse_version,
 )
 from ledger_platform.observability.health import Health
-from ledger_testing.issuer import AUDIENCE, ISSUER
+from ledger_testing.issuer import AUDIENCE, ISSUER, machine_claims
 lazy from ledger_kernel.access import Principal
 lazy from ledger_platform.observability.tracing import Tracing
 lazy from ledger_testing.issuer import LocalIssuer
@@ -324,6 +325,21 @@ async def test_a_revoked_api_client_is_refused_whatever_its_token_says(
     assert ApiClientRevokedError.code == "api_client_revoked"
 
 
+async def test_a_machine_user_that_is_no_api_client_is_refused_and_a_person_is_not(
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, standings: Knowing
+) -> None:
+    machine = {"Authorization": f"Bearer {local_issuer.token(claims=machine_claims('4001'))}"}
+    refused = await client.get("/thing", headers=machine)
+    assert (refused.status_code, PROBLEM.validate_json(refused.content)["code"]) == (
+        403,
+        "api_client_unregistered",
+    )
+    assert (await client.get("/thing", headers=bearer(local_issuer))).status_code == 200  # a person
+    standings.standing = Standing(mode=Mode.TEST)  # once registered, the machine acts in its mode
+    assert (await client.get("/thing", headers=machine)).status_code == 200
+    assert ApiClientUnregisteredError.code == "api_client_unregistered"
+
+
 # ── Remembering a standing ──────────────────────────────────────────────────────
 
 
@@ -332,6 +348,7 @@ def principal_of(subject: str, organization: str = "1001") -> Principal:
         subject=SubjectId(subject),
         organization=organization_of(organization),
         provider_organization=organization,
+        kind=PrincipalKind.HUMAN,
     )
 
 

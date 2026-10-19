@@ -1,6 +1,7 @@
 """How a caller stands, as identity keeps it (§9.2, §9.7): its API client, its organization's API version.
 
-A machine user registered as an API client carries its mode and its version pin; its revocation counts. The
+A machine user registered as an API client carries its mode and its version pin; its revocation counts. A
+person is never one: its API clients are not looked for. The
 organization is pinned to the version current when it was first seen (``Organization.api_version``). The
 chassis remembers the answer for a while (``CachedStandings``): this reads it once, in short units of the
 caller's organization. An API client's rows are seen one mode at a time (row-level security), so its mode is
@@ -10,6 +11,7 @@ found by looking in each; a machine user is a client in one mode at most.
 from typing import final, override
 
 from ledger_identity.adapters.postgres.repositories import PgApiClients, PgOrganizations
+from ledger_kernel.access import PrincipalKind
 from ledger_kernel.tenancy import Mode, OrganizationScope
 from ledger_platform.http import ApiVersion, Standing, Standings
 lazy from ledger_identity.domain.api_clients import ApiClient
@@ -31,7 +33,7 @@ class IdentityStandings(Standings):
         organization = principal.organization
         async with self._database.unit(OrganizationScope(organization, None)) as unit:
             kept = await PgOrganizations(unit.connection, organization).get(organization)
-        client = await self._client(principal)
+        client = None if principal.kind is PrincipalKind.HUMAN else await self._client(principal)
         return Standing(
             mode=None if client is None else client.mode,
             client=None if client is None else ApiVersion(client.api_version),

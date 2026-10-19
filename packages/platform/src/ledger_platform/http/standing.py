@@ -1,10 +1,12 @@
 """What identity knows of a caller beyond its token (§9.2, §9.7): its pins, its mode, whether it was revoked.
 
 An API client is a machine user registered with an organization, bound to one mode and pinned to a version
-of the API; its organization is pinned too. The chassis asks identity for all of it through ``Standings`` once
-the token is proven (``with_standing``), and the answer settles three things for the request: the version it
-speaks (``resolve``), the mode it acts in (an API client's credential carries it: ``Ledger-Mode`` is then
-optional, and may only repeat it), and whether a credential that was revoked still counts (it does not).
+of the API; its organization is pinned too. The chassis asks identity for all of it through ``Standings``
+once the token is proven, and the answer settles what the request is: the version it speaks (``resolve``),
+the mode it acts in (an API client's credential carries it: ``Ledger-Mode`` is then optional, and may only
+repeat it), whether a credential that was revoked still counts (it does not), and whether a machine may act at
+all: a machine acts only as an API client, one that is none is refused (403 ``api_client_unregistered``), and
+a person never stands as one.
 """
 
 from abc import ABCMeta, abstractmethod
@@ -13,7 +15,7 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import ClassVar, Final, Protocol, final, override
 
-from ledger_kernel.errors import UnauthenticatedError
+from ledger_kernel.errors import ForbiddenError, UnauthenticatedError
 from ledger_platform.config.options import require_at_least, require_seconds
 from ledger_platform.http.versions import CURRENT_VERSION
 lazy from ledger_kernel.access import Principal, SubjectId
@@ -32,13 +34,23 @@ class ApiClientRevokedError(UnauthenticatedError):
         super().__init__("this API client was revoked")
 
 
+class ApiClientUnregisteredError(ForbiddenError):
+    """A machine user its organization never registered as an API client: a machine acts only as one."""
+
+    code: ClassVar[str] = "api_client_unregistered"
+
+    def __init__(self) -> None:
+        super().__init__("this machine user is not an API client of its organization")
+
+
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Standing:
     """What is known of a caller: nothing, for a human of an organization identity has not seen yet."""
 
     mode: Mode | None = None
-    """The mode its API client is bound to; none for a human, who names it in ``Ledger-Mode``."""
+    """The mode its active API client is bound to; none for a person, who names it in ``Ledger-Mode``, and
+    for a machine user that is no API client (refused)."""
     client: ApiVersion | None = None
     """The version its API client is pinned to."""
     organization: ApiVersion | None = None

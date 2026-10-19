@@ -73,7 +73,7 @@ async def test_every_change_through_the_api_is_audited_as_its_caller_in_its_requ
     assert [response.status_code for response in responses] == [201, 200, 201, 204, 201, 200]
     rows = await audited(admin)
     assert {row[0] for row in rows} == {ORGANIZATION}
-    assert {row[1] for row in rows} == {"2001"}
+    assert {row[1] for row in rows} == {"human:2001"}  # the caller, a person
     call = {
         name: response.headers["request-id"]
         for name, response in zip(
@@ -152,8 +152,8 @@ async def test_registering_and_revoking_an_api_client_are_audited_as_the_adminis
     rows = await audited(admin)
     detail = {"subject": "4001", "mode": "live"}
     assert [(row[1], row[2], row[3], row[4], row[8]) for row in rows] == [
-        ("2001", made.headers["request-id"], "api_client.register", "api_client", detail),
-        ("2001", revoked.headers["request-id"], "api_client.revoke", "api_client", detail),
+        ("human:2001", made.headers["request-id"], "api_client.register", "api_client", detail),
+        ("human:2001", revoked.headers["request-id"], "api_client.revoke", "api_client", detail),
     ]
     assert rows[0][5] == str(parse_id(API_CLIENT_PREFIX, str(document(made)["id"])))
     register, revoke = rows

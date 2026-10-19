@@ -25,7 +25,8 @@ The dependencies bind what they learn (``organization_id``, ``subject``, ``compa
 for the rest of the request, and unbind it when the request ends. They also leave it in the request
 (``request_fields``), for the log line of a failure the chassis reports once they have ended.
 ``authenticated`` also makes the caller the actor of what the request audits (``acting_as``, Decision 10):
-its subject, in the call its request id names, or in a call of its own (a UUIDv7) where it is not traced.
+its kind and subject (``Actor.of``), in the call its request id names, or in a call of its own (a UUIDv7)
+where it is not traced.
 """
 
 from abc import ABCMeta, abstractmethod
@@ -160,7 +161,7 @@ def authenticated(verifier: Verifier, limiter: RateLimiter | None = None) -> Cal
         call = current_request_id() or str(new_id())
         with (
             _bound(request, organization_id=str(principal.organization), subject=principal.subject),
-            acting_as(Actor(principal.subject, call)),
+            acting_as(Actor.of(principal, call)),
         ):
             yield principal
 

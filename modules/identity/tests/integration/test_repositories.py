@@ -42,7 +42,7 @@ from ledger_identity.domain.membership import found
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN, Organization
 from ledger_identity.domain.roles import EVERYTHING, READ_ONLY
 from ledger_identity.domain.text import parse_code, parse_legal_name, parse_name, parse_time_zone
-from ledger_kernel.access import CompanyNotFoundError, Principal, Role, SubjectId
+from ledger_kernel.access import CompanyNotFoundError, Principal, PrincipalKind, Role, SubjectId
 from ledger_kernel.ids import CompanyId, new_id
 from ledger_kernel.jurisdiction import parse_jurisdiction
 from ledger_kernel.money import Currency
@@ -67,19 +67,27 @@ FOUNDER: Final = Principal(
     organization=organization_of("1001"),
     provider_organization="1001",
     roles=frozenset({ORGANIZATION_ADMIN}),
+    kind=PrincipalKind.HUMAN,
 )
 PARTNER: Final = Principal(
-    subject=SubjectId("2002"), organization=FOUNDER.organization, provider_organization="1001"
+    subject=SubjectId("2002"),
+    organization=FOUNDER.organization,
+    provider_organization="1001",
+    kind=PrincipalKind.HUMAN,
 )
 STRANGER: Final = Principal(
     subject=SubjectId("2001"),
     organization=organization_of("1002"),
     provider_organization="1002",
     roles=frozenset({ORGANIZATION_ADMIN}),
+    kind=PrincipalKind.HUMAN,
 )
 OWNER: Final = FOUNDER.subject
 MEMBER: Final = Principal(
-    subject=SubjectId("3001"), organization=FOUNDER.organization, provider_organization="1001"
+    subject=SubjectId("3001"),
+    organization=FOUNDER.organization,
+    provider_organization="1001",
+    kind=PrincipalKind.HUMAN,
 )
 RNC: Final = TaxId(TaxIdScheme("do.rnc"), "101850043")
 SANTO_DOMINGO: Final = parse_time_zone("America/Santo_Domingo")

@@ -26,6 +26,8 @@ A token is accepted only when all of this holds:
   tokens too;
 * ``sub`` and the organization claim are there and well formed.
 
+Whether the caller is a person or a machine is read from ``client_id`` and ``aud`` (``kind_of``).
+
 The claims named above are Zitadel's (``auth.providers.zitadel``); the keys are held by ``PublishedKeys``
 (``auth.keys``), which fetches, keeps and refreshes them.
 
@@ -59,11 +61,13 @@ from ledger_platform.auth.providers.zitadel import (
     ID_TOKEN_CLAIMS,
     ORGANIZATION_CLAIM,
     granted_roles,
+    kind_of,
     organization_of,
     project_roles_claim,
 )
 from ledger_platform.config.options import InvalidOptionError, require_seconds
 from ledger_platform.config.settings import TokenAlgorithm
+lazy from ledger_kernel.access import PrincipalKind
 lazy from ledger_platform.config.settings import Settings
 
 _COMPONENT: Final = "token"
@@ -296,8 +300,8 @@ class TokenVerifier:
         if key is None:
             _refuse(TokenProblem.UNKNOWN_KEY)
         claims = self._signed_claims(token, key, header.alg)
-        self._check(claims)
-        return self._principal(claims)
+        kind = self._check(claims)
+        return self._principal(claims, kind)
 
     @staticmethod
     def _signed_claims(token: str, key: Key, algorithm: str) -> dict[str, object]:
@@ -310,15 +314,20 @@ class TokenVerifier:
             return _valid(_OBJECT, decoded.claims, TokenProblem.MALFORMED)
         _refuse(problem)
 
-    def _check(self, claims: Mapping[str, object]) -> None:
-        """Refuse claims of another issuer or audience, of another kind of token, expired or not yet valid."""
+    def _check(self, claims: Mapping[str, object]) -> PrincipalKind:
+        """Refuse claims of another issuer or audience, of another kind of token, expired or not yet valid.
+
+        Whether the token, once accepted, is a person's or a machine's (``kind_of``).
+        """
         if claims.get("iss") != self._policy.issuer:
             _refuse(TokenProblem.ISSUER)
-        audiences = _valid(_AUDIENCES, claims.get("aud"), TokenProblem.AUDIENCE)
-        if self._policy.audience not in ([audiences] if isinstance(audiences, str) else audiences):
+        audience = _valid(_AUDIENCES, claims.get("aud"), TokenProblem.AUDIENCE)
+        audiences = (audience,) if isinstance(audience, str) else tuple(audience)
+        if self._policy.audience not in audiences:
             _refuse(TokenProblem.AUDIENCE)
         for name in ACCESS_TOKEN_CLAIMS:
             _valid(_IDENTIFIER, claims.get(name), TokenProblem.WRONG_KIND)
+        client = _valid(_IDENTIFIER, claims.get("client_id"), TokenProblem.WRONG_KIND)
         if not ID_TOKEN_CLAIMS.isdisjoint(claims):
             _refuse(TokenProblem.WRONG_KIND)
         expires = _numeric_date(claims, "exp")
@@ -331,14 +340,16 @@ class TokenVerifier:
             _refuse(TokenProblem.EXPIRED)
         if any(moment is not None and moment > now + leeway for moment in (not_before, issued)):
             _refuse(TokenProblem.NOT_YET_VALID)
+        return kind_of(client, audiences)
 
-    def _principal(self, claims: Mapping[str, object]) -> Principal:
+    def _principal(self, claims: Mapping[str, object], kind: PrincipalKind) -> Principal:
         with contextlib.suppress(ValidationError, InvalidSubjectError):
             organization = _PROVIDER_ORGANIZATION.validate_python(claims.get(ORGANIZATION_CLAIM))
             return Principal(
                 subject=parse_subject(_TEXT.validate_python(claims.get("sub"))),
                 organization=organization_of(organization),
                 provider_organization=organization,
+                kind=kind,
                 roles=frozenset(granted_roles(claims, self._roles_claim, organization)),
             )
         _refuse(TokenProblem.CLAIMS)

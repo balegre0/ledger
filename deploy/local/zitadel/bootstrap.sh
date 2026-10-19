@@ -1,10 +1,13 @@
 #!/bin/sh
-# Makes the local Zitadel hold what a developer needs to call ledger with a real token: a project (its id is the
-# audience of the tokens) with the role ledger.organization.admin, an API application for the platform, and a
-# machine user granted that role (it registers companies), with a client secret.
+# Makes the local Zitadel hold what a developer needs to call ledger with real tokens: a project (its id is the
+# audience of the tokens) with the role ledger.organization.admin, an API application for the platform, a person
+# (ledger-admin) and a machine user (ledger-dev) both granted that role, and the web application the person signs
+# in through. A machine acts only as an API client its organization registered, so the person registers the
+# machine user first (README.md). Zitadel's bootstrap service account is made a login client too: token.sh signs
+# the person in through Zitadel's session API, with no browser.
 # Run after `docker compose -f deploy/local/compose.yaml --profile zitadel up -d --wait`. It can run again: what
-# exists is found by name and kept, and the machine user gets a new client secret (the previous one stops
-# working). Needs curl, grep and sed. Every step that fails, or answers without what it should, stops the script
+# exists is found by name and kept; the machine user gets a new client secret, the person a new password and the
+# web application a new client secret (the previous ones stop working). Needs curl, grep, sed and od. Every step that fails, or answers without what it should, stops the script
 # with a message.
 set -eu
 
@@ -94,25 +97,29 @@ if [ -z "$user" ]; then
   require "the machine user's id" "$user"
 fi
 
-# The machine user's grant on the project: found by user and project, made if missing, given the role it lacks.
-grants=$(printf '{"queries":[{"userIdQuery":{"userId":"%s"}},{"projectIdQuery":{"projectId":"%s"}}]}' \
-  "$user" "$project")
-answer=$(call POST /management/v1/users/grants/_search --data "$grants") ||
-  fail "looking for the machine user's grant failed: $answer"
-grant=$(printf '%s' "$answer" | field id)
-if [ -z "$grant" ]; then
-  answer=$(call POST "/management/v1/users/$user/grants" \
-    --data "{\"projectId\":\"$project\",\"roleKeys\":[\"$ROLE\"]}") ||
-    fail "granting the machine user $ROLE failed: $answer"
-  require "the grant's id" "$(printf '%s' "$answer" | field userGrantId)"
-elif ! printf '%s' "$answer" | grep -q "\"$ROLE\""; then # Zitadel refuses a change that changes nothing
-  # An update replaces the grant's roles: keep the ones it holds (a quoted, comma-separated list) beside ROLE.
-  held=$(printf '%s' "$answer" | grep -o '"roleKeys"[[:space:]]*:[[:space:]]*\[[^]]*\]' | head -n 1 |
-    sed 's/^[^[]*\[\(.*\)\]$/\1/')
-  answer=$(call PUT "/management/v1/users/$user/grants/$grant" \
-    --data "{\"roleKeys\":[${held:+$held,}\"$ROLE\"]}") ||
-    fail "granting the machine user $ROLE failed: $answer"
-fi
+# grant USER: USER's grant on the project, found by user and project, made if missing, given the role it lacks.
+grant() {
+  grants=$(printf '{"queries":[{"userIdQuery":{"userId":"%s"}},{"projectIdQuery":{"projectId":"%s"}}]}' \
+    "$1" "$project")
+  answer=$(call POST /management/v1/users/grants/_search --data "$grants") ||
+    fail "looking for the grant of user $1 failed: $answer"
+  held_grant=$(printf '%s' "$answer" | field id)
+  if [ -z "$held_grant" ]; then
+    answer=$(call POST "/management/v1/users/$1/grants" \
+      --data "{\"projectId\":\"$project\",\"roleKeys\":[\"$ROLE\"]}") ||
+      fail "granting user $1 $ROLE failed: $answer"
+    require "the grant's id" "$(printf '%s' "$answer" | field userGrantId)"
+  elif ! printf '%s' "$answer" | grep -q "\"$ROLE\""; then # Zitadel refuses a change that changes nothing
+    # An update replaces the grant's roles: keep the ones it holds (a quoted, comma-separated list) beside ROLE.
+    held=$(printf '%s' "$answer" | grep -o '"roleKeys"[[:space:]]*:[[:space:]]*\[[^]]*\]' | head -n 1 |
+      sed 's/^[^[]*\[\(.*\)\]$/\1/')
+    answer=$(call PUT "/management/v1/users/$1/grants/$held_grant" \
+      --data "{\"roleKeys\":[${held:+$held,}\"$ROLE\"]}") ||
+      fail "granting user $1 $ROLE failed: $answer"
+  fi
+}
+
+grant "$user"
 
 answer=$(call PUT "/management/v1/users/$user/secret" --data '{}') ||
   fail "issuing the machine user's client secret failed"
@@ -121,6 +128,71 @@ client_secret=$(printf '%s' "$answer" | field clientSecret)
 require "the client id" "$client_id"
 require "the client secret" "$client_secret"
 
+# The person: a human user of the organization with a password of this run, granted the role too.
+answer=$(call POST /management/v1/users/_search --data "$(equals ledger-admin userName)") ||
+  fail "looking for the person failed: $answer"
+person=$(printf '%s' "$answer" | field id)
+password="Ledger-$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')!"
+if [ -z "$person" ]; then
+  answer=$(call POST /v2/users/human --data "{\"username\":\"ledger-admin\",
+    \"organization\":{\"orgId\":\"$organization\"},\"profile\":{\"givenName\":\"Ledger\",\"familyName\":\"Admin\"},
+    \"email\":{\"email\":\"ledger-admin@ledger-local.zitadel.localhost\",\"isVerified\":true},
+    \"password\":{\"password\":\"$password\",\"changeRequired\":false}}") ||
+    fail "creating the person failed"
+  person=$(printf '%s' "$answer" | field userId)
+  require "the person's id" "$person"
+else
+  call POST "/v2/users/$person/password" \
+    --data "{\"newPassword\":{\"password\":\"$password\",\"changeRequired\":false}}" > /dev/null ||
+    fail "setting the person's password failed"
+fi
+grant "$person"
+
+# The web application the person signs in through: its access tokens are JWTs that hold the person's roles; its
+# configuration is set again on every run (Zitadel refuses a change that changes nothing: not a failure).
+LOGIN_REDIRECT=http://localhost/ledger-dev-login
+login_config="\"redirectUris\":[\"$LOGIN_REDIRECT\"],\"responseTypes\":[\"OIDC_RESPONSE_TYPE_CODE\"],
+  \"grantTypes\":[\"OIDC_GRANT_TYPE_AUTHORIZATION_CODE\"],\"appType\":\"OIDC_APP_TYPE_WEB\",
+  \"authMethodType\":\"OIDC_AUTH_METHOD_TYPE_BASIC\",\"accessTokenType\":\"OIDC_TOKEN_TYPE_JWT\",
+  \"accessTokenRoleAssertion\":true,\"devMode\":true,\"loginVersion\":{\"loginV2\":{\"baseUri\":\"$LOGIN_REDIRECT\"}}"
+answer=$(call POST "/management/v1/projects/$project/apps/_search" --data "$(equals ledger-dev-login name)") ||
+  fail "looking for the web application failed: $answer"
+app=$(printf '%s' "$answer" | field id)
+if [ -z "$app" ]; then
+  answer=$(call POST "/management/v1/projects/$project/apps/oidc" \
+    --data "{\"name\":\"ledger-dev-login\",$login_config}") || fail "creating the web application failed: $answer"
+  app=$(printf '%s' "$answer" | field appId)
+  require "the web application's id" "$app"
+else
+  answer=$(call PUT "/management/v1/projects/$project/apps/$app/oidc_config" --data "{$login_config}") ||
+    printf '%s' "$answer" | grep -qi 'no changes' || fail "configuring the web application failed: $answer"
+fi
+answer=$(call POST "/management/v1/projects/$project/apps/$app/oidc_config/_generate_client_secret" --data '{}') ||
+  fail "issuing the web application's client secret failed"
+login_secret=$(printf '%s' "$answer" | field clientSecret)
+require "the web application's client secret" "$login_secret"
+answer=$(call GET "/management/v1/projects/$project/apps/$app") || fail "reading the web application failed"
+login_client=$(printf '%s' "$answer" | field clientId)
+require "the web application's client id" "$login_client"
+
+# The bootstrap service account signs the person in through the session API (a login client), and stays the
+# instance's owner. Zitadel refuses a change that changes nothing: that is not a failure.
+answer=$(call GET /auth/v1/users/me) || fail "reading the bootstrap service account failed: $answer"
+service=$(printf '%s' "$answer" | field id)
+require "the bootstrap service account's id" "$service"
+answer=$(call PUT "/admin/v1/members/$service" --data '{"roles":["IAM_OWNER","IAM_LOGIN_CLIENT"]}') ||
+  printf '%s' "$answer" | grep -qi 'no changes' ||
+  fail "making the service account a login client failed: $answer"
+
+cat > "$OUT/person.env" << ENV
+PERSON_ID=$person
+PERSON_LOGIN=ledger-admin
+PERSON_PASSWORD=$password
+LOGIN_CLIENT_ID=$login_client
+LOGIN_CLIENT_SECRET=$login_secret
+LOGIN_REDIRECT=$LOGIN_REDIRECT
+SERVICE_ID=$service
+ENV
 cat > "$OUT/client.env" << ENV
 ZITADEL=$ZITADEL
 PROJECT_ID=$project
@@ -132,5 +204,5 @@ cat > "$OUT/ledger.env" << ENV
 LEDGER_TOKEN_AUDIENCE=$project
 ENV
 
-echo "project $project in organization $organization; the developer client is in $OUT/client.env"
+echo "project $project in organization $organization: the machine user in $OUT/client.env, the person in $OUT/person.env"
 echo "now restart the api on the new audience: docker compose -f deploy/local/compose.yaml up -d api"

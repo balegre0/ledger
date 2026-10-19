@@ -14,6 +14,7 @@ from ledger_kernel.access import (
     Permission,
     PermissionDeniedError,
     Principal,
+    PrincipalKind,
     Role,
     SubjectId,
     parse_permission,
@@ -129,9 +130,17 @@ def test_a_company_that_cannot_even_be_named_is_not_found_without_naming_it() ->
 
 def test_a_principal_is_an_immutable_value_without_roles_by_default() -> None:
     organization = OrganizationId(new_id())
-    principal = Principal(subject=SubjectId("2001"), organization=organization, provider_organization="1001")
+    principal = Principal(
+        subject=SubjectId("2001"),
+        organization=organization,
+        provider_organization="1001",
+        kind=PrincipalKind.HUMAN,
+    )
     assert principal == Principal(
-        subject=SubjectId("2001"), organization=organization, provider_organization="1001"
+        subject=SubjectId("2001"),
+        organization=organization,
+        provider_organization="1001",
+        kind=PrincipalKind.HUMAN,
     )
     assert principal.roles == frozenset()
     field = "subject"
@@ -144,7 +153,12 @@ ORGANIZATION: Final = OrganizationId(new_id())
 
 def build(**overrides: object) -> Principal:
     """A principal holding values of any type, the way a caller that skipped the type checker makes one."""
-    principal = Principal(subject=SubjectId("2001"), organization=ORGANIZATION, provider_organization="1001")
+    principal = Principal(
+        subject=SubjectId("2001"),
+        organization=ORGANIZATION,
+        provider_organization="1001",
+        kind=PrincipalKind.HUMAN,
+    )
     for name, value in overrides.items():
         object.__setattr__(principal, name, value)
     principal.__post_init__()
@@ -184,6 +198,24 @@ def test_a_provider_organization_that_is_empty_too_long_or_not_text_is_refused(
 def test_a_provider_organization_of_the_longest_length_is_accepted() -> None:
     longest = "9" * MAX_PROVIDER_ORGANIZATION_LENGTH
     assert build(provider_organization=longest).provider_organization == longest
+
+
+def test_a_principal_is_a_person_or_a_machine_said_once_where_it_is_made() -> None:
+    assert [kind.value for kind in PrincipalKind] == ["human", "machine"]
+    machine = Principal(
+        subject=SubjectId("2001"),
+        organization=ORGANIZATION,
+        provider_organization="1001",
+        kind=PrincipalKind.MACHINE,
+    )
+    assert machine.kind is PrincipalKind.MACHINE
+    assert build().kind is PrincipalKind.HUMAN
+
+
+@pytest.mark.parametrize("kind", ["human", None, 1], ids=["text", "none", "number"])
+def test_a_kind_that_is_not_one_of_the_two_is_refused(kind: object) -> None:
+    with pytest.raises(InvalidValueError, match=r"^principal\.kind must be a PrincipalKind$"):
+        build(kind=kind)
 
 
 def test_the_built_in_roles_are_one_closed_list_of_words() -> None:

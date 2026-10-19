@@ -1,8 +1,10 @@
 """A local OpenID provider for tests: RSA keys, their JWKS served on 127.0.0.1, access tokens on demand.
 
-The tokens look like the access tokens Zitadel v4 issues to a machine user (``iss``, ``aud``, ``sub``,
-``exp``, ``iat``, ``nbf``, ``jti``, ``client_id``, the resource owner's organization id and, when asked,
-project roles; header ``typ`` ``JWT``), signed RS256 with a key the JWKS document publishes. A test can
+The tokens look like the access tokens Zitadel v4 issues (``iss``, ``aud``, ``sub``, ``exp``, ``iat``,
+``nbf``, ``jti``, ``client_id``, the resource owner's organization id and, when asked, project roles; header
+``typ`` ``JWT``), signed RS256 with a key the JWKS document publishes. They are a person's, signed in through
+the application ``APPLICATION`` (its ``client_id``, and among the audiences); ``machine_claims`` turn one into
+a machine user's, whose ``client_id`` is its own name and whose only audience is the project. A test can
 rotate and retire keys, make the endpoint fail or stall, and count how often it was asked.
 """
 
@@ -23,6 +25,8 @@ from pydantic import TypeAdapter
 
 ISSUER: Final = "https://issuer.ledger.test"
 AUDIENCE: Final = "ledger-test"
+APPLICATION: Final = "ledger-test-app"
+"""The application a person signs in through: a person's token names it as its client and its audience."""
 PROVIDER_ORGANIZATION: Final = "1001"
 SUBJECT: Final = "2001"
 ORGANIZATION_CLAIM: Final = "urn:zitadel:iam:user:resourceowner:id"
@@ -31,6 +35,11 @@ _LIFETIME: Final = timedelta(minutes=5)
 _END_OF_HEAD: Final = b"\r\n\r\n"
 _ADDRESS: Final = TypeAdapter(tuple[str, int] | tuple[str, int, int, int])
 """An internet address as a socket reports it: host and port, plus flow and scope for IPv6."""
+
+
+def machine_claims(subject: str, audience: str = AUDIENCE) -> dict[str, object]:
+    """The claims that make a token a machine user's: its own name as its client, the project its audience."""
+    return {"client_id": f"machine-{subject}", "aud": [audience]}
 
 
 @final
@@ -165,7 +174,7 @@ class LocalIssuer:
         claims: Mapping[str, object] | None = None,
         kid: str | None = None,
     ) -> str:
-        """An access token for ``subject`` of ``organization``, valid for five minutes from now.
+        """A person's access token for ``subject`` of ``organization``, valid for five minutes from now.
 
         ``roles`` are project roles granted in that organization. ``claims`` replace or add claims; one set
         to ``None`` is left out. ``kid`` signs with that key instead of the newest.
@@ -173,9 +182,9 @@ class LocalIssuer:
         issued = int(datetime.now(UTC).timestamp())
         payload: dict[str, object] = {
             "iss": self.issuer,
-            "aud": [self.audience],
+            "aud": [self.audience, APPLICATION],
             "sub": subject,
-            "client_id": "ledger-test",
+            "client_id": APPLICATION,
             "jti": f"V2_{uuid.uuid7().hex}-at_{uuid.uuid7().hex}",
             "iat": issued,
             "nbf": issued,

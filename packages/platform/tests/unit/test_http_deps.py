@@ -42,7 +42,7 @@ from ledger_platform.http.deps import (
 )
 from ledger_platform.http.openapi import precondition_checked
 from ledger_platform.observability.health import Health
-from ledger_testing.issuer import AUDIENCE, ISSUER, PROVIDER_ORGANIZATION, SUBJECT
+from ledger_testing.issuer import AUDIENCE, ISSUER, PROVIDER_ORGANIZATION, SUBJECT, machine_claims
 lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_kernel.ids import OrganizationId
 lazy from ledger_platform.auth.access import CompanyAccess
@@ -320,10 +320,17 @@ async def test_the_bound_fields_do_not_outlive_the_request(
 async def test_the_caller_acts_in_the_request_named_by_its_request_id(
     client: httpx.AsyncClient, local_issuer: LocalIssuer
 ) -> None:
-    """What a route audits names the principal and the request (Decision 10): its ``Request-Id``."""
-    response = await client.get("/acting", headers=bearer(local_issuer.token(subject="2001")))
-    assert response.status_code == 200
-    assert BODY.validate_json(response.content) == {"name": "2001", "call_id": response.headers["request-id"]}
+    """What a route audits names the principal, a person or a machine, and the request (Decision 10)."""
+    for token, name in (
+        (local_issuer.token(subject="2001"), "human:2001"),
+        (local_issuer.token(subject="4001", claims=machine_claims("4001")), "machine:4001"),
+    ):
+        response = await client.get("/acting", headers=bearer(token))
+        assert response.status_code == 200
+        assert BODY.validate_json(response.content) == {
+            "name": name,
+            "call_id": response.headers["request-id"],
+        }
 
 
 async def test_an_untraced_request_acts_in_a_call_of_its_own(

@@ -7,6 +7,7 @@ from ledger_kernel.access import (
     Permission,
     PermissionDeniedError,
     Principal,
+    PrincipalKind,
     SubjectId,
     parse_permission,
 )
@@ -18,7 +19,12 @@ from ledger_platform.auth.access import CompanyAccess
 
 ORGANIZATION: Final = OrganizationId(new_id())
 COMPANY: Final = CompanyId(new_id())
-ALICE: Final = Principal(subject=SubjectId("alice"), organization=ORGANIZATION, provider_organization="1001")
+ALICE: Final = Principal(
+    subject=SubjectId("alice"),
+    organization=ORGANIZATION,
+    provider_organization="1001",
+    kind=PrincipalKind.HUMAN,
+)
 COMPANIES_READ: Final = parse_permission("identity.companies.read")
 COMPANIES_MANAGE: Final = parse_permission("identity.companies.manage")
 READ: Final = frozenset({COMPANIES_READ})

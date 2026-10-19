@@ -9,6 +9,7 @@ lazy import psycopg
 
 from ledger_identity.domain.ids import API_CLIENT_PREFIX
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN
+from ledger_kernel.access import PrincipalKind
 from ledger_kernel.ids import format_id, parse_id
 from ledger_platform.http import CURRENT_VERSION
 from ledger_platform.http.versions import VERSION_HEADER
@@ -20,9 +21,11 @@ NEW: Final = {"subject": "4001", "name": " Odoo   connector "}
 EARLIER: Final = date(2026, 1, 1)
 
 
-def machine(local_issuer: LocalIssuer, subject: str = "4001", *, admin: bool = True) -> TestPrincipal:
-    """The machine user ``subject`` of organization ``1001``, with the provider's admin role unless not."""
-    return TestPrincipal(local_issuer, subject=subject, roles=(ORGANIZATION_ADMIN,) if admin else ())
+def machine(local_issuer: LocalIssuer, subject: str = "4001") -> TestPrincipal:
+    """The machine user ``subject`` of organization ``1001``, with the provider's admin role."""
+    return TestPrincipal(
+        local_issuer, subject=subject, roles=(ORGANIZATION_ADMIN,), kind=PrincipalKind.MACHINE
+    )
 
 
 async def register_in(client: httpx.AsyncClient, owner: TestPrincipal, mode: str, key: str = "k-1") -> str:
@@ -58,7 +61,7 @@ async def test_an_administrator_registers_a_machine_user_for_its_mode_and_the_cl
 async def test_registering_needs_the_organization_s_admin_role_a_mode_and_a_key(
     client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal
 ) -> None:
-    plain = machine(local_issuer, "2002", admin=False)
+    plain = TestPrincipal(local_issuer, subject="2002")  # a person of the organization, no administrator
     forbidden = await client.post("/v1/api_clients", json=NEW, headers=plain.posting("k-1"))
     assert (forbidden.status_code, document(forbidden)["code"]) == (403, "forbidden")
     keyless = await client.post("/v1/api_clients", json=NEW, headers=owner.bearer() | {"Ledger-Mode": "test"})
@@ -154,7 +157,7 @@ async def test_every_route_needs_the_organization_s_admin_role(
     client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal
 ) -> None:
     made = await register_in(client, owner, "test")
-    plain = machine(local_issuer, "2002", admin=False)
+    plain = TestPrincipal(local_issuer, subject="2002")
     headers = plain.bearer() | {"Ledger-Mode": "test"}
     for response in (
         await client.get("/v1/api_clients", headers=headers),
@@ -207,10 +210,30 @@ async def test_a_revoked_client_s_credential_is_refused_at_once(
     assert (refused.status_code, document(refused)["code"]) == (401, "api_client_revoked")
 
 
-async def test_a_machine_user_that_is_no_client_stands_as_a_human_does(
+async def test_a_machine_user_that_is_no_client_is_refused_whatever_it_names(
     client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal
 ) -> None:
+    """A machine acts only as an API client: one its organization never registered is refused."""
     await register_in(client, owner, "test")
     stranger = machine(local_issuer, "4999")
-    response = await client.get("/v1/api_clients", headers=stranger.bearer())
+    for headers in (stranger.bearer(), stranger.bearer() | {"Ledger-Mode": "test"}):
+        response = await client.get("/v1/api_clients", headers=headers)
+        assert (response.status_code, document(response)["code"]) == (403, "api_client_unregistered")
+
+
+async def test_a_person_s_credential_never_carries_a_client_s_mode(
+    client: httpx.AsyncClient, admin: psycopg.AsyncConnection, owner: TestPrincipal
+) -> None:
+    """A person whose subject an API client names anyway still names its mode: only a machine is a client."""
+    await register_in(client, owner, "live")
+    await admin.execute("UPDATE identity.api_clients SET subject = %s", (owner.subject,))
+    response = await client.get("/v1/api_clients", headers=owner.bearer())
     assert (response.status_code, document(response)["code"]) == (400, "mode_required")
+
+
+async def test_a_person_does_not_register_itself_as_an_api_client(
+    client: httpx.AsyncClient, owner: TestPrincipal
+) -> None:
+    itself = {"subject": owner.subject, "name": "Me"}
+    response = await client.post("/v1/api_clients", json=itself, headers=owner.posting("k-me"))
+    assert (response.status_code, document(response)["code"]) == (422, "api_client_human")

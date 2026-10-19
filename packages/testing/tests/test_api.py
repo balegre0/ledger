@@ -2,6 +2,7 @@ import httpx
 import pytest
 from joserfc import jwt
 
+from ledger_kernel.access import PrincipalKind
 from ledger_testing.api import NotCreatedError, TestPrincipal, created, document, page
 from ledger_testing.issuer import LocalIssuer
 
@@ -47,6 +48,13 @@ def test_a_caller_s_token_carries_the_project_roles_it_was_given() -> None:
         f"urn:zitadel:iam:org:project:{issuer.audience}:roles"
         not in jwt.decode(plain.removeprefix("Bearer "), issuer.signing_key()).claims
     )
+
+
+def test_a_machine_caller_s_token_is_a_machine_s() -> None:
+    issuer = LocalIssuer()
+    robot = TestPrincipal(issuer, subject="4001", kind=PrincipalKind.MACHINE)
+    claims = jwt.decode(robot.bearer()["Authorization"].removeprefix("Bearer "), issuer.signing_key()).claims
+    assert (claims["client_id"], claims["aud"]) == ("machine-4001", [issuer.audience])
 
 
 def test_pages_and_documents_are_read_as_json() -> None:

@@ -3,7 +3,7 @@ from typing import Final
 
 import pytest
 
-from ledger_kernel.access import Principal, SubjectId
+from ledger_kernel.access import Principal, PrincipalKind, SubjectId
 from ledger_kernel.ids import OrganizationId
 from ledger_kernel.tenancy import OrganizationScope
 from ledger_platform.data.audit import Actor, MissingActorError, current_actor
@@ -12,13 +12,16 @@ from ledger_platform.runtime.calls import Call, SystemCall, acting, actor_of
 ORGANIZATION: Final = OrganizationId(uuid.uuid7())
 SCOPE: Final = OrganizationScope(ORGANIZATION, None)
 PRINCIPAL: Final = Principal(
-    subject=SubjectId("user-1"), organization=ORGANIZATION, provider_organization="zitadel-org"
+    subject=SubjectId("user-1"),
+    organization=ORGANIZATION,
+    provider_organization="zitadel-org",
+    kind=PrincipalKind.HUMAN,
 )
 
 
 def test_a_call_acts_as_its_principal_under_its_request_id() -> None:
     call = Call(principal=PRINCIPAL, scope=SCOPE, request_id="r-1")
-    assert actor_of(call) == Actor("user-1", "r-1")
+    assert actor_of(call) == Actor("human:user-1", "r-1")  # the actor says it is a person
     assert call.traceparent is None
 
 

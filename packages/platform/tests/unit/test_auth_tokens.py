@@ -12,6 +12,7 @@ from joserfc.jwk import ECKey, OctKey, RSAKey
 from joserfc.jws import JWSRegistry
 from pydantic import SecretStr, TypeAdapter
 
+from ledger_kernel.access import PrincipalKind
 from ledger_kernel.errors import ErrorKind
 from ledger_platform.auth.keys import PublishedKeys
 from ledger_platform.auth.providers.zitadel import organization_of, project_roles_claim
@@ -159,6 +160,33 @@ async def test_a_token_of_the_provider_proves_who_calls(
     assert principal.provider_organization == "394763327332483075"
     assert principal.organization == organization_of("394763327332483075")
     assert principal.roles == frozenset()
+
+
+async def test_a_user_signed_in_through_an_application_is_a_person(
+    local_issuer: LocalIssuer, verifier: TokenVerifier
+) -> None:
+    """What Zitadel v4.19.2 issues for a login (checked against it): ``client_id`` is the application's id,
+    and the application is among the audiences."""
+    claims = {
+        "client_id": "395736099391012867",
+        "aud": ["395736027249049603", "395736099391012867", AUDIENCE],
+    }
+    principal = await verifier.verify(local_issuer.token(claims=claims))
+    assert principal.kind is PrincipalKind.HUMAN
+
+
+@pytest.mark.parametrize(
+    "audiences", [[AUDIENCE], AUDIENCE, ["zitadel", AUDIENCE]], ids=["list", "one", "two"]
+)
+async def test_a_machine_user_with_its_own_credentials_is_a_machine(
+    local_issuer: LocalIssuer, verifier: TokenVerifier, audiences: object
+) -> None:
+    """What Zitadel v4.19.2 issues to a machine user through client credentials or the JWT profile grant
+    (checked against it): ``client_id`` is the machine user's user name, which is no audience."""
+    principal = await verifier.verify(
+        local_issuer.token(claims={"client_id": "ledger-dev", "aud": audiences})
+    )
+    assert principal.kind is PrincipalKind.MACHINE
 
 
 async def test_the_roles_of_this_project_granted_in_the_callers_organization_are_read(

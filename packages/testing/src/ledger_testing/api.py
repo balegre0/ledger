@@ -12,7 +12,8 @@ lazy from collections.abc import Mapping
 from pydantic import TypeAdapter
 lazy import httpx
 
-from ledger_testing.issuer import PROVIDER_ORGANIZATION, SUBJECT
+from ledger_kernel.access import PrincipalKind
+from ledger_testing.issuer import PROVIDER_ORGANIZATION, SUBJECT, machine_claims
 lazy from ledger_testing.issuer import LocalIssuer
 
 _CREATED: Final = 201
@@ -63,10 +64,18 @@ class TestPrincipal:
     organization: str = PROVIDER_ORGANIZATION
     roles: tuple[str, ...] = ()
     """Project roles the provider granted the caller in its organization (none by default)."""
+    kind: PrincipalKind = PrincipalKind.HUMAN
+    """A person, unless a machine user (an API client's credential)."""
 
     def bearer(self) -> dict[str, str]:
         """``Authorization: Bearer`` with a fresh token of the caller."""
-        token = self.issuer.token(subject=self.subject, organization=self.organization, roles=self.roles)
+        machine = machine_claims(self.subject, self.issuer.audience)
+        token = self.issuer.token(
+            subject=self.subject,
+            organization=self.organization,
+            roles=self.roles,
+            claims=machine if self.kind is PrincipalKind.MACHINE else None,
+        )
         return {"Authorization": f"Bearer {token}"}
 
     def posting(self, key: str, mode: str = "test") -> dict[str, str]:

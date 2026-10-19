@@ -44,7 +44,7 @@ def actor_of(call: Call | SystemCall) -> Actor:
     """Who acts in ``call``, as audit rows record it."""
     match call:
         case Call(principal=principal, request_id=request_id):
-            return Actor(principal.subject, request_id)
+            return Actor.of(principal, request_id)
         case _:
             assert_type(call, SystemCall)
             return Actor(f"system:{call.reason}", call.call_id)

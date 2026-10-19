@@ -25,7 +25,7 @@ from ledger_identity.domain.errors import CompanyInactiveError
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN
 from ledger_identity.domain.roles import EVERYTHING, READ_ONLY
 from ledger_identity.domain.text import parse_legal_name, parse_time_zone
-from ledger_kernel.access import CompanyNotFoundError, Principal, SubjectId
+from ledger_kernel.access import CompanyNotFoundError, Principal, PrincipalKind, SubjectId
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.ids import CompanyId, new_id
 from ledger_kernel.jurisdiction import parse_jurisdiction
@@ -47,15 +47,20 @@ FOUNDER: Final = Principal(
     organization=organization_of("1001"),
     provider_organization="1001",
     roles=frozenset({ORGANIZATION_ADMIN}),
+    kind=PrincipalKind.HUMAN,
 )
 STRANGER: Final = Principal(
     subject=SubjectId("2001"),
     organization=organization_of("1002"),
     provider_organization="1002",
     roles=frozenset({ORGANIZATION_ADMIN}),
+    kind=PrincipalKind.HUMAN,
 )
 MEMBER: Final = Principal(
-    subject=SubjectId("3001"), organization=FOUNDER.organization, provider_organization="1001"
+    subject=SubjectId("3001"),
+    organization=FOUNDER.organization,
+    provider_organization="1001",
+    kind=PrincipalKind.HUMAN,
 )
 RNC: Final = TaxId(TaxIdScheme("do.rnc"), "101850043")
 CEDULA: Final = TaxId(TaxIdScheme("do.cedula"), "00114672381")

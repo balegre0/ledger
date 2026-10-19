@@ -1077,7 +1077,7 @@ CREATE INDEX idempotency_expiry ON {s}.idempotency_keys (expires_at);
 CREATE TABLE {s}.audit_events (                     -- append-only
   id uuid PRIMARY KEY, occurred_at timestamptz NOT NULL,
   organization_id uuid, company_id uuid, mode text,
-  actor text NOT NULL,                               -- principal subject, API client id, or "system:<reason>"
+  actor text NOT NULL,                               -- "human:<subject>", "machine:<subject>" or "system:<reason>"
   call_id text NOT NULL,                             -- request id or SystemCall id
   action text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL,
   before_hash bytea, after_hash bytea,               -- SHA-256 of the canonical before/after, never the data
@@ -1715,7 +1715,7 @@ v1 §9 holds except where noted.
 | Concern | Measure |
 |---|---|
 | Identity provider | Zitadel v4, unmodified (AGPL network use). Token verification generic (issuer, audience, asymmetric algorithms only, leeway, RFC 9068 access-token shape); provider claims only in `auth.providers.zitadel`: organization from `urn:zitadel:iam:user:resourceowner:id`, roles only from the audience project's claim (v1 kept) |
-| API credentials | Zitadel machine users (private-key JWT or client credentials) registered in `identity.api_clients` with organization, mode and pinned version |
+| API credentials | Zitadel machine users (private-key JWT or client credentials) registered in `identity.api_clients` with organization, mode and pinned version. A principal is a person or a machine (`Principal.kind`, from the verified claims: a Zitadel access token whose `client_id` is one of its audiences was issued to an application a person signed in through; a machine user's own credentials name the machine as `client_id` and no application, checked against Zitadel v4.19.2). A machine acts only as an active API client of its organization (403 `api_client_unregistered` otherwise, 401 `api_client_revoked` once revoked); a person never stands as one; registering refuses a subject known to be a person (the registering person, 422 `api_client_human`) |
 | Certificate custody | §3.7: signer process only. `local` backend: KMS envelope encryption, requires our INDOTEL authorization; `remote` backend: keys stay with an INDOTEL-authorized certification entity (Decreto 587-24 Art. 22, [06] §6). Subject must match the company (M3 decision 1); validity window; chain to an accepted DR certification authority; revocation checks in v2-M5 |
 | Signer data | the signer's **business tables** are reachable only by `ledger_signer`; its `outbox` and `inbox` are also reachable by `ledger_relay` (fan-out); `api` reaches the signer only through gRPC with a per-caller token and method allowlist |
 | Secrets | from the cloud secret manager (External Secrets Operator); never in images, repos, `repr`, logs or errors |

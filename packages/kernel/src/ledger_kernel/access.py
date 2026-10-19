@@ -1,7 +1,8 @@
 """Who acts and what they may do: the vocabulary of authorization every app shares.
 
 A ``Principal`` is a caller whose token was verified: the identity provider's id of the user or machine
-(``subject``), the organization it acts in, and the roles the provider granted it there. What it may do in a
+(``subject``), whether it is a person or a machine (``kind``), the organization it acts in, and the roles the
+provider granted it there. What it may do in a
 company is a set of ``Permission``s, codes a module declares in its manifest, which identity derives from
 the principal's ``Role`` there: one of the built-in roles every manifest grants its permissions to (§7.7).
 Refusals are one class per code: ``PermissionDeniedError`` and ``CompanyNotFoundError`` are raised by the
@@ -57,6 +58,18 @@ class Role(StrEnum):
     """Reads the company (and, with invoicing, issues documents)."""
     VIEWER = "viewer"
     """Reads."""
+
+
+class PrincipalKind(StrEnum):
+    """Whether a principal is a person or a machine, as its verified token tells.
+
+    A machine acts only as an API client its organization registered, bound to one mode (§7.1).
+    """
+
+    HUMAN = "human"
+    """A person, signed in through an application of the identity provider."""
+    MACHINE = "machine"
+    """A machine user of the identity provider, authenticated with its own credentials."""
 
 
 Permission = NewType("Permission", str)
@@ -133,12 +146,16 @@ class Principal:
     """The organization it acts in: derived from the identity provider's organization id."""
     provider_organization: str
     """The identity provider's own id of that organization (Zitadel's resource owner)."""
+    kind: PrincipalKind
+    """A person or a machine: said where the principal is made, never assumed."""
     roles: frozenset[str] = field(default_factory=frozenset[str])
     """Roles the identity provider granted in that organization (project roles); none by default."""
 
     def __post_init__(self) -> None:
         # Annotations are not enforced at runtime, and a principal decides what a caller may do: it is checked
         # once, where it is made. A failure is a defect of the code that built it (``InvalidValueError``).
+        if type(self.kind) is not PrincipalKind:
+            raise InvalidValueError(field="principal.kind", requirement="a PrincipalKind")
         if type(self.roles) is not frozenset or not all(type(role) is str for role in self.roles):
             raise InvalidValueError(field="principal.roles", requirement="a frozenset of text")
         organization = self.provider_organization

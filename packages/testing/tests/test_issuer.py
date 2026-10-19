@@ -8,6 +8,7 @@ from joserfc.jwk import KeySet, KeySetSerialization
 from pydantic import TypeAdapter
 
 from ledger_testing.issuer import (
+    APPLICATION,
     AUDIENCE,
     ISSUER,
     ORGANIZATION_CLAIM,
@@ -15,6 +16,7 @@ from ledger_testing.issuer import (
     SUBJECT,
     IssuerKeys,
     LocalIssuer,
+    machine_claims,
 )
 
 JWKS = TypeAdapter(KeySetSerialization)
@@ -73,13 +75,20 @@ def test_a_token_verifies_with_the_published_keys_and_carries_zitadels_claims() 
     issuer = LocalIssuer()
     claims = claims_of(issuer, issuer.token(roles=("operator",)))
     assert claims["iss"] == ISSUER
-    assert claims["aud"] == [AUDIENCE]
+    assert claims["aud"] == [AUDIENCE, APPLICATION]
+    assert claims["client_id"] == APPLICATION  # a person's, signed in through an application
     assert claims["sub"] == SUBJECT
     assert claims[ORGANIZATION_CLAIM] == PROVIDER_ORGANIZATION
     assert claims[f"urn:zitadel:iam:org:project:{AUDIENCE}:roles"] == {
         "operator": {PROVIDER_ORGANIZATION: "ledger.test"}
     }
     assert {"exp", "iat", "nbf", "client_id", "jti"} <= claims.keys()
+
+
+def test_a_machine_s_token_names_the_machine_as_its_client_and_no_application() -> None:
+    issuer = LocalIssuer()
+    claims = claims_of(issuer, issuer.token(subject="4001", claims=machine_claims("4001")))
+    assert (claims["aud"], claims["client_id"], claims["sub"]) == ([AUDIENCE], "machine-4001", "4001")
 
 
 def test_every_token_has_an_id_of_its_own() -> None:

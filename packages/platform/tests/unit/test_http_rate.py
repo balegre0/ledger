@@ -13,7 +13,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from prometheus_client import CollectorRegistry
 lazy from fastapi import FastAPI
 
-from ledger_kernel.access import Principal, SubjectId
+from ledger_kernel.access import Principal, PrincipalKind, SubjectId
 from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.http.app import ApiInfo, Observability, create_app
@@ -123,7 +123,10 @@ class ByToken(Verifier):
     @override
     async def verify(self, token: str) -> Principal:
         return Principal(
-            subject=SubjectId(token), organization=organization_of("1001"), provider_organization="1001"
+            subject=SubjectId(token),
+            organization=organization_of("1001"),
+            provider_organization="1001",
+            kind=PrincipalKind.HUMAN,
         )
 
 

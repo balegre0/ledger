@@ -18,12 +18,13 @@ lazy from fastapi import Request
 lazy from fastapi.security import HTTPAuthorizationCredentials
 lazy from prometheus_client import CollectorRegistry
 
+from ledger_kernel.access import PrincipalKind
 from ledger_platform.auth.keys import HttpKeys, PublishedKeys
 from ledger_platform.auth.tokens import TokenPolicy, TokenSettingsMissingError, TokenVerifier
 from ledger_platform.http.deps import BEARER, Verifier, authenticated
 from ledger_platform.http.mode import MODE_KEY
 from ledger_platform.http.rate import RateLimiter
-from ledger_platform.http.standing import ApiClientRevokedError, resolve
+from ledger_platform.http.standing import ApiClientRevokedError, ApiClientUnregisteredError, resolve
 from ledger_platform.http.versions import VERSION_HEADER, VERSION_KEY, VersionUnknownError, parse_version
 lazy from ledger_kernel.access import Principal
 lazy from ledger_platform.config.settings import Settings
@@ -37,7 +38,8 @@ def _with_standing(caller: Caller, standings: Standings) -> Caller:
     """``caller``, which also settles what the request is as its caller stands (``standing``).
 
     The caller is proven first (401), then asked its standing: an API client that was revoked is refused
-    (401 ``api_client_revoked``); the mode its API client is bound to becomes the request's
+    (401 ``api_client_revoked``), and a machine user that is no API client (403 ``api_client_unregistered``);
+    the mode its API client is bound to becomes the request's
     (``ledger_mode_of``); and the version it speaks is settled: a ``Ledger-Version`` the request names is
     read (400 ``version_unknown`` for one that does not exist, or for two), else the pins decide. The answer
     to every request, this one's or not, names its version (``create_app``).
@@ -52,6 +54,8 @@ def _with_standing(caller: Caller, standings: Standings) -> Caller:
             known = await standings.of(principal)
             if known.revoked:
                 raise ApiClientRevokedError
+            if principal.kind is PrincipalKind.MACHINE and known.mode is None:
+                raise ApiClientUnregisteredError
             sent = request.headers.getlist(VERSION_HEADER)
             if len(sent) > 1:
                 raise VersionUnknownError

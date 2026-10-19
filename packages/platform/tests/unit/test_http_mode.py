@@ -10,7 +10,7 @@ from fastapi.security import HTTPBearer
 lazy from fastapi import Request
 lazy from fastapi.security import HTTPAuthorizationCredentials
 
-from ledger_kernel.access import Principal, SubjectId
+from ledger_kernel.access import Principal, PrincipalKind, SubjectId
 from ledger_kernel.errors import ErrorKind
 from ledger_kernel.tenancy import Mode
 from ledger_platform.auth.providers.zitadel import organization_of
@@ -30,7 +30,10 @@ SECRET_LOOKING: str = "live; tax_id=101850043"
 """A value no mode is, carrying something a problem must never repeat."""
 _BEARER: Final = HTTPBearer(auto_error=False)
 CALLER: Final = Principal(
-    subject=SubjectId("1"), organization=organization_of("1001"), provider_organization="1001"
+    subject=SubjectId("1"),
+    organization=organization_of("1001"),
+    provider_organization="1001",
+    kind=PrincipalKind.HUMAN,
 )
 
 

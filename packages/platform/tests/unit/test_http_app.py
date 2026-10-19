@@ -24,7 +24,7 @@ lazy from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 lazy from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 lazy from prometheus_client import CollectorRegistry
 
-from ledger_kernel.access import Principal, SubjectId
+from ledger_kernel.access import Principal, PrincipalKind, SubjectId
 from ledger_kernel.errors import (
     ConflictError,
     ErrorKind,
@@ -1232,7 +1232,10 @@ async def anyone(
     """A caller proven by nothing: what a document needs of a moded route's caller."""
     del request, credentials
     yield Principal(
-        subject=SubjectId("1"), organization=organization_of("1001"), provider_organization="1001"
+        subject=SubjectId("1"),
+        organization=organization_of("1001"),
+        provider_organization="1001",
+        kind=PrincipalKind.HUMAN,
     )
 
 

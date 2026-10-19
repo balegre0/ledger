@@ -74,6 +74,7 @@ from ledger_kernel.access import (
     CompanyNotFoundError,
     PermissionDeniedError,
     Principal,
+    PrincipalKind,
     Role,
     SubjectId,
     parse_permission,
@@ -98,7 +99,12 @@ lazy from ledger_kernel.errors import LedgerError
 NOW: Final = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
 LATER: Final = NOW + timedelta(hours=1)
 ORGANIZATION: Final = OrganizationId(new_id())
-FOUNDER: Final = Principal(subject=SubjectId("2001"), organization=ORGANIZATION, provider_organization="1001")
+FOUNDER: Final = Principal(
+    subject=SubjectId("2001"),
+    organization=ORGANIZATION,
+    provider_organization="1001",
+    kind=PrincipalKind.HUMAN,
+)
 RNC: Final = TaxId(TaxIdScheme("do.rnc"), "101850043")
 CEDULA: Final = TaxId(TaxIdScheme("do.cedula"), "00113918205")
 DOMINICAN: Final = parse_jurisdiction("DO")
@@ -663,7 +669,10 @@ def test_a_roster_holds_only_the_membership_of_its_own_subject_in_its_own_compan
 
 def test_the_founder_of_a_company_belongs_to_its_organization_and_founds_an_active_company() -> None:
     stranger = Principal(
-        subject=SubjectId("2001"), organization=OTHER_ORGANIZATION, provider_organization="9"
+        subject=SubjectId("2001"),
+        organization=OTHER_ORGANIZATION,
+        provider_organization="9",
+        kind=PrincipalKind.HUMAN,
     )
     with pytest.raises(
         InvalidValueError, match=r"^founder must be a principal of the company's organization$"

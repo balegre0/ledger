@@ -1,15 +1,16 @@
 """Zitadel's claims (§10): the identity provider's rules for reading a token.
 
-Where its tokens name the caller's organization and roles, and what tells its access tokens from its ID
-tokens. A second provider would bring rules of its own beside these.
+Where its tokens name the caller's organization and roles, what tells its access tokens from its ID tokens,
+and what tells a person from a machine. A second provider would bring rules of its own beside these.
 """
 
 from typing import Final
 from uuid import NAMESPACE_URL, uuid5
-lazy from collections.abc import Iterator, Mapping
+lazy from collections.abc import Collection, Iterator, Mapping
 
 from pydantic import TypeAdapter
 
+from ledger_kernel.access import PrincipalKind
 from ledger_kernel.ids import OrganizationId
 
 ORGANIZATION_CLAIM: Final = "urn:zitadel:iam:user:resourceowner:id"
@@ -43,3 +44,17 @@ def granted_roles(claims: Mapping[str, object], name: str, organization: str) ->
     """The roles the claim ``name`` grants in ``organization``."""
     roles = _ROLES.validate_python(claims.get(name, {}))
     yield from (role for role, organizations in roles.items() if organization in organizations)
+
+
+def kind_of(client_id: str, audiences: Collection[str]) -> PrincipalKind:
+    """Whether the token of ``client_id`` for ``audiences`` was issued to a person or to a machine.
+
+    Checked against Zitadel v4.19.2. A person signs in through an application of the provider: the token's
+    ``client_id`` is that application's id, and Zitadel adds the application to the audiences. A machine user
+    authenticates with its own credentials (client credentials or the JWT profile grant) and no application:
+    ``client_id`` is its user name, and the audiences are only the projects asked for. Zitadel puts no claim
+    that names the user's type in an access token, so this is the one signal its verified claims give. A
+    machine user named exactly like an audience would pass for a person, so a machine is never more than an
+    API client its organization registered, and a person never stands as one.
+    """
+    return PrincipalKind.HUMAN if client_id in audiences else PrincipalKind.MACHINE

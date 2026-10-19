@@ -10,6 +10,7 @@ from ledger_identity.domain.api_clients import ApiClient
 from ledger_identity.domain.company import Company
 from ledger_identity.domain.errors import (
     ApiClientExistsError,
+    ApiClientHumanError,
     ApiClientNotFoundError,
     EstablishmentCodeTakenError,
     StaleVersionError,
@@ -19,7 +20,7 @@ from ledger_identity.domain.establishments import Establishment
 from ledger_identity.domain.membership import Actor, Roster, found, grant, revoke
 from ledger_identity.domain.organization import Organization, require_organization_admin
 from ledger_identity.domain.roles import COMPANIES_MANAGE
-from ledger_kernel.access import CompanyNotFoundError
+from ledger_kernel.access import CompanyNotFoundError, PrincipalKind
 lazy from ledger_identity.application.ports import AuditAction, IdentityUnit
 lazy from ledger_identity.domain.api_clients import ApiClientSpec
 lazy from ledger_identity.domain.company import FiscalProfile
@@ -176,8 +177,15 @@ async def register_api_client(
     that is an active API client already, in either mode, is refused (``ApiClientExistsError``): one
     credential carries one mode. The unit's mode is the registration's. An organization identity has not seen
     yet is kept now, pinned to the client's version, as its first company would have kept it.
+
+    An API client is a machine user: a subject identity knows to be a person, the registering person
+    itself, is refused (``ApiClientHumanError``). identity learns no other subject's kind before it calls,
+    so a person registered by mistake is not refused here; a person's credential never stands as an API
+    client, so such a client changes nothing for that person until it is revoked.
     """
     require_organization_admin(admin)
+    if admin.kind is PrincipalKind.HUMAN and registration.spec.subject == admin.subject:
+        raise ApiClientHumanError
     await unit.organizations.add(
         Organization.of(admin, now=unit.now, api_version=registration.spec.api_version)
     )

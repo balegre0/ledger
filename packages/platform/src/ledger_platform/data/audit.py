@@ -11,6 +11,7 @@ from typing import ClassVar, Final, final
 lazy from collections.abc import Generator
 
 from ledger_kernel.errors import LedgerError
+lazy from ledger_kernel.access import Principal
 
 
 @final
@@ -18,11 +19,17 @@ from ledger_kernel.errors import LedgerError
 class Actor:
     """Who acts and in which call.
 
-    ``name``: a principal's subject, an API client's id, or ``system:<reason>``; ``call_id``: the call's id.
+    ``name``: a principal's kind and subject (``human:<subject>``, ``machine:<subject>``: ``of``), or
+    ``system:<reason>``; ``call_id``: the call's id.
     """
 
     name: str
     call_id: str
+
+    @classmethod
+    def of(cls, principal: Principal, call_id: str) -> Actor:
+        """``principal`` acting in the call ``call_id``: whether a person or a machine, and which."""
+        return cls(f"{principal.kind}:{principal.subject}", call_id)
 
 
 class MissingActorError(LedgerError):

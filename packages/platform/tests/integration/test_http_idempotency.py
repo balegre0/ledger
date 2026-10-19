@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-from ledger_kernel.access import Principal, SubjectId
+from ledger_kernel.access import Principal, PrincipalKind, SubjectId
 from ledger_kernel.tenancy import Mode, OrganizationScope
 from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_platform.config.options import InvalidOptionError
@@ -129,7 +129,10 @@ def attempt(
     name: str = "first",
 ) -> Attempt:
     caller = Principal(
-        subject=SubjectId(subject), organization=ORGANIZATION, provider_organization=PROVIDER_ORGANIZATION
+        subject=SubjectId(subject),
+        organization=ORGANIZATION,
+        provider_organization=PROVIDER_ORGANIZATION,
+        kind=PrincipalKind.HUMAN,
     )
     body = canonical_body(NewThing(name=name))
     return Attempt.of(caller, key, route=route, target=Target.of(path), body=body)
