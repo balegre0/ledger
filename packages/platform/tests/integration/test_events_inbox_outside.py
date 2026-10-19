@@ -22,16 +22,17 @@ from sqlalchemy import text
 from structlog.testing import capture_logs
 lazy from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from ledger_kernel.errors import InvalidInputError, UnavailableError
+from ledger_kernel.errors import ConflictError, InvalidInputError, UnavailableError
 from ledger_kernel.events import Event
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.config.manifest import ConsumerDecl
 from ledger_platform.data.audit import Actor, current_actor
 from ledger_platform.data.unit_of_work import open_unit
-from ledger_platform.events.consumers import Consumer, ConsumerSpec
+from ledger_platform.events.consumers import DEFAULT_TIMEOUT, Consumer, ConsumerSpec
 from ledger_platform.events.dispatcher import Dispatcher
 from ledger_platform.events.inbox import InboxRunner
+from ledger_platform.events.wakeups import Wakeups
 from ledger_platform.runtime.calls import SystemCall, acting
 from ledger_platform.runtime.facade import UnitOpenError, facade
 from ledger_testing import waiting
@@ -83,6 +84,15 @@ class UnreadableError(InvalidInputError):
 
     def __init__(self) -> None:
         super().__init__("the test's event cannot be read")
+
+
+class StaleError(ConflictError):
+    """A test's facade refusing a command for the state it found."""
+
+    code: ClassVar[str] = "test_outside_stale"
+
+    def __init__(self) -> None:
+        super().__init__("the test's aggregate moved on")
 
 
 @final
@@ -163,9 +173,16 @@ class Bench:
     handler: Handler
 
     def runner(
-        self, *, max_attempts: int = 10, lease: timedelta | None = None, tracing: Tracing | None = None
+        self,
+        *,
+        max_attempts: int = 10,
+        lease: timedelta | None = None,
+        timeout: timedelta = DEFAULT_TIMEOUT,
+        tracing: Tracing | None = None,
     ) -> InboxRunner:
-        declared = ConsumerDecl(consumer=NAME, types=(RENAMED,), max_attempts=max_attempts, style="outside")
+        declared = ConsumerDecl(
+            consumer=NAME, types=(RENAMED,), max_attempts=max_attempts, style="outside", timeout=timeout
+        )
         consumer = Consumer.of(ConsumerSpec(name=NAME, outside=self.handler), declared)
         if lease is None:
             return InboxRunner(
@@ -316,7 +333,8 @@ async def test_a_retryable_failure_leaves_the_row_ready_after_the_backoff(bench:
     assert await runner.run_until_idle() == 1
     assert await bench.rows("SELECT * FROM other.inbox") == []
     assert bench.handler.calls == [event, event]
-    assert len(await bench.seen()) == 2  # an outside handler's effects stay: its facade is idempotent
+    assert len(await bench.seen()) == 2  # a failed run's effects stay (at least once): a real facade takes
+    # the event id as its idempotency token and makes the second call a no-op; this probe's is not one
 
 
 async def test_an_invalid_event_is_dead_at_once_and_a_replay_runs_it_again(bench: Bench) -> None:
@@ -368,6 +386,7 @@ async def test_a_handler_slower_than_its_lease_keeps_its_row(bench: Bench) -> No
 
     await waiting.eventually(past_the_first_lease)
     assert await runner_b.claim_now() == []
+    assert (await bench.state(event))[:2] == ("running", 1)  # still A's: B neither took nor recovered it
     ((lease_until,),) = await bench.rows("SELECT lease_until FROM other.inbox")
     assert _MOMENT.validate_python(lease_until) > await bench.now()
     release.set()
@@ -469,6 +488,7 @@ async def test_a_lease_that_cannot_be_renewed_stops_the_handler(bench: Bench) ->
     finally:
         await bench.superuser.execute("DROP FUNCTION other.refuse_renewals() CASCADE")
     assert [entry["event"] for entry in logs] == ["inbox_lease_renewal_failed", "inbox_lease_lost"]
+    assert logs[0]["event_id"] == str(event)
     assert bench.handler.cancelled == 1
     assert await bench.state(event) == ("running", 1, None)  # left to its lease: recovered by the next claim
 
@@ -506,3 +526,78 @@ async def test_a_cancelled_runner_gives_its_rows_back_and_the_started_one_keeps_
     assert await bench.state(started) == ("ready", 1, None)
     assert await bench.state(later) == ("ready", 0, None)
     assert await bench.rows("SELECT count(*) FROM other.inbox WHERE lease_token IS NOT NULL") == [(0,)]
+
+
+async def test_a_conflict_is_retried_as_inside_consumers_do(bench: Bench) -> None:
+    """Spec §3.5's rule (only ``INVALID`` or spent attempts are dead): a stale version is absorbed by a
+    version-monotonic facade (a no-op success), so a ``CONFLICT`` that reaches the runner is retried."""
+    (event,) = await bench.deliver(renamed())
+    bench.handler.fail(event, StaleError())
+    with capture_logs():
+        assert await bench.runner().run_until_idle() == 1
+    assert await bench.state(event) == ("ready", 1, "test_outside_stale")
+    assert bench.handled("retry") == 1
+
+
+def stuck_once(handler: Handler) -> asyncio.Event:
+    """Make ``handler`` hang on its first event only; the event set once it hangs."""
+    entered = asyncio.Event()
+
+    async def hang() -> None:
+        if not entered.is_set():
+            entered.set()
+            await asyncio.Event().wait()
+
+    handler.during = hang
+    return entered
+
+
+async def test_a_handler_past_its_timeout_is_stopped_and_retried_and_the_runner_moves_on(
+    bench: Bench,
+) -> None:
+    stuck, next_one = await bench.deliver(renamed("1"), renamed("2"))
+    stuck_once(bench.handler)
+    with capture_logs() as logs:
+        async with asyncio.timeout(10):
+            assert await bench.runner(timeout=SHORT).run_until_idle() == 2
+    assert await bench.state(stuck) == ("ready", 1, "inbox_handler_timed_out")
+    assert await bench.rows(STATE, next_one) == []
+    assert bench.handler.cancelled == 1
+    assert [entry["event"] for entry in logs] == ["inbox.handler_failed"]
+    assert (bench.handled("retry"), bench.handled("done")) == (1, 1)
+
+
+async def test_a_handler_past_its_timeout_on_its_last_attempt_is_dead(bench: Bench) -> None:
+    (event,) = await bench.deliver(renamed())
+    stuck_once(bench.handler)
+    with capture_logs():
+        assert await bench.runner(max_attempts=1, timeout=SHORT).run_until_idle() == 1
+    assert await bench.state(event) == ("dead", 1, "inbox_handler_timed_out")
+
+
+async def test_a_timeout_the_handler_raises_itself_is_its_own_failure(bench: Bench) -> None:
+    """Only the limit the runner set counts as the handler's timeout."""
+    (event,) = await bench.deliver(renamed())
+    bench.handler.fail(event, TimeoutError())
+    with capture_logs():
+        assert await bench.runner().run_until_idle() == 1
+    assert await bench.state(event) == ("ready", 1, "internal")
+
+
+async def test_a_stopped_runner_waits_for_a_stuck_handler_only_until_its_timeout(bench: Bench) -> None:
+    """Drain: the handler in flight ends at its timeout and is recorded; the rest go back unspent."""
+    stuck, later = await bench.deliver(renamed("1"), renamed("2"))
+    entered = stuck_once(bench.handler)
+    runner = bench.runner(timeout=SHORT)
+    running = asyncio.create_task(runner.run(Wakeups("postgresql://never.invalid/ledger")))
+    await entered.wait()
+    runner.stop()
+    with capture_logs():
+        async with asyncio.timeout(10):
+            await runner.drained.wait()
+    assert await bench.state(stuck) == ("ready", 1, "inbox_handler_timed_out")
+    assert await bench.state(later) == ("ready", 0, None)
+    assert bench.handler.calls == [stuck]
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running

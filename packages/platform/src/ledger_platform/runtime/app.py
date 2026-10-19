@@ -162,8 +162,9 @@ class PoolTooSmallError(LedgerError):
 
     def __init__(self, role: str, size: int, need: PoolNeed) -> None:
         pool = f"the {role}'s pool of {size} connections (LEDGER_DATABASE_POOL_SIZE)"
-        jobs = f"{need.jobs} for jobs (their concurrency), {need.renewals} for their lease renewals"
-        parts = f"{jobs}, {need.runners} for its runners, {need.headroom}"
+        jobs = f"{need.jobs} for jobs (their concurrency)"
+        renewals = f"{need.renewals} for lease renewals (running jobs, outside consumers)"
+        parts = f"{jobs}, {renewals}, {need.runners} for its runners, {need.headroom}"
         super().__init__(f"{pool} is smaller than the {need.total} it may hold at once: {parts} of headroom")
 
 

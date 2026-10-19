@@ -327,7 +327,10 @@ type wait in the inbox for the next roll forward (alerted by age), never fail.
   third of it while it runs (a renewal that finds the row taken over or fails stops it), its row then deleted,
   or its failure recorded by the retry, `dead` and replay rules above, in another unit fenced by the token (a
   lost lease records nothing, `inbox_lease_lost`): its effects are at least once, so what it calls takes the
-  event id as idempotency token or a version (rule 4).
+  event id as idempotency token or a version (rule 4), a version-monotonic facade answering a stale version as a
+  no-op success (a `CONFLICT` that reaches the runner is retried, like any but `INVALID`). A run past the
+  consumer's `timeout` (manifest, default 60 s) is stopped and retried as `inbox_handler_timed_out` (dead once
+  its attempts are spent), so a hung call never holds the consumer, nor a stopping worker, longer than that.
 - **Exactly-once effects over at-least-once delivery.** Fan-out inserts and the outbox delete commit together,
   so one outbox row is fanned out once; the inbox primary key `(consumer, event_id)` absorbs any repeat. A
   handled inbox row is deleted in the handler's transaction (nothing can deliver it again: its outbox row is

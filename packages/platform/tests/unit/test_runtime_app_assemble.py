@@ -812,7 +812,8 @@ def test_a_worker_s_pool_holds_every_job_its_renewals_its_runners_and_headroom()
         App("worker", settings=sized(no_overflow, 15), discover=discover)  # the need without the renewals
     assert str(caught.value) == (
         "the worker's pool of 15 connections (LEDGER_DATABASE_POOL_SIZE) is smaller than the 23 it may hold "
-        "at once: 8 for jobs (their concurrency), 8 for their lease renewals, 5 for its runners, "
+        "at once: 8 for jobs (their concurrency), 8 for lease renewals (running jobs, outside consumers), "
+        "5 for its runners, "
         "2 of headroom"
     )
     assert caught.value.code == "pool_too_small"
@@ -845,7 +846,8 @@ def test_an_outside_consumer_holds_a_second_connection_for_its_lease_renewals() 
         App("worker", settings=sized(no_overflow, 10), discover=discover)
     assert str(caught.value) == (
         "the worker's pool of 10 connections (LEDGER_DATABASE_POOL_SIZE) is smaller than the 11 it may hold "
-        "at once: 2 for jobs (their concurrency), 3 for their lease renewals, 4 for its runners, "
+        "at once: 2 for jobs (their concurrency), 3 for lease renewals (running jobs, outside consumers), "
+        "4 for its runners, "
         "2 of headroom"
     )
 
@@ -1117,7 +1119,8 @@ def test_the_signer_pool_need_counts_its_runners() -> None:
         App("signer", settings=sized(no_overflow, 10), discover=discover)
     assert str(caught.value) == (
         "the signer's pool of 10 connections (LEDGER_DATABASE_POOL_SIZE) is smaller than the 11 it may hold "
-        "at once: 3 for jobs (their concurrency), 3 for their lease renewals, 3 for its runners, "
+        "at once: 3 for jobs (their concurrency), 3 for lease renewals (running jobs, outside consumers), "
+        "3 for its runners, "
         "2 of headroom"
     )
     App("worker", settings=sized(no_overflow, 9), discover=discover)

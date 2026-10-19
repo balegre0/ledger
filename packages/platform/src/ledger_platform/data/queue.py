@@ -35,6 +35,7 @@ from types import MappingProxyType
 from typing import Final, Never, NotRequired, TypedDict, Unpack, final
 lazy from collections.abc import Awaitable, Callable, Mapping, Sequence
 
+import structlog
 from pydantic import TypeAdapter
 from sqlalchemy import case, func, select, tuple_, update
 lazy from sqlalchemy import ColumnElement, RowMapping, Update
@@ -67,6 +68,7 @@ WORKER_LOST: Final = "worker_lost"
 RECOVERY_BATCH: Final = 100
 """Expired rows a recovery takes at most (the rest at the next claim)."""
 _STATUSES: Final = TypeAdapter(list[str])
+_logger = structlog.stdlib.get_logger(__name__)
 
 
 class Window(TypedDict):
@@ -256,8 +258,9 @@ async def renewing[R](
 ) -> R:
     """``work``'s result, ``renew`` awaited every ``every`` seconds while it runs (see the module).
 
-    A renewal that answers ``False`` cancels ``work`` and raises ``lost()`` instead of the cancellation: one
-    that fails must answer ``False`` itself. The cancellation of the task awaiting this is raised as it is.
+    A renewal that answers ``False``, or raises, cancels ``work`` and raises ``lost()`` instead of the
+    cancellation (a failed renewal cannot vouch for the lease; ``renew`` logs its failures itself). The
+    cancellation of the task awaiting this is raised as it is.
     """
     running = asyncio.ensure_future(work)
     gone = asyncio.Event()
@@ -278,7 +281,12 @@ async def _keep[R](
 ) -> None:
     while True:
         await asyncio.sleep(every)
-        if not await renew():
+        try:
+            kept = await renew()
+        except Exception:  # the lease cannot be vouched for: as good as lost; a cancellation is no Exception
+            _logger.exception("queue.lease_renewal_failed")
+            kept = False
+        if not kept:
             gone.set()
             running.cancel()
             return

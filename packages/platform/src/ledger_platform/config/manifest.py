@@ -220,6 +220,8 @@ class ConsumerDecl(_Section):
     ``style``: ``inside``, the handler runs in the unit its inbox row is deleted in; ``outside``, it runs with
     no unit open, so it may call other modules' facades, and its row is deleted afterwards under its lease
     (§3.5). An ordered consumer runs inside: a long outside handler would hold its subject's head.
+    ``timeout``: the longest one run of an outside handler may take; past it the run is stopped and retried
+    (an inside handler is bounded by its unit's statement and transaction timeouts).
     """
 
     consumer: Dotted
@@ -227,6 +229,7 @@ class ConsumerDecl(_Section):
     max_attempts: int = Field(default=10, ge=1)
     ordered: bool = False
     style: ConsumerStyle = "inside"
+    timeout: Duration = Field(default=timedelta(seconds=60), gt=timedelta(0))
 
     @model_validator(mode="after")
     def unordered_when_outside(self) -> Self:

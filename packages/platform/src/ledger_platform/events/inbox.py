@@ -20,7 +20,10 @@ by the token, in a short unit (finding nothing, the handler does not run: ``inbo
 every third of its length while the handler runs (``data.queue.renewing``: a renewal that finds the row taken
 over, or fails, stops the handler, ``inbox_lease_lost``); then deletes the row, or records its failure by the
 same rule as above, in one more unit whose statement names the token. A runner whose lease was taken over
-meanwhile deletes and records nothing (``inbox_lease_lost``): the row is its new holder's. Its effects are
+meanwhile deletes and records nothing (``inbox_lease_lost``): the row is its new holder's. A handler that
+runs past its consumer's ``timeout`` is stopped and its run fails as ``InboxHandlerTimedOutError`` (retried,
+or dead once its attempts are spent), so a hung call cannot hold the consumer and renew its lease for ever;
+a stopping runner thus waits for it at most that long. Its effects are
 therefore at least once (a crash after the handler runs it again), never recorded twice; what it calls is
 idempotent by the event or a version (rule 4). It is never ordered (the manifest refuses it).
 
@@ -68,7 +71,7 @@ lazy from opentelemetry.trace import Span
 lazy from prometheus_client import CollectorRegistry
 lazy from sqlalchemy import ColumnElement, RowMapping, Update
 
-from ledger_kernel.errors import ConflictError, ErrorKind, LedgerError, error_type
+from ledger_kernel.errors import ConflictError, ErrorKind, LedgerError, UnavailableError, error_type
 from ledger_platform.data.audit import Actor, acting_as
 from ledger_platform.data.notifier import INBOX
 from ledger_platform.data.queue import (
@@ -109,6 +112,15 @@ class _LeaseLostError(LedgerError):
 
     def __init__(self) -> None:
         super().__init__("the inbox row's lease was taken over by another worker")
+
+
+class InboxHandlerTimedOutError(UnavailableError):
+    """An outside handler ran past its consumer's ``timeout``: the run is stopped and retried."""
+
+    code: ClassVar[str] = "inbox_handler_timed_out"
+
+    def __init__(self, consumer: str) -> None:
+        super().__init__(f"{consumer}'s handler ran past its timeout")
 
 
 class ReplayRefusedError(ConflictError):
@@ -401,11 +413,26 @@ class InboxRunner:
         if not await self._renewed(row):
             raise _LeaseLostError
         await renewing(
-            handler(row.event),
+            self._bounded(handler, row.event),
             renew=partial(self._renewed, row),
             every=self._lease.total_seconds() / 3,
             lost=_LeaseLostError,
         )
+
+    async def _bounded(self, handler: OutsideHandler, event: RawEvent) -> None:
+        """``handler``, or ``InboxHandlerTimedOutError`` when it runs past the consumer's ``timeout``.
+
+        A ``TimeoutError`` the handler raises itself (a call of its own that timed out) is its own failure:
+        only the limit set here is told apart.
+        """
+        limit = asyncio.timeout(self._consumer.timeout.total_seconds())
+        try:
+            async with limit:
+                await handler(event)
+        except TimeoutError as error:
+            if limit.expired():
+                raise InboxHandlerTimedOutError(self._consumer.name) from error
+            raise
 
     async def _attempt(self, row: ClaimedEvent, run: Callable[[], Awaitable[None]]) -> _Failure | None:
         """``run`` the handler; how its failure is recorded if it failed (a lost lease is raised)."""
@@ -442,8 +469,11 @@ class InboxRunner:
         try:
             async with self._database.unit(None) as unit:
                 return (await unit.connection.execute(self._extended(row))).first() is not None
-        except Exception:  # the database: the lease cannot be vouched for, another worker may take the row
-            _logger.exception("inbox_lease_renewal_failed", consumer=self._consumer.name)
+        except Exception as error:  # the database: the lease cannot be vouched for, another may take the row
+            reraise_when_stopping(error)
+            _logger.exception(
+                "inbox_lease_renewal_failed", consumer=self._consumer.name, event_id=str(row.event.id)
+            )
             return False
 
     async def _settle(self, row: ClaimedEvent, failure: _Failure | None) -> None:

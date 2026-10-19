@@ -10,10 +10,13 @@ JSON payload).
 - An *outside* handler (``OutsideHandler``, style ``outside``) runs with no unit open, so it may call other
   modules' facades; its row is deleted afterwards, in a unit of its own, under its lease. It runs at least
   once: what it calls is idempotent by the event (its id as the idempotency token, ``call_id`` of the
-  ``SystemCall`` it builds) or by a version (rule 4).
+  ``SystemCall`` it builds) or by a version (rule 4). A version-monotonic facade answers a stale version as a
+  no-op success, not a ``CONFLICT``: an error the handler raises is retried like an inside consumer's (only
+  an ``INVALID`` one, or the last attempt's, is dead). Its run is bounded by its declared ``timeout``.
 """
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import ClassVar, Final, final
 lazy from collections.abc import Awaitable, Callable, Mapping
 lazy from datetime import datetime
@@ -28,10 +31,16 @@ lazy from ledger_platform.config.manifest import ConsumerDecl, ConsumerStyle
 lazy from ledger_platform.data.codec import JsonValue
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
 
+DEFAULT_TIMEOUT: Final = timedelta(seconds=60)
+"""An outside handler's ``timeout`` unless its manifest says otherwise (``ConsumerDecl``'s default)."""
 type Handler = Callable[[RawEvent, UnitOfWork], Awaitable[None]]
 """Handles one event inside the unit its inbox row is deleted in."""
 type OutsideHandler = Callable[[RawEvent], Awaitable[None]]
-"""Handles one event with no unit open (it may call facades); its inbox row goes after it, under its lease."""
+"""Handles one event with no unit open; its row goes after it, under its lease.
+
+It may call facades, one at a time: each holds a unit's connection while it runs, and the pool counts one per
+outside consumer, never a ``gather`` of several.
+"""
 
 
 class ConsumerMismatchError(LedgerError):
@@ -162,6 +171,8 @@ class Consumer:
     max_attempts: int
     ordered: bool
     handler: Handler | Outside
+    timeout: timedelta = DEFAULT_TIMEOUT
+    """The longest one run of an outside handler may take (see the module)."""
 
     @property
     def outside(self) -> bool:
@@ -185,4 +196,5 @@ class Consumer:
             max_attempts=decl.max_attempts,
             ordered=decl.ordered,
             handler=spec.handling,
+            timeout=decl.timeout,
         )

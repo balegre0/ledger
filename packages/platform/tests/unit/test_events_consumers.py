@@ -1,7 +1,7 @@
 """Consumers (§3.5): a declaration merged with an assembly's handler; an inbox row read as an event."""
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Final, Literal
 lazy from collections.abc import Callable
 
@@ -95,6 +95,16 @@ def test_an_outside_consumer_takes_its_handler_with_no_unit() -> None:
     declared = ConsumerDecl(consumer="other.renames", types=("probe.thing.renamed",), style="outside")
     consumer = Consumer.of(ConsumerSpec(name="other.renames", outside=notice), declared)
     assert consumer.handler == Outside(notice)
+    assert consumer.timeout == timedelta(seconds=60)
+    timed = ConsumerDecl(
+        consumer="other.renames",
+        types=("probe.thing.renamed",),
+        style="outside",
+        timeout=timedelta(seconds=5),
+    )
+    assert Consumer.of(ConsumerSpec(name="other.renames", outside=notice), timed).timeout == timedelta(
+        seconds=5
+    )
     assert consumer.outside
     assert not Consumer.of(
         ConsumerSpec(name="other.renames", handler=ignore),
