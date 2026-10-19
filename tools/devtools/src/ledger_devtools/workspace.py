@@ -25,6 +25,9 @@ DEV_ONLY: Final = frozenset({"ledger-testing", "ledger-devtools"})
 """Distributions never shipped in the image (with every ``*-testing`` one)."""
 MODULE_LAYERS: Final = ("assembly", "adapters", "application", "api", "domain", "events", "_manifest")
 """What a module's import package may hold, top to bottom (§4.5)."""
+CUSTODY: Final = "adapters.custody"
+"""What a module isolated in a role holds key material in: only the module and the apps of its role reach it
+(§4.6 contract 12, ADR 0010)."""
 _NESTED_DEPTH: Final = 3
 """``countries/<cc>/testing``."""
 

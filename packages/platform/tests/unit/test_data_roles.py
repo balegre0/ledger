@@ -267,3 +267,13 @@ def test_a_refused_schema_name_is_not_echoed_whole() -> None:
     with pytest.raises(InvalidSchemaNameError) as raised:
         SchemaRoles(schema="X" * 200)
     assert "X" * 41 not in str(raised.value)
+
+
+def test_a_run_without_an_isolated_schema_leaves_the_signer_s_platform_membership_alone() -> None:
+    """Roles made later on the same server, for another package, leave the signer its schedule leases."""
+    plain = cluster_statements((SchemaRoles(schema="platform"),), LOGINS, salt=salted)[-1]
+    assert "AND (granted.rolname, member.rolname) NOT IN (('platform_rw', 'ledger_signer'))" in plain
+    signed = cluster_statements(
+        (SchemaRoles(schema="platform"), SchemaRoles(schema="vault", signer=True)), LOGINS, salt=salted
+    )[-1]
+    assert "NOT IN (('platform_rw', 'ledger_signer'))" not in signed

@@ -30,7 +30,7 @@ SCHEMAS = ("platform", "probe", "other")
 
 def pytest_ledger_template(template: Template) -> None:
     """The roles, the platform's schema migrated, and the chassis's tables in ``probe`` and ``other``."""
-    bootstrap(template, SCHEMAS)
+    bootstrap(template, SCHEMAS, isolated=())
     migrate(template, PLATFORM_MIGRATIONS)
     create_chassis(template, "probe")
     create_chassis(template, "other")

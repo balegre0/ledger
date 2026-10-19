@@ -17,7 +17,7 @@ from ledger_devtools.names import LOADED_BY_OTHERS, TEST_TOOLING, distribution_o
 from ledger_devtools.roles import role_grants_path, role_grants_text
 from ledger_devtools.root import ROOT_PYPROJECT, root_text
 from ledger_devtools.sql import init_sql_text
-from ledger_devtools.workspace import MANIFEST_GLOBS, MODULE_LAYERS
+from ledger_devtools.workspace import CUSTODY, MANIFEST_GLOBS, MODULE_LAYERS
 from ledger_platform.config.manifest import PackageKind
 from ledger_platform.config.names import PLATFORM
 from ledger_platform.config.settings import SETTINGS_GROUP
@@ -554,6 +554,45 @@ def _module_contracts(facts: _Facts, module: Package) -> Iterator[str | None]:
     )
 
 
+def _custody_contracts(facts: _Facts) -> Iterator[str | None]:
+    """Each isolated module's custody is reached by the module and the apps of its role only (ADR 0010).
+
+    Nothing else reaches it, even through another package (a module importing a module that imports it): no
+    app, module, country or package. The apps of the module's role import its assembly, which imports the
+    custody: they may reach it that way, never directly. What Python loads besides the import graph (a
+    package's ``__init__`` with any of its submodules) is ``check``'s (``ledger_devtools.checks``).
+    """
+    workspace = facts.workspace
+    for module in workspace.modules:
+        role = module.manifest.isolated_in
+        if role is None:
+            continue
+        serving = {
+            app.import_name
+            for app in workspace.apps
+            if app.manifest.app is not None and app.manifest.app.role == role
+        }
+        custody = [f"{module.import_name}.{CUSTODY}"]
+        yield _contract(
+            f"{module.name}-custody",
+            (
+                f"Nothing but {module.name} and the apps of the {role} role reaches {module.name}'s custody, "
+                "even indirectly"
+            ),
+            "forbidden",
+            ("source_modules", [root for root in facts.roots if root not in {module.import_name, *serving}]),
+            ("forbidden_modules", custody),
+        )
+        yield _contract(
+            f"{module.name}-custody-{role}-apps",
+            f"The apps of the {role} role reach {module.name}'s custody through its assembly only",
+            "forbidden",
+            ("source_modules", sorted(serving)),
+            ("forbidden_modules", custody),
+            ("allow_indirect_imports", "True"),
+        )
+
+
 def _closing_contracts(facts: _Facts) -> Iterator[str | None]:
     workspace = facts.workspace
     production = [package for package in workspace.packages if package.is_production]
@@ -604,6 +643,7 @@ def importlinter_text(workspace: Workspace) -> str:
         *_edge_contracts(facts),
         *_country_contracts(facts),
         *(contract for module in workspace.modules for contract in _module_contracts(facts, module)),
+        *_custody_contracts(facts),
         *_closing_contracts(facts),
     )
     return GENERATED_HEADER + "\n" + "\n".join(contract for contract in contracts if contract is not None)

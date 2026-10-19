@@ -46,6 +46,7 @@ FOR stray IN
                AND NOT membership.admin_option AND NOT membership.inherit_option AND membership.set_option)
       AND member.rolname <> current_user
       AND (granted.rolname IN ('ledger_relay', 'platform_owner', 'platform_rw', 'platform_purge', 'identity_owner', 'identity_rw', 'identity_purge', 'invoicing_owner', 'invoicing_rw', 'invoicing_purge', 'ledger_app', 'ledger_migrator') OR member.rolname IN ('ledger_relay', 'platform_owner', 'platform_rw', 'platform_purge', 'identity_owner', 'identity_rw', 'identity_purge', 'invoicing_owner', 'invoicing_rw', 'invoicing_purge') OR (member.rolname = 'ledger_app' AND granted.rolname !~ '_(rw|purge)$') OR (member.rolname = 'ledger_migrator' AND granted.rolname !~ '_owner$') OR (member.rolname = 'ledger_signer' AND granted.rolname !~ '_(rw|purge)$'))
+      AND (granted.rolname, member.rolname) NOT IN (('platform_rw', 'ledger_signer'))
 LOOP
     EXECUTE format('REVOKE %I FROM %I GRANTED BY %I CASCADE', stray.role, stray.member, stray.grantor);
 END LOOP;

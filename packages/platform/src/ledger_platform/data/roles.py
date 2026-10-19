@@ -128,7 +128,8 @@ def _literal(text: str) -> str:
 class SchemaRoles:
     """A schema and its roles.
 
-    ``signer``: its ``rw`` and ``purge`` roles belong to ``ledger_signer``, not to ``ledger_app``.
+    ``signer``: its ``rw`` and ``purge`` roles belong to ``ledger_signer``, not to ``ledger_app``. Callers set
+    it from the owner's manifest (``PackageManifest.isolated_in == "signer"``), never from the schema's name.
     """
 
     schema: str
@@ -208,7 +209,7 @@ FOR stray IN
     WHERE NOT ((granted.rolname, member.rolname) IN ({expected})
                AND NOT membership.admin_option AND NOT membership.inherit_option AND membership.set_option)
       AND member.rolname <> current_user
-      AND (granted.rolname IN ({granted}) OR member.rolname IN ({groups}) OR {families})
+      AND (granted.rolname IN ({granted}) OR member.rolname IN ({groups}) OR {families}){kept}
 LOOP
     EXECUTE format('REVOKE %I FROM %I GRANTED BY %I CASCADE', stray.role, stray.member, stray.grantor);
 END LOOP;
@@ -220,20 +221,28 @@ def _names(names: Sequence[str]) -> sql.Composed:
 
 
 def _revoke_strays(
-    groups: Sequence[str], logins: Sequence[str], memberships: Sequence[tuple[str, str]]
+    groups: Sequence[str],
+    logins: Sequence[str],
+    memberships: Sequence[tuple[str, str]],
+    kept: Sequence[tuple[str, str]],
 ) -> str:
-    """Revoke, whoever granted it, every membership no statement here granted.
+    """Revoke, whoever granted it, every membership no statement here granted, but those ``kept``.
 
     That is any membership in this run's roles (nobody is a member of a login either), any of this run's group
     roles in another role, and any of a login outside its family of roles (``_KEPT_BY_LOGIN``). A membership
     of an expected pair is kept only with this module's options: PostgreSQL 16 keeps one row per grantor, and
     the ``GRANT`` here normalizes the current user's row only. The role running the statements keeps its own
-    (PostgreSQL makes a ``CREATEROLE`` creator a member of what it creates). Every name is a constant or a
-    checked schema's role, and goes in as a literal.
+    (PostgreSQL makes a ``CREATEROLE`` creator a member of what it creates). ``kept`` pairs are left as they
+    are, neither granted nor revoked. Every name is a constant or a checked schema's role, and goes in as a
+    literal.
     """
     pair = sql.SQL("({}, {})")
     family = sql.SQL("(member.rolname = {} AND granted.rolname !~ {})")
+    pairs = sql.SQL(", ").join(pair.format(sql.Literal(r), sql.Literal(m)) for r, m in kept)
     return _STRAYS.format(
+        kept=sql.SQL("\n      AND (granted.rolname, member.rolname) NOT IN ({})").format(pairs)
+        if kept
+        else sql.SQL(""),
         expected=sql.SQL(", ").join(pair.format(sql.Literal(r), sql.Literal(m)) for r, m in memberships),
         granted=_names([*groups, *logins]),
         groups=_names(groups),
@@ -249,7 +258,9 @@ def cluster_statements(
     """The roles of every schema and the logins, with their memberships (run once per server).
 
     ``salt`` gives each login's verifier its salt; a generated file that must come out the same at every run
-    passes one of its own.
+    passes one of its own. ``ledger_signer`` is a member of the platform's ``rw`` role (schedule leases) when
+    a schema of the run is the signer login's; a run with none leaves that membership as it finds it, so that
+    the roles one package's tests make never take it from another's on the same server.
     """
     statements = [
         *_role(RELAY, _GROUP),
@@ -270,10 +281,11 @@ def cluster_statements(
         statements += [*_role(schema.owner, _GROUP), *_role(schema.rw, _GROUP), *_role(schema.purge, _GROUP)]
         memberships += [(schema.owner, MIGRATOR), (schema.rw, schema.login), (schema.purge, schema.login)]
     memberships.append((RELAY, APP))
+    leases = (f"{PLATFORM}_rw", SIGNER)
     if signed:
-        memberships.append((f"{PLATFORM}_rw", SIGNER))
+        memberships.append(leases)
     statements += [_member(role, login) for role, login in memberships]
-    statements.append(_revoke_strays(groups, names, memberships))
+    statements.append(_revoke_strays(groups, names, memberships, () if signed else (leases,)))
     return tuple(statements)
 
 

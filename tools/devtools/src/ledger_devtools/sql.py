@@ -33,9 +33,23 @@ def local_salt(login: str) -> bytes:
     return hashlib.sha256(f"ledger-devtools local login {login}".encode()).digest()[:SALT_BYTES]
 
 
+def _schema_roles(workspace: Workspace) -> tuple[SchemaRoles, ...]:
+    """Every schema's roles, in migration order.
+
+    Those of a module isolated in the signer's role (``[data] isolated_in``) are ``ledger_signer``'s; a
+    channel's never are.
+    """
+    isolated = {
+        package.manifest.schema_name
+        for package in workspace.packages
+        if package.manifest.isolated_in == "signer"
+    }
+    return tuple(SchemaRoles(schema=schema, signer=schema in isolated) for schema in workspace.schemas())
+
+
 def init_sql_text(workspace: Workspace) -> str:
     """Roles (cluster), the ``ledger`` database, then every schema with its grants."""
-    roles = tuple(SchemaRoles(schema=schema, signer=schema == "signer") for schema in workspace.schemas())
+    roles = _schema_roles(workspace)
     cluster = "".join(
         f"{statement};\n" for statement in cluster_statements(roles, LOCAL_LOGINS, salt=local_salt)
     )

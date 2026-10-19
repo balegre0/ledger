@@ -556,3 +556,76 @@ def test_a_country_gets_its_manifest_module_and_the_platform_only_with_a_channel
     assert Path("countries/zz/src/ledger_country_zz/_manifest.py") in generated
     assert '"ledger-platform"' not in pyproject_text(workspace.by_name("do"), workspace)
     assert '"ledger-platform"' in pyproject_text(workspace.by_name("zz"), workspace)
+
+
+VAULT: Final = """
+[package]
+name = "vault"
+kind = "module"
+summary = "Keys, isolated in the signer's role."
+owners = ["@o"]
+
+[dependencies]
+packages = ["kernel", "platform"]
+
+[data]
+schema = "vault"
+isolated_in = "signer"
+"""
+SIGNER_APP: Final = """
+[package]
+name = "signer"
+kind = "app"
+summary = "The signer app."
+owners = ["@o"]
+
+[dependencies]
+packages = ["platform"]
+
+[app]
+script = "ledger-signer"
+role = "signer"
+"""
+
+
+def test_an_isolated_module_gets_a_custody_contract(tree: Path, write: Writer) -> None:
+    """Nothing reaches its custody, even through other modules; its role's apps only through its assembly."""
+    write("modules/vault", VAULT, ("adapters", "assembly"))
+    write("apps/signer", SIGNER_APP, ())
+    text = importlinter_text(Workspace.load(tree))
+    assert (
+        "[importlinter:contract:vault-custody]\n"
+        "name = Nothing but vault and the apps of the signer role reaches vault's custody, even indirectly\n"
+        "type = forbidden\n"
+        "source_modules =\n"
+        "    ledger_app_api\n"
+        "    ledger_identity\n"
+        "    ledger_kernel\n"
+        "    ledger_platform\n"
+        "forbidden_modules =\n"
+        "    ledger_vault.adapters.custody\n"
+        "\n"
+    ) in text
+    assert (
+        "[importlinter:contract:vault-custody-signer-apps]\n"
+        "name = The apps of the signer role reach vault's custody through its assembly only\n"
+        "type = forbidden\n"
+        "source_modules =\n"
+        "    ledger_app_signer\n"
+        "forbidden_modules =\n"
+        "    ledger_vault.adapters.custody\n"
+        "allow_indirect_imports = True\n"
+    ) in text
+
+
+def test_an_isolated_module_without_an_app_of_its_role_gets_the_one_contract(
+    tree: Path, write: Writer
+) -> None:
+    write("modules/vault", VAULT, ("adapters",))
+    text = importlinter_text(Workspace.load(tree))
+    assert "[importlinter:contract:vault-custody]\n" in text
+    assert "vault-custody-signer-apps" not in text
+
+
+def test_no_custody_contract_without_an_isolated_module(tree: Path) -> None:
+    assert "-custody]" not in importlinter_text(Workspace.load(tree))

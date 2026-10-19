@@ -9,11 +9,12 @@ A module's ``conftest.py`` names what it tests and prepares the template with it
         UNDER_TEST.prepare(template)
 
 and returns ``UNDER_TEST`` from a ``module_under_test`` fixture. The plugin's fixtures then give its tests the
-worker's database migrated as production migrates it (``migrated``, emptied after each test), a pool as
-``ledger_app`` (``database``), the module's units in its own role (``module_database``), a superuser session
-(``admin``), the apps' settings (``settings``), the ``api`` app and a client of it (``api``, ``client``), and
-a fresh, empty database with the schemas (``fresh_database_name``, ``fresh``, ``fresh_admin_url``). No module
-copies another's conftest.
+worker's database migrated as production migrates it (``migrated``, emptied after each test), a pool as the
+module's login (``database``: ``ledger_signer`` for a module isolated in the signer's role, else
+``ledger_app``) and one as ``ledger_app`` (``app_database``), the module's units in its own role
+(``module_database``), a superuser session (``admin``), the apps' settings (``settings``), the ``api`` app
+and a client of it (``api``, ``client``), and a fresh, empty database with the schemas
+(``fresh_database_name``, ``fresh``, ``fresh_admin_url``). No module copies another's conftest.
 """
 
 import graphlib
@@ -28,7 +29,7 @@ from ledger_platform.config.manifest import PackageKind
 from ledger_platform.config.names import PLATFORM
 from ledger_platform.config.settings import Settings
 from ledger_platform.data.migrations import platform_migrations
-from ledger_platform.runtime.packs import installed_modules
+from ledger_platform.runtime.packs import installed_modules, load_modules
 from ledger_platform.runtime.registries import MODULES, installed
 from ledger_testing.database import bootstrap, migrate
 lazy from ledger_platform.config.manifest import PackageManifest
@@ -84,6 +85,26 @@ class ModuleUnderTest:
         Read from the manifests, transitively, each module after those it depends on itself; each is the
         revisions its entry point names (``Module.migrations``). A package that is not a module needs none.
         """
+        return tuple(_revisions(module) for module in self._needed())
+
+    @property
+    def isolated(self) -> tuple[str, ...]:
+        """Those of its ``schemas`` that are the signer login's: of the modules isolated in the signer's role.
+
+        Its own, and those of the modules it needs, by their manifests (``[data] isolated_in``).
+        """
+        needed = tuple(
+            _revisions(module).schema for module in self._needed() if _is_isolated(module.manifest)
+        )
+        return (*needed, self.schema) if self.is_isolated else needed
+
+    @property
+    def is_isolated(self) -> bool:
+        """Whether the package is a module isolated in the signer's role: its units log in as the signer."""
+        return _is_isolated(self.manifest)
+
+    def _needed(self) -> tuple[Module, ...]:
+        """The modules it depends on, transitively, each after those it depends on itself."""
         if self.manifest.package.kind is not PackageKind.MODULE:
             return ()
         modules = {module.manifest.package.name: module for module in installed_modules(self.discover)}
@@ -98,7 +119,7 @@ class ModuleUnderTest:
             graph[name] = modules[name].manifest.dependencies.modules
             pending.extend(graph[name])
         order = tuple(graphlib.TopologicalSorter(graph).static_order())
-        return tuple(_revisions(modules[name]) for name in order)
+        return tuple(modules[name] for name in order)
 
     @property
     def schemas(self) -> tuple[str, ...]:
@@ -144,13 +165,44 @@ class ModuleUnderTest:
 
     def prepare(self, template: Template) -> None:
         """The roles and the schemas, each at head as ``ledger_migrator`` with the relay granted."""
-        bootstrap(template, self.schemas)
+        bootstrap(template, self.schemas, isolated=self.isolated)
         revisions: Sequence[SchemaMigrations] = (
             (self.migrations,)
             if self.schema == PLATFORM
             else (platform_migrations(), *self.needs, self.migrations)
         )
         migrate(template, *revisions)
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InstalledSchemas:
+    """The schemas of a server as ``init.sql`` has them: the platform's, then each installed module's."""
+
+    schemas: tuple[str, ...]
+    isolated: tuple[str, ...]
+    """Those of modules isolated in the signer's role: ``ledger_signer``'s."""
+
+
+def installed_schemas(discover: Discover = installed) -> InstalledSchemas:
+    """The schemas of the platform and of every module ``ledger-migrate`` migrates, from their manifests."""
+    manifests = tuple(module.manifest for module in load_modules(discover))
+    return InstalledSchemas(
+        schemas=(
+            PLATFORM,
+            *(manifest.schema_name for manifest in manifests if manifest.schema_name is not None),
+        ),
+        isolated=tuple(
+            manifest.schema_name
+            for manifest in manifests
+            if manifest.schema_name is not None and _is_isolated(manifest)
+        ),
+    )
+
+
+def _is_isolated(manifest: PackageManifest) -> bool:
+    """Whether ``manifest``'s module is isolated in the signer's role: its schema is ``ledger_signer``'s."""
+    return manifest.isolated_in == "signer"
 
 
 def _revisions(module: Module) -> SchemaMigrations:

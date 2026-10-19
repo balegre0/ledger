@@ -332,3 +332,36 @@ def test_an_order_is_between_zero_and_a_thousand_and_for_a_point_the_module_impl
     with pytest.raises(InvalidManifestError) as caught:
         load_manifest(declared)
     assert caught.value.problems[0].startswith(f"{location}")
+
+
+SIGNER_MODULE = """
+[package]
+name = "signer"
+kind = "module"
+summary = "Certificates and signatures."
+owners = ["@o"]
+
+[data]
+schema = "signer"
+isolated_in = "signer"
+"""
+
+
+def test_a_module_may_be_isolated_in_the_signer_role() -> None:
+    manifest = load_manifest(SIGNER_MODULE)
+    assert manifest.isolated_in == "signer"
+    assert load_manifest(SIGNER_MODULE.replace('isolated_in = "signer"\n', "")).isolated_in is None
+    assert load_manifest(APP_HEAD + APP_SECTION).isolated_in is None  # no [data] at all
+
+
+def test_only_signer_isolation_exists() -> None:
+    with pytest.raises(InvalidManifestError) as caught:
+        load_manifest(SIGNER_MODULE.replace('isolated_in = "signer"', 'isolated_in = "worker"'))
+    assert caught.value.problems[0].startswith("data.isolated_in: ")
+    assert "worker" not in str(caught.value)
+
+
+def test_only_a_module_is_isolated() -> None:
+    with pytest.raises(InvalidManifestError) as caught:
+        load_manifest(SIGNER_MODULE.replace('kind = "module"', 'kind = "package"'))
+    assert caught.value.problems == ("data.isolated_in: only a module may be isolated",)

@@ -15,7 +15,13 @@ from ledger_platform.data.migrations import SchemaMigrations, platform_migration
 from ledger_platform.data.notifier import OUTBOX
 from ledger_platform.runtime.contexts import Module, ModuleParts
 from ledger_platform.runtime.registries import MODULES, REGIMES, Discovered
-from ledger_testing.modules import ModuleUnderTest, NeedUnmetError, QuietSignals, SchemaLessModuleError
+from ledger_testing.modules import (
+    ModuleUnderTest,
+    NeedUnmetError,
+    QuietSignals,
+    SchemaLessModuleError,
+    installed_schemas,
+)
 lazy from ledger_platform.config.settings import Settings
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.runtime.app import App
@@ -64,15 +70,37 @@ def test_a_module_that_needs_one_not_installed_or_without_revisions_is_a_defect_
         _ = ModuleUnderTest(alpha.manifest, migrations_of("alpha"), discover=found(alpha, beta)).needs
 
 
+def test_the_isolated_schemas_are_those_of_its_own_and_its_needs_manifests_that_isolate_them() -> None:
+    vault, alpha = a_module("vault", isolated=True), a_module("alpha", "vault")
+    everything = found(vault, alpha)
+    needing = ModuleUnderTest(alpha.manifest, migrations_of("alpha"), discover=everything)
+    assert (needing.schemas, needing.isolated) == (("platform", "vault", "alpha"), ("vault",))
+    assert ModuleUnderTest(vault.manifest, migrations_of("vault"), discover=everything).isolated == ("vault",)
+    alone = ModuleUnderTest(a_module("beta").manifest, migrations_of("beta"), discover=everything)
+    assert alone.isolated == ()
+    assert (needing.is_isolated, alone.is_isolated) == (False, False)
+    assert ModuleUnderTest(vault.manifest, migrations_of("vault"), discover=everything).is_isolated
+    assert ModuleUnderTest(MANIFEST, platform_migrations(), discover=everything).isolated == ()
+
+
+def test_the_installed_schemas_are_the_platform_s_then_each_module_s_the_isolated_ones_marked() -> None:
+    """What ``ledger-migrate``'s tests make their server's roles from, as ``init.sql`` would."""
+    found_here = installed_schemas(found(a_module("vault", isolated=True), a_module("alpha", "vault")))
+    assert (found_here.schemas, found_here.isolated) == (("platform", "alpha", "vault"), ("vault",))
+    assert installed_schemas(found(a_module("alpha"))).isolated == ()
+
+
 def migrations_of(schema: str) -> SchemaMigrations:
     return SchemaMigrations(schema=schema, scripts=f"{schema}_unused:migrations")
 
 
-def a_module(name: str, *depends: str, migrated: bool = True) -> Module:
+def a_module(name: str, *depends: str, migrated: bool = True, isolated: bool = False) -> Module:
     declared = ", ".join(f'"{dependency}"' for dependency in depends)
+    isolation = 'isolated_in = "signer"\n' if isolated else ""
     text = (
         f'[package]\nname = "{name}"\nkind = "module"\nsummary = "A module."\nowners = ["@o"]\n'
         f'[dependencies]\npackages = ["platform"]\nmodules = [{declared}]\n[data]\nschema = "{name}"\n'
+        f"{isolation}"
     )
 
     def assemble(context: ModuleContext) -> ModuleParts:
