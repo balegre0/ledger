@@ -165,7 +165,7 @@ async def test_row_level_security_shows_a_scope_what_it_owns_and_nothing_without
         "company_tax_ids": 2,
         "memberships": 2,
         "establishments": 2,
-        "api_clients": 0,  # moded: no scope below names a mode (see the test of the moded table)
+        "api_clients": 2,  # the organization's, whatever their mode (revision 0003)
     }
     registry = {
         "tax_registrations": 3
@@ -183,11 +183,12 @@ async def test_row_level_security_shows_a_scope_what_it_owns_and_nothing_without
         "company_tax_ids": 1,
         "memberships": 1,
         "establishments": 1,
+        "api_clients": 1,
     }
     assert await counts(module_database, None) == dict.fromkeys(everything, 0) | registry
 
 
-async def test_a_moded_table_shows_a_scope_the_clients_of_its_organization_and_mode_only(
+async def test_api_clients_show_a_unit_of_their_organization_whatever_its_mode_and_nobody_else(
     module_database: BoundDatabase,
 ) -> None:
     mine = await seeded(module_database)
@@ -207,24 +208,24 @@ async def test_a_moded_table_shows_a_scope_the_clients_of_its_organization_and_m
         )
     }
     assert seen == {
-        (organization, Mode.TEST): 1,
-        (organization, Mode.LIVE): 1,
+        (organization, Mode.TEST): 2,  # the client a test unit made and the live one: the mode is a column
+        (organization, Mode.LIVE): 2,
         (other.tenant.organization, Mode.TEST): 1,
-        (other.tenant.organization, Mode.LIVE): 0,
-        (organization, None): 0,
+        (other.tenant.organization, Mode.LIVE): 1,
+        (organization, None): 2,
     }
 
 
-async def test_an_api_client_of_another_mode_or_organization_cannot_be_written_by_a_unit(
+async def test_an_api_client_of_another_organization_cannot_be_written_by_a_unit(
     module_database: BoundDatabase,
 ) -> None:
     mine = await seeded(module_database)
     other = await seeded(module_database)
     organization = mine.tenant.organization
     for scope, row in (
-        (OrganizationScope(organization, Mode.TEST), api_client_of(organization, "live")),
         (OrganizationScope(organization, Mode.TEST), api_client_of(other.tenant.organization)),
-        (OrganizationScope(organization, None), api_client_of(organization)),
+        (OrganizationScope(organization, None), api_client_of(other.tenant.organization, "live")),
+        (None, api_client_of(organization)),
     ):
         with pytest.raises(ProgrammingError) as caught:
             async with module_database.unit(scope) as unit:

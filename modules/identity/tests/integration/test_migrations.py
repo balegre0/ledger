@@ -131,7 +131,7 @@ def test_two_migrations_started_at_once_both_succeed(fresh: Settings, fresh_admi
 
 
 def test_the_migrated_schema_is_exactly_the_models(migrated: WorkerDatabase) -> None:
-    assert MIGRATIONS.head == "0002"  # 0001 squashes v1's two (nothing was in production); 0002 is chassis v2
+    assert MIGRATIONS.head == "0003"  # 0001 squashes v1's two; 0002 is chassis v2; 0003 API clients' policies
     assert pending_changes(superuser(migrated), MODELS, schema=S) is None
 
 

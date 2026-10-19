@@ -991,7 +991,9 @@ USING (organization_id = (SELECT NULLIF(current_setting('ledger.organization_id'
 -- scope "organization": organization_id only (organizations, companies, tax ids, memberships, establishments);
 --   visible to the organization's transactions and to those of its companies. A company's establishments are
 --   here because registering a company writes its `MAIN` one in the same unit, before any company scope exists
--- scope "moded_organization": organization_id + mode (API clients, organization-level idempotency keys)
+-- scope "moded_organization": organization_id + mode (organization-level idempotency keys). API clients are
+--   under "organization" (identity's revision 0003): a client's mode is a column it is bound to, read by its
+--   subject across modes in the standings' one transaction; every other read and write names its mode
 ```
 
 - Settings wrapped in `(SELECT …)` are evaluated once per statement ([04] rule 7). Every hot index leads with
@@ -1613,6 +1615,12 @@ fragment), published, and snapshotted per package (`openapi.json`, contract test
   current version at creation. Precedence: the request header, else the API client's pin, else the
   organization's pin. The response echoes the resolved `Ledger-Version`; an unknown date is 400
   `version_unknown`.
+- **When a pin is set.** An organization is pinned when identity first keeps it, which is a write: its first
+  company or its first API client, to the version current then. Before that identity knows nothing of it, and
+  its requests speak what they name, else the current version (the same date the pin then takes). How a caller
+  stands (its pins, its API client) is remembered per replica 30 s, an answer that knows nothing 5 s (so a new
+  organization's pin, or a new API client, counts within 5 s), with one question at a time per caller; identity
+  answers it in one transaction of the caller's organization.
 - Built now: header parsing, pin storage, precedence and echo. The transform machinery (`VersionChange`
   backward response / forward request transforms, generated changelog) is built with the first breaking change
   (§16.4). Cadence then: monthly non-breaking versions, at most two breaking releases a year, each change reviewed

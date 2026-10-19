@@ -593,23 +593,34 @@ class PgApiClients(ApiClients):
         rows = (await self._connection.execute(paged(self._mine(), ApiClientRecord.id, request))).all()
         return page_of([_api_client(row) for row in rows], request, key=lambda found: found.id)
 
-    @override
-    async def of_subject(self, subject: SubjectId) -> ApiClient | None:
-        newest_active_first = (
-            case((ApiClientRecord.status == ApiClientStatus.ACTIVE.value, 0), else_=1),
-            ApiClientRecord.id.desc(),
-        )
-        row = (
-            await self._connection.execute(
-                self._mine().where(ApiClientRecord.subject == subject).order_by(*newest_active_first).limit(1)
-            )
-        ).first()
-        return None if row is None else _api_client(row)
-
     def _mine(self) -> Select[UUID, UUID, str, str, str, date, str, datetime, str, datetime | None]:
         return _API_CLIENT.where(
             ApiClientRecord.organization_id == self._organization, _in_the_unit_s_mode(self._mode)
         )
+
+
+async def client_of_subject(
+    connection: AsyncConnection, organization: OrganizationId, subject: SubjectId
+) -> ApiClient | None:
+    """The API client of ``subject`` in ``organization``, in whichever mode it is bound to.
+
+    The active one; else the newest revoked one, so that a machine user whose client was revoked stays
+    refused. In any unit of the organization: API clients are its rows, whatever their mode (revision 0003).
+    """
+    newest_active_first = (
+        case((ApiClientRecord.status == ApiClientStatus.ACTIVE.value, 0), else_=1),
+        ApiClientRecord.id.desc(),
+    )
+    row = (
+        await connection.execute(
+            _API_CLIENT.where(
+                ApiClientRecord.organization_id == organization, ApiClientRecord.subject == subject
+            )
+            .order_by(*newest_active_first)
+            .limit(1)
+        )
+    ).first()
+    return None if row is None else _api_client(row)
 
 
 @final

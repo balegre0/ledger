@@ -353,11 +353,6 @@ class MemoryApiClients(ApiClients):
     async def page(self, request: PageRequest) -> Page[ApiClient]:
         return paged(self._mine(), request, key=lambda client: client.id)
 
-    @override
-    async def of_subject(self, subject: SubjectId) -> ApiClient | None:
-        ours = sorted((found for found in self._mine() if found.subject == subject), key=lambda c: c.id)
-        return next((found for found in reversed(ours) if found.active), ours[-1] if ours else None)
-
     def _mine(self) -> list[ApiClient]:
         return [
             client
@@ -1162,14 +1157,3 @@ async def test_the_api_clients_of_a_mode_are_listed_in_id_order(state: State) ->
         state.unit(), PageRequest(size=2, after=decode_cursor(first.next_cursor))
     )
     assert (rest.items, rest.next_cursor) == (tuple(made[2:]), None)
-
-
-async def test_a_machine_user_is_found_in_the_mode_it_is_bound_to(state: State) -> None:
-    first = await commands.register_api_client(state.unit(), FOUNDER, client_registration())
-    assert await state.unit().api_clients.of_subject(MACHINE) == first
-    assert await state.unit(mode=Mode.LIVE).api_clients.of_subject(MACHINE) is None
-    assert await state.unit().api_clients.of_subject(SubjectId("4999")) is None
-    await commands.revoke_api_client(state.unit(LATER), FOUNDER, first.id)
-    revoked = await state.unit().api_clients.of_subject(MACHINE)
-    assert revoked is not None
-    assert not revoked.active  # the last revoked one, when no active one is left

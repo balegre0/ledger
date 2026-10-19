@@ -20,7 +20,7 @@ lazy from sqlalchemy import Insert
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ledger_identity.adapters.permissions import MembershipPermissions
-from ledger_identity.adapters.postgres.repositories import ForeignTenantError
+from ledger_identity.adapters.postgres.repositories import ForeignTenantError, client_of_subject
 from ledger_identity.adapters.postgres.tables import (
     CompanyRecord,
     EstablishmentRecord,
@@ -564,6 +564,14 @@ async def in_mode[T](
     return await in_unit(module_database, OrganizationScope(FOUNDER.organization, mode), work)
 
 
+async def subject_s(
+    module_database: BoundDatabase, mode: Mode | None, subject: SubjectId
+) -> ApiClient | None:
+    """The API client of ``subject`` in the founder's organization, as identity's standings read it."""
+    async with module_database.unit(OrganizationScope(FOUNDER.organization, mode)) as unit:
+        return await client_of_subject(unit.connection, FOUNDER.organization, subject)
+
+
 def client_registration(subject: SubjectId = MACHINE, mode: Mode = Mode.TEST) -> commands.ClientRegistration:
     spec = ApiClientSpec(subject=subject, name=parse_name("Odoo"), api_version=VERSION)
     return commands.ClientRegistration(spec=spec, mode=mode)
@@ -599,9 +607,9 @@ async def test_api_clients_are_kept_per_mode_and_a_machine_user_is_one_active_cl
         lambda unit: commands.register_api_client(unit, FOUNDER, client_registration(mode=Mode.LIVE)),
     )
     assert again.active
-    live = await in_mode(module_database, Mode.LIVE, lambda unit: unit.api_clients.of_subject(MACHINE))
-    test = await in_mode(module_database, Mode.TEST, lambda unit: unit.api_clients.of_subject(MACHINE))
-    assert (live, test) == (again, revoked)  # the active one of the mode it is bound to; the revoked, in its
+    found = await subject_s(module_database, None, MACHINE)
+    assert found == again  # the active one, of whichever mode, in any unit of the organization
+    assert await subject_s(module_database, Mode.TEST, SubjectId("4999")) is None
 
 
 async def test_the_last_revoked_client_is_found_when_none_is_active(module_database: BoundDatabase) -> None:
@@ -618,7 +626,7 @@ async def test_the_last_revoked_client_is_found_when_none_is_active(module_datab
             partial(commands.revoke_api_client, admin=FOUNDER, client_id=made.id),
         )
         ids.append(made.id)
-    found = await in_mode(module_database, Mode.TEST, lambda unit: unit.api_clients.of_subject(MACHINE))
+    found = await subject_s(module_database, None, MACHINE)
     assert found is not None
     assert (found.id, found.active) == (max(ids), False)
 

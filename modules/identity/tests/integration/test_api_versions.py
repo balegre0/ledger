@@ -19,6 +19,15 @@ async def pin_organization(admin: psycopg.AsyncConnection, version: date) -> Non
     await admin.execute("UPDATE identity.organizations SET api_version = %s", (version,))
 
 
+def colleague(owner: TestPrincipal) -> TestPrincipal:
+    """Another principal of the owner's organization, whose standing nobody asked for yet.
+
+    The owner's was asked while its organization did not exist (registering the ``company``), and an answer
+    that knows nothing is remembered 5 s: a fresh caller sees the organization's pin at once.
+    """
+    return TestPrincipal(owner.issuer, subject="2999", organization=owner.organization)
+
+
 async def test_an_organization_is_pinned_to_the_current_version_when_its_first_company_is_registered(
     client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
@@ -44,10 +53,10 @@ async def test_the_organization_s_pin_decides_unless_the_request_names_a_version
 ) -> None:
     del company
     await pin_organization(admin, EARLIER)
-    pinned = await client.get("/v1/organization", headers=owner.bearer())
+    pinned = await client.get("/v1/organization", headers=colleague(owner).bearer())
     assert pinned.headers[VERSION_HEADER] == EARLIER.isoformat()
     named = await client.get(
-        "/v1/organization", headers=owner.bearer() | {VERSION_HEADER: CURRENT_VERSION.isoformat()}
+        "/v1/organization", headers=colleague(owner).bearer() | {VERSION_HEADER: CURRENT_VERSION.isoformat()}
     )
     assert named.headers[VERSION_HEADER] == CURRENT_VERSION.isoformat()
 
@@ -57,9 +66,9 @@ async def test_a_pin_is_remembered_for_a_while(
 ) -> None:
     del company
     await pin_organization(admin, EARLIER)
-    await client.get("/v1/organization", headers=owner.bearer())
+    await client.get("/v1/organization", headers=colleague(owner).bearer())
     await pin_organization(admin, CURRENT_VERSION)
-    remembered = await client.get("/v1/organization", headers=owner.bearer())
+    remembered = await client.get("/v1/organization", headers=colleague(owner).bearer())
     assert remembered.headers[VERSION_HEADER] == EARLIER.isoformat()  # the pin of 30 s ago, until it expires
 
 

@@ -4,6 +4,7 @@ Identity answers through the ``StandingsPort``; ``Authentication.caller`` settle
 answer names the version the request speaks (``Ledger-Version``).
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import date
 from typing import Annotated, Final, final, override
@@ -42,7 +43,7 @@ from ledger_platform.http.versions import (
     parse_version,
 )
 from ledger_platform.observability.health import Health
-from ledger_platform.runtime.standings import CachedStandings
+from ledger_platform.runtime.standings import NEGATIVE_TTL, CachedStandings
 from ledger_testing.issuer import AUDIENCE, ISSUER, machine_claims
 lazy from ledger_kernel.access import Principal
 lazy from ledger_platform.observability.tracing import Tracing
@@ -400,16 +401,91 @@ async def test_the_standings_remembered_are_bounded_forgetting_the_oldest_first(
     assert knowing.asked == 4  # the oldest was forgotten
 
 
-async def test_a_caller_that_is_known_to_nobody_is_asked_again_until_it_is() -> None:
-    """Its organization is not known yet; the next question must see the organization once it is."""
-    knowing = Knowing()
-    cached = CachedStandings(knowing, ttl=30.0, size=10, clock=Time())
+async def test_a_caller_that_is_known_to_nobody_is_remembered_so_only_briefly() -> None:
+    """Its organization (or its API client) is not known yet: it shows within ``NEGATIVE_TTL`` once it is."""
+    knowing, time = Knowing(), Time()
+    cached = CachedStandings(knowing, ttl=30.0, size=10, clock=time)
     ana = principal_of("ana")
     assert await cached.of(ana) == Standing()
     knowing.standing = Standing(organization=NEWER)
+    time.now += NEGATIVE_TTL - 0.1
+    assert await cached.of(ana) == Standing()  # remembered: a flood of strangers costs one question each
+    time.now += 0.2
     assert await cached.of(ana) == Standing(organization=NEWER)
     assert await cached.of(ana) == Standing(organization=NEWER)
     assert knowing.asked == 2
+    assert NEGATIVE_TTL == 5.0
+
+
+@final
+class Slow(StandingsPort):
+    """Answers once told to; counts the questions."""
+
+    def __init__(self) -> None:
+        self.asked = 0
+        self.answer = asyncio.Event()
+
+    @override
+    async def of(self, principal: Principal) -> Standing:
+        del principal
+        self.asked += 1
+        await self.answer.wait()
+        return Standing(organization=NEWER)
+
+
+async def test_callers_that_ask_at_once_share_one_question() -> None:
+    slow = Slow()
+    cached = CachedStandings(slow, ttl=30.0, size=10, clock=Time())
+    ana = principal_of("ana")
+    waiting = [asyncio.create_task(cached.of(ana)) for _ in range(5)]
+    await asyncio.sleep(0)
+    gives_up = waiting.pop()
+    gives_up.cancel()  # one request that gives up does not stop the question for the others
+    slow.answer.set()
+    assert await asyncio.gather(*waiting) == [Standing(organization=NEWER)] * 4
+    assert slow.asked == 1
+    assert (await cached.of(principal_of("bob"))) == Standing(organization=NEWER)
+    assert slow.asked == 2
+
+
+async def test_a_question_that_fails_fails_for_every_caller_waiting_for_it() -> None:
+    @final
+    class Broken(StandingsPort):
+        def __init__(self) -> None:
+            self.asked = 0
+            self.answer = asyncio.Event()
+
+        @override
+        async def of(self, principal: Principal) -> Standing:
+            del principal
+            self.asked += 1
+            await self.answer.wait()
+            raise ConnectionError
+
+    broken = Broken()
+    cached = CachedStandings(broken, ttl=30.0, size=10, clock=Time())
+    first, second = (asyncio.create_task(cached.of(principal_of("ana"))) for _ in range(2))
+    await asyncio.sleep(0)
+    broken.answer.set()
+    for task in (first, second):
+        with pytest.raises(ConnectionError):
+            await task
+    assert broken.asked == 1
+
+
+async def test_a_question_nobody_waits_for_any_more_still_lands() -> None:
+    """Every request that asked gave up: the answer is kept all the same, and its failure is seen."""
+    slow = Slow()
+    cached = CachedStandings(slow, ttl=30.0, size=10, clock=Time())
+    ana = principal_of("ana")
+    alone = asyncio.create_task(cached.of(ana))
+    await asyncio.sleep(0)
+    alone.cancel()
+    slow.answer.set()
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert await cached.of(ana) == Standing(organization=NEWER)
+    assert slow.asked == 1
 
 
 async def test_a_caller_that_failed_to_be_asked_is_asked_again() -> None:
@@ -437,3 +513,5 @@ def test_a_cache_that_remembers_nothing_is_a_mistake() -> None:
     for ttl, size in ((0.0, 1), (-1.0, 1), (30.0, 0)):
         with pytest.raises(InvalidOptionError):
             CachedStandings(Knowing(), ttl=ttl, size=size)
+    with pytest.raises(InvalidOptionError):
+        CachedStandings(Knowing(), ttl=30.0, size=1, negative_ttl=0.0)

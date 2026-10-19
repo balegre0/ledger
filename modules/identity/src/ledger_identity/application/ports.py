@@ -139,10 +139,6 @@ class ApiClients(Protocol, metaclass=ABCMeta):
     async def page(self, request: PageRequest) -> Page[ApiClient]:
         """The API clients of the unit's mode, revoked ones too, in id order."""
 
-    @abstractmethod
-    async def of_subject(self, subject: SubjectId) -> ApiClient | None:
-        """The active API client of the machine user in the unit's mode, else its last revoked one."""
-
 
 class Events(Protocol, metaclass=ABCMeta):
     """What the unit announces once it commits."""

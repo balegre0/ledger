@@ -5,7 +5,9 @@ A module (identity) hands over its ``StandingsPort`` under ``STANDINGS_PORT`` an
 What other packages call is a ``@facade``: so is ``CachedStandings.of``, which opens units of its own.
 """
 
+import asyncio
 from collections import OrderedDict
+from functools import partial
 from time import monotonic
 from typing import Final, TypeIs, final, override
 
@@ -25,6 +27,9 @@ def _is_standings_port(value: object) -> TypeIs[StandingsPort]:
 
 STANDINGS_PORT: Final = Key("StandingsPort", _is_standings_port)
 """The platform's port under its name: how a module provides it and the app binds it."""
+NEGATIVE_TTL: Final = 5.0
+"""Seconds an answer that knows nothing is kept: what a new organization or API client waits at most."""
+type _Caller = tuple[OrganizationId, SubjectId]
 
 
 @final
@@ -33,35 +38,60 @@ class CachedStandings(StandingsPort):
 
     Every request asks for the standing of its caller, and it changes rarely (a pin is fixed when its owner is
     made; an API client is registered or revoked now and then): this keeps the question off the database. A
-    change shows within ``ttl``: a revoked client works that long. Nothing is remembered of a question that
-    failed, nor of an answer that knows nothing: it is what a caller of an organization that does not exist
-    yet gets, and its next question must see the organization once it does.
+    change shows within ``ttl``: a revoked client works that long on each replica that remembers it. An answer
+    that knows nothing (a caller of an organization identity has not seen yet, a machine that is no API client
+    yet) is kept ``negative_ttl`` seconds only: the organization or the client it waits for shows that soon.
+    One question is asked at a time per caller: the requests that arrive while it is out wait for its answer
+    (and a request that gives up does not stop it for the others). Nothing is kept of a question that failed:
+    each request waiting for it gets the failure, and the next asks again.
     """
 
-    __slots__ = ("_clock", "_inner", "_kept", "_size", "_ttl")
+    __slots__ = ("_clock", "_flights", "_inner", "_kept", "_negative_ttl", "_size", "_ttl")
 
     def __init__(
-        self, inner: StandingsPort, *, ttl: float, size: int, clock: MonotonicClock = monotonic
+        self,
+        inner: StandingsPort,
+        *,
+        ttl: float,
+        size: int,
+        negative_ttl: float = NEGATIVE_TTL,
+        clock: MonotonicClock = monotonic,
     ) -> None:
         require_seconds("standing", "ttl", ttl)
+        require_seconds("standing", "negative_ttl", negative_ttl)
         require_at_least("standing", "size", size)
         self._inner = inner
         self._ttl = ttl
+        self._negative_ttl = negative_ttl
         self._size = size
         self._clock = clock
-        self._kept: OrderedDict[tuple[OrganizationId, SubjectId], tuple[float, Standing]] = OrderedDict()
+        self._kept: OrderedDict[_Caller, tuple[float, Standing]] = OrderedDict()
+        self._flights: dict[_Caller, asyncio.Future[Standing]] = {}
 
     @override
     @facade
     async def of(self, principal: Principal) -> Standing:
-        key, now = (principal.organization, principal.subject), self._clock()
+        key = (principal.organization, principal.subject)
         held = self._kept.get(key)
-        if held is not None and now < held[0]:
+        if held is not None and self._clock() < held[0]:
             return held[1]
+        flight = self._flights.get(key)
+        if flight is None:
+            flight = self._flights[key] = asyncio.ensure_future(self._ask(key, principal))
+            flight.add_done_callback(partial(self._landed, key))
+        return await asyncio.shield(flight)
+
+    async def _ask(self, key: _Caller, principal: Principal) -> Standing:
+        """Ask the inner port, and keep its answer: ``negative_ttl`` when it knows nothing, else ``ttl``."""
         standing = await self._inner.of(principal)
+        ttl = self._negative_ttl if standing == NOTHING_KNOWN else self._ttl
         _ = self._kept.pop(key, None)
-        if standing != NOTHING_KNOWN:
-            self._kept[key] = (now + self._ttl, standing)
-            while len(self._kept) > self._size:
-                _ = self._kept.popitem(last=False)
+        self._kept[key] = (self._clock() + ttl, standing)
+        while len(self._kept) > self._size:
+            _ = self._kept.popitem(last=False)
         return standing
+
+    def _landed(self, key: _Caller, flight: asyncio.Future[Standing]) -> None:
+        """The question is answered (or failed): the next one is asked anew; its failure counts as seen."""
+        del self._flights[key]
+        _ = flight.cancelled() or flight.exception()
