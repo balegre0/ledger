@@ -59,6 +59,18 @@ def app_of(handled: Handled, *, limit: int = LIMIT) -> FastAPI:
         handled.calls += 1
         return {"ok": True}
 
+    @router.post("/x/special")
+    async def special(note: Note) -> Note:
+        """Declared first: the router dispatches ``/x/special`` here, so the app's limit holds."""
+        handled.calls += 1
+        return note
+
+    @router.post("/x/{item}", dependencies=[Depends(larger_body(LIMIT * 2))])
+    async def item(item: str, note: Note) -> Note:
+        del item
+        handled.calls += 1
+        return note
+
     @router.post("/uploads/{name}", dependencies=[Depends(larger_body(LIMIT * 2))])
     async def upload(name: str, note: Note) -> Note:
         """Takes up to twice the app's limit (a certificate's upload takes 2 MiB where the rest takes 1)."""
@@ -185,6 +197,16 @@ async def test_a_route_may_take_a_larger_body_and_only_that_route() -> None:
     assert (taken.status_code, elsewhere.status_code, streamed.status_code) == (200, 413, 200)
     assert (beyond.status_code, handled.calls) == (413, 2)
     assert str(LIMIT * 2) in (Problem.model_validate_json(beyond.content).detail or "")
+
+
+async def test_the_limit_is_the_one_of_the_route_the_request_is_dispatched_to() -> None:
+    """``/x/special`` matches ``/x/{item}`` too, but the router sends it to ``/x/special``, declared first."""
+    handled = Handled()
+    over = b'{"text":"' + b"x" * (LIMIT + 10) + b'"}'
+    async with client_of(app_of(handled)) as client:
+        special = await client.post("/x/special", content=over, headers={"Content-Type": "application/json"})
+        other = await client.post("/x/other", content=over, headers={"Content-Type": "application/json"})
+    assert (special.status_code, other.status_code, handled.calls) == (413, 200, 1)
 
 
 def test_the_largest_body_a_route_may_take_is_two_mebibytes() -> None:

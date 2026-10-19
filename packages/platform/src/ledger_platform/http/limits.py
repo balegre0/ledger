@@ -52,15 +52,18 @@ def larger_body(limit: int = MAX_UPLOAD_BYTES) -> LargerBody:
     return larger
 
 
-def route_limits(routes: Sequence[BaseRoute]) -> tuple[tuple[APIRoute, int], ...]:
-    """Each route of ``routes`` (an app's, its included routers' too) that declares a limit of its own."""
-    found: list[tuple[APIRoute, int]] = []
+def route_limits(routes: Sequence[BaseRoute]) -> tuple[tuple[BaseRoute, int | None], ...]:
+    """Every route of ``routes`` in the order the router tries them, each with the limit it declares, if any.
+
+    ``routes`` are an app's, its included routers' too. A request is held to the limit of the route the router
+    dispatches it to: the first that matches it fully, declared before any other that would match it too
+    (``/x/special`` before ``/x/{id}``).
+    """
+    found: list[tuple[BaseRoute, int | None]] = []
     for context in iter_route_contexts(routes):
         route = context.original_route
-        if isinstance(route, APIRoute):
-            limits = [_LARGER[call] for call in _own_calls(route)]
-            if limits:
-                found.append((route, max(limits)))
+        limits = [_LARGER[call] for call in _own_calls(route)] if isinstance(route, APIRoute) else []
+        found.append((route, max(limits) if limits else None))
     return tuple(found)
 
 
@@ -86,17 +89,21 @@ class BodyLimit:
     __slots__ = ("_app", "_limit", "_routes")
 
     def __init__(
-        self, app: AsgiApp, *, limit: int = MAX_BODY_BYTES, routes: Sequence[tuple[APIRoute, int]] = ()
+        self,
+        app: AsgiApp,
+        *,
+        limit: int = MAX_BODY_BYTES,
+        routes: Sequence[tuple[BaseRoute, int | None]] = (),
     ) -> None:
         self._app = app
         self._limit = limit
         self._routes = tuple(routes)
 
     def _limit_of(self, scope: AsgiScope) -> int:
-        """The limit of the request's route, if it declares one (``route_limits``); else the app's."""
+        """The limit of the route the request is dispatched to, if it declares one; else the app's."""
         for route, limit in self._routes:
             if route.matches(scope)[0] is Match.FULL:
-                return limit
+                return self._limit if limit is None else limit
         return self._limit
 
     async def __call__(self, scope: AsgiScope, receive: AsgiReceive, send: AsgiSend) -> None:
