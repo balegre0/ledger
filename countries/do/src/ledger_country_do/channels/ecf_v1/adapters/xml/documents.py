@@ -10,7 +10,7 @@ lazy from datetime import datetime
 
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import verify_enveloped
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf, rfce
-from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import checked
+from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.application.ports import EcfFormat
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
@@ -25,15 +25,17 @@ class DgiiXml(EcfFormat):
 
     @override
     def ecf(self, draft: EcfDraft, totals: Totals, *, signed_at: datetime) -> bytes:
-        return checked(
+        return DO_SCHEMAS.checked(
             ecf.FORMAT_OF[draft.ecf_type], ecf.render(draft, totals, signed_at=signed_at), unsigned=True
         )
 
     @override
     def rfce(self, draft: EcfDraft, totals: Totals, *, security_code: str) -> bytes:
-        return checked(Format.RFCE, rfce.render(draft, totals, security_code=security_code), unsigned=True)
+        return DO_SCHEMAS.checked(
+            Format.RFCE, rfce.render(draft, totals, security_code=security_code), unsigned=True
+        )
 
     @override
     def signed(self, draft: EcfDraft, signed: bytes, *, rfce: bool) -> str:
-        checked(Format.RFCE if rfce else ecf.FORMAT_OF[draft.ecf_type], signed, unsigned=False)
+        DO_SCHEMAS.checked(Format.RFCE if rfce else ecf.FORMAT_OF[draft.ecf_type], signed, unsigned=False)
         return verify_enveloped(signed).signature_value

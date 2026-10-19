@@ -16,16 +16,11 @@ from ledger_country_do.channels.ecf_v1.application.emission import (
 from ledger_country_do.channels.ecf_v1.application.ports import AuthorityUnavailableError, Failure
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 from ledger_country_do.channels.ecf_v1.domain.routing import Route
-from ledger_country_do.channels.ecf_v1.domain.status_map import (
-    DgiiMessage,
-    EcfState,
-    FiscalStatus,
-    NumberFate,
-    Severity,
-)
+from ledger_country_do.channels.ecf_v1.domain.status_map import EcfState, NumberFate
 from ledger_country_do_testing.fake_dgii.state import Scripted, Status
 from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
 from ledger_country_do_testing.transports import FAKE_HOSTS, BreaksAfterSending, Counting
+from ledger_fiscal_kit.status import AuthorityMessage, FiscalStatus, Severity
 from ledger_fiscal_kit.xml.hardened import texts
 lazy from ledger_country_do.channels.ecf_v1.application.emission import Emitted
 lazy from ledger_country_do_testing.fake_dgii.app import FakeDgii
@@ -126,7 +121,9 @@ async def test_aceptado_condicional_after_en_proceso_is_valid_with_its_messages(
         FiscalStatus.ACCEPTED_WITH_OBSERVATIONS,
         Severity.WARNING,
     )
-    assert emitted.outcome.messages == (DgiiMessage("613", "Fuera de tolerancia"),)
+    assert emitted.outcome.messages == (
+        AuthorityMessage(code="613", message="Fuera de tolerancia", lang="es"),
+    )
     assert emitted.outcome.number is NumberFate.USED
     assert sleeps == [1.0, 2.0, 5.0]
 

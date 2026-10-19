@@ -16,7 +16,7 @@ lazy from collections.abc import Mapping
 
 from lxml import etree
 
-from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import corrected
+from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 from ledger_fiscal_kit.xml.hardened import parser
 lazy from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
@@ -36,7 +36,7 @@ class UndeclaredElementError(EcfError):
 @cache
 def declared(format_: Format) -> Mapping[str, str]:
     """The elements ``format_``'s schema declares, by their lowercase names (see the module)."""
-    root = etree.fromstring(corrected(format_), parser())
+    root = etree.fromstring(DO_SCHEMAS.corrected(format_), parser())
     names = {name for found in root.iter(_ELEMENT) if (name := found.get("name")) is not None}
     spellings = Counter(name.lower() for name in names)
     return MappingProxyType({name.lower(): name for name in names if spellings[name.lower()] == 1})

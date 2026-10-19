@@ -58,7 +58,7 @@ from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import endpoint
 from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import TokenAnswer
 from ledger_country_do.channels.ecf_v1.adapters.http import ACCEPTED_ENCODING, DEFAULT_TIMEOUTS, bounded
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import INBOUND, verify_enveloped
-from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import checked
+from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError, EcfUnavailableError
 from ledger_country_do.channels.ecf_v1.domain.notation import parse_dgii_moment
@@ -365,7 +365,7 @@ class BuyerClient:
 
     def _receipt(self, arecf: bytes, draft: EcfDraft, buyer: str, *, received_at: datetime) -> Delivered:
         """``arecf`` once it is DGII's, signed, about ``draft``, by a certificate trusted for ``buyer``."""
-        checked(Format.ARECF, arecf, unsigned=False)
+        DO_SCHEMAS.checked(Format.ARECF, arecf, unsigned=False)
         verified = verify_enveloped(arecf, INBOUND)
         issuer, receiver, encf, state, reason, moment = texts(
             arecf,

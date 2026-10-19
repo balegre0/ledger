@@ -8,7 +8,7 @@ lazy import httpx
 
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import INBOUND
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf, rfce
-from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import violations
+from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.notation import SANTO_DOMINGO
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
@@ -92,7 +92,7 @@ async def test_a_signed_seed_buys_a_token_valid_an_hour(
     now = clock()
     seed = await http.get(f"{AUTH}/semilla")
     assert seed.headers["content-type"].startswith("text/xml")
-    assert violations(Format.SEED, seed.content, unsigned=True) == ()
+    assert DO_SCHEMAS.violations(Format.SEED, seed.content, unsigned=True) == ()
     assert texts(seed.content, "fecha") == (now.astimezone(SANTO_DOMINGO).isoformat(),)
     answer = await http.post(
         f"{AUTH}/validarsemilla", files=xml(await signer.sign_seed(seed.content, audience=AUDIENCE))

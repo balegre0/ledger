@@ -60,11 +60,13 @@ from ledger_country_do.channels.ecf_v1.domain.environments import (
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 from ledger_country_do.channels.ecf_v1.domain.notation import local_date
 from ledger_country_do.channels.ecf_v1.domain.routing import Route
-from ledger_country_do.channels.ecf_v1.domain.status_map import DOCUMENTED, FiscalStatus
+from ledger_country_do.channels.ecf_v1.domain.status_map import DOCUMENTED
 from ledger_country_do_testing.local_signer import BundleIncompleteError, KeyPairSigner
 from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
+from ledger_fiscal_kit.status import FiscalStatus
 from ledger_fiscal_kit.xml.dsig import NotAnRsaKeyError, SigningPairError
 from ledger_fiscal_kit.xml.hardened import XmlDocumentError
+from ledger_fiscal_kit.xml.schemas import SchemaDriftError, SchemaViolationError
 from ledger_kernel.errors import ConflictError, InvalidInputError
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import Resolve
 lazy from ledger_country_do.channels.ecf_v1.application.emission import Emitted, Signed
@@ -82,8 +84,15 @@ _ALLOWED: Final = frozenset({Environment.TESTECF, Environment.CERTECF})
 _ACCEPTED: Final = frozenset({FiscalStatus.ACCEPTED, FiscalStatus.ACCEPTED_WITH_OBSERVATIONS})
 _USAGE: Final = 2
 _NOT_ACCEPTED: Final = 1
-_REPORTED: Final = (EcfError, XmlDocumentError, NotAnRsaKeyError, SigningPairError)
-"""What a run reports by its code instead of a traceback: the pack's errors and the signature profile's."""
+_REPORTED: Final = (
+    EcfError,
+    XmlDocumentError,
+    SchemaViolationError,
+    SchemaDriftError,
+    NotAnRsaKeyError,
+    SigningPairError,
+)
+"""What a run reports by its code instead of a traceback: the pack's errors and the kit's XML errors."""
 _AUTH_PROBE: Final = "ledger-spike-authentication-check"
 """A track id that does not exist: ``consultaresultado`` needs a token, so asking about it proves one."""
 _RFCE_NOT_DELIVERED: Final = "a consumer invoice sent as an RFCE is not delivered (spec 8.6.5)"
@@ -412,11 +421,11 @@ def _report(emitted: Emitted, settings: SpikeSettings, out: TextIO) -> None:
         )
     else:
         number = "" if outcome.number is None else f" (number {outcome.number.value})"
-        words = DOCUMENTED[outcome.code.value]
+        words = DOCUMENTED[outcome.code]
         _say(out, f"DGII: codigo {outcome.code.value} {words} -> {outcome.status.value}{number}")
     messages = () if outcome is None else outcome.messages
     for message in messages:
-        _say(out, f"  {message.code}: {message.text}")
+        _say(out, f"  {message.code}: {message.message}")
     _say(out, f"security code: {signed.security_code}")
     _say(out, f"QR: {signed.qr}")
     parked = (
@@ -435,7 +444,7 @@ def _report(emitted: Emitted, settings: SpikeSettings, out: TextIO) -> None:
         "parked": parked,
         "codigo": None if outcome is None else outcome.code.value,
         "status": None if outcome is None else outcome.status.value,
-        "messages": [[message.code, message.text] for message in messages],
+        "messages": [[message.code, message.message] for message in messages],
         "security_code": signed.security_code,
         "qr": signed.qr,
     }

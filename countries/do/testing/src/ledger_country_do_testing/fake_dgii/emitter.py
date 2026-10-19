@@ -44,7 +44,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 lazy from starlette.types import Message, Receive
 
-from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import corrected
+from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.notation import SANTO_DOMINGO
 from ledger_country_do_testing.fake_dgii.state import STATUS_WORDS, Received, Status
@@ -105,7 +105,7 @@ _REPORTED: Final = 5
 
 @cache
 def _schema(format_: Format) -> xmlschema.XMLSchema10:
-    return xmlschema.XMLSchema10(corrected(format_).decode("utf-8"))
+    return xmlschema.XMLSchema10(DO_SCHEMAS.corrected(format_).decode("utf-8"))
 
 
 def schema_problems(format_: Format, document: bytes) -> tuple[tuple[str, str], ...]:

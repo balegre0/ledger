@@ -8,7 +8,7 @@ from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import (
     verify_enveloped,
 )
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf
-from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import violations
+from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.answers import json_list, json_object
@@ -104,7 +104,7 @@ async def test_the_simulator_receives_an_e_cf_and_answers_a_signed_arecf(
         files=xml(await signed_credit_invoice(signer)),
         headers=await receiver_token(http, signer),
     )
-    assert violations(Format.ARECF, answer.content) == ()
+    assert DO_SCHEMAS.violations(Format.ARECF, answer.content) == ()
     assert verify_enveloped(answer.content).certificate == receiver_identity.certificate
     detail = "DetalleAcusedeRecibo/"
     found = texts(

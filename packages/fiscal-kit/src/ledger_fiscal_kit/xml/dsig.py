@@ -54,6 +54,7 @@ from cryptography.hazmat.primitives.serialization import Encoding
 from lxml import etree
 lazy from cryptography.hazmat.primitives.asymmetric.types import PrivateKeyTypes
 
+from ledger_fiscal_kit.xml.c14n import canonical
 from ledger_fiscal_kit.xml.hardened import (
     COMMENT,
     DSIG,
@@ -196,12 +197,6 @@ def _b64(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
 
 
-def _c14n(document: bytes) -> bytes:
-    return etree.tostring(
-        etree.fromstring(document, parser()), method="c14n", exclusive=False, with_comments=False
-    )
-
-
 @final
 class Prepared:
     """A document ``prepare`` checked and digested: what it lacks is a signature value over ``to_sign``.
@@ -263,11 +258,13 @@ def prepare(document: bytes) -> Prepared:
         raise UnsignableDocumentError(_XML_ATTRIBUTES)
     if root.tag == SIGNATURE or root.find(f".//{SIGNATURE}") is not None:
         raise DocumentSignedError
+    # Not ``c14n.canonical``: that would read the document a second time, and this tree is the one checked
+    # above (no comment, processing instruction or ``xml:`` attribute), so the digest covers what was checked.
     digest = _b64(
         hashlib.sha256(etree.tostring(tree, method="c14n", exclusive=False, with_comments=False)).digest()
     )
     in_scope = {prefix: uri for prefix, uri in root.nsmap.items() if prefix is not None}
-    return Prepared(_MADE, document, digest, _c14n(signed_info(digest, in_scope).encode()))
+    return Prepared(_MADE, document, digest, canonical(signed_info(digest, in_scope).encode()))
 
 
 def sign_enveloped(document: bytes, key: PrivateKeyTypes, certificate: x509.Certificate) -> bytes:
