@@ -2,10 +2,13 @@
 
 Queries are ``GET``; what carries a document (the signed seed, an e-CF, an RFCE) is a multipart ``POST``.
 
-* **Authentication.** DGII's seed, read by the hardened parser before anything signs it, is signed by the
-  ``XmlSigner`` (``sign_seed``) and exchanged at ``validarsemilla`` for a token cached per environment until
-  five minutes before it expires (never longer than an hour), fetched once at a time. A seed serves once, so
-  a failed exchange starts again from a fresh seed: the two are retried together, never the validation alone.
+* **Authentication.** DGII's seed is signed by the ``XmlSigner`` (``sign_seed``, which refuses anything but
+  DGII's ``SemillaModel``, read hardened, before a key sees it; its audience the ``ecf`` host) and exchanged
+  at ``validarsemilla`` for a token cached per environment until five minutes before it expires (never
+  longer than an hour), fetched once at a time. A seed serves once, so a failed exchange starts again from a
+  fresh seed: the two are retried together, never the validation alone. A seed the signer refuses as no seed
+  or cannot sign is ``unreadable``; its other refusals (no certificate, one not valid, the signer unreachable)
+  pass as they are.
   A 401 drops the token that was refused (not one another call has renewed since) and the call is made once
   more with a new one. Tokens live in memory only: never stored, logged, shown in a ``repr`` or put in an
   error, and forgotten when the client closes.
@@ -39,6 +42,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Final, TypedDict, Unpack, final, override
+from urllib.parse import urlsplit
 lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 
 import httpx
@@ -63,7 +67,6 @@ from ledger_country_do.channels.ecf_v1.adapters.http import (
     MAX_ANSWER,
     bounded,
 )
-from ledger_country_do.channels.ecf_v1.adapters.signing.seeds import require_seed
 from ledger_country_do.channels.ecf_v1.application.ports import (
     Answer,
     Authority,
@@ -77,7 +80,6 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError
 from ledger_country_do.channels.ecf_v1.domain.notation import SANTO_DOMINGO, parse_dgii_moment
 from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage
-from ledger_fiscal_kit.xml.hardened import XmlDocumentError
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import MessageAnswer
 lazy from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
@@ -179,6 +181,7 @@ class DgiiClient(Authority):
     """``Authority`` over HTTPS (see the module); ``opened`` holds its connections."""
 
     __slots__ = (
+        "_audience",
         "_clock",
         "_hosts",
         "_http",
@@ -193,6 +196,7 @@ class DgiiClient(Authority):
     def __init__(self, signer: XmlSigner, **options: Unpack[ClientOptions]) -> None:
         self._signer = signer
         self._hosts = options.get("hosts", OFFICIAL_HOSTS)
+        self._audience = urlsplit(self._hosts.ecf).netloc
         self._timeouts = options.get("timeouts", DEFAULT_TIMEOUTS)
         self._clock = options.get("clock", _now)
         self._sleep = options.get("sleep", asyncio.sleep)
@@ -318,10 +322,13 @@ class DgiiClient(Authority):
         return self._client(service).build_request(method, url, headers=headers, params=params, files=files)
 
     async def _signed(self, seed: bytes) -> bytes:
+        """``seed`` signed for DGII's host; one the signer refuses as no seed, or cannot sign, is unreadable.
+
+        The signer's other errors (no certificate, one not valid, the signer unreachable) pass as they are.
+        """
         try:
-            require_seed(seed)
-            return await self._signer.sign_seed(seed)
-        except (EcfInvalidError, XmlDocumentError) as error:
+            return await self._signer.sign_seed(seed, audience=self._audience)
+        except EcfInvalidError as error:
             raise AuthorityUnavailableError(Failure.UNREADABLE, Service.SEED.value) from error
 
     async def _authenticate(

@@ -24,12 +24,14 @@ from ledger_fiscal_kit.xml.dsig import (
     SHA256,
     DocumentSignedError,
     NotAnRsaKeyError,
+    Prepared,
     SigningPairError,
     UnsignableDocumentError,
     prepare,
     sign_enveloped,
 )
 from ledger_fiscal_kit.xml.hardened import DSIG, XmlDocumentError
+from ledger_kernel.errors import InvalidValueError
 from ledger_testing.pki import SIGNING, Authority, distinguished_name, ec_key, rsa_key
 lazy from ledger_testing.pki import Issued
 
@@ -165,10 +167,23 @@ def test_complete_refuses_a_certificate_that_is_not_the_signers(issued: Issued) 
     assert caught.value.code == "xml_signing_pair_refused"
     with pytest.raises(SigningPairError, match="not the signing key's"):
         prepared.complete(value[::-1], issued.certificate)
-    with pytest.raises(SigningPairError, match="not the signing key's"):
-        prepared.complete(value, Authority.root().issue(SUBJECT, key=ec_key()).certificate)
     with pytest.raises(SigningPairError, match=NOT_FOR_SIGNING):
         prepared.complete(value, certificate(rsa(issued), usage=ENCIPHERMENT_ONLY))
+
+
+def test_complete_refuses_a_certificate_whose_key_is_not_rsa(issued: Issued) -> None:
+    prepared = prepare(ECF)
+    value = rsa(issued).sign(prepared.to_sign, padding.PKCS1v15(), hashes.SHA256())
+    with pytest.raises(NotAnRsaKeyError) as caught:
+        prepared.complete(value, Authority.root().issue(SUBJECT, key=ec_key()).certificate)
+    assert caught.value.code == "xml_signing_key_not_rsa"
+
+
+def test_a_prepared_document_is_made_by_prepare_alone() -> None:
+    # Built otherwise, it would skip prepare's checks (comments, xml: attributes, a signature already there).
+    unchecked = b"<!-- c --><a/>"
+    with pytest.raises(InvalidValueError, match=r"prepared must be made by dsig.prepare"):
+        Prepared(object(), unchecked, "digest", b"<SignedInfo/>")
 
 
 def test_a_signature_made_from_the_digest_alone_verifies(issued: Issued, verify: Verify) -> None:

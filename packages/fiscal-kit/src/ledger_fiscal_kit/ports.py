@@ -148,7 +148,11 @@ class SignerPort(Protocol, metaclass=ABCMeta):
 
     @abstractmethod
     async def certificate_validity(self, call: SystemCall, tenant: Tenant) -> CertificateValidity | None:
-        """When the certificate serving ``tenant``'s company and mode may sign; ``None`` without one."""
+        """When the certificate serving ``tenant``'s company and mode may sign; ``None`` without one.
+
+        ``tenant`` names a mode (it chooses the certificate): a tenant without one is refused
+        (``InvalidValueError``, a defect of the caller), never answered with either mode's certificate.
+        """
 
 
 def is_signer_port(value: object) -> TypeIs[SignerPort]:

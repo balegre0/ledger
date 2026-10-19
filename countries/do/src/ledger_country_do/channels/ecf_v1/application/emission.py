@@ -6,10 +6,11 @@ Emission is two steps, so a caller can keep what was signed before anything leav
   32 under the threshold). The e-CF written and checked, signed (``FechaHoraFirma`` is the clock's moment of
   signing) and checked again; its security code is the first six characters of its signature value. On the
   RFCE route the summary is written with that code, signed and checked too. Nothing is signed unless DGII's
-  side is ready (``Authority.require_ready``: hosts allowed, connections open) and the signing certificate is
-  valid from the moment of signing to ``MAX_SIGNING_SKEW`` after it (``CertificateNotValidError``); nothing
-  is returned whose signature came back more than ``MAX_SIGNING_SKEW`` from that moment (``SigningSkewError``:
-  a queued signer, a clock that jumped). ``sign`` raises, or returns everything signed with its QR.
+  side is ready (``Authority.require_ready``: hosts allowed, connections open). The signer is told the moment
+  of signing and the e-NCF; whether the certificate covers that moment is the signer's rule, not asked here
+  first (``XmlSigner``'s errors: ``CertificateNotValidError``, ``CertificateMissingError``...). Nothing is
+  returned whose signature came back more than ``MAX_SIGNING_SKEW`` from that moment (``SigningSkewError``: a
+  queued signer, a clock that jumped). ``sign`` raises, or returns everything signed with its QR.
 * ``send(signed) -> Emitted`` **never raises a pack error**: whatever stops it parks the document, ``Emitted``
   carrying the signed documents, any track id and the last answer, and ``unknown`` saying why (``Unknown``:
   the error's code, DGII's failure where there is one, and whether the document left: ``False`` certainly
@@ -93,15 +94,6 @@ SEND_BUDGET: Final = 300.0
 """Seconds one ``send`` may take in all: the schedule (108 s), the settle delay and the calls' own limits."""
 
 
-class CertificateNotValidError(EcfConflictError):
-    """The signing certificate is expired or not yet valid at the moment of signing: renew or wait."""
-
-    code: ClassVar[str] = "do_ecf_certificate_not_valid"
-
-    def __init__(self) -> None:
-        super().__init__("the signing certificate is not valid at the moment of signing")
-
-
 class SequenceExpiredError(EcfConflictError):
     """The number's range ended before the moment of signing: a document parked past it needs a new number."""
 
@@ -124,7 +116,11 @@ class SettleTooShortError(EcfError):
 
 
 class SigningSkewError(EcfUnavailableError):
-    """A signature came back too far from its stated moment of signing; signing again may succeed."""
+    """A signature came back too far from its stated moment of signing; signing again may succeed.
+
+    Raised here when the signature returns late, and by the signer (through ``XmlSigner``) when its own clock
+    is that far from the moment the document states.
+    """
 
     code: ClassVar[str] = "do_ecf_signing_skew"
 
@@ -297,14 +293,12 @@ class Emitter:
         signed_at = self._clock()
         if draft.sequence_expires_on is not None and local_date(signed_at) > draft.sequence_expires_on:
             raise SequenceExpiredError  # DGII dates the range: it ran up to that day, in Santo Domingo
-        validity = await self._signer.certificate_validity()
-        if not (validity.covers(signed_at) and validity.covers(signed_at + MAX_SIGNING_SKEW)):
-            raise CertificateNotValidError
-        signed = await self._sign(self._xml.ecf(draft, totals, signed_at=signed_at), signed_at)
+        reference = str(draft.encf)
+        signed = await self._sign(self._xml.ecf(draft, totals, signed_at=signed_at), signed_at, reference)
         code = security_code(self._xml.signed(draft, signed, rfce=False))
         if where is Route.RFCE:
             unsigned = self._xml.rfce(draft, totals, security_code=code)
-            summary = await self._sign(unsigned, signed_at)
+            summary = await self._sign(unsigned, signed_at, reference)
             self._xml.signed(draft, summary, rfce=True)
             qr = rfce_qr_url(
                 RfceQrData(draft.issuer.rnc, draft.encf, totals.total, code),
@@ -357,9 +351,9 @@ class Emitter:
             unknown = Unknown.of(error, sent=progress.sent)
         return Emitted(signed=signed, track_id=progress.track_id, outcome=progress.outcome, unknown=unknown)
 
-    async def _sign(self, document: bytes, signed_at: datetime) -> bytes:
+    async def _sign(self, document: bytes, signed_at: datetime, reference: str) -> bytes:
         """``document`` signed, once its signature is back within ``MAX_SIGNING_SKEW`` of ``signed_at``."""
-        signed = await self._signer.sign_document(document)
+        signed = await self._signer.sign_document(document, signed_at=signed_at, reference=reference)
         if abs(self._clock() - signed_at) > MAX_SIGNING_SKEW:
             raise SigningSkewError
         return signed

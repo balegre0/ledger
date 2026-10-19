@@ -1,10 +1,12 @@
 """The ports do-ecf-v1's use cases need; adapters implement them (spec §4.5).
 
-``XmlSigner`` becomes fiscal-kit's ``SignerPort`` (spec §8.4) at integration, implemented over the signer
-module's gRPC client; in the spike a key held in the test or CLI process implements it. ``Authority`` is
-DGII's web services for an emitter (spec §8.6.3), implemented by ``adapters.dgii.client``. ``EcfFormat`` is
-DGII's XML formats (written, checked against DGII's schemas, signatures verified), implemented by
-``adapters.xml.documents``.
+``XmlSigner`` is the channel's narrow view of fiscal-kit's ``SignerPort`` (spec §8.4), bound to one issuing
+company: ``adapters.signing.port.PortSigner`` implements it over the port (the signer module's gRPC client in
+every app but the signer); in tests, the fake DGII and the spike CLI a key held in that process does. Whoever
+holds the key decides whether its certificate may sign at the moment a document states, never the channel.
+``Authority`` is DGII's web services for an emitter (spec §8.6.3), implemented by ``adapters.dgii.client``.
+``EcfFormat`` is DGII's XML formats (written, checked against DGII's schemas, signatures verified),
+implemented by ``adapters.xml.documents``.
 """
 
 from abc import ABCMeta, abstractmethod
@@ -13,7 +15,11 @@ from enum import StrEnum
 from typing import ClassVar, Protocol, final
 lazy from datetime import datetime
 
-from ledger_country_do.channels.ecf_v1.domain.errors import EcfUnavailableError
+from ledger_country_do.channels.ecf_v1.domain.errors import (
+    EcfConflictError,
+    EcfInvalidError,
+    EcfUnavailableError,
+)
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
@@ -21,33 +27,69 @@ lazy from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage
 lazy from ledger_country_do.channels.ecf_v1.domain.totals import Totals
 
 
-@final
-@dataclass(frozen=True, slots=True)
-class CertificateValidity:
-    """When the signing certificate may sign: from ``not_before`` to ``not_after``, both included."""
-
-    not_before: datetime
-    not_after: datetime
-
-    def covers(self, moment: datetime) -> bool:
-        """Whether the certificate is valid at ``moment``."""
-        return self.not_before <= moment <= self.not_after
-
-
 class XmlSigner(Protocol, metaclass=ABCMeta):
-    """Signs DGII's documents with the issuing company's certificate, in DGII's profile."""
+    """Signs DGII's documents with one issuing company's certificate, in DGII's profile.
+
+    Every method raises, beside the errors it names: ``CertificateMissingError`` (the company has no
+    certificate for the mode), ``CertificateNotValidError`` (it does not cover the moment of signing and the
+    skew after it), ``SigningSkewError`` (the signer's clock disagrees with that moment) and
+    ``SignerUnavailableError`` (the signer could not be reached). Each is a pack error (``EcfError``).
+    """
 
     @abstractmethod
-    async def certificate_validity(self) -> CertificateValidity:
-        """When the certificate the signatures carry is valid."""
+    async def sign_document(self, document: bytes, *, signed_at: datetime, reference: str) -> bytes:
+        """``document`` with DGII's enveloped signature appended as its root's last child.
+
+        ``signed_at``: the moment the document states (``FechaHoraFirma``); ``reference``: its e-NCF, which
+        the signer's audit names. ``DocumentUnsignableError`` when the profile cannot sign it.
+        """
 
     @abstractmethod
-    async def sign_document(self, document: bytes) -> bytes:
-        """``document`` with DGII's enveloped signature appended as its root's last child."""
+    async def sign_seed(self, seed: bytes, *, audience: str) -> bytes:
+        """DGII's or a receiver's authentication seed (``SemillaModel``), signed the same way.
 
-    @abstractmethod
-    async def sign_seed(self, seed: bytes) -> bytes:
-        """DGII's or a receiver's authentication seed (``SemillaModel``), signed the same way."""
+        ``audience``: the host the seed came from (a host name, with its port if any), which the signer's
+        audit names. Anything but DGII's ``SemillaModel`` is refused before it reaches a key
+        (``SeedMalformedError``), so a hostile receiver never gets another document signed as if it were a
+        seed.
+        """
+
+
+class CertificateMissingError(EcfConflictError):
+    """The issuing company has no certificate installed for the mode: install one, then sign again."""
+
+    code: ClassVar[str] = "do_ecf_certificate_missing"
+
+    def __init__(self) -> None:
+        super().__init__("the issuing company has no signing certificate in this mode")
+
+
+class CertificateNotValidError(EcfConflictError):
+    """The signing certificate is expired or not yet valid at the moment of signing: renew or wait."""
+
+    code: ClassVar[str] = "do_ecf_certificate_not_valid"
+
+    def __init__(self) -> None:
+        super().__init__("the signing certificate is not valid at the moment of signing")
+
+
+class SignerUnavailableError(EcfUnavailableError):
+    """The signer could not be reached, or is not configured: signing again later may succeed."""
+
+    code: ClassVar[str] = "do_ecf_signer_unavailable"
+
+    def __init__(self) -> None:
+        super().__init__("the signer is unavailable")
+
+
+class DocumentUnsignableError(EcfInvalidError):
+    """The signer refused to sign the document; ``reason``: its code for why (``xml_document_signed``...)."""
+
+    code: ClassVar[str] = "do_ecf_document_refused"
+
+    def __init__(self, reason: str) -> None:
+        self.reason: str = reason
+        super().__init__(f"the signer refused to sign the document ({reason})")
 
 
 @final

@@ -16,9 +16,13 @@ from ledger_country_do.channels.ecf_v1.adapters.xml import ecf, rfce
 from ledger_country_do.channels.ecf_v1.application.ports import (
     Answer,
     AuthorityUnavailableError,
+    CertificateMissingError,
+    CertificateNotValidError,
+    DocumentUnsignableError,
     OutcomeUnknownError,
     Received,
     Refused,
+    SignerUnavailableError,
     TrackId,
     XmlSigner,
 )
@@ -29,7 +33,7 @@ from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.fake_dgii.state import Scripted, Status
 from ledger_country_do_testing.samples import SIGNED_AT, consumer_invoice, credit_invoice
 from ledger_country_do_testing.transports import FAKE_HOSTS, BreaksAfterSending, Counting
-lazy from ledger_country_do.channels.ecf_v1.application.ports import CertificateValidity
+lazy from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 lazy from ledger_country_do_testing.fake_dgii.app import FakeDgii
 lazy from ledger_country_do_testing.local_signer import KeyPairSigner
 lazy from ledger_testing.clock import ManualClock
@@ -40,9 +44,13 @@ FIRST: Final = Encf(EcfType.CREDIT_INVOICE, 1)
 SEED_PATH: Final = "/testecf/autenticacion/api/autenticacion/semilla"
 
 
+async def signed(signer: KeyPairSigner, document: bytes) -> bytes:
+    return await signer.sign_document(document, signed_at=SIGNED_AT, reference="E310000000001")
+
+
 async def signed_ecf(signer: KeyPairSigner, sequence: int = 1, *, small_consumer: bool = False) -> bytes:
     draft = consumer_invoice(sequence) if small_consumer else credit_invoice(sequence)
-    return await signer.sign_document(ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT))
+    return await signed(signer, ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT))
 
 
 def client_over(
@@ -106,7 +114,7 @@ async def test_the_rfce_is_answered_at_once_on_the_fc_host(
     dgii: DgiiClient, signer: KeyPairSigner, fake: FakeDgii
 ) -> None:
     draft = consumer_invoice()
-    summary = await signer.sign_document(rfce.render(draft, compute_totals(draft), security_code="dcp79q"))
+    summary = await signed(signer, rfce.render(draft, compute_totals(draft), security_code="dcp79q"))
     answer = await dgii.submit_rfce(T, ISSUER, draft.encf, summary)
     assert answer == Answer(code=1, messages=(), sequence_used=True, encf="E320000000001")
     assert fake.received[-1].host == "fc.fake.test"
@@ -122,7 +130,7 @@ async def test_the_rfce_s_messages_keep_their_string_codes_and_dgii_s_valor(
         status=Status.REJECTED, messages=(("RFCE-7", "El monto no cuadra"),), sequence_used=False
     )
     draft = consumer_invoice()
-    summary = await signer.sign_document(rfce.render(draft, compute_totals(draft), security_code="dcp79q"))
+    summary = await signed(signer, rfce.render(draft, compute_totals(draft), security_code="dcp79q"))
     answer = await dgii.submit_rfce(T, ISSUER, draft.encf, summary)
     assert answer == Answer(
         code=2,
@@ -232,7 +240,7 @@ async def test_an_rfce_whose_connection_broke_after_sending_is_not_sent_again(
 ) -> None:
     broken = BreaksAfterSending(httpx.ASGITransport(app=fake.app), "recepcionfc")
     draft = consumer_invoice()
-    summary = await signer.sign_document(rfce.render(draft, compute_totals(draft), security_code="dcp79q"))
+    summary = await signed(signer, rfce.render(draft, compute_totals(draft), security_code="dcp79q"))
     async with client_over(broken, signer, clock, sleeps).opened() as dgii:
         with pytest.raises(OutcomeUnknownError, match="outcome is unknown"):
             await dgii.submit_rfce(T, ISSUER, draft.encf, summary)
@@ -555,6 +563,68 @@ async def test_a_seed_dgii_would_not_send_is_never_signed(
             await dgii.result(T, "a")
 
 
+@final
+class SeedSigner(XmlSigner):
+    """Signs seeds with ``inner`` and records their audiences, or refuses each with ``refusal``."""
+
+    __slots__ = ("_inner", "_refusal", "audiences")
+
+    def __init__(self, inner: KeyPairSigner, refusal: EcfError | None = None) -> None:
+        self._inner = inner
+        self._refusal = refusal
+        self.audiences: list[str] = []
+
+    @override
+    async def sign_document(self, document: bytes, *, signed_at: datetime, reference: str) -> bytes:
+        raise AssertionError  # authentication signs seeds only
+
+    @override
+    async def sign_seed(self, seed: bytes, *, audience: str) -> bytes:
+        self.audiences.append(audience)
+        if self._refusal is not None:
+            raise self._refusal
+        return await self._inner.sign_seed(seed, audience=audience)
+
+
+async def test_a_seed_is_signed_for_dgii_s_host(
+    signer: KeyPairSigner, fake: FakeDgii, clock: ManualClock, sleeps: list[float]
+) -> None:
+    recording = SeedSigner(signer)
+    async with client_over(httpx.ASGITransport(app=fake.app), recording, clock, sleeps).opened() as dgii:
+        await dgii.result(T, "a")
+    official = DgiiClient(recording, transport=scripted_dgii(GOOD_TOKEN, 200, b'{"codigo": 0}'))
+    async with official.opened():
+        await official.result(T, "a")
+    assert recording.audiences == ["ecf.fake.test", "ecf.dgii.gov.do"]
+
+
+async def test_a_seed_the_signer_refuses_to_sign_is_unreadable(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
+) -> None:
+    refusing = SeedSigner(signer, DocumentUnsignableError("xml_document_unsignable"))
+    async with client_over(scripted_dgii(GOOD_TOKEN, 200, b"{}"), refusing, clock, sleeps).opened() as dgii:
+        with pytest.raises(AuthorityUnavailableError, match="seed: unreadable") as raised:
+            await dgii.result(T, "a")
+    assert isinstance(raised.value.__cause__, DocumentUnsignableError)
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [CertificateMissingError(), CertificateNotValidError(), SignerUnavailableError()],
+    ids=["missing", "not-valid", "unavailable"],
+)
+async def test_the_signer_s_other_refusals_pass_as_they_are(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float], refusal: EcfError
+) -> None:
+    # The emitter parks on them by their own codes (a certificate to install, a signer to wait for).
+    refusing = SeedSigner(signer, refusal)
+    async with client_over(scripted_dgii(GOOD_TOKEN, 200, b"{}"), refusing, clock, sleeps).opened() as dgii:
+        with pytest.raises(type(refusal)) as raised:
+            await dgii.submit_ecf(T, ISSUER, FIRST, b"<ECF/>")
+    assert raised.value is refusal
+    assert sleeps == []
+
+
 async def test_a_seed_or_its_validation_refused_is_a_failure(
     signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
 ) -> None:
@@ -742,17 +812,13 @@ class SlowSigner(XmlSigner):
         self._inner = inner
 
     @override
-    async def certificate_validity(self) -> CertificateValidity:
-        return await self._inner.certificate_validity()
+    async def sign_document(self, document: bytes, *, signed_at: datetime, reference: str) -> bytes:
+        return await self._inner.sign_document(document, signed_at=signed_at, reference=reference)
 
     @override
-    async def sign_document(self, document: bytes) -> bytes:
-        return await self._inner.sign_document(document)
-
-    @override
-    async def sign_seed(self, seed: bytes) -> bytes:
+    async def sign_seed(self, seed: bytes, *, audience: str) -> bytes:
         await asyncio.sleep(60)
-        return await self._inner.sign_seed(seed)
+        return await self._inner.sign_seed(seed, audience=audience)
 
 
 async def test_waiting_for_a_token_ends_with_the_deadline(

@@ -7,6 +7,7 @@ description = "Dominican Republic: regime 'do' (DGII's tax law as data) and chan
 requires-python = ">=3.15"
 dependencies = [
     "ledger-kernel",
+    "ledger-platform",
     "ledger-fiscal-kit",
     "cryptography>=50.0.2",
     "httpx>=0.28.1",
@@ -19,6 +20,7 @@ do = "ledger_country_do.regime:REGIME"
 
 [tool.uv.sources]
 ledger-kernel = { workspace = true }
+ledger-platform = { workspace = true }
 ledger-fiscal-kit = { workspace = true }
 
 [build-system]

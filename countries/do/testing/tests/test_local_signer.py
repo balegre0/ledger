@@ -1,21 +1,30 @@
-from datetime import timedelta
+from datetime import UTC, datetime
+from typing import Final
 
 import pytest
 from cryptography.hazmat.primitives.serialization import BestAvailableEncryption, pkcs12
 
+from ledger_country_do.channels.ecf_v1.adapters.signing.seeds import SeedMalformedError
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import verify_enveloped
+from ledger_country_do.channels.ecf_v1.application.ports import DocumentUnsignableError
 from ledger_country_do_testing.local_signer import BundleIncompleteError, KeyPairSigner
 from ledger_country_do_testing.pki import person
 from ledger_country_do_testing.signatures import SHAPES
-from ledger_testing.pki import OPENING_PHRASE, Authority, bundle
+from ledger_fiscal_kit.xml.dsig import NotAnRsaKeyError, SigningPairError
+from ledger_testing.pki import OPENING_PHRASE, Authority, bundle, ec_key, rsa_key
+
+SIGNED_AT: Final = datetime(2026, 10, 13, 13, 30, tzinfo=UTC)
+AUDIENCE: Final = "ecf.dgii.gov.do"
 
 
 async def test_a_bundle_opens_into_a_signer_of_documents_and_seeds() -> None:
     issued = Authority.root().issue(person())
     signer = KeyPairSigner.from_pkcs12(bundle(issued), OPENING_PHRASE.encode())
     assert signer.certificate == issued.certificate
-    assert verify_enveloped(await signer.sign_document(SHAPES["ecf"])).certificate == issued.certificate
-    assert verify_enveloped(await signer.sign_seed(SHAPES["seed"])).certificate == issued.certificate
+    document = await signer.sign_document(SHAPES["ecf"], signed_at=SIGNED_AT, reference="E310000000001")
+    assert verify_enveloped(document).certificate == issued.certificate
+    seed = await signer.sign_seed(SHAPES["seed"], audience=AUDIENCE)
+    assert verify_enveloped(seed).certificate == issued.certificate
 
 
 def test_a_test_certificate_makes_a_signer() -> None:
@@ -54,13 +63,42 @@ def test_the_key_is_never_shown() -> None:
     assert "PRIVATE" not in repr(signer)
 
 
-async def test_the_signer_s_validity_is_its_certificate_s() -> None:
+def test_a_pair_that_cannot_sign_makes_no_signer() -> None:
+    # Refused when built, as the signer refuses it at import: signing never fails for the pair's sake.
     issued = Authority.root().issue(person())
-    validity = await KeyPairSigner.from_issued(issued).certificate_validity()
-    assert (validity.not_before, validity.not_after) == (
-        issued.certificate.not_valid_before_utc,
-        issued.certificate.not_valid_after_utc,
-    )
-    assert validity.covers(validity.not_before)
-    assert validity.covers(validity.not_after)
-    assert not validity.covers(validity.not_after + timedelta(microseconds=1))
+    with pytest.raises(NotAnRsaKeyError):
+        KeyPairSigner(ec_key(), issued.certificate)
+    with pytest.raises(SigningPairError, match="not the signing key's"):
+        KeyPairSigner(rsa_key(), issued.certificate)
+
+
+@pytest.mark.parametrize(
+    "seed", [SHAPES["ecf"], b"<a>", b"<SemillaModel/>"], ids=["an-e-cf", "unreadable", "empty-seed"]
+)
+async def test_what_is_not_dgii_s_seed_is_never_signed(seed: bytes) -> None:
+    signer = KeyPairSigner.from_issued(Authority.root().issue(person()))
+    with pytest.raises(SeedMalformedError):
+        await signer.sign_seed(seed, audience=AUDIENCE)
+
+
+@pytest.mark.parametrize(
+    ("document", "reason"),
+    [
+        (b"<a>", "xml_document_malformed"),
+        (b"<!-- c --><a/>", "xml_document_unsignable"),
+        (
+            SHAPES["ecf"].replace(
+                b"</ECF>", b'<Signature xmlns="http://www.w3.org/2000/09/xmldsig#"/></ECF>'
+            ),
+            "xml_document_signed",
+        ),
+    ],
+    ids=["unreadable", "comment", "signed"],
+)
+async def test_a_document_the_profile_refuses_is_refused_as_the_signer_refuses_it(
+    document: bytes, reason: str
+) -> None:
+    signer = KeyPairSigner.from_issued(Authority.root().issue(person()))
+    with pytest.raises(DocumentUnsignableError) as caught:
+        await signer.sign_document(document, signed_at=SIGNED_AT, reference="E310000000001")
+    assert caught.value.reason == reason
