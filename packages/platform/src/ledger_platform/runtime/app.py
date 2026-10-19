@@ -11,15 +11,20 @@ channels, with the ports modules provide; then merge what they handed back and c
   provider's keys as a resource. It refuses to start without the token settings.
 - ``worker``: the fan-out, an inbox runner per consumer, a job runner per schema with jobs, the scheduler and
   the LISTEN connection, each supervised; ``/livez``, ``/readyz`` and ``/metrics`` on the worker's HTTP port.
+  The fan-out covers the schemas of modules isolated in another role too; nothing else of the worker does.
+- ``signer``: the modules isolated in it alone (``runtime.assembly``), their resources (a gRPC server), inbox
+  runners, job runners and schedules, the scheduler and the LISTEN connection as the worker runs them, but no
+  fan-out (the worker's moves its outbox); ``/livez``, ``/readyz`` and ``/metrics`` on its HTTP port.
 - ``migrate``: every schema's revisions in order (platform first), the relay's grants, then the subscriptions
   of every schema and the routing version in one transaction.
-- ``signer``, ``receiver``: refused until their modules exist (v2-M2, v2-M4).
+- ``receiver``: refused until its modules exist (v2-M4).
 
 Connections. Units go through ``LEDGER_DATABASE_URL``, which may be a transaction pooler's (§6.7): with
 ``LEDGER_DATABASE_POOLED`` psycopg prepares no statement on it. The after-commit NOTIFYs have a pool of their
 own (one connection, short waits), so a busy pool never delays them and they never take a unit's connection.
-The worker's LISTEN connection and ``ledger-migrate`` connect directly (``LEDGER_DATABASE_DIRECT_URL``, which
-the worker requires when it is made); the URLs are secrets and never logged. ``migrate`` exports no spans.
+The LISTEN connections of the worker and the signer, and ``ledger-migrate``, connect directly
+(``LEDGER_DATABASE_DIRECT_URL``, which the worker and the signer require when they are made); the URLs are
+secrets and never logged. ``migrate`` exports no spans.
 
 An app starts once (``AppAlreadyStartedError`` for a second lifespan). It stops within ``STOP_BUDGET``
 seconds, step by step, each step held to its share (``STOP``): the worker's runners are asked to stop (claim
@@ -93,6 +98,8 @@ POOL_HEADROOM: Final = 2
 """Connections beyond what a role runs: readiness checks, a request or a renewal at a busy moment."""
 WORKER_LOOPS: Final = 2
 """The worker's fan-out and scheduler, each holding a connection while it runs a pass."""
+SIGNER_LOOPS: Final = 1
+"""The signer's scheduler: the worker fans its outbox out."""
 STOP_BUDGET: Final = 25.0
 """Seconds an app takes to stop at most: inside an orchestrator's usual 30-second grace."""
 
@@ -122,7 +129,9 @@ STOP: Final = StopTimes()
 _ABANDONED: Final[set[asyncio.Future[object]]] = set()
 """Stop steps left behind: kept until they end, so that they are not collected while they run."""
 _logger = structlog.stdlib.get_logger(__name__)
-_NOT_BUILT: Final = frozenset({"signer", "receiver"})
+_NOT_BUILT: Final = frozenset({"receiver"})
+_LOOPS: Final[Mapping[AppRole, int]] = {"worker": WORKER_LOOPS, "signer": SIGNER_LOOPS}
+"""The roles that run consumers, jobs and schedules (they listen for wake-ups), and their loops besides."""
 _PERMANENT: Final = (InvalidOptionError,)
 """Failures of a worker that no restart can fix."""
 _SET_LOCK_TIMEOUT: Final = text("SELECT set_config('lock_timeout', :wait, true)")
@@ -178,19 +187,24 @@ class PoolNeed:
 
 
 def pool_need(role: AppRole, members: Sequence[Member]) -> PoolNeed:
-    """What ``role`` holds at once: the worker runs every member's jobs and runners; the others, requests."""
-    if role != "worker":
+    """What ``role`` holds at once.
+
+    The worker and the signer run their members' jobs and runners (a member relayed only has none); the
+    others, requests.
+    """
+    loops = _LOOPS.get(role)
+    if loops is None:
         return PoolNeed()
     jobs = sum(decl.concurrency for member in members for decl, _ in member.kinds.values())
     return PoolNeed(
         jobs=jobs,
         renewals=jobs,
-        runners=sum(len(member.consumers) + bool(member.kinds) for member in members) + WORKER_LOOPS,
+        runners=sum(len(member.consumers) + bool(member.kinds) for member in members) + loops,
     )
 
 
 class DirectUrlMissingError(LedgerError):
-    """A worker or ``ledger-migrate`` without ``LEDGER_DATABASE_DIRECT_URL`` (LISTEN, session locks)."""
+    """The worker, the signer or ``ledger-migrate`` without ``LEDGER_DATABASE_DIRECT_URL`` (LISTEN, locks)."""
 
     code: ClassVar[str] = "direct_url_missing"
 
@@ -217,16 +231,16 @@ class SchemaUnknownError(LedgerError):
 
 
 class NotListeningError(LedgerError):
-    """The worker's LISTEN connection is down (readiness)."""
+    """The LISTEN connection of the worker or the signer is down (readiness)."""
 
     code: ClassVar[str] = "listen_down"
 
     def __init__(self) -> None:
-        super().__init__("the worker does not listen for wake-ups")
+        super().__init__("the app does not listen for wake-ups")
 
 
 class WorkersDownError(LedgerError):
-    """The worker's workers are not running, or some ended for good (readiness)."""
+    """The workers of the worker or the signer are not running, or some ended for good (readiness)."""
 
     code: ClassVar[str] = "workers_down"
 
@@ -328,7 +342,7 @@ class App:
     ) -> None:
         if role in _NOT_BUILT:
             raise RoleNotBuiltError(role)
-        if role == "worker" and settings.database_direct_url is None:
+        if role in _LOOPS and settings.database_direct_url is None:
             raise DirectUrlMissingError(role)
         self._role = role
         self._settings = settings
@@ -362,6 +376,7 @@ class App:
         self._signals = Notifier(self._notifications)
         shared = Shared(
             role=role,
+            environment=settings.environment,
             clock=clock,
             database=self._database,
             signals=self._signals,
@@ -390,6 +405,11 @@ class App:
         return self._assembled.modules
 
     @property
+    def members(self) -> tuple[Member, ...]:
+        """What the role assembled: the platform, then the modules in assembly order, then the channels."""
+        return self._assembled.members
+
+    @property
     def migrations(self) -> tuple[SchemaMigrations, ...]:
         """Every schema's revisions, in migration order: the platform's, then each module's and channel's."""
         return tuple(member.migrations for member in self._assembled.members)
@@ -406,8 +426,8 @@ class App:
         await self._close_pools()
 
     def asgi(self) -> FastAPI:
-        """The app to serve (roles ``api`` and ``worker``): its lifespan starts and stops everything else."""
-        if self._role not in {"api", "worker"}:
+        """The app to serve (``api``, ``worker``, ``signer``): its lifespan starts and stops the rest."""
+        if self._role not in {"api", "worker", "signer"}:
             raise RoleMismatchError(self._role, "serve HTTP")
         if self._served is None:
             members = self._assembled.members
@@ -444,10 +464,11 @@ class App:
         health = Health()
         health.add("database", self._database.ping)
         for member in self._assembled.members:
-            health.add(f"schema:{member.schema}", partial(member.migrations.readiness, self._database))
+            if not member.relay_only:  # a schema its login cannot enter
+                health.add(f"schema:{member.schema}", partial(member.migrations.readiness, self._database))
             for name, check in member.checks.items():
                 health.add(f"{member.name}:{name}", check)
-        if self._role == "worker":
+        if self._role in _LOOPS:
             health.add("listen", self._listening)
             health.add("workers", self._working)
             health.add_liveness("workers", self._alive)
@@ -478,7 +499,7 @@ class App:
             for resource in (*resources, *self._authentication.resources()):
                 await resource.__aenter__()
                 opened.append(resource)
-            if self._role == "worker":
+            if self._role in _LOOPS:
                 self._start_workers()
             yield
         finally:
@@ -517,13 +538,15 @@ class App:
         self._running = True  # from the first worker on: a start that fails halfway is stopped all the same
         wakeups = self._wakeups = Wakeups(settings.listen_url.get_secret_value())
         _ = supervisor.start("wakeups", wakeups.run)
-        dispatcher = Dispatcher(
-            self._database,
-            schemas=tuple(member.schema for member in members),
-            signals=self._signals,
-            registry=self._registry,
-        )
-        _ = supervisor.start("dispatcher", partial(dispatcher.run, wakeups))
+        # The worker fans out every schema, relayed ones too: the signer's outbox is moved by the worker's.
+        if self._role == "worker":
+            dispatcher = Dispatcher(
+                self._database,
+                schemas=tuple(member.schema for member in members),
+                signals=self._signals,
+                registry=self._registry,
+            )
+            _ = supervisor.start("dispatcher", partial(dispatcher.run, wakeups))
         for member in members:
             database = self._assembled.bound[member.schema]
             for consumer in member.consumers:

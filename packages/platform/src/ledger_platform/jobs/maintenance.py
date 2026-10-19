@@ -87,9 +87,17 @@ async def _purge_all(purge: _Purge, databases: Sequence[BoundDatabase], batch: i
 
 
 def maintenance_jobs(
-    databases: Sequence[BoundDatabase], *, batch: int = PURGE_BATCH
+    databases: Sequence[BoundDatabase],
+    *,
+    batch: int = PURGE_BATCH,
+    kinds: tuple[str, str] = (PURGE_IDEMPOTENCY_KEYS, PURGE_DONE_JOBS),
 ) -> tuple[JobSpec, JobSpec]:
-    """The two purge jobs over every bound schema (the platform's assembly hands them to its runner)."""
+    """The two purge jobs over ``databases``, of ``kinds`` (expired keys, then done jobs).
+
+    The platform's assembly hands the platform's kinds to its runner, over every schema the app's login
+    enters; a module whose schema only its own role reaches (the signer's) declares kinds of its own and hands
+    them over for its schema (Decision 11).
+    """
     require_at_least("purge", "batch", batch)
     bound = tuple(databases)
 
@@ -103,6 +111,5 @@ def maintenance_jobs(
         await _purge_all(_done_jobs, bound, batch)
         return Done()
 
-    return JobSpec(kind=PURGE_IDEMPOTENCY_KEYS, handler=purge_keys), JobSpec(
-        kind=PURGE_DONE_JOBS, handler=purge_jobs
-    )
+    keys_kind, jobs_kind = kinds
+    return JobSpec(kind=keys_kind, handler=purge_keys), JobSpec(kind=jobs_kind, handler=purge_jobs)

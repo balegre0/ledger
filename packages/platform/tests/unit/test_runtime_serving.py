@@ -12,6 +12,7 @@ lazy from fastapi import FastAPI
 from ledger_platform.config.settings import LogFormat, Settings
 from ledger_platform.runtime import SERVER_LOGGERS, serve, serving, serving_logs
 from ledger_platform.runtime.app import STOP_BUDGET, DirectUrlMissingError
+from ledger_platform.runtime.assembly import IsolatedModuleMissingError
 
 URL = "postgresql+psycopg://ledger_app:x@127.0.0.1:1/ledger"
 _RECORD = TypeAdapter(dict[str, object])
@@ -70,11 +71,32 @@ def test_the_worker_factory_builds_the_worker_app_without_connecting() -> None:
     assert not any(path.startswith("/v1/") for path in paths(app))
 
 
+def distribution_version(distribution: str) -> str:
+    """``importlib.metadata.version`` of the signer's app, which comes with a later task."""
+    del distribution
+    return "1.2.3"
+
+
 @pytest.mark.usefixtures("environment")
-def test_a_worker_without_a_direct_url_does_not_start(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_signer_factory_refuses_to_start_without_an_isolated_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No module of this workspace is isolated in the signer's role yet: its app has nothing to run."""
+    monkeypatch.setattr(serving, "version", distribution_version)
+    with pytest.raises(IsolatedModuleMissingError):
+        serving.signer()
+
+
+@pytest.mark.usefixtures("environment")
+@pytest.mark.parametrize("role", ["worker", "signer"])
+def test_an_app_that_listens_without_a_direct_url_does_not_start(
+    monkeypatch: pytest.MonkeyPatch, role: serving.ServedRole
+) -> None:
     monkeypatch.delenv("LEDGER_DATABASE_DIRECT_URL")
-    with pytest.raises(DirectUrlMissingError):
-        serving.worker()
+    monkeypatch.setattr(serving, "version", distribution_version)
+    factory = {"worker": serving.worker, "signer": serving.signer}[role]
+    with pytest.raises(DirectUrlMissingError, match=role):
+        factory()
 
 
 def served(monkeypatch: pytest.MonkeyPatch, role: serving.ServedRole) -> dict[str, object]:
@@ -95,7 +117,7 @@ def served(monkeypatch: pytest.MonkeyPatch, role: serving.ServedRole) -> dict[st
 
 
 @pytest.mark.usefixtures("environment")
-@pytest.mark.parametrize("role", ["api", "worker"])
+@pytest.mark.parametrize("role", ["api", "worker", "signer"])
 def test_serve_hands_granian_the_role_s_factory_on_the_configured_address(
     monkeypatch: pytest.MonkeyPatch, role: serving.ServedRole
 ) -> None:

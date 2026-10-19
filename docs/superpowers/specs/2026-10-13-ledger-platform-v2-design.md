@@ -414,7 +414,7 @@ state machines** (ADR 0003).
 Rule 7, ADR 0010.
 
 - **Process**: `ledger-signer`, its own Deployment, its own PostgreSQL login (`ledger_signer`, member of
-  `signer_rw` only), its own KMS and certification-entity credentials. Network policy: only `api`, `worker` and
+  `signer_rw`, `signer_purge` and, for its schedule leases, `platform_rw`: §6.2), its own KMS and certification-entity credentials. Network policy: only `api`, `worker` and
   `receiver` pods reach its gRPC port; it reaches only PostgreSQL, KMS and the certification entity.
 - **Backends** (`SigningBackend` port inside the signer; one per certificate, chosen at import):
   - `local`: the `.p12` is parsed in the signer; the private key is encrypted with a per-certificate data key

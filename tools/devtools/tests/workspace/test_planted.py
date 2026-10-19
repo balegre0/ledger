@@ -197,6 +197,25 @@ def test_a_planted_isolated_module_gets_the_signer_login_and_a_custody_contract(
     assert "forbidden_modules =\n    ledger_vault.adapters.custody\n" in contracts
 
 
+def test_a_role_isolates_one_module_at_most(repository: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A second module isolated in the signer's role fails sync and check, naming both (rule of two)."""
+    for name in ("vault", "lockbox"):
+        manifest = VAULT.replace('"vault"', f'"{name}"')
+        write_files(
+            repository,
+            {
+                f"modules/{name}/manifest.toml": manifest,
+                f"modules/{name}/src/ledger_{name}/__init__.py": PLANTED_DOCSTRING,
+            },
+        )
+    problem = (
+        "modules 'lockbox' and 'vault' are both isolated in the signer's role: a role isolates one module"
+    )
+    for command in ("sync", "check"):
+        assert main([command, "--root", str(repository)]) == 1
+        assert problem in capsys.readouterr().out
+
+
 SIGNER_APP: Final = """[package]
 name = "signer"
 kind = "app"

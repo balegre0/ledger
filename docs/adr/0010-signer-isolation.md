@@ -37,3 +37,22 @@ authorization to manage signature-creation data on the signer's behalf.
   channels; the signer is the template for later extractions.
 - Negative: one gRPC hop per signature (far under the 50 ms p95 target for the local backend; the remote
   backend's latency is set by the entity) and one more deployable.
+
+## Accepted risks and follow-ups
+
+Recorded at the review of the runtime's signer role (v2-M2b Task 3); each names who closes it.
+
+1. **The signer process imports every installed entry point.** The `signer` app loads every module, regime and
+   channel entry point of the one image before keeping only the modules isolated in its role (the others are
+   not assembled and their settings are not read, but their code is imported). Accepted for the one-image
+   deployment. Follow-up: filter entry points by distribution metadata before importing them.
+2. **`platform_rw` gives the signer login the whole platform schema.** `ledger_signer` needs
+   `platform.schedule_leases` (and `SELECT` on `platform.alembic_version` for readiness) but is a member of
+   the whole `platform_rw`. Follow-up: a narrow group role holding exactly those two grants.
+3. **An isolated module installed while the signer is absent or not ready.** The worker keeps fanning events
+   into the signer's inbox, where they pile up without an unrouted flag (they are routed; nobody consumes
+   them). Follow-up (v2-M2b Task 14, alerts in v2-M6): a runbook and an alert on the age of the oldest ready
+   row of the signer's inbox, and on the signer's readiness.
+4. **No client readiness on the signer.** The client side of the signer module (in `api`, `worker`,
+   `receiver`) must hand no readiness check that calls the signer: their readiness never depends on it
+   (spec §3.7). v2-M2b Tasks 12 and 13 test it.
