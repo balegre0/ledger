@@ -6,10 +6,14 @@ reported outside them, by the chassis's error handling, once they have ended: so
 the request's ASGI scope (the mapping Starlette's ``request.state`` lives in too), which that handling reads.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final, final
-lazy from collections.abc import Mapping, MutableMapping
+lazy from collections.abc import Generator, Mapping, MutableMapping
+
+import structlog
+lazy from fastapi import Request
 
 _KEY: Final = "ledger.caller"
 """Where in the scope of a request the fields are kept."""
@@ -36,3 +40,11 @@ def remembered(scope: Mapping[str, object]) -> Mapping[str, str]:
             return values
         case _:
             return _NONE
+
+
+@contextmanager
+def bound(request: Request, **fields: str) -> Generator[None]:
+    """``fields`` in the log context while the block runs, and in the request for its failure's log line."""
+    remember(request.scope, **fields)
+    with structlog.contextvars.bound_contextvars(**fields):
+        yield

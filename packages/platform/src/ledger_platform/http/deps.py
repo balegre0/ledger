@@ -1,7 +1,9 @@
 """What a module's routes declare: who calls, for which company, and how the request applies.
 
-* ``authenticated(verifier)``: a dependency giving the caller (``Principal``) its bearer token proves; 401
-  without one that holds. It is also the OpenAPI document's security scheme (HTTP bearer, JWT).
+* ``Caller``: the dependency giving a route its ``Principal`` (``Authentication.caller``, the only one a
+module
+  gets; the chassis's token-only one is ``proving.authenticated``). ``BEARER`` is the OpenAPI document's
+  security scheme (HTTP bearer, JWT).
 * ``company_in_path(caller, permissions)`` and ``company_in_header(...)``: the company of the request (the
   path's ``company_id``, or the ``Ledger-Company`` header, §9.7) and what the caller may do there
   (``CompanyAccess``); 404 when it may do nothing there, whichever organization the company is of. The caller
@@ -24,20 +26,16 @@
 The dependencies bind what they learn (``organization_id``, ``subject``, ``company_id``) to the log context
 for the rest of the request, and unbind it when the request ends. They also leave it in the request
 (``request_fields``), for the log line of a failure the chassis reports once they have ended.
-``authenticated`` also makes the caller the actor of what the request audits (``acting_as``, Decision 10):
-its kind and subject (``Actor.of``), in the call its request id names, or in a call of its own (a UUIDv7)
-where it is not traced.
+The caller is also the actor of what the request audits (``proving.authenticated``, Decision 10).
 """
 
 from abc import ABCMeta, abstractmethod
-from contextlib import contextmanager
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Annotated, ClassVar, Final, Protocol, final
 from weakref import WeakSet
-lazy from collections.abc import AsyncGenerator, Callable, Coroutine, Generator, Iterator, Sequence
+lazy from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator, Sequence
 
-import structlog
 from fastapi import Depends, Header, Path
 from fastapi.routing import APIRoute, iter_route_contexts
 from fastapi.security import HTTPBearer
@@ -49,17 +47,12 @@ lazy from starlette.routing import BaseRoute
 
 from ledger_kernel.access import CompanyNotFoundError
 from ledger_kernel.errors import ForbiddenError, InvalidInputError, LedgerError
-from ledger_kernel.ids import COMPANY_PREFIX, CompanyId, InvalidPublicIdError, new_id, parse_id
+from ledger_kernel.ids import COMPANY_PREFIX, CompanyId, InvalidPublicIdError, parse_id
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.access import CompanyAccess
-from ledger_platform.auth.tokens import MissingTokenError
-from ledger_platform.data.audit import Actor, acting_as
-from ledger_platform.http.problems import current_request_id
-from ledger_platform.http.rate import RateLimitedError
-from ledger_platform.http.request_fields import remember
+from ledger_platform.http.request_fields import bound
 lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_platform.auth.access import PermissionSource
-lazy from ledger_platform.http.rate import RateLimiter
 
 COMPANY_HEADER: Final = "Ledger-Company"
 IF_MATCH: Final = "If-Match"
@@ -131,43 +124,6 @@ class AmbiguousCompanyError(LedgerError):
         super().__init__(f"a route takes its company from its path or from {COMPANY_HEADER}, never both")
 
 
-@contextmanager
-def _bound(request: Request, **fields: str) -> Generator[None]:
-    """``fields`` in the log context while the block runs, and in the request for its failure's log line."""
-    remember(request.scope, **fields)
-    with structlog.contextvars.bound_contextvars(**fields):
-        yield
-
-
-def authenticated(verifier: Verifier, limiter: RateLimiter | None = None) -> Caller:
-    """The dependency that gives a route its caller, proven by the request's bearer token.
-
-    With a ``limiter``, a caller over its rate is refused (429) once it is proven: nobody is counted, and so
-    nobody can be limited, by presenting a token that does not verify.
-    """
-
-    async def caller(
-        request: Request,
-        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(BEARER)],
-    ) -> AsyncGenerator[Principal]:
-        if credentials is None:
-            raise MissingTokenError
-        principal = await verifier.verify(credentials.credentials)
-        if (
-            limiter is not None
-            and (wait := limiter.wait(f"{principal.organization}:{principal.subject}")) > 0
-        ):
-            raise RateLimitedError(wait)
-        call = current_request_id() or str(new_id())
-        with (
-            _bound(request, organization_id=str(principal.organization), subject=principal.subject),
-            acting_as(Actor.of(principal, call)),
-        ):
-            yield principal
-
-    return caller
-
-
 async def _granted(principal: Principal, company_id: str, source: PermissionSource) -> CompanyAccess:
     """``principal``'s access to the company ``company_id`` names; ``CompanyNotFoundError`` without a role.
 
@@ -194,7 +150,7 @@ def company_in_path[**P](caller: Caller, permissions: PermissionsDependency[P]) 
         source: Annotated[PermissionSource, Depends(permissions)],
     ) -> AsyncGenerator[CompanyAccess]:
         granted = await _granted(principal, company_id, source)
-        with _bound(request, company_id=str(granted.tenant.company)):
+        with bound(request, company_id=str(granted.tenant.company)):
             yield granted
 
     return access
@@ -220,7 +176,7 @@ def company_in_header[**P](caller: Caller, permissions: PermissionsDependency[P]
         if len(request.headers.getlist(COMPANY_HEADER)) > 1:
             raise InvalidHeaderError(COMPANY_HEADER, "sent once")
         granted = await _granted(principal, company_header, source)
-        with _bound(request, company_id=str(granted.tenant.company)):
+        with bound(request, company_id=str(granted.tenant.company)):
             yield granted
 
     return access
@@ -301,7 +257,7 @@ def unguarded_routes(routes: Sequence[BaseRoute], *, prefix: str = "/v1") -> tup
     """Every route under ``prefix`` that needs no bearer token, or declares no requirement, and why.
 
     ``routes`` are an app's (``app.routes``), its included routers' too. A route needs a token when it
-    depends, directly or through another dependency, on ``authenticated``'s bearer scheme; it declares a
+    depends, directly or through another dependency, on the bearer scheme (``BEARER``); it declares a
     requirement when one of its dependencies was made by ``allowed``, ``holding`` or ``in_organization``. Both
     are read from the route's own dependencies: a dependency an ``APIRouter`` adds to all its routes is not
     seen. Empty when every route is guarded: an app's test asserts so.

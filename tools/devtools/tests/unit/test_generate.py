@@ -460,6 +460,21 @@ def test_production_never_imports_what_only_dev_tooling_declares(tree: Path, wri
     assert "    ledger_country_do_testing" in forbidden.splitlines()
 
 
+def test_no_module_or_country_builds_a_caller_that_skips_how_callers_stand(tree: Path, write: Writer) -> None:
+    """``Authentication.caller`` is the one caller a module gets: the token-only one is the chassis's own."""
+    write("countries/do", COUNTRY, ())
+    text = importlinter_text(Workspace.load(tree))
+    marker = "[importlinter:contract:only-the-chassis-proves-tokens]\n"
+    contract = text.split(marker, 1)[1].split("\n\n", 1)[0]
+    assert contract == (
+        "name = Only the chassis builds a caller from a token alone\n"
+        "type = forbidden\n"
+        "source_modules =\n    ledger_country_do\n    ledger_identity\n"
+        "forbidden_modules =\n    ledger_platform.http.proving\n"
+        "allow_indirect_imports = True"
+    )
+
+
 def test_a_country_s_channels_on_disk_are_layered_and_pure(tree: Path, write: Writer) -> None:
     source = write("countries/do", COUNTRY, ("regime", "channels"))
     for layer in ("adapters", "application", "domain"):

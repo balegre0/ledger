@@ -613,6 +613,17 @@ forbidden_modules =
     xdist
     xmlschema
 
+[importlinter:contract:only-the-chassis-proves-tokens]
+name = Only the chassis builds a caller from a token alone
+type = forbidden
+source_modules =
+    ledger_country_do
+    ledger_identity
+    ledger_invoicing
+forbidden_modules =
+    ledger_platform.http.proving
+allow_indirect_imports = True
+
 [importlinter:contract:apps-only-compose]
 name = Apps only compose
 type = forbidden

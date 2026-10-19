@@ -21,8 +21,9 @@ lazy from prometheus_client import CollectorRegistry
 from ledger_kernel.access import PrincipalKind
 from ledger_platform.auth.keys import HttpKeys, PublishedKeys
 from ledger_platform.auth.tokens import TokenPolicy, TokenSettingsMissingError, TokenVerifier
-from ledger_platform.http.deps import BEARER, Verifier, authenticated
+from ledger_platform.http.deps import BEARER, Verifier
 from ledger_platform.http.mode import MODE_KEY
+from ledger_platform.http.proving import authenticated
 from ledger_platform.http.rate import RateLimiter
 from ledger_platform.http.standing import (
     NOTHING_KNOWN,

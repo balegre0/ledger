@@ -17,8 +17,9 @@ from ledger_kernel.access import Principal, PrincipalKind, SubjectId
 from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.http.app import ApiInfo, Observability, create_app
-from ledger_platform.http.deps import Verifier, authenticated
+from ledger_platform.http.deps import Verifier
 from ledger_platform.http.problems import Problem
+from ledger_platform.http.proving import authenticated
 from ledger_platform.http.rate import RateLimitedError, RateLimiter
 from ledger_platform.observability.health import Health
 

@@ -165,6 +165,10 @@ FORBIDDEN: Final = {
         "import ledger_country_do.channels.ecf_v1.adapters",
     ),
     "do-channel-ecf_v1-is-pure": (f"{ECF_V1}/domain/__init__.py", "import sqlalchemy"),
+    "only-the-chassis-proves-tokens": (
+        "modules/identity/src/ledger_identity/adapters/__init__.py",
+        "import ledger_platform.http.proving",
+    ),
 }
 _CONTRACT: Final = re.compile(r"^\[importlinter:contract:(.+)\]$", re.MULTILINE)
 
@@ -187,6 +191,9 @@ def synced(tree: Path, write: Writer) -> Path:
         directory = tree / "packages/platform/src/ledger_platform" / child
         directory.mkdir()
         (directory / "__init__.py").write_text('"""Layer."""\n', encoding="utf-8")
+    (tree / "packages/platform/src/ledger_platform/http/proving.py").write_text(
+        '"""The chassis caller from a token alone."""\n', encoding="utf-8"
+    )
     for layer in ("adapters", "application", "domain"):
         directory = tree / ECF_V1 / layer
         directory.mkdir(parents=True)

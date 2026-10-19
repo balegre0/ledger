@@ -25,8 +25,8 @@ from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.http import create_app
 from ledger_platform.http.app import ApiInfo, Observability
 from ledger_platform.http.authentication import Authentication
-from ledger_platform.http.deps import authenticated
 from ledger_platform.http.mode import ledger_mode_of
+from ledger_platform.http.proving import authenticated
 from ledger_platform.http.standing import (
     ApiClientRevokedError,
     ApiClientUnregisteredError,

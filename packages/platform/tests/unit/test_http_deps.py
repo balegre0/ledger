@@ -29,7 +29,6 @@ from ledger_platform.http.deps import (
     IfMatch,
     allowed,
     any_principal,
-    authenticated,
     company_in_header,
     company_in_path,
     etag,
@@ -41,6 +40,7 @@ from ledger_platform.http.deps import (
     unguarded_routes,
 )
 from ledger_platform.http.openapi import precondition_checked
+from ledger_platform.http.proving import authenticated
 from ledger_platform.observability.health import Health
 from ledger_testing.issuer import AUDIENCE, ISSUER, PROVIDER_ORGANIZATION, SUBJECT, machine_claims
 lazy from ledger_kernel.access import Permission, Principal

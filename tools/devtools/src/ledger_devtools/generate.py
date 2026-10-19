@@ -60,6 +60,9 @@ PLATFORM_LAYERS: Final = (
 
 ``_manifest`` sits above ``config``: the generated file validates its data with ``config.manifest``'s model.
 """
+PROVING: Final = "ledger_platform.http.proving"
+"""The chassis's token-only caller: every route's caller applies how its caller stands, so nothing but the
+chassis builds one from this (``Authentication.caller`` is the one a module or a country gets)."""
 _PROTECTED: Final = ("domain", "application", "adapters", "assembly", "_manifest")
 """A module's layers nothing else in production imports (contract 7)."""
 _INNER: Final = ("domain", "application", "adapters")
@@ -566,6 +569,14 @@ def _closing_contracts(facts: _Facts) -> Iterator[str | None]:
             "forbidden_modules",
             sorted({*TEST_TOOLING, *tooling, *(package.import_name for package in dev_only)}),
         ),
+    )
+    yield _contract(
+        "only-the-chassis-proves-tokens",
+        "Only the chassis builds a caller from a token alone",
+        "forbidden",
+        ("source_modules", sorted({*facts.countries, *(module.import_name for module in workspace.modules)})),
+        ("forbidden_modules", [PROVING]),
+        ("allow_indirect_imports", "True"),
     )
     inner = [name for module in workspace.modules for name in facts.submodules(module, _INNER)]
     below_runtime = [
