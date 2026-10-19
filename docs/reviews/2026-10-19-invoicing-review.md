@@ -26,7 +26,7 @@ now is safe if I1 is the first follow-up commit on `main`.
   401 from the standings. A retry for another company never matches the hash. Replay hands out nothing beyond
   what the caller received, or could read, already. Tests:
   `test_a_retry_after_*` (`tests/integration/test_invoices_api.py:409-463`).
-- **Paired-column CHECKs.** `ck_invoices_seller_tax_id`, `_buyer_tax_id`, `_buyer_named`, `_void_reason`,
+- **Paired-column check constraints.** `ck_invoices_seller_tax_id`, `_buyer_tax_id`, `_buyer_named`, `_void_reason`,
   `_functional` and `ck_invoice_taxes_functional` are in the migration and the models in the same words
   (`r0001_invoicing.py:115-135`, `tables.py:115-135`). The reader refuses a partial row
   (`repositories.py:201-225`).
@@ -92,7 +92,7 @@ Files: `domain/invoice.py:220-236` (`_require_correctable`), `domain/pricing.py:
 - **Fix.** Refuse a note whose `issue_date` is before the corrected invoice's (`CorrectionProblem.BEFORE_INVOICE`,
   422 `correction_invalid`). This is checked under the lock in `apply`, where the invoice is already read.
 - **Owner decision needed.** Should a note's lines be priced at the corrected invoice's tax point by default, and
-  is that one exempt from the 400-day bound? DGII's `InformacionReferencia` also needs the corrected invoice's
+  is that one exempt from the 400-day bound? DGII's reference block of a note also needs the corrected invoice's
   date (see M3b below).
 
 ### Minor
@@ -206,7 +206,7 @@ Files: `ledger_platform/http/idempotency.py` (`_identity`), invoicing's `idempot
    Decision 24 moves that decision to the chain, so `price` must accept and keep them.
 6. **Corrections need the corrected invoice's data.** `InvoiceView.corrects` is an id. `fiscal_draft` needs the
    corrected invoice's issue date and its authority number, from a second `document()` call plus the mirror. The
-   DO `CodigoModificacion` has no field yet. See also I1.
+   DO modification code (the reason a note corrects) has no field yet. See also I1.
 7. **Channel limits are tighter than invoicing's.**
 
    | Field | invoicing | DO e-CF |
