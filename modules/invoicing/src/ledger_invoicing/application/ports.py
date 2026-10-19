@@ -1,0 +1,124 @@
+"""What the use cases need: invoicing's state in one unit of work, and identity through its API.
+
+A unit is one transaction scoped to a company in a mode: row-level security limits what its repositories see
+to that tenant, and every repository names it in every statement (tenancy is checked twice, §2). identity is
+asked outside any unit (rule 13: no facade call while a unit is open), through ``CompanyDirectory``. The
+methods are abstract so that they need no body: a ``...`` is a statement no test could reach.
+"""
+
+from abc import ABCMeta, abstractmethod
+from dataclasses import dataclass
+from typing import Literal, Protocol, final
+lazy from collections.abc import Callable, Mapping
+lazy from contextlib import AbstractAsyncContextManager
+lazy from datetime import datetime
+lazy from uuid import UUID
+
+lazy from ledger_identity.api import CompanyInfo
+lazy from ledger_invoicing.domain.ids import InvoiceId
+lazy from ledger_invoicing.domain.invoice import Invoice
+lazy from ledger_invoicing.domain.pricing import EstablishmentRef
+lazy from ledger_invoicing.events import InvoicingEvent
+lazy from ledger_kernel.ids import CompanyId
+lazy from ledger_kernel.jurisdiction import Jurisdiction
+lazy from ledger_kernel.regimes import RegimeDef
+lazy from ledger_kernel.tenancy import Tenant
+lazy from ledger_platform.runtime.calls import Call
+
+type RegimeOf = Callable[[Jurisdiction], RegimeDef | None]
+"""The installed regime that governs a jurisdiction, if any (its subdivision's, else its country's)."""
+
+
+class Invoices(Protocol, metaclass=ABCMeta):
+    """The documents of the unit's company, in the unit's mode."""
+
+    @abstractmethod
+    async def add(self, invoice: Invoice) -> InvoiceId | None:
+        """Keep a new document: ``None`` once kept, else the document of its type holding its business key.
+
+        Nothing is kept when the business key is taken: it is unique per company, mode and type for ever.
+        """
+
+    @abstractmethod
+    async def get(self, invoice: InvoiceId) -> Invoice | None:
+        """The document, or ``None`` (another company's or mode's is ``None`` too)."""
+
+    @abstractmethod
+    async def locked(self, invoice: InvoiceId) -> Invoice | None:
+        """The document, locked until the unit ends: whatever is decided on it waits for other units first."""
+
+    @abstractmethod
+    async def update(self, invoice: Invoice) -> None:
+        """Keep ``invoice`` in place of the version kept of it, which the unit holds locked."""
+
+
+class Events(Protocol, metaclass=ABCMeta):
+    """What the unit announces once it commits."""
+
+    @abstractmethod
+    def publish(self, event: InvoicingEvent) -> None:
+        """Announce ``event`` when, and only if, the unit commits (the outbox, written with the unit)."""
+
+
+type AuditAction = Literal["invoice.create", "invoice.issue", "invoice.void"]
+"""What a use case records it did (§10): every change of a document is audited."""
+
+
+class Audit(Protocol, metaclass=ABCMeta):
+    """Who changed what, recorded with the change (``audit_events``, §6.4): it commits with the unit, or not.
+
+    The actor is the call the unit runs in, not the use case's to name.
+    """
+
+    @abstractmethod
+    def record(
+        self,
+        action: AuditAction,
+        subject: UUID,
+        *,
+        before: object,
+        after: object,
+        detail: Mapping[str, str] | None = None,
+    ) -> None:
+        """Record that ``action`` changed ``subject`` from ``before`` to ``after`` (``None``: not there).
+
+        Only hashes of the two are kept; ``detail`` holds codes only, never what a client typed.
+        """
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InvoicingUnit:
+    """One unit of work: invoicing's state as one transaction sees it, and what it announces."""
+
+    invoices: Invoices
+    events: Events
+    audit: Audit
+    now: datetime
+    """The unit's time: everything it records and announces happened then, as one transaction does."""
+
+
+class InvoicingUnits(Protocol, metaclass=ABCMeta):
+    """Where the use cases get the units they work in, one for each thing they do."""
+
+    @abstractmethod
+    def unit(self, tenant: Tenant) -> AbstractAsyncContextManager[InvoicingUnit]:
+        """A unit scoped to ``tenant`` (a company in a mode); it commits when its block ends cleanly."""
+
+
+class CompanyDirectory(Protocol, metaclass=ABCMeta):
+    """What invoicing asks identity (``IdentityApi``), never while a unit is open (rule 13).
+
+    Answers are as identity has them when asked; they decide the seller, the regime and the establishment's
+    day, and a document stores what it took from them.
+    """
+
+    @abstractmethod
+    async def company(self, call: Call, company: CompanyId) -> CompanyInfo:
+        """The company (``CompanyNotFoundError`` when the call's organization has none by that id)."""
+
+    @abstractmethod
+    async def establishment(
+        self, call: Call, company: CompanyId, code: str | None
+    ) -> EstablishmentRef | None:
+        """The company's establishment of ``code`` (``MAIN`` when ``None``), or ``None`` when it has none."""

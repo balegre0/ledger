@@ -36,3 +36,7 @@ class InvoiceVoided(Event):
     VERSION: ClassVar[int] = 1
     kind: DocumentKind
     direction: Direction
+
+
+type InvoicingEvent = InvoiceIssued | InvoiceVoided
+"""Every event invoicing publishes (its manifest's ``[[events.publishes]]``)."""

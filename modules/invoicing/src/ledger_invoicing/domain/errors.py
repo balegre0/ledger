@@ -10,7 +10,7 @@ from typing import ClassVar
 lazy from uuid import UUID
 
 from ledger_invoicing.domain.ids import INVOICE_PREFIX
-from ledger_kernel.errors import ConflictError, InvalidInputError, NotFoundError
+from ledger_kernel.errors import ConflictError, InvalidInputError, LedgerError, NotFoundError
 from ledger_kernel.ids import format_id
 
 
@@ -224,3 +224,25 @@ class InvoiceChangedError(ConflictError):
 
     def __init__(self, invoice: UUID) -> None:
         super().__init__(f"invoice {_public(invoice)} changed meanwhile: read it again")
+
+
+class EstablishmentUnknownError(InvalidInputError):
+    """The document names an establishment its company does not have."""
+
+    code: ClassVar[str] = "establishment_unknown"
+
+    def __init__(self) -> None:
+        super().__init__("establishment names no establishment of the company")
+
+
+class RegimeMissingError(LedgerError):
+    """No installed regime governs the company's jurisdiction: a defect of the installation, not the request.
+
+    identity registers a company only in a jurisdiction an installed regime governs, so a missing one means a
+    country pack was removed while its companies remained.
+    """
+
+    code: ClassVar[str] = "regime_missing"
+
+    def __init__(self) -> None:
+        super().__init__("no installed regime governs the company's jurisdiction")

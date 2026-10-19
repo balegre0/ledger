@@ -1,0 +1,223 @@
+"""What changes invoicing's state: creating a document (a draft, or issued at once), issuing a draft, voiding.
+
+Each use case asks identity what it needs first (the company, its establishment), outside any unit (rule 13),
+prices the document with the regime of the company's jurisdiction, and then changes the state in one unit of
+the call's tenant, which commits the change, its event and its audit record together or none of them (rule 3).
+A refusal leaves nothing stored, announced or recorded.
+"""
+
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Final, final
+lazy from collections.abc import Callable
+lazy from datetime import date
+lazy from decimal import Decimal
+lazy from uuid import UUID
+
+from ledger_identity.api import CompanyInactiveError
+from ledger_invoicing.domain.errors import (
+    CorrectionInvalidError,
+    CorrectionProblem,
+    EstablishmentUnknownError,
+    ExternalReferenceTakenError,
+    InvoiceChangedError,
+    InvoiceNotFoundError,
+    InvoiceNotIssuableError,
+    RegimeMissingError,
+)
+from ledger_invoicing.domain.ids import InvoiceId
+from ledger_invoicing.domain.invoice import Invoice, InvoiceStatus, Opening
+from ledger_invoicing.domain.parties import Seller
+from ledger_invoicing.domain.pricing import Terms, local_date, price
+from ledger_kernel.errors import InvalidValueError
+from ledger_kernel.tenancy import Tenant
+lazy from ledger_identity.api import CompanyInfo
+lazy from ledger_invoicing.application.ports import CompanyDirectory, InvoicingUnits, RegimeOf
+lazy from ledger_invoicing.domain.lines import LineTerms
+lazy from ledger_invoicing.domain.parties import Party
+lazy from ledger_invoicing.domain.pricing import CountryFields, EstablishmentRef, Pricing
+lazy from ledger_invoicing.domain.text import ExternalReference, Reason
+lazy from ledger_kernel.clock import Clock
+lazy from ledger_kernel.money import Currency
+lazy from ledger_kernel.regimes import Direction, DocumentKind, RegimeDef
+lazy from ledger_platform.runtime.calls import Call
+
+_NO_FIELDS: Final[CountryFields] = MappingProxyType({})
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Creation:
+    """A document a client asks to create, as it wrote it (``POST /v1/invoices``).
+
+    What is ``None`` defaults: the currency to the company's functional one (Decision 5), the establishment to
+    ``MAIN``, the dates when the document is priced (Decision 6). It is issued at once unless ``draft``
+    (Decision 3).
+    """
+
+    kind: DocumentKind
+    direction: Direction
+    lines: tuple[LineTerms, ...]
+    currency: Currency | None = None
+    exchange_rate: Decimal | None = None
+    issue_date: date | None = None
+    tax_point: date | None = None
+    establishment: str | None = None
+    buyer: Party | None = None
+    fiscal: CountryFields = field(default=_NO_FIELDS, hash=False)
+    external_reference: ExternalReference | None = None
+    corrects: InvoiceId | None = None
+    """The invoice a credit or debit note corrects."""
+    draft: bool = False
+
+    def terms(self, functional_currency: Currency) -> Terms:
+        """The document's terms, in its currency or else the company's functional one."""
+        return Terms(
+            currency=functional_currency if self.currency is None else self.currency,
+            lines=self.lines,
+            exchange_rate=self.exchange_rate,
+            issue_date=self.issue_date,
+            tax_point=self.tax_point,
+            establishment=self.establishment,
+            buyer=self.buyer,
+            fiscal=self.fiscal,
+        )
+
+
+def tenant_of(call: Call) -> Tenant:
+    """The company and mode ``call`` acts in: a document exists in one mode of one company."""
+    scope = call.scope
+    if not isinstance(scope, Tenant) or scope.mode is None:
+        raise InvalidValueError(field="call.scope", requirement="a company in a mode")
+    return scope
+
+
+def seller_of(company: CompanyInfo) -> Seller:
+    """The company as a document's seller: its legal name and its primary tax id."""
+    return Seller(legal_name=company.legal_name, tax_id=company.tax_ids[0])
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InvoicingCommands:
+    """The use cases that change documents, over the ports they need."""
+
+    units: InvoicingUnits
+    directory: CompanyDirectory
+    regime_of: RegimeOf
+    clock: Clock
+    """The wall clock: what fixes "today" in an establishment's time zone. Times recorded are the unit's."""
+    new_id: Callable[[], UUID]
+
+    async def create(self, call: Call, creation: Creation) -> Invoice:
+        """Create the document ``creation`` asks for in the call's tenant: a draft, or issued at once.
+
+        Refused without a trace: for an inactive company (``CompanyInactiveError``), an establishment it lacks
+        (``EstablishmentUnknownError``), terms its regime refuses, a note whose invoice it cannot correct
+        (``CorrectionInvalidError``), or a business key a document of its type holds
+        (``ExternalReferenceTakenError``).
+        """
+        tenant = tenant_of(call)
+        company = await self._company(call, tenant)
+        terms = creation.terms(company.functional_currency)
+        pricing = await self._priced(call, company, terms)
+        opening = Opening(
+            id=InvoiceId(self.new_id()),
+            tenant=tenant,
+            kind=creation.kind,
+            direction=creation.direction,
+            external_reference=creation.external_reference,
+            terms=terms,
+        )
+        seller = None if creation.draft else seller_of(company)
+        async with self.units.unit(tenant) as unit:
+            corrected = None if creation.corrects is None else await unit.invoices.get(creation.corrects)
+            if creation.corrects is not None and corrected is None:
+                raise CorrectionInvalidError(CorrectionProblem.NOT_FOUND)
+            invoice, issued = Invoice.new(
+                opening, corrects=corrected, pricing=pricing, seller=seller, now=unit.now
+            )
+            holder = await unit.invoices.add(invoice)
+            if holder is not None:
+                raise ExternalReferenceTakenError(holder)
+            if issued is not None:
+                unit.events.publish(issued)
+            detail = {"kind": invoice.kind.value, "status": invoice.status.value}
+            unit.audit.record("invoice.create", invoice.id, before=None, after=invoice, detail=detail)
+        return invoice
+
+    async def issue(self, call: Call, invoice: InvoiceId) -> Invoice:
+        """Issue the draft ``invoice``, priced again on the day it is issued, sold by the company as it is.
+
+        ``InvoiceNotFoundError`` for no document of the tenant by that id; ``InvoiceNotIssuableError`` for one
+        that is not a draft; ``InvoiceChangedError`` when it changed while it was priced.
+        """
+        tenant = tenant_of(call)
+        async with self.units.unit(tenant) as unit:
+            draft = await unit.invoices.get(invoice)
+        if draft is None:
+            raise InvoiceNotFoundError(invoice)
+        if draft.status is not InvoiceStatus.DRAFT:
+            raise InvoiceNotIssuableError(draft.id)
+        company = await self._company(call, tenant)
+        pricing = await self._priced(call, company, draft.terms)
+        async with self.units.unit(tenant) as unit:
+            current = await unit.invoices.locked(invoice)
+            if current != draft:
+                raise InvoiceChangedError(invoice)
+            corrected = None if draft.corrects is None else await unit.invoices.get(draft.corrects)
+            issued, event = draft.issue(
+                seller=seller_of(company), pricing=pricing, corrected=corrected, now=unit.now
+            )
+            await unit.invoices.update(issued)
+            unit.events.publish(event)
+            detail = {"kind": issued.kind.value}
+            unit.audit.record("invoice.issue", issued.id, before=draft, after=issued, detail=detail)
+        return issued
+
+    async def void(self, call: Call, invoice: InvoiceId, reason: Reason | None) -> Invoice:
+        """Void the issued document ``invoice``, for ``reason`` if given.
+
+        ``InvoiceNotFoundError`` for no document of the tenant by that id; ``InvoiceNotVoidableError`` for one
+        not issued, or one a channel accepted.
+        """
+        async with self.units.unit(tenant_of(call)) as unit:
+            current = await unit.invoices.locked(invoice)
+            if current is None:
+                raise InvoiceNotFoundError(invoice)
+            voided, event = current.void(reason=reason, now=unit.now)
+            await unit.invoices.update(voided)
+            unit.events.publish(event)
+            detail = {"kind": voided.kind.value}
+            unit.audit.record("invoice.void", voided.id, before=current, after=voided, detail=detail)
+        return voided
+
+    async def _company(self, call: Call, tenant: Tenant) -> CompanyInfo:
+        """The tenant's company, which must be active to make or issue a document."""
+        company = await self.directory.company(call, tenant.company)
+        if not company.active:
+            raise CompanyInactiveError(company.id)
+        return company
+
+    async def _priced(self, call: Call, company: CompanyInfo, terms: Terms) -> Pricing:
+        """``terms`` priced with the company's regime, today in its establishment's time zone."""
+        establishment = await self._establishment(call, company, terms.establishment)
+        return price(
+            terms,
+            regime=self._regime(company),
+            functional_currency=company.functional_currency,
+            establishment=establishment,
+            today=local_date(self.clock(), establishment.time_zone),
+        )
+
+    async def _establishment(self, call: Call, company: CompanyInfo, code: str | None) -> EstablishmentRef:
+        found = await self.directory.establishment(call, company.id, code)
+        if found is None:
+            raise EstablishmentUnknownError
+        return found
+
+    def _regime(self, company: CompanyInfo) -> RegimeDef:
+        regime = self.regime_of(company.jurisdiction)
+        if regime is None:
+            raise RegimeMissingError
+        return regime
