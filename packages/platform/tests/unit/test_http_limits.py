@@ -6,7 +6,7 @@ lazy from collections.abc import AsyncGenerator, AsyncIterator
 
 import httpx
 import pytest
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from opentelemetry.sdk.trace import TracerProvider
 from prometheus_client import CollectorRegistry
 from pydantic import BaseModel, ConfigDict
@@ -14,7 +14,7 @@ lazy from fastapi import FastAPI
 
 from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.http.app import ApiInfo, Observability, create_app
-from ledger_platform.http.limits import MAX_BODY_BYTES
+from ledger_platform.http.limits import MAX_BODY_BYTES, MAX_UPLOAD_BYTES, larger_body
 from ledger_platform.http.problems import Problem
 from ledger_platform.observability.health import Health
 
@@ -58,6 +58,13 @@ def app_of(handled: Handled, *, limit: int = LIMIT) -> FastAPI:
     async def ignores() -> dict[str, bool]:
         handled.calls += 1
         return {"ok": True}
+
+    @router.post("/uploads/{name}", dependencies=[Depends(larger_body(LIMIT * 2))])
+    async def upload(name: str, note: Note) -> Note:
+        """Takes up to twice the app's limit (a certificate's upload takes 2 MiB where the rest takes 1)."""
+        del name
+        handled.calls += 1
+        return note
 
     observability = Observability(
         health=Health(), registry=CollectorRegistry(), tracer_provider=TracerProvider()
@@ -157,6 +164,35 @@ async def test_a_body_that_declares_nothing_is_not_refused_before_it_is_read() -
     async with client_of(app_of(handled)) as client:
         response = await client.post("/ignores-its-body", content=chunks(b"x" * LIMIT))
     assert (response.status_code, handled.calls) == (200, 1)
+
+
+async def test_a_route_may_take_a_larger_body_and_only_that_route() -> None:
+    handled = Handled()
+    over = b'{"text":"' + b"x" * (LIMIT + 10) + b'"}'  # over the app's limit, within the route's
+    async with client_of(app_of(handled)) as client:
+        taken = await client.post(
+            "/uploads/a.p12", content=over, headers={"Content-Type": "application/json"}
+        )
+        elsewhere = await client.post("/echo", content=over, headers={"Content-Type": "application/json"})
+        streamed = await client.post(
+            "/uploads/b.p12",
+            content=chunks(over[:20], over[20:]),
+            headers={"Content-Type": "application/json"},
+        )
+        beyond = await client.post(
+            "/uploads/c.p12", content=b"x" * (LIMIT * 2 + 1), headers={"Content-Type": "application/json"}
+        )
+    assert (taken.status_code, elsewhere.status_code, streamed.status_code) == (200, 413, 200)
+    assert (beyond.status_code, handled.calls) == (413, 2)
+    assert str(LIMIT * 2) in (Problem.model_validate_json(beyond.content).detail or "")
+
+
+def test_the_largest_body_a_route_may_take_is_two_mebibytes() -> None:
+    assert MAX_UPLOAD_BYTES == 2 * 1024 * 1024
+    for limit in (0, MAX_UPLOAD_BYTES + 1):
+        with pytest.raises(InvalidOptionError) as caught:
+            larger_body(limit)
+        assert caught.value.component == "http"
 
 
 @pytest.mark.parametrize("limit", [0, -1])

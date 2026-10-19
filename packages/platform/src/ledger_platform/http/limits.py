@@ -5,17 +5,72 @@ it. ``BodyLimit`` answers for the app. A request that declares more than the lim
 running at all; one that declares less, or nothing (chunked), is refused as soon as the bytes read pass the
 limit, and whatever the route then tries to send is dropped (a route answers only once it has read its body).
 FastAPI turns an error raised while a body is read into a 400, so the 413 is written here and not raised.
+
+A route that takes more than the app's limit (a certificate upload, 2 MiB at most) says so as a dependency,
+``dependencies=[Depends(larger_body(MAX_UPLOAD_BYTES))]``: the app reads it from its routes when it is made
+(``route_limits``) and holds each request of that route to that limit instead.
 """
 
 from typing import Final, final
+from weakref import WeakKeyDictionary
+lazy from collections.abc import Callable, Coroutine, Sequence
 
+from fastapi.routing import APIRoute, iter_route_contexts
 from starlette.datastructures import Headers
+from starlette.routing import Match
+lazy from starlette.routing import BaseRoute
 
+from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.http.problems import PayloadTooLargeError, refusal
 lazy from ledger_platform.http.metrics import AsgiApp, AsgiMessage, AsgiReceive, AsgiScope, AsgiSend
 
 MAX_BODY_BYTES: Final = 1024 * 1024
 """A JSON body of the public API: 1 MiB (§10). A route that takes more (a certificate upload) is set apart."""
+MAX_UPLOAD_BYTES: Final = 2 * 1024 * 1024
+"""The most any route takes (§10): a certificate upload."""
+type LargerBody = Callable[[], Coroutine[object, object, None]]
+"""The dependency ``larger_body`` makes: it does nothing when called; the app reads the limit it holds."""
+_LARGER: Final[WeakKeyDictionary[LargerBody, int]] = WeakKeyDictionary()
+"""Every dependency ``larger_body`` made, and its limit."""
+
+
+def larger_body(limit: int = MAX_UPLOAD_BYTES) -> LargerBody:
+    """A dependency that lets its route take a body of up to ``limit`` bytes, ``MAX_UPLOAD_BYTES`` at most.
+
+    The limit is the route's alone, in place of the app's, whichever is larger: a route that declares it is
+    held to it, every other route to the app's.
+    """
+    if not 0 < limit <= MAX_UPLOAD_BYTES:
+        raise InvalidOptionError(
+            component="http", option="larger_body", requirement=f"1 to {MAX_UPLOAD_BYTES} bytes", value=limit
+        )
+
+    async def larger() -> None:
+        """Nothing: the limit is the body limit's to apply, before the route runs."""
+
+    _LARGER[larger] = limit
+    return larger
+
+
+def route_limits(routes: Sequence[BaseRoute]) -> tuple[tuple[APIRoute, int], ...]:
+    """Each route of ``routes`` (an app's, its included routers' too) that declares a limit of its own."""
+    found: list[tuple[APIRoute, int]] = []
+    for context in iter_route_contexts(routes):
+        route = context.original_route
+        if isinstance(route, APIRoute):
+            limits = [_LARGER[call] for call in _own_calls(route)]
+            if limits:
+                found.append((route, max(limits)))
+    return tuple(found)
+
+
+def _own_calls(route: APIRoute) -> tuple[LargerBody, ...]:
+    """The dependencies a route declares itself that ``larger_body`` made."""
+    return tuple(
+        dependency.call
+        for dependency in route.dependant.dependencies
+        if callable(dependency.call) and dependency.call in _LARGER
+    )
 
 
 def _declared_length(scope: AsgiScope) -> int | None:
@@ -28,18 +83,28 @@ def _declared_length(scope: AsgiScope) -> int | None:
 class BodyLimit:
     """Refuses a request body over ``limit`` bytes (see the module); an ASGI middleware, like ``Measure``."""
 
-    __slots__ = ("_app", "_limit")
+    __slots__ = ("_app", "_limit", "_routes")
 
-    def __init__(self, app: AsgiApp, *, limit: int = MAX_BODY_BYTES) -> None:
+    def __init__(
+        self, app: AsgiApp, *, limit: int = MAX_BODY_BYTES, routes: Sequence[tuple[APIRoute, int]] = ()
+    ) -> None:
         self._app = app
         self._limit = limit
+        self._routes = tuple(routes)
+
+    def _limit_of(self, scope: AsgiScope) -> int:
+        """The limit of the request's route, if it declares one (``route_limits``); else the app's."""
+        for route, limit in self._routes:
+            if route.matches(scope)[0] is Match.FULL:
+                return limit
+        return self._limit
 
     async def __call__(self, scope: AsgiScope, receive: AsgiReceive, send: AsgiSend) -> None:
         """Run the request, or answer 413 when its body is over the limit."""
         if scope["type"] != "http":
             await self._app(scope, receive, send)
             return
-        limit, declared = self._limit, _declared_length(scope)
+        limit, declared = self._limit_of(scope), _declared_length(scope)
         if declared is not None and declared > limit:
             await refusal(PayloadTooLargeError(limit))(scope, receive, send)
             return
