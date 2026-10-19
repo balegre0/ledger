@@ -80,13 +80,17 @@ def test_a_planted_contract_generates_into_its_module_only(
     changed = {path for path in before.keys() | after.keys() if before.get(path) != after.get(path)}
     assert changed <= set(targets(Workspace.load(repository)))
     names = ("__init__.py", "vault_pb2.py", "vault_pb2.pyi", "vault_pb2_grpc.py", "vault_pb2_grpc.pyi")
-    assert {path for path in changed if path.is_relative_to(CODE)} == {CODE / name for name in names}
-    assert 'omit = ["*/adapters/grpc/_generated/*"]\n' in after[Path("modules/vault/pyproject.toml")]
+    assert {path for path in changed if path.is_relative_to(CODE)} == {
+        CODE / "__init__.py",
+        *(CODE / "v1" / name for name in names),
+    }
+    omitted = 'omit = ["*/modules/*/src/*/adapters/grpc/_generated/*"]\n'
+    assert omitted in after[Path("modules/vault/pyproject.toml")]
     write(repository, PROTO, CONTRACT.replace("  string id = 1;\n", "  string id = 1;\n  string seal = 2;\n"))
     assert main(["check", "--root", str(repository)]) == 1
     stale = "stale, run `uv run ledger-devtools sync`"
     assert capsys.readouterr().out.splitlines() == [
-        f"{(CODE / name).as_posix()}: {stale}" for name in ("vault_pb2.py", "vault_pb2.pyi")
+        f"{(CODE / 'v1' / name).as_posix()}: {stale}" for name in ("vault_pb2.py", "vault_pb2.pyi")
     ]
 
 
@@ -103,10 +107,11 @@ IDENTITY: Final = {
 GIT: Final = shutil.which("git") or "git"
 
 
-def git(repository: Path, *arguments: str) -> str:
+def git(repository: Path, *arguments: str, stdin: str = "") -> str:
     return subprocess.run(
         [GIT, "-C", str(repository), *arguments],
         env={**os.environ, **IDENTITY},
+        input=stdin,
         capture_output=True,
         text=True,
         check=True,
@@ -164,6 +169,25 @@ def test_proto_breaking_passes_a_compatible_change_and_refuses_a_breaking_one(ba
     status, said = proto_breaking(based)
     assert status != 0
     assert 'Previously present field "2" with name "at" on message "OpenRequest" was deleted.' in said, said
-    status, said = proto_breaking(based, "--base", "no-such-ref")
+
+
+def test_an_explicit_base_must_name_a_commit(based: Path) -> None:
+    status, said = proto_breaking(based, "--base", "release/v9")
+    assert status != 0
+    assert "--base release/v9 names no commit here" in said, said
+
+
+def test_a_base_without_a_contract_has_nothing_to_break(based: Path) -> None:
+    empty = git(based, "commit-tree", "-m", "empty", git(based, "mktree"))
+    git(based, "update-ref", "refs/heads/before", empty)
+    status, said = proto_breaking(based, "--base", "before")
     assert status == 0, said
-    assert "no-such-ref holds no contract (contracts/buf.yaml and a .proto): nothing can break" in said
+    assert "before holds no contract (contracts/buf.yaml and a .proto): nothing can break" in said
+
+
+def test_the_default_base_may_be_absent(based: Path) -> None:
+    """A pull request's checkout has no local main: `poe check` passes, CI's own step compares."""
+    git(based, "update-ref", "-d", "refs/heads/main")
+    status, said = proto_breaking(based)
+    assert status == 0, said
+    assert "main is not a ref here: nothing to compare (--base names the ref to compare with)" in said

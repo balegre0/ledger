@@ -27,15 +27,21 @@ jobs:
           enable-cache: true
       - name: Install (locked)
         run: uv sync --locked --all-packages
-      - name: Protobuf breaking changes against the pull request's base
-        # The gate's own task, against the base branch as fetched (a pull request's checkout has no local branch
-        # of it, so `poe check`'s run against `main` finds nothing to compare and passes). It extracts the base's
-        # contracts/ with `git archive` and runs buf breaking in the image deploy/local/images.toml pins, both
-        # trees mounted read-only; it passes while the base holds no .proto.
-        if: github.event_name == 'pull_request'
+      - name: Protobuf breaking changes against the base
+        # The gate's own task with an explicit base, which must name a commit: a pull request's base branch as
+        # fetched (its checkout has no local branch of it, so `poe check`'s run against `main` finds nothing to
+        # compare and passes), or on a push the commit the branch pointed to before (all zeros for a new branch:
+        # nothing to compare). It extracts the base's contracts/ with `git archive` and runs buf breaking in the
+        # image deploy/local/images.toml pins, without network, both trees mounted read-only; it passes while
+        # the base holds no .proto.
         env:
-          BASE_REF: ${{ github.base_ref }}
-        run: uv run poe proto-breaking --base "origin/$BASE_REF"
+          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: |
+          if [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            echo "a new branch: nothing to compare"
+          else
+            uv run poe proto-breaking --base "$BASE"
+          fi
       - name: Format, lint, types x2, architecture, deps, spelling, devtools, dead code, tests
         # The packages' test runs share the runner: LEDGER_TEST_JOBS caps how many run at once (two on a 4-core
         # runner keeps memory in bounds); each line of a run is prefixed with its package, and pytest-timeout ends

@@ -4,7 +4,7 @@ extend-exclude = [
     "countries/do/src/ledger_country_do/channels/ecf_v1/adapters/xsd/",
     "countries/do/tests/contract/golden/",
     # protoc's output (ledger_devtools.protos): serialized descriptors, spelled by the contract, not here.
-    "**/adapters/grpc/_generated/",
+    "modules/*/src/*/adapters/grpc/_generated/",
 ]
 
 [default]

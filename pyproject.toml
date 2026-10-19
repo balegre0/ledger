@@ -180,7 +180,7 @@ subprocess.run(["vulture", *sorted(
 )]).returncode in {0, 3}
 """
 
-# buf lint over contracts/, in the image deploy/local/images.toml pins. Skipped while no .proto exists: the signer
+# buf lint over contracts/, in the image deploy/local/images.toml pins, without network. Skipped while no .proto exists: the signer
 # milestone adds the first (the only cross-process surface; in-process APIs are Python Protocols).
 [tool.poe.tasks.proto-lint]
 help = "buf lint over contracts/ (skipped while no .proto exists)"
@@ -188,45 +188,52 @@ imports = ["glob", "os", "pathlib", "subprocess", "tomllib"]
 assert = true
 expr = '''
 not glob.glob("contracts/proto/**/*.proto", recursive=True) or subprocess.run([
-    "docker", "run", "--rm", "--volume", f"{os.getcwd()}/contracts:/workspace", "--workdir", "/workspace",
+    "docker", "run", "--rm", "--network", "none", "--volume", f"{os.getcwd()}/contracts:/workspace",
+    "--workdir", "/workspace",
     tomllib.loads(pathlib.Path("deploy/local/images.toml").read_text(encoding="utf-8"))["images"]["buf"], "lint",
 ]).returncode == 0
 '''
 
-# buf breaking: contracts/ as it is now against contracts/ of a git ref (`--base`, main by default; CI passes the
-# pull request's base), in the same pinned image. The ref's contracts/ is extracted with `git archive` into a
-# temporary directory and both are mounted read-only: no .git is mounted (a worktree's is a file pointing outside
-# the mount) and buf needs no network. While the ref holds no contracts/buf.yaml or no .proto (before the first
-# contract reaches it, or a ref that does not exist here, as `main` in a pull request's checkout), nothing can
-# break: the task says so and passes.
+# buf breaking: contracts/ as it is now against contracts/ of a git ref, in the same pinned image, without network.
+# The ref's contracts/ is extracted with `git archive` into a temporary directory (removed even when Docker
+# fails) and both trees are mounted read-only: no .git is mounted (a worktree's is a file pointing outside the
+# mount). `--base <ref>` must name a commit: a typo fails. Without it the base is `main`, and the task passes when
+# there is no such ref here (a pull request's checkout has none: CI's own step passes the base it compares
+# with). A ref that holds no contracts/buf.yaml or no .proto has nothing to break: the task says so and passes.
 [tool.poe.tasks.proto-breaking]
-help = "buf breaking: contracts/ against a ref's (main by default; passes while it holds no .proto)"
-imports = ["io", "os", "pathlib", "shutil", "subprocess", "tarfile", "tempfile", "tomllib"]
+help = "buf breaking: contracts/ against a ref's (--base, main by default; passes while it holds no .proto)"
+imports = ["io", "os", "pathlib", "subprocess", "tarfile", "tempfile", "tomllib"]
 assert = true
-args = [{ name = "base", default = "main", help = "The git ref whose contracts/ nothing may break" }]
+args = [{ name = "base", default = "", help = "The git ref whose contracts/ nothing may break (main if omitted)" }]
 expr = '''
-(
-    subprocess.run(["git", "cat-file", "-e", f"{base}:contracts/buf.yaml"], capture_output=True).returncode != 0
+(lambda ref, explicit: (
+    (print(f"--base {ref} names no commit here") is None and False)
+    if explicit
+    else print(f"{ref} is not a ref here: nothing to compare (--base names the ref to compare with)") is None
+) if subprocess.run(
+    ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], capture_output=True
+).returncode != 0 else (
+    print(f"{ref} holds no contract (contracts/buf.yaml and a .proto): nothing can break") is None
+) if (
+    subprocess.run(["git", "cat-file", "-e", f"{ref}:contracts/buf.yaml"], capture_output=True).returncode != 0
     or not [name for name in subprocess.run(
-        ["git", "ls-tree", "-r", "--name-only", base, "--", "contracts/proto"],
+        ["git", "ls-tree", "-r", "--name-only", ref, "--", "contracts/proto"],
         capture_output=True, text=True, check=True,
     ).stdout.splitlines() if name.endswith(".proto")]
-) and print(f"{base} holds no contract (contracts/buf.yaml and a .proto): nothing can break") is None or (
-    lambda against: (
-        tarfile.open(fileobj=io.BytesIO(subprocess.run(
-            ["git", "archive", "--format=tar", base, "contracts"], capture_output=True, check=True,
-        ).stdout)).extractall(against, filter="data"),
-        subprocess.run([
-            "docker", "run", "--rm",
-            "--mount", f"type=bind,source={os.getcwd()}/contracts,target=/workspace,readonly",
-            "--mount", f"type=bind,source={against}/contracts,target=/against,readonly",
-            "--workdir", "/workspace",
-            tomllib.loads(pathlib.Path("deploy/local/images.toml").read_text(encoding="utf-8"))["images"]["buf"],
-            "breaking", "--against", "/against",
-        ]).returncode,
-        shutil.rmtree(against),
-    )[1] == 0
-)(tempfile.mkdtemp())
+) else (lambda against: (
+    tarfile.open(fileobj=io.BytesIO(subprocess.run(
+        ["git", "archive", "--format=tar", ref, "contracts"], capture_output=True, check=True,
+    ).stdout)).extractall(against.name, filter="data"),
+    subprocess.run([
+        "docker", "run", "--rm", "--network", "none",
+        "--mount", f"type=bind,source={os.getcwd()}/contracts,target=/workspace,readonly",
+        "--mount", f"type=bind,source={against.name}/contracts,target=/against,readonly",
+        "--workdir", "/workspace",
+        tomllib.loads(pathlib.Path("deploy/local/images.toml").read_text(encoding="utf-8"))["images"]["buf"],
+        "breaking", "--against", "/against",
+    ]).returncode,
+    against.cleanup(),
+)[1] == 0)(tempfile.TemporaryDirectory()))(base or "main", bool(base))
 '''
 
 # Zero suppressions: no Python file may switch a check off.
@@ -245,6 +252,8 @@ expr = '''
 # same on Windows and Linux: no shell, no script. Prose that mentions a form without the `#` is not a match.
 # The one path left out is protoc's output, which `ledger-devtools sync` writes from a contract
 # (ledger_devtools.protos) and nobody edits: mypy-protobuf's stubs carry type checkers' directives.
+# Every exclusion of it below names modules/*/src/*/adapters/grpc/_generated, and `ledger-devtools check`
+# refuses such a directory anywhere but modules/<m>/src/ledger_<m>/, and any file in it it did not write.
 [tool.poe.tasks.suppressions]
 help = "Zero suppressions: no noqa, type: ignore, tool directive or coverage pragma in Python files"
 imports = ["subprocess"]
@@ -257,7 +266,7 @@ subprocess.run([
     "-e", "#[[:space:]]*(based)?pyright:",
     "-e", "#[[:space:]]*(flake8|isort|mypy|ruff):",
     "-e", "#[[:space:]]*pragma:?[[:space:]]*no[[:space:]]*(cover|branch)",
-    "--", "*.py", "*.pyi", ":(exclude)**/adapters/grpc/_generated/**",
+    "--", "*.py", "*.pyi", ":(exclude,glob)modules/*/src/*/adapters/grpc/_generated/**",
 ]).returncode == 1
 '''
 
@@ -266,7 +275,7 @@ subprocess.run([
 target-version = "py315"
 line-length = 110
 # protoc's output (ledger_devtools.protos): written from a contract, never edited, formatted as protoc does.
-extend-exclude = ["**/adapters/grpc/_generated"]
+extend-exclude = ["modules/*/src/*/adapters/grpc/_generated"]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -312,8 +321,8 @@ pythonVersion = "3.15"
 include = ["packages", "modules", "countries", "apps", "tools"]
 # protoc's output (ledger_devtools.protos) is neither checked nor reported on: its .pyi stubs, which
 # mypy-protobuf writes, still type every use of it.
-exclude = ["**/.venv", "**/__pycache__", "**/adapters/grpc/_generated"]
-ignore = ["**/adapters/grpc/_generated"]
+exclude = ["**/.venv", "**/__pycache__", "modules/*/src/*/adapters/grpc/_generated"]
+ignore = ["modules/*/src/*/adapters/grpc/_generated"]
 typeCheckingMode = "all"
 failOnWarnings = true
 reportImplicitOverride = "error"
@@ -348,6 +357,8 @@ enable_error_code = [
 ]
 
 # protoc's output (ledger_devtools.protos): its errors are not reported (its .pyi stubs still type every use).
+# mypy matches a module pattern's `*` only as whole components (mypy.options.compile_glob), so the first
+# cannot be `ledger_*`; `ledger-devtools check` keeps the package to modules/<m>/src/ledger_<m>/ instead.
 [[tool.mypy.overrides]]
 module = ["*.adapters.grpc._generated.*"]
 ignore_errors = true
@@ -380,7 +391,7 @@ timeout = "300"
 [tool.vulture]
 min_confidence = 60
 # protoc's output (ledger_devtools.protos): it defines all a contract says, callers use what they need.
-exclude = ["*/adapters/grpc/_generated/*"]
+exclude = ["*/modules/*/src/*/adapters/grpc/_generated/*"]
 ignore_decorators = [
     # FastAPI calls the route and exception handlers registered by decorator
     "@*.get", "@*.post", "@*.put", "@*.patch", "@*.delete", "@*.exception_handler",

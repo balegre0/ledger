@@ -14,7 +14,7 @@ from typing import Final, TypeIs, final
 lazy from collections.abc import Callable, Iterator, Mapping, Sequence
 
 from ledger_devtools.names import LOADED_BY_OTHERS, TEST_TOOLING, distribution_of, import_names, renamed
-from ledger_devtools.protos import GENERATED_FILES, GENERATED_PACKAGE, contracts
+from ledger_devtools.protos import GENERATED_DIRECTORIES, GENERATED_FILES, contracts
 from ledger_devtools.protos import generated as grpc_code
 from ledger_devtools.roles import role_grants_path, role_grants_text
 from ledger_devtools.root import ROOT_PYPROJECT, root_text
@@ -722,7 +722,7 @@ def orphans(workspace: Workspace, generated: Mapping[Path, str]) -> list[Path]:
     when it carries the generated header (one written by hand is never touched).
     """
     places = (pattern.removesuffix("/manifest.toml") for pattern in MANIFEST_GLOBS)
-    code_of_contracts = f"modules/*/src/*/{GENERATED_PACKAGE.replace('.', '/')}/*"
+    code_of_contracts = f"{GENERATED_DIRECTORIES}/**"
     found = sorted(
         {
             path
