@@ -20,11 +20,11 @@ from ledger_identity.adapters.http.models import CompanyView, RegisteredCompany,
 from ledger_identity.adapters.http.public import company_ref
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import commands, queries
-from ledger_identity.domain.company import FiscalProfile
-from ledger_identity.domain.errors import DuplicateTaxIdError, StaleVersionError, TimeZoneRequiredError
+from ledger_identity.domain.company import FiscalProfile, require_fits
+from ledger_identity.domain.errors import DuplicateTaxIdError, StaleVersionError
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN
 from ledger_identity.domain.roles import COMPANIES_MANAGE, COMPANIES_READ
-from ledger_identity.domain.text import parse_legal_name, parse_time_zone
+from ledger_identity.domain.text import TimeZone, parse_legal_name, parse_time_zone
 from ledger_kernel.jurisdiction import parse_jurisdiction
 from ledger_kernel.money import Currency
 from ledger_kernel.tax_ids import TaxIdCheck
@@ -50,10 +50,11 @@ from ledger_platform.http import (
     success,
 )
 lazy from ledger_identity.adapters.http.context import ApiContext
-lazy from ledger_identity.adapters.http.models import CompanyChanges, NewCompany
+lazy from ledger_identity.adapters.http.models import CompanyChanges, NewCompany, TaxIdBody
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_kernel.access import Principal
 lazy from ledger_kernel.pagination import PageRequest
+lazy from ledger_kernel.regimes import ParsedTaxId
 lazy from ledger_kernel.tenancy import Mode
 lazy from ledger_platform.auth import CompanyAccess
 lazy from ledger_platform.http import IfMatch, StoredResponse
@@ -71,6 +72,14 @@ def stored(
         headers["Location"] = f"/v1/companies/{company_ref(company.id)}"
     view = CompanyView.of(company) if warnings is None else RegisteredCompany.registered(company, warnings)
     return json_response(status, view, headers)
+
+
+def tax_ids_of(context: ApiContext, sent: Sequence[TaxIdBody]) -> list[ParsedTaxId]:
+    """The tax ids a request lists, each read by its scheme; one listed twice is refused (once normalized)."""
+    read = [context.tax_ids.parse(item.scheme, item.value) for item in sent]
+    if len({item.tax_id for item in read}) != len(read):
+        raise DuplicateTaxIdError
+    return read
 
 
 def router(context: ApiContext) -> APIRouter:
@@ -101,25 +110,21 @@ def router(context: ApiContext) -> APIRouter:
         """Register a company of the caller's organization; the caller becomes its owner.
 
         The caller must hold the identity provider's project role ``ledger.organization.admin``. The request
-        acts in ``Ledger-Mode``: its ``Idempotency-Key`` is kept per mode. The company is both modes'.
+        acts in ``Ledger-Mode``: its ``Idempotency-Key`` is kept per mode. The company is both modes'. Its
+        fiscal profile must fit the installed regime of its jurisdiction: one no regime governs is refused
+        (``jurisdiction_unsupported``), as are a functional currency the regime does not let it keep its books
+        in (``currency_unsupported``) and a tax id of another country's scheme where the regime allows its own
+        country's only (``tax_id_foreign``).
         """
-        read = [context.tax_ids.parse(item.scheme, item.value) for item in body.tax_ids]
-        tax_ids = tuple(item.tax_id for item in read)
-        if len(set(tax_ids)) != len(tax_ids):
-            raise DuplicateTaxIdError
+        read = tax_ids_of(context, body.tax_ids)
         jurisdiction = parse_jurisdiction(body.jurisdiction.country, body.jurisdiction.subdivision)
-        time_zone = (
-            context.default_time_zone(jurisdiction)
-            if body.time_zone is None
-            else parse_time_zone(body.time_zone)
-        )
-        if time_zone is None:
-            raise TimeZoneRequiredError
         profile = FiscalProfile(
             jurisdiction=jurisdiction,
             functional_currency=Currency.of(body.functional_currency),
-            tax_ids=tax_ids,
+            tax_ids=tuple(item.tax_id for item in read),
         )
+        regime = require_fits(profile, context.regime_of(jurisdiction))
+        time_zone = TimeZone(regime.time_zone) if body.time_zone is None else parse_time_zone(body.time_zone)
         warnings = [
             RegistrationWarning(code="tax_id_checksum_mismatch", field=f"tax_ids.{position}")
             for position, item in enumerate(read)
@@ -181,14 +186,35 @@ def router(context: ApiContext) -> APIRouter:
         body: CompanyChanges,
         response: Response,
     ) -> CompanyView:
-        """Change a company, if it is at a version ``If-Match`` names."""
-        legal_name = parse_legal_name(body.legal_name)
+        """Change a company, if it is at a version ``If-Match`` names: what the request names changes.
+
+        Its fiscal profile (jurisdiction, functional currency, tax ids) changes only until it is locked (409
+        ``fiscal_profile_locked``), and only to one the installed regime of its jurisdiction allows, as at
+        registration. ``tax_ids`` is the whole list: an id it no longer lists is released, and one it lists
+        anew that an active company holds refuses the change (409 ``tax_id_taken``).
+        """
+        jurisdiction = body.jurisdiction
+        changes = commands.Changes(
+            legal_name=None if body.legal_name is None else parse_legal_name(body.legal_name),
+            jurisdiction=(
+                None
+                if jurisdiction is None
+                else parse_jurisdiction(jurisdiction.country, jurisdiction.subdivision)
+            ),
+            functional_currency=None
+            if body.functional_currency is None
+            else Currency.of(body.functional_currency),
+            tax_ids=None
+            if body.tax_ids is None
+            else tuple(item.tax_id for item in tax_ids_of(context, body.tax_ids)),
+            regime_of=context.regime_of,
+        )
         with precondition_checked(StaleVersionError):
             async with database.unit(access.tenant) as unit:
-                changed = await commands.rename_company(
+                changed = await commands.change_company(
                     bind(unit),
                     access.tenant.company,
-                    legal_name=legal_name,
+                    changes,
                     admits=condition.admits,
                     actor=access.principal.subject,
                 )

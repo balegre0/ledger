@@ -1,6 +1,7 @@
 import unicodedata
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Final
 from uuid import UUID
 
@@ -10,19 +11,23 @@ from hypothesis import strategies as st
 
 from ledger_identity._manifest import MANIFEST
 from ledger_identity.domain.api_clients import ApiClient, ApiClientSpec, ApiClientStatus
-from ledger_identity.domain.company import Company, CompanyStatus, FiscalProfile
+from ledger_identity.domain.company import Company, CompanyStatus, FiscalProfile, require_fits
 from ledger_identity.domain.errors import (
     CompanyInactiveError,
+    CurrencyUnsupportedError,
     EstablishmentCodeTakenError,
     EstablishmentNotFoundError,
+    FiscalProfileLockedError,
     InvalidCodeError,
     InvalidNameError,
     InvalidTimeZoneError,
+    JurisdictionUnsupportedError,
     LastOwnerError,
     MembershipNotFoundError,
     OrganizationNotFoundError,
     OwnersOnlyError,
     StaleVersionError,
+    TaxIdForeignError,
     TaxIdTakenError,
 )
 from ledger_identity.domain.establishments import MAIN_CODE, MAIN_NAME, Establishment
@@ -88,8 +93,9 @@ from ledger_kernel.ids import (
     format_id,
     new_id,
 )
-from ledger_kernel.jurisdiction import parse_jurisdiction
-from ledger_kernel.money import Currency
+from ledger_kernel.jurisdiction import CountryCode, Jurisdiction, parse_jurisdiction
+from ledger_kernel.money import Currency, RoundingMode
+from ledger_kernel.regimes import Locale, RegimeDef, RegimeKey, RoundingRule, Source
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.data.codec import payload_of
@@ -294,6 +300,8 @@ def test_a_company_locks_its_fiscal_profile_once_at_a_new_version() -> None:
         scope=company.tenant,
         subject=company.id,
         aggregate_version=2,
+        jurisdiction=company.profile.jurisdiction,
+        functional_currency=company.profile.functional_currency,
         tax_ids=(RNC,),
         legal_name=company.legal_name,
         fiscal_profile_locked=True,
@@ -310,7 +318,7 @@ def test_a_deactivated_company_locks_nothing() -> None:
 
 def test_renaming_a_company_makes_a_new_version() -> None:
     company = registered()
-    renamed, updated = company.rename(parse_legal_name("Duarte Hermanos"), now=LATER)
+    renamed, updated = company.change(legal_name=parse_legal_name("Duarte Hermanos"), now=LATER)
     assert (renamed.legal_name, renamed.version, renamed.updated_at, renamed.created_at) == (
         "Duarte Hermanos",
         2,
@@ -321,6 +329,8 @@ def test_renaming_a_company_makes_a_new_version() -> None:
         scope=company.tenant,
         subject=company.id,
         aggregate_version=2,
+        jurisdiction=company.profile.jurisdiction,
+        functional_currency=company.profile.functional_currency,
         tax_ids=(RNC,),
         legal_name=LegalName("Duarte Hermanos"),
         fiscal_profile_locked=False,
@@ -329,7 +339,71 @@ def test_renaming_a_company_makes_a_new_version() -> None:
 
 def test_renaming_a_company_to_its_own_name_changes_nothing() -> None:
     company = registered()
-    assert company.rename(company.legal_name, now=LATER) == (company, None)
+    assert company.change(legal_name=company.legal_name, now=LATER) == (company, None)
+    assert company.change(profile=company.profile, now=LATER) == (company, None)
+    assert company.change(now=LATER) == (company, None)
+
+
+def test_a_profile_and_a_name_changed_together_make_one_version() -> None:
+    company = registered()
+    profile = replace(company.profile, tax_ids=(CEDULA, RNC))
+    changed, updated = company.change(legal_name=parse_legal_name("Duarte"), profile=profile, now=LATER)
+    assert (changed.profile, changed.legal_name, changed.version) == (profile, "Duarte", 2)
+    assert updated is not None
+    assert (updated.tax_ids, updated.aggregate_version) == ((CEDULA, RNC), 2)
+
+
+def test_a_locked_profile_changes_no_more_though_the_name_does() -> None:
+    locked, _ = registered().lock_fiscal_profile(now=LATER)
+    with pytest.raises(FiscalProfileLockedError) as caught:
+        locked.change(profile=replace(locked.profile, tax_ids=(CEDULA,)), now=LATER)
+    assert (caught.value.kind, caught.value.code) == (ErrorKind.CONFLICT, "fiscal_profile_locked")
+    renamed, _ = locked.change(legal_name=parse_legal_name("Other"), profile=locked.profile, now=LATER)
+    assert (renamed.legal_name, renamed.profile) == ("Other", locked.profile)
+
+
+def regime_of(country: str, *, books: tuple[Currency, ...] = (), foreign: bool = False) -> RegimeDef:
+    """A regime of ``country`` in pesos with nothing else: what judges a fiscal profile."""
+    return RegimeDef(
+        key=RegimeKey(country.lower()),
+        jurisdiction=Jurisdiction(CountryCode(country)),
+        currency=Currency.of("DOP"),
+        time_zone="America/Santo_Domingo",
+        labels={Locale("es"): country},
+        tax_id_schemes=(),
+        tax_categories=(),
+        document_types=(),
+        rounding=RoundingRule(
+            mode=RoundingMode.HALF_UP, points=frozenset(), places=2, line_tolerance=Decimal("0.01")
+        ),
+        fields=(),
+        parameters={},
+        sources=(Source(title="Law", url="https://law.invalid", version="1", retrieved_on=date(2026, 1, 1)),),
+        functional_currencies=books,
+        foreign_tax_ids=foreign,
+    )
+
+
+def test_a_profile_fits_the_regime_of_its_jurisdiction_or_is_refused() -> None:
+    profile = registered().profile
+    dominican = regime_of("DO")
+    assert require_fits(profile, dominican) is dominican
+    with pytest.raises(JurisdictionUnsupportedError) as unsupported:
+        require_fits(profile, None)
+    with pytest.raises(CurrencyUnsupportedError) as currency:
+        require_fits(replace(profile, functional_currency=Currency.of("USD")), dominican)
+    dollars = regime_of("DO", books=(Currency.of("USD"),))
+    assert require_fits(replace(profile, functional_currency=Currency.of("USD")), dollars) is dollars
+    foreign = TaxId(TaxIdScheme("es.nif"), "B12345678")
+    with pytest.raises(TaxIdForeignError, match=r"tax_ids\.1 ") as abroad:
+        require_fits(replace(profile, tax_ids=(RNC, foreign)), dominican)
+    open_to_all = regime_of("DO", foreign=True)
+    assert require_fits(replace(profile, tax_ids=(RNC, foreign)), open_to_all) is open_to_all
+    assert [error.value.code for error in (unsupported, currency, abroad)] == [
+        "jurisdiction_unsupported",
+        "currency_unsupported",
+        "tax_id_foreign",
+    ]
 
 
 def test_a_deactivated_company_says_so_and_changes_no_more() -> None:
@@ -338,7 +412,7 @@ def test_a_deactivated_company_says_so_and_changes_no_more() -> None:
     assert (inactive.status, inactive.version) == (CompanyStatus.INACTIVE, 2)
     assert event == CompanyDeactivated(scope=company.tenant, subject=company.id, aggregate_version=2)
     with pytest.raises(CompanyInactiveError) as caught:
-        inactive.rename(parse_legal_name("Other"), now=LATER)
+        inactive.change(legal_name=parse_legal_name("Other"), now=LATER)
     assert (caught.value.kind, caught.value.code) == (ErrorKind.CONFLICT, "company_inactive")
     with pytest.raises(CompanyInactiveError):
         inactive.deactivate(now=LATER)

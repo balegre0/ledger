@@ -62,7 +62,18 @@ class Companies(Protocol, metaclass=ABCMeta):
 
     @abstractmethod
     async def update(self, company: Company, *, version: int) -> bool:
-        """Replace the company kept at ``version`` by ``company``; false when it is not at that version."""
+        """Replace the company kept at ``version`` by ``company``; false when it is not at that version.
+
+        Its jurisdiction and functional currency too; its tax ids are ``retax``'s.
+        """
+
+    @abstractmethod
+    async def retax(self, company: Company) -> bool:
+        """Keep the company's tax ids as its profile lists them, and move its registry rows with them.
+
+        The ids it no longer lists are released; those it lists anew are registered to it. False when an
+        active company (of any organization) holds one of them: the unit is then rolled back by its caller.
+        """
 
     @abstractmethod
     async def of_member(self, subject: SubjectId, request: PageRequest) -> Page[Company]:
@@ -144,6 +155,7 @@ class Events(Protocol, metaclass=ABCMeta):
 type AuditAction = Literal[
     "company.register",
     "company.rename",
+    "company.change_profile",
     "company.deactivate",
     "company.lock_fiscal_profile",
     "api_client.register",

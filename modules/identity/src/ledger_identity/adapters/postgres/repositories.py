@@ -17,7 +17,7 @@ lazy from collections.abc import Sequence
 lazy from datetime import date, datetime
 lazy from uuid import UUID
 
-from sqlalchemy import and_, case, delete, false, func, select, update
+from sqlalchemy import and_, case, delete, false, func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 lazy from sqlalchemy import ColumnElement, Row, Select
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
@@ -341,6 +341,9 @@ class PgCompanies(Companies):
                 CompanyRecord.version == version,
             )
             .values(
+                country=company.profile.jurisdiction.country,
+                subdivision=company.profile.jurisdiction.subdivision,
+                currency=company.profile.functional_currency.code,
                 legal_name=company.legal_name,
                 status=company.status.value,
                 fiscal_profile_locked_at=company.fiscal_profile_locked_at,
@@ -358,6 +361,62 @@ class PgCompanies(Companies):
                 )
             )
         return True
+
+    @override
+    async def retax(self, company: Company) -> bool:
+        _require_own(company.organization, self._organization)
+        listed = company.profile.tax_ids
+        mine = and_(
+            TaxRegistrationRecord.organization_id == self._organization,
+            TaxRegistrationRecord.company_id == company.id,
+        )
+        await self._connection.execute(
+            delete(CompanyTaxIdRecord).where(
+                CompanyTaxIdRecord.organization_id == self._organization,
+                CompanyTaxIdRecord.company_id == company.id,
+            )
+        )
+        await self._connection.execute(
+            insert(CompanyTaxIdRecord).values(
+                [
+                    {
+                        "organization_id": company.organization,
+                        "company_id": company.id,
+                        "position": position,
+                        "scheme": tax_id.scheme,
+                        "value": tax_id.value,
+                    }
+                    for position, tax_id in enumerate(listed)
+                ]
+            )
+        )
+        keys = [(tax_id.scheme, tax_id.value) for tax_id in listed]
+        await self._connection.execute(
+            delete(TaxRegistrationRecord).where(
+                mine, tuple_(TaxRegistrationRecord.scheme, TaxRegistrationRecord.value).not_in(keys)
+            )
+        )
+        await self._connection.execute(
+            insert(TaxRegistrationRecord)
+            .values(
+                [
+                    {
+                        "scheme": tax_id.scheme,
+                        "value": tax_id.value,
+                        "organization_id": company.organization,
+                        "company_id": company.id,
+                    }
+                    for tax_id in listed
+                ]
+            )
+            .on_conflict_do_nothing(
+                index_elements=[TaxRegistrationRecord.scheme, TaxRegistrationRecord.value]
+            )
+        )
+        held = await self._connection.execute(
+            select(func.count()).select_from(TaxRegistrationRecord).where(mine)
+        )
+        return held.scalar_one() == len(listed)  # fewer: another company holds one of them
 
     @override
     async def of_member(self, subject: SubjectId, request: PageRequest) -> Page[Company]:

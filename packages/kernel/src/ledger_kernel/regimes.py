@@ -267,6 +267,12 @@ class RegimeDef:
     fields: tuple[FieldDef, ...]
     parameters: Mapping[str, Timeline[Decimal | int | str]] = field(hash=False)
     sources: tuple[Source, ...]
+    functional_currencies: tuple[Currency, ...] = ()
+    """Currencies a company of the jurisdiction may keep its books in besides ``currency`` (where the law lets
+    some keep them in a foreign currency); none by default."""
+    foreign_tax_ids: bool = False
+    """Whether a company of the jurisdiction may list tax ids of other countries' schemes (a foreign company's
+    own ids beside its local one); by default it lists its own country's only."""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "labels", _frozen(self.labels))
@@ -274,6 +280,14 @@ class RegimeDef:
         self._check_identity()
         self._check_schemes()
         self._check_contents()
+
+    def keeps_books_in(self, currency: Currency) -> bool:
+        """Whether a company of the jurisdiction may keep its books in ``currency``."""
+        return currency == self.currency or currency in self.functional_currencies
+
+    def accepts_tax_id(self, tax_id: TaxId) -> bool:
+        """Whether a company of the jurisdiction may list ``tax_id``: its country's, or any where allowed."""
+        return self.foreign_tax_ids or tax_id.scheme.partition(".")[0] == self.jurisdiction.country.lower()
 
     def _check_identity(self) -> None:
         key, jurisdiction = self.key, self.jurisdiction
@@ -285,6 +299,9 @@ class RegimeDef:
             raise InvalidRegimeError(key, "has no label")
         if not self.sources:
             raise InvalidRegimeError(key, "names no source")
+        books = self.functional_currencies
+        if self.currency in books or len(set(books)) != len(books):
+            raise InvalidRegimeError(key, "lists a functional currency twice, or its own currency among them")
 
     def _check_schemes(self) -> None:
         key, country = self.key, self.jurisdiction.country

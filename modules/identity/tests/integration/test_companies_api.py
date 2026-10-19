@@ -9,6 +9,7 @@ from typing import Final
 import pytest
 from pydantic import TypeAdapter
 lazy import httpx
+lazy import psycopg
 
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import commands
@@ -330,16 +331,25 @@ async def test_a_company_is_registered_in_its_regime_s_time_zone_unless_it_names
     assert zones == [("MAIN", "America/Santo_Domingo"), ("MAIN", "Europe/Madrid")]
 
 
-async def test_a_company_of_a_country_without_a_regime_must_name_its_time_zone(
-    client: httpx.AsyncClient, owner: TestPrincipal
+@pytest.mark.parametrize(
+    ("change", "code"),
+    [
+        ({"jurisdiction": {"country": "ES"}}, "jurisdiction_unsupported"),
+        ({"jurisdiction": {"country": "ES"}, "time_zone": "Europe/Madrid"}, "jurisdiction_unsupported"),
+        ({"functional_currency": "USD"}, "currency_unsupported"),
+    ],
+    ids=["no-regime", "no-regime-with-a-zone", "currency-the-regime-does-not-allow"],
+)
+async def test_a_profile_the_installed_regimes_do_not_allow_is_refused(
+    client: httpx.AsyncClient, owner: TestPrincipal, change: dict[str, object], code: str
 ) -> None:
-    abroad = body({"scheme": "do.rnc", "value": "101-85004-3"}, jurisdiction={"country": "ES"})
-    refused = await client.post("/v1/companies", json=abroad, headers=owner.posting("k-1"))
-    assert (refused.status_code, document(refused)["code"]) == (422, "time_zone_required")
-    accepted = await client.post(
-        "/v1/companies", json=abroad | {"time_zone": "Europe/Madrid"}, headers=owner.posting("k-2")
+    """Only the regime of the company's jurisdiction can judge its documents: it must allow its profile."""
+    refused = await client.post(
+        "/v1/companies",
+        json=body({"scheme": "do.rnc", "value": "101-85004-3"}) | change,
+        headers=owner.posting("k-1"),
     )
-    assert accepted.status_code == 201
+    assert (refused.status_code, document(refused)["code"]) == (422, code)
 
 
 @pytest.mark.parametrize("zone", ["Mars/Olympus", "../etc/passwd", "", "x" * 65])
@@ -732,11 +742,14 @@ async def test_a_change_needs_the_version_it_was_made_from(
     ("payload", "code"),
     [
         ({"legal_name": " "}, "invalid_name"),
-        ({"legal_name": "X", "tax_ids": [{"scheme": "do.rnc", "value": "130000012"}]}, "invalid_request"),
-        ({"legal_name": "X", "jurisdiction": {"country": "US"}}, "invalid_request"),
-        ({"legal_name": "X", "functional_currency": "USD"}, "invalid_request"),
+        ({}, "invalid_request"),
+        ({"status": "inactive"}, "invalid_request"),
+        ({"jurisdiction": {"country": "US"}}, "jurisdiction_unsupported"),
+        ({"functional_currency": "USD"}, "currency_unsupported"),
+        ({"tax_ids": []}, "invalid_request"),
+        ({"tax_ids": [{"scheme": "do.rnc", "value": "130000012"}] * 2}, "tax_id_duplicated"),
     ],
-    ids=["blank-name", "tax-ids-never-change", "jurisdiction-never-changes", "currency-never-changes"],
+    ids=["blank-name", "nothing", "unknown-field", "no-regime", "currency", "no-tax-id", "a-tax-id-twice"],
 )
 async def test_a_change_that_cannot_be_made_is_refused(
     client: httpx.AsyncClient, owner: TestPrincipal, company: str, payload: dict[str, str], code: str
@@ -745,6 +758,73 @@ async def test_a_change_that_cannot_be_made_is_refused(
         f"/v1/companies/{company}", json=payload, headers=owner.bearer() | {"If-Match": '"1"'}
     )
     assert (response.status_code, document(response)["code"]) == (422, code)
+
+
+async def test_until_it_is_locked_a_profile_changes_and_the_registry_follows_its_tax_ids(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
+) -> None:
+    """``tax_ids`` is the whole list: the id it drops is released at once, the one it adds is held."""
+    path = f"/v1/companies/{company}"
+    refiled = await client.patch(
+        path,
+        json={"tax_ids": [{"scheme": "do.rnc", "value": "130000012"}], "legal_name": "Duarte Hermanos"},
+        headers=owner.bearer() | {"If-Match": '"1"'},
+    )
+    assert (refiled.status_code, refiled.headers["etag"]) == (200, '"2"')  # one change, one version
+    assert (document(refiled)["tax_ids"], document(refiled)["legal_name"]) == (
+        [{"scheme": "do.rnc", "value": "130000012"}],
+        "Duarte Hermanos",
+    )
+    released = await client.post("/v1/companies", json=DUARTE, headers=owner.posting("c-again"))
+    held = await client.post(
+        "/v1/companies",
+        json=body({"scheme": "do.rnc", "value": "130-00001-2"}),
+        headers=owner.posting("c-held"),
+    )
+    assert (released.status_code, held.status_code, document(held)["code"]) == (201, 409, "tax_id_taken")
+
+
+async def test_a_profile_cannot_take_a_tax_id_another_company_holds(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
+) -> None:
+    other = await created(
+        client, "/v1/companies", body({"scheme": "do.rnc", "value": "130000012"}), owner.posting("c-2")
+    )
+    taken = await client.patch(
+        f"/v1/companies/{company}",
+        json={
+            "tax_ids": [
+                {"scheme": "do.rnc", "value": "101850043"},
+                {"scheme": "do.rnc", "value": "130000012"},
+            ]
+        },
+        headers=owner.bearer() | {"If-Match": '"1"'},
+    )
+    assert (taken.status_code, document(taken)["code"]) == (409, "tax_id_taken")
+    read = await client.get(f"/v1/companies/{company}", headers=owner.bearer())
+    assert (read.headers["etag"], len(TAX_IDS.validate_python(document(read)["tax_ids"]))) == ('"1"', 1)
+    assert other
+
+
+async def test_a_locked_profile_changes_no_more_though_the_name_still_does(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str, admin: psycopg.AsyncConnection
+) -> None:
+    await admin.execute("UPDATE identity.companies SET fiscal_profile_locked_at = now()")
+    path = f"/v1/companies/{company}"
+    for change in (
+        {"functional_currency": "DOP", "tax_ids": [{"scheme": "do.rnc", "value": "130000012"}]},
+        {"jurisdiction": {"country": "DO", "subdivision": "DO-01"}},
+    ):
+        refused = await client.patch(path, json=change, headers=owner.bearer() | {"If-Match": "*"})
+        assert (refused.status_code, document(refused)["code"]) == (409, "fiscal_profile_locked")
+    same = await client.patch(
+        path, json={"functional_currency": "DOP"}, headers=owner.bearer() | {"If-Match": "*"}
+    )
+    renamed = await client.patch(
+        path, json={"legal_name": "Duarte e Hijos"}, headers=owner.bearer() | {"If-Match": "*"}
+    )
+    assert (same.status_code, same.headers["etag"]) == (200, '"1"')  # what it is already is no change
+    assert (renamed.status_code, renamed.headers["etag"]) == (200, '"2"')
 
 
 async def test_of_two_changes_of_one_version_only_one_applies(

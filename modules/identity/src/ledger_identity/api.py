@@ -49,7 +49,7 @@ class CompanyInfo:
     legal_name: str
     active: bool
     fiscal_profile_locked: bool
-    """Whether its jurisdiction, functional currency and primary tax id can no longer change (§7.1)."""
+    """Whether its fiscal profile (jurisdiction, functional currency, tax ids) can no longer change (§7.1)."""
     version: int
 
 

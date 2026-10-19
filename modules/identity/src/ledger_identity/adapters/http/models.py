@@ -8,7 +8,7 @@ from datetime import date, datetime
 from typing import ClassVar, Final, Self
 lazy from collections.abc import Sequence
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ledger_identity.adapters.http.public import (
     ApiClientRef,
@@ -35,6 +35,13 @@ lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_identity.domain.organization import Organization
 lazy from ledger_kernel.jurisdiction import Jurisdiction
 lazy from ledger_kernel.tax_ids import TaxId
+
+
+class _NothingToChangeError(ValueError):
+    def __init__(self) -> None:
+        super().__init__(
+            "a change names at least one of legal_name, jurisdiction, functional_currency, tax_ids"
+        )
 
 
 class _Shape(BaseModel):
@@ -90,7 +97,7 @@ MAX_TAX_IDS: Final = 5
 
 
 class NewCompany(_Shape):
-    """A company to register."""
+    """A company to register, with a fiscal profile the installed regime of its jurisdiction allows."""
 
     jurisdiction: JurisdictionBody
     functional_currency: str = Field(
@@ -112,17 +119,40 @@ class NewCompany(_Shape):
         min_length=1,
         max_length=64,
         description=(
-            "An IANA zone: where the days of its main establishment begin and end. "
-            "Absent: its regime's; required where no regime is installed."
+            "An IANA zone: where the days of its main establishment begin and end. Absent: its regime's."
         ),
         examples=["America/Santo_Domingo"],
     )
 
 
 class CompanyChanges(_Shape):
-    """What can change in a company."""
+    """What can change in a company: what the request names changes, the rest stays.
 
-    legal_name: str = Field(min_length=1, max_length=MAX_LEGAL_NAME)
+    Its fiscal profile (jurisdiction, functional currency, tax ids) changes only until it is locked, before
+    the company's first numbered document (409 ``fiscal_profile_locked`` after).
+    """
+
+    legal_name: str | None = Field(default=None, min_length=1, max_length=MAX_LEGAL_NAME)
+    jurisdiction: JurisdictionBody | None = None
+    functional_currency: str | None = Field(
+        default=None, min_length=3, max_length=3, description="ISO 4217.", examples=["DOP"]
+    )
+    tax_ids: list[TaxIdBody] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_TAX_IDS,
+        description=(
+            "The whole list, each once, the first the primary one: an id it no longer lists is released, "
+            "one it lists anew is registered."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def changes_something(self) -> Self:
+        """A change names at least one thing to change."""
+        if not self.model_fields_set:
+            raise _NothingToChangeError
+        return self
 
 
 class CompanyView(_Shape):
@@ -136,7 +166,7 @@ class CompanyView(_Shape):
     legal_name: str
     status: CompanyStatus
     fiscal_profile_locked_at: datetime | None = Field(
-        description="When its jurisdiction, currency and primary tax id became immutable, if they did."
+        description="When its fiscal profile (jurisdiction, currency, tax ids) became immutable, if it did."
     )
     version: int
     created_at: datetime

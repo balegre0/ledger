@@ -33,15 +33,31 @@ class InvalidTimeZoneError(InvalidInputError):
         super().__init__("a time zone is the name of an IANA zone, such as America/Santo_Domingo")
 
 
-class TimeZoneRequiredError(InvalidInputError):
-    """A company of a jurisdiction no regime is installed for, registered without the zone its days run in."""
+class JurisdictionUnsupportedError(InvalidInputError):
+    """A company of a jurisdiction no installed regime governs: nothing could judge its documents."""
 
-    code: ClassVar[str] = "time_zone_required"
+    code: ClassVar[str] = "jurisdiction_unsupported"
 
     def __init__(self) -> None:
-        super().__init__(
-            "a time zone is required: no installed regime says where this jurisdiction's days run"
-        )
+        super().__init__("no installed regime governs this jurisdiction")
+
+
+class CurrencyUnsupportedError(InvalidInputError):
+    """A functional currency the regime of the company's jurisdiction does not let it keep its books in."""
+
+    code: ClassVar[str] = "currency_unsupported"
+
+    def __init__(self) -> None:
+        super().__init__("the jurisdiction's regime does not let a company keep its books in this currency")
+
+
+class TaxIdForeignError(InvalidInputError):
+    """A tax id of another country's scheme, where the jurisdiction's regime allows its own country's only."""
+
+    code: ClassVar[str] = "tax_id_foreign"
+
+    def __init__(self, position: int) -> None:
+        super().__init__(f"tax_ids.{position} is of another country's scheme than the jurisdiction's")
 
 
 class InvalidCodeError(InvalidInputError):
@@ -163,6 +179,15 @@ class CompanyInactiveError(ConflictError):
 
     def __init__(self, company: UUID) -> None:
         super().__init__(f"company {format_id(COMPANY_PREFIX, company)} is inactive")
+
+
+class FiscalProfileLockedError(ConflictError):
+    """The company's fiscal profile was locked (before its first numbered document): it changes no more."""
+
+    code: ClassVar[str] = "fiscal_profile_locked"
+
+    def __init__(self, company: UUID) -> None:
+        super().__init__(f"company {format_id(COMPANY_PREFIX, company)} has its fiscal profile locked")
 
 
 class StaleVersionError(ConflictError):

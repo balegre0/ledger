@@ -124,6 +124,8 @@ class Changes(TypedDict, total=False):
     tax_categories: tuple[TaxCategoryDef, ...]
     document_types: tuple[DocumentTypeDef, ...]
     fields: tuple[FieldDef, ...]
+    functional_currencies: tuple[Currency, ...]
+    foreign_tax_ids: bool
 
 
 def regime(**changes: Unpack[Changes]) -> RegimeDef:
@@ -146,6 +148,8 @@ def regime(**changes: Unpack[Changes]) -> RegimeDef:
         fields=changes.get("fields", ()),
         parameters={"threshold": Timeline(Since(date(2020, 1, 1), Decimal(1000)))},
         sources=changes.get("sources", (SOURCE,)),
+        functional_currencies=changes.get("functional_currencies", ()),
+        foreign_tax_ids=changes.get("foreign_tax_ids", False),
     )
 
 
@@ -255,6 +259,26 @@ def test_two_regimes_declaring_one_scheme_are_refused() -> None:
 def test_a_regime_that_contradicts_itself_is_refused(built: Callable[[], RegimeDef], problem: str) -> None:
     with pytest.raises(InvalidRegimeError, match=problem):
         built()
+
+
+def test_a_company_keeps_its_books_in_the_regime_s_currency_or_another_it_allows() -> None:
+    assert regime().keeps_books_in(USD)
+    assert not regime().keeps_books_in(Currency.of("EUR"))
+    assert regime(functional_currencies=(Currency.of("EUR"),)).keeps_books_in(Currency.of("EUR"))
+
+
+def test_a_regime_accepts_only_its_country_s_tax_ids_unless_it_says_so() -> None:
+    domestic, foreign = TaxId(TaxIdScheme("us.probe"), "1"), TaxId(TaxIdScheme("fr.siren"), "1")
+    assert regime().accepts_tax_id(domestic)
+    assert not regime().accepts_tax_id(foreign)
+    assert regime(foreign_tax_ids=True).accepts_tax_id(foreign)
+
+
+def test_a_regime_whose_book_currencies_repeat_or_include_its_own_is_refused() -> None:
+    with pytest.raises(InvalidRegimeError, match="functional currency"):
+        regime(functional_currencies=(USD,))
+    with pytest.raises(InvalidRegimeError, match="functional currency"):
+        regime(functional_currencies=(Currency.of("EUR"), Currency.of("EUR")))
 
 
 def test_a_regime_of_a_subdivision_is_keyed_by_the_subdivision() -> None:

@@ -7,7 +7,7 @@ lazy from datetime import date
 
 from ledger_identity.application.queries import main_establishment
 from ledger_identity.domain.api_clients import ApiClient
-from ledger_identity.domain.company import Company
+from ledger_identity.domain.company import Company, FiscalProfile, require_fits
 from ledger_identity.domain.errors import (
     ApiClientExistsError,
     ApiClientHumanError,
@@ -23,16 +23,51 @@ from ledger_identity.domain.roles import COMPANIES_MANAGE
 from ledger_kernel.access import CompanyNotFoundError, PrincipalKind
 lazy from ledger_identity.application.ports import AuditAction, IdentityUnit
 lazy from ledger_identity.domain.api_clients import ApiClientSpec
-lazy from ledger_identity.domain.company import FiscalProfile
 lazy from ledger_identity.domain.ids import ApiClientId
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_identity.domain.text import Code, LegalName, Name, TimeZone
 lazy from ledger_kernel.access import Principal, Role, SubjectId
 lazy from ledger_kernel.ids import CompanyId
+lazy from ledger_kernel.jurisdiction import Jurisdiction
+lazy from ledger_kernel.money import Currency
+lazy from ledger_kernel.regimes import RegimeDef
+lazy from ledger_kernel.tax_ids import TaxId
 lazy from ledger_kernel.tenancy import Mode
 
 type Admits = Callable[[int], bool]
 """Whether a change may apply to a company at a version: the client's ``If-Match``."""
+type RegimeOf = Callable[[Jurisdiction], RegimeDef | None]
+"""The installed regime that governs a jurisdiction, if any."""
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Changes:
+    """What a change of a company sets; whatever is ``None`` stays as it is.
+
+    The jurisdiction, the functional currency and the tax ids make its fiscal profile (the tax ids as a whole
+    list, the first its primary one): they change only until the profile is locked.
+    """
+
+    regime_of: RegimeOf
+    """What judges a new profile: the installed regime of its jurisdiction."""
+    legal_name: LegalName | None = None
+    jurisdiction: Jurisdiction | None = None
+    functional_currency: Currency | None = None
+    tax_ids: tuple[TaxId, ...] | None = None
+
+    def profile_of(self, company: Company) -> FiscalProfile | None:
+        """``company``'s profile with these changes, if any part of it changes at all."""
+        if (self.jurisdiction, self.functional_currency, self.tax_ids) == (None, None, None):
+            return None
+        current = company.profile
+        return FiscalProfile(
+            jurisdiction=current.jurisdiction if self.jurisdiction is None else self.jurisdiction,
+            functional_currency=(
+                current.functional_currency if self.functional_currency is None else self.functional_currency
+            ),
+            tax_ids=current.tax_ids if self.tax_ids is None else self.tax_ids,
+        )
 
 
 @final
@@ -143,17 +178,36 @@ async def _replace(unit: IdentityUnit, current: Company, changed: Company) -> No
         raise StaleVersionError(current.id)
 
 
-async def rename_company(
-    unit: IdentityUnit, company_id: CompanyId, *, legal_name: LegalName, admits: Admits, actor: SubjectId
+async def change_company(
+    unit: IdentityUnit,
+    company_id: CompanyId,
+    changes: Changes,
+    *,
+    admits: Admits,
+    actor: SubjectId,
 ) -> Company:
-    """Give the company ``legal_name``, if its current version is one ``admits``, as ``actor`` may."""
+    """Change the company as ``changes`` say, if its current version is one ``admits``, as ``actor`` may.
+
+    A fiscal profile changes only until it is locked (``FiscalProfileLockedError``), and only to one the
+    regime of its jurisdiction allows (``require_fits``); a tax id it lists anew that an active company
+    holds refuses the change (``TaxIdTakenError``), and one it no longer lists is released. Nothing that is
+    so already is changed, announced or recorded.
+    """
     current = await _admitted(unit, company_id, admits, actor)
-    renamed, updated = current.rename(legal_name, now=unit.now)
-    if updated is not None:
-        await _replace(unit, current, renamed)
-        unit.events.publish(updated)
-        unit.audit.record("company.rename", current.id, before=current, after=renamed)
-    return renamed
+    profile = changes.profile_of(current)
+    changed, updated = current.change(legal_name=changes.legal_name, profile=profile, now=unit.now)
+    if updated is None:
+        return current
+    refiled = changed.profile != current.profile
+    if refiled:
+        _ = require_fits(changed.profile, changes.regime_of(changed.profile.jurisdiction))
+    await _replace(unit, current, changed)
+    if changed.profile.tax_ids != current.profile.tax_ids and not await unit.companies.retax(changed):
+        raise TaxIdTakenError
+    unit.events.publish(updated)
+    action: AuditAction = "company.change_profile" if refiled else "company.rename"
+    unit.audit.record(action, current.id, before=current, after=changed)
+    return changed
 
 
 async def deactivate_company(
@@ -228,7 +282,7 @@ def _client_detail(client: ApiClient) -> dict[str, str]:
 
 
 async def lock_fiscal_profile(unit: IdentityUnit, company_id: CompanyId) -> Company:
-    """Lock the company's fiscal profile: its jurisdiction, functional currency and primary tax id.
+    """Lock the company's fiscal profile: its jurisdiction, functional currency and tax ids.
 
     The platform's call, before a company's first numbered document; one already locked stays as it was, so a
     retry changes and announces nothing.

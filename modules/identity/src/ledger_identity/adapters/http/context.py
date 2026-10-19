@@ -5,9 +5,8 @@ from typing import final
 
 from ledger_identity.adapters.permissions import MembershipPermissions
 from ledger_platform.http import Idempotency, company_in_path, ledger_mode_of
-lazy from ledger_identity.domain.text import TimeZone
 lazy from ledger_kernel.jurisdiction import Jurisdiction
-lazy from ledger_kernel.regimes import TaxIdSchemes
+lazy from ledger_kernel.regimes import RegimeDef, TaxIdSchemes
 lazy from ledger_platform.auth import PermissionSource
 lazy from ledger_platform.config.manifest import ChannelEntry
 lazy from ledger_platform.data import BoundDatabase
@@ -29,7 +28,8 @@ class ApiContext:
     in_company: InCompany
     idempotency: Idempotency
     regimes: Regimes
-    """The installed regimes: their schemes read a client's ``{scheme, value}``, their zones default."""
+    """The installed regimes: their schemes read a client's ``{scheme, value}``, they say which fiscal profile
+    a company of their jurisdiction may have, and their zones default."""
     channels: tuple[ChannelEntry, ...]
     """The manifest entries of the installed channels, by key: what ``/v1/countries`` says of them."""
 
@@ -38,14 +38,14 @@ class ApiContext:
         """Every installed regime's tax id schemes."""
         return self.regimes.tax_id_schemes
 
-    def default_time_zone(self, jurisdiction: Jurisdiction) -> TimeZone | None:
-        """The zone the installed regime of ``jurisdiction`` runs its days in; none when no regime is of it.
+    def regime_of(self, jurisdiction: Jurisdiction) -> RegimeDef | None:
+        """The installed regime that governs ``jurisdiction``; none when no regime is of it.
 
-        A subdivision with its own regime is judged by it; any other falls back to its country's.
+        A subdivision with its own regime is governed by it; any other by its country's.
         """
         for key in (jurisdiction.subdivision, jurisdiction.country):
             if key is not None and key.lower() in self.regimes:
-                return TimeZone(self.regimes.get(key.lower()).time_zone)
+                return self.regimes.get(key.lower())
         return None
 
     @classmethod

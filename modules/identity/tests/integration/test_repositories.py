@@ -402,11 +402,11 @@ async def test_another_organization_sees_none_of_a_company(module_database: Boun
 
 async def test_a_change_applies_to_the_version_it_was_made_from_only(module_database: BoundDatabase) -> None:
     company = await create(module_database)
-    renamed, _ = company.rename(parse_legal_name("Duarte Hermanos"), now=NOW)
+    renamed, _ = company.change(legal_name=parse_legal_name("Duarte Hermanos"), now=NOW)
     assert await in_unit(
         module_database, company.tenant, lambda unit: unit.companies.update(renamed, version=1)
     )
-    again, _ = company.rename(parse_legal_name("Duarte e Hijos"), now=NOW)
+    again, _ = company.change(legal_name=parse_legal_name("Duarte e Hijos"), now=NOW)
     assert not await in_unit(
         module_database, company.tenant, lambda unit: unit.companies.update(again, version=1)
     )
@@ -422,8 +422,12 @@ async def test_renames_and_deactivations_are_announced(
     await in_unit(
         module_database,
         company.tenant,
-        lambda unit: commands.rename_company(
-            unit, company.id, legal_name=parse_legal_name("Duarte S.A."), admits=anything, actor=OWNER
+        lambda unit: commands.change_company(
+            unit,
+            company.id,
+            commands.Changes(regime_of=lambda _: None, legal_name=parse_legal_name("Duarte S.A.")),
+            admits=anything,
+            actor=OWNER,
         ),
     )
     await in_unit(
@@ -762,7 +766,7 @@ async def test_a_unit_refuses_to_write_a_row_of_another_tenant(module_database: 
         spec, organization=company.organization, mode=Mode.TEST, actor=OWNER, now=NOW
     )
     a_test_client = client_of_theirs  # a client of mode test handed to a unit of mode live
-    renamed, _ = company.rename(parse_legal_name("Duarte S.A."), now=NOW)
+    renamed, _ = company.change(legal_name=parse_legal_name("Duarte S.A."), now=NOW)
     of_another_organization: tuple[Callable[[IdentityUnit], Awaitable[object]], ...] = (
         lambda unit: unit.organizations.add(Organization.of(FOUNDER, now=NOW, api_version=VERSION)),
         lambda unit: unit.companies.add(company),

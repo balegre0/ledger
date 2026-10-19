@@ -32,14 +32,16 @@ class CompanyRegistered(Event):
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CompanyUpdated(Event):
-    """A company's details changed: its legal name, or its fiscal profile was locked."""
+    """A company's details changed: its legal name, its fiscal profile, or the profile was locked."""
 
     TYPE: ClassVar[str] = "identity.company.updated"
     VERSION: ClassVar[int] = 1
+    jurisdiction: Jurisdiction
+    functional_currency: Currency
     tax_ids: tuple[TaxId, ...]
     legal_name: str
     fiscal_profile_locked: bool
-    """Whether jurisdiction, functional currency and primary tax id are now immutable (§7.1)."""
+    """Whether the fiscal profile (jurisdiction, functional currency, tax ids) is now immutable (§7.1)."""
 
 
 @final

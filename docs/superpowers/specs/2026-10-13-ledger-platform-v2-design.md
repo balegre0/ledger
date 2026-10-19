@@ -1167,7 +1167,17 @@ Organization (Zitadel organization; shard key; pinned API version)
   `jurisdiction` (country + optional ISO 3166-2 subdivision), `functional_currency`, `tax_ids: tuple[TaxId,
   ...]` (at least one; the primary one is the registry key), `status`, `fiscal_profile_locked_at` (set through
   `IdentityApi.lock_fiscal_profile` by `fiscal` before a company's first numbered document; afterwards
-  jurisdiction, functional currency and the primary tax id are immutable; R4), `version` (ETag).
+  its whole fiscal profile, jurisdiction, functional currency and tax ids, is immutable; R4), `version` (ETag).
+- **The fiscal profile** (jurisdiction, functional currency, tax ids) is judged by the installed regimes, at
+  registration and at every change: the jurisdiction must have a regime (its subdivision's, else its country's;
+  422 `jurisdiction_unsupported`), the functional currency must be one the regime lets a company keep its books
+  in (`RegimeDef.currency`, or one of its `functional_currencies`; 422 `currency_unsupported`), and every tax id
+  scheme must be of the jurisdiction's country unless the regime allows foreign ones (`foreign_tax_ids`; 422
+  `tax_id_foreign`). Until the profile is locked it is edited with `PATCH /v1/companies/{id}` and `If-Match`
+  (`jurisdiction`, `functional_currency`, `tax_ids` as the whole list: a dropped id is released from the registry,
+  an added one is registered, 409 `tax_id_taken` if an active company holds it); once locked the whole profile is
+  refused (409 `fiscal_profile_locked`), the legal name still changes. A jurisdiction no installed regime governs
+  cannot be registered, so a company's time zone defaults to its regime's.
 - **Establishment**: `code`, `name`, `time_zone` (IANA; defaults to the regime's). A document names an
   establishment (default "main"); its time zone fixes the document's tax point date (I11). v1's *emission
   points* are deleted from identity; a channel that needs issuing points models them itself ([05] §4.2).

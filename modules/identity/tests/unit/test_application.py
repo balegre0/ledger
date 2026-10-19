@@ -27,6 +27,7 @@ from ledger_identity.domain.errors import (
     CompanyInactiveError,
     EstablishmentCodeTakenError,
     EstablishmentNotFoundError,
+    JurisdictionUnsupportedError,
     LastOwnerError,
     MembershipNotFoundError,
     OrganizationAdminRequiredError,
@@ -66,9 +67,11 @@ lazy from ledger_identity.domain.company import Company
 lazy from ledger_identity.domain.establishments import Establishment
 lazy from ledger_identity.domain.ids import ApiClientId, EstablishmentId
 lazy from ledger_identity.domain.membership import Membership
-lazy from ledger_identity.domain.text import Code
+lazy from ledger_identity.domain.text import Code, LegalName
 lazy from ledger_identity.events import IdentityEvent
+lazy from ledger_kernel.jurisdiction import Jurisdiction
 lazy from ledger_kernel.pagination import Page
+lazy from ledger_kernel.regimes import RegimeDef
 
 NOW: Final = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
 LATER: Final = NOW + timedelta(minutes=5)
@@ -221,6 +224,16 @@ class MemoryCompanies(Companies):
             return False
         self._state.companies[company.id] = company
         return True
+
+    @override
+    async def retax(self, company: Company) -> bool:
+        taken = {
+            tax_id
+            for other in self._state.companies.values()
+            if other.id != company.id and other.status is CompanyStatus.ACTIVE
+            for tax_id in other.profile.tax_ids
+        }
+        return not taken & set(company.profile.tax_ids)
 
     @override
     async def of_member(self, subject: SubjectId, request: PageRequest) -> Page[Company]:
@@ -485,12 +498,31 @@ async def test_a_deactivated_company_s_tax_id_may_be_registered_again(state: Sta
     assert (other.organization, other.profile) == (STRANGER.organization, company.profile)
 
 
+def no_regime(jurisdiction: Jurisdiction) -> RegimeDef | None:
+    """What judges a profile where no regime is installed: nothing."""
+    del jurisdiction
+    return None
+
+
+def renaming(legal_name: LegalName) -> commands.Changes:
+    """A change of the name alone: nothing judges a profile, none changes."""
+    return commands.Changes(regime_of=no_regime, legal_name=legal_name)
+
+
+async def test_a_profile_no_installed_regime_governs_is_refused_and_nothing_changes(state: State) -> None:
+    company = await created(state)
+    abroad = commands.Changes(regime_of=no_regime, jurisdiction=parse_jurisdiction("ES"))
+    with pytest.raises(JurisdictionUnsupportedError):
+        await commands.change_company(state.unit(LATER), company.id, abroad, admits=anything, actor=OWNER)
+    assert (state.companies[company.id], len(state.events)) == (company, 2)
+
+
 async def test_a_rename_is_a_new_version_announced(state: State) -> None:
     company = await created(state)
-    renamed = await commands.rename_company(
+    renamed = await commands.change_company(
         state.unit(LATER),
         company.id,
-        legal_name=parse_legal_name("Duarte Hermanos"),
+        renaming(parse_legal_name("Duarte Hermanos")),
         admits=anything,
         actor=OWNER,
     )
@@ -500,8 +532,8 @@ async def test_a_rename_is_a_new_version_announced(state: State) -> None:
 
 async def test_a_rename_to_the_same_name_changes_and_announces_nothing(state: State) -> None:
     company = await created(state)
-    same = await commands.rename_company(
-        state.unit(LATER), company.id, legal_name=company.legal_name, admits=anything, actor=OWNER
+    same = await commands.change_company(
+        state.unit(LATER), company.id, renaming(company.legal_name), admits=anything, actor=OWNER
     )
     assert (same, len(state.events)) == (company, 2)
 
@@ -509,8 +541,8 @@ async def test_a_rename_to_the_same_name_changes_and_announces_nothing(state: St
 async def test_a_change_the_precondition_does_not_admit_is_stale(state: State) -> None:
     company = await created(state)
     with pytest.raises(StaleVersionError):
-        await commands.rename_company(
-            state.unit(LATER), company.id, legal_name=parse_legal_name("X"), admits=nothing, actor=OWNER
+        await commands.change_company(
+            state.unit(LATER), company.id, renaming(parse_legal_name("X")), admits=nothing, actor=OWNER
         )
     with pytest.raises(StaleVersionError):
         await commands.deactivate_company(state.unit(LATER), company.id, admits=nothing, actor=OWNER)
@@ -521,8 +553,8 @@ async def test_a_company_changed_by_someone_else_meanwhile_is_stale(state: State
     company = await created(state)
     state.races_lost = True
     with pytest.raises(StaleVersionError):
-        await commands.rename_company(
-            state.unit(LATER), company.id, legal_name=parse_legal_name("X"), admits=anything, actor=OWNER
+        await commands.change_company(
+            state.unit(LATER), company.id, renaming(parse_legal_name("X")), admits=anything, actor=OWNER
         )
     assert len(state.events) == 2
 
@@ -546,8 +578,8 @@ async def test_a_deactivated_company_is_announced_and_opens_nothing_more(state: 
 async def test_a_company_that_does_not_exist_is_not_found(state: State) -> None:
     missing = CompanyId(new_id())
     with pytest.raises(CompanyNotFoundError):
-        await commands.rename_company(
-            state.unit(), missing, legal_name=parse_legal_name("X"), admits=anything, actor=OWNER
+        await commands.change_company(
+            state.unit(), missing, renaming(parse_legal_name("X")), admits=anything, actor=OWNER
         )
     with pytest.raises(CompanyNotFoundError):
         await queries.company(state.unit(), missing)
@@ -575,10 +607,10 @@ async def test_a_new_company_and_its_owner_are_audited_as_created(state: State) 
 
 async def test_a_change_of_a_company_is_audited_from_what_it_was_to_what_it_is(state: State) -> None:
     company = await created(state)
-    renamed = await commands.rename_company(
+    renamed = await commands.change_company(
         state.unit(LATER),
         company.id,
-        legal_name=parse_legal_name("Duarte Hermanos"),
+        renaming(parse_legal_name("Duarte Hermanos")),
         admits=anything,
         actor=OWNER,
     )
@@ -591,8 +623,8 @@ async def test_a_change_of_a_company_is_audited_from_what_it_was_to_what_it_is(s
 
 async def test_what_changes_nothing_or_is_refused_is_not_audited(state: State) -> None:
     company = await created(state)
-    await commands.rename_company(
-        state.unit(LATER), company.id, legal_name=company.legal_name, admits=anything, actor=OWNER
+    await commands.change_company(
+        state.unit(LATER), company.id, renaming(company.legal_name), admits=anything, actor=OWNER
     )
     with pytest.raises(StaleVersionError):
         await commands.deactivate_company(state.unit(LATER), company.id, admits=nothing, actor=OWNER)
@@ -877,8 +909,8 @@ async def test_an_admin_demoted_while_its_change_of_the_company_waits_is_refused
     with pytest.raises(PermissionDeniedError):
         await commands.deactivate_company(state.unit(LATER), company.id, admits=anything, actor=ADMIN)
     with pytest.raises(PermissionDeniedError):
-        await commands.rename_company(
-            state.unit(LATER), company.id, legal_name=parse_legal_name("X"), admits=anything, actor=ADMIN
+        await commands.change_company(
+            state.unit(LATER), company.id, renaming(parse_legal_name("X")), admits=anything, actor=ADMIN
         )
     assert (state.companies[company.id], len(state.events)) == (company, 3)
 
@@ -890,8 +922,8 @@ async def test_a_company_is_changed_by_an_actor_with_an_active_role_there_only(s
     with pytest.raises(CompanyNotFoundError):
         await commands.deactivate_company(state.unit(LATER), company.id, admits=anything, actor=ADMIN)
     with pytest.raises(CompanyNotFoundError):
-        await commands.rename_company(
-            state.unit(LATER), company.id, legal_name=parse_legal_name("X"), admits=anything, actor=VIEWER
+        await commands.change_company(
+            state.unit(LATER), company.id, renaming(parse_legal_name("X")), admits=anything, actor=VIEWER
         )
     assert state.companies[company.id] == company
 
@@ -955,8 +987,8 @@ async def test_another_organizations_unit_sees_nothing_of_the_company(state: Sta
     with pytest.raises(CompanyNotFoundError):
         await commands.grant_role(outsider, company.id, subject=VIEWER, role=Role.VIEWER, actor=OWNER)
     with pytest.raises(CompanyNotFoundError):
-        await commands.rename_company(
-            outsider, company.id, legal_name=parse_legal_name("X"), admits=anything, actor=OWNER
+        await commands.change_company(
+            outsider, company.id, renaming(parse_legal_name("X")), admits=anything, actor=OWNER
         )
     with pytest.raises(EstablishmentNotFoundError):
         await queries.establishment(outsider, company.id, main.id)

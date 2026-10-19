@@ -1,8 +1,9 @@
 """A company: one taxpayer of an organization, and the unit of tenancy (§7).
 
 It is in one jurisdiction, keeps its books in one functional currency and holds one or more tax ids, the
-first of which is its primary one. Once its fiscal profile is locked (before its first numbered document) its
-jurisdiction, functional currency and primary tax id never change (§7.1: another taxpayer is another company).
+first of which is its primary one: its fiscal profile, which the regime of its jurisdiction must allow
+(``require_fits``). Until the profile is locked (before the company's first numbered document) it may be
+changed; once locked it never changes (§7.1: another taxpayer is another company).
 Every change makes a new version, which is the company's ``ETag``. A deactivated company changes no more; its
 data stays readable.
 """
@@ -12,7 +13,13 @@ from enum import StrEnum
 from typing import final
 lazy from datetime import datetime
 
-from ledger_identity.domain.errors import CompanyInactiveError
+from ledger_identity.domain.errors import (
+    CompanyInactiveError,
+    CurrencyUnsupportedError,
+    FiscalProfileLockedError,
+    JurisdictionUnsupportedError,
+    TaxIdForeignError,
+)
 from ledger_identity.events import CompanyDeactivated, CompanyRegistered, CompanyUpdated
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.ids import CompanyId, new_id
@@ -21,6 +28,7 @@ lazy from ledger_identity.domain.text import LegalName
 lazy from ledger_kernel.ids import OrganizationId
 lazy from ledger_kernel.jurisdiction import Jurisdiction
 lazy from ledger_kernel.money import Currency
+lazy from ledger_kernel.regimes import RegimeDef
 lazy from ledger_kernel.tax_ids import TaxId
 
 
@@ -55,6 +63,23 @@ class FiscalProfile:
     def primary_tax_id(self) -> TaxId:
         """The first of its tax ids: the one the taxpayer is known by."""
         return self.tax_ids[0]
+
+
+def require_fits(profile: FiscalProfile, regime: RegimeDef | None) -> RegimeDef:
+    """The regime of the profile's jurisdiction (``regime``, if installed), once it allows the profile.
+
+    A jurisdiction no installed regime governs (``JurisdictionUnsupportedError``); a functional currency the
+    regime does not let a company keep its books in (``CurrencyUnsupportedError``); a tax id of another
+    country's scheme where the regime allows its own country's only (``TaxIdForeignError``, naming the first).
+    """
+    if regime is None:
+        raise JurisdictionUnsupportedError
+    if not regime.keeps_books_in(profile.functional_currency):
+        raise CurrencyUnsupportedError
+    for position, tax_id in enumerate(profile.tax_ids):
+        if not regime.accepts_tax_id(tax_id):
+            raise TaxIdForeignError(position)
+    return regime
 
 
 @final
@@ -113,19 +138,30 @@ class Company:
         if self.status is CompanyStatus.INACTIVE:
             raise CompanyInactiveError(self.id)
 
-    def rename(self, legal_name: LegalName, *, now: datetime) -> tuple[Company, CompanyUpdated | None]:
-        """The company under ``legal_name``; unchanged, and no event, when that is already its name."""
+    def change(
+        self, *, legal_name: LegalName | None = None, profile: FiscalProfile | None = None, now: datetime
+    ) -> tuple[Company, CompanyUpdated | None]:
+        """The company under ``legal_name`` and with ``profile``, each where given, at its next version.
+
+        Unchanged, and no event, when it is so already. Its profile changes only until it is locked
+        (``FiscalProfileLockedError``); whether its regime allows the new one is the caller's to check first
+        (``require_fits``).
+        """
         self.require_active()
-        if legal_name == self.legal_name:
+        name = self.legal_name if legal_name is None else legal_name
+        fiscal = self.profile if profile is None else profile
+        if fiscal != self.profile and self.fiscal_profile_locked_at is not None:
+            raise FiscalProfileLockedError(self.id)
+        if (name, fiscal) == (self.legal_name, self.profile):
             return self, None
-        renamed = replace(self, legal_name=legal_name, version=self.version + 1, updated_at=now)
-        return renamed, renamed.updated()
+        changed = replace(self, legal_name=name, profile=fiscal, version=self.version + 1, updated_at=now)
+        return changed, changed.updated()
 
     def lock_fiscal_profile(self, *, now: datetime) -> tuple[Company, CompanyUpdated | None]:
         """The company with its fiscal profile locked; unchanged, and no event, when it already is.
 
-        Locked before its first numbered document: jurisdiction, functional currency and primary tax id are
-        what every number and every tax point is judged by, so they cannot change afterwards.
+        Locked before its first numbered document: jurisdiction, functional currency and tax ids are what
+        every number and every tax point is judged by, so they cannot change afterwards.
         """
         self.require_active()
         if self.fiscal_profile_locked_at is not None:
@@ -139,6 +175,8 @@ class Company:
             scope=self.tenant,
             subject=self.id,
             aggregate_version=self.version,
+            jurisdiction=self.profile.jurisdiction,
+            functional_currency=self.profile.functional_currency,
             tax_ids=self.profile.tax_ids,
             legal_name=self.legal_name,
             fiscal_profile_locked=self.fiscal_profile_locked_at is not None,

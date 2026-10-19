@@ -103,6 +103,8 @@ async def test_renames_and_deactivations_are_announced_at_the_company_s_versions
             inside,
             2,
             {
+                "jurisdiction": {"country": "DO", "subdivision": None},
+                "functional_currency": "DOP",
                 "tax_ids": [{"scheme": "do.rnc", "value": "101850043"}],
                 "legal_name": "Duarte SRL",
                 "fiscal_profile_locked": False,

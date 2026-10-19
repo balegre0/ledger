@@ -154,18 +154,66 @@
       },
       "CompanyChanges": {
         "additionalProperties": false,
-        "description": "What can change in a company.",
+        "description": "What can change in a company: what the request names changes, the rest stays.\n\nIts fiscal profile (jurisdiction, functional currency, tax ids) changes only until it is locked, before\nthe company's first numbered document (409 ``fiscal_profile_locked`` after).",
         "properties": {
+          "functional_currency": {
+            "anyOf": [
+              {
+                "maxLength": 3,
+                "minLength": 3,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "ISO 4217.",
+            "examples": [
+              "DOP"
+            ],
+            "title": "Functional Currency"
+          },
+          "jurisdiction": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JurisdictionBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "legal_name": {
-            "maxLength": 300,
-            "minLength": 1,
-            "title": "Legal Name",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 300,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Legal Name"
+          },
+          "tax_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/TaxIdBody"
+                },
+                "maxItems": 5,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The whole list, each once, the first the primary one: an id it no longer lists is released, one it lists anew is registered.",
+            "title": "Tax Ids"
           }
         },
-        "required": [
-          "legal_name"
-        ],
         "title": "CompanyChanges",
         "type": "object"
       },
@@ -201,7 +249,7 @@
                 "type": "null"
               }
             ],
-            "description": "When its jurisdiction, currency and primary tax id became immutable, if they did.",
+            "description": "When its fiscal profile (jurisdiction, currency, tax ids) became immutable, if it did.",
             "title": "Fiscal Profile Locked At"
           },
           "functional_currency": {
@@ -698,7 +746,7 @@
       },
       "NewCompany": {
         "additionalProperties": false,
-        "description": "A company to register.",
+        "description": "A company to register, with a fiscal profile the installed regime of its jurisdiction allows.",
         "properties": {
           "functional_currency": {
             "description": "ISO 4217: the currency its books are kept in.",
@@ -741,7 +789,7 @@
                 "type": "null"
               }
             ],
-            "description": "An IANA zone: where the days of its main establishment begin and end. Absent: its regime's; required where no regime is installed.",
+            "description": "An IANA zone: where the days of its main establishment begin and end. Absent: its regime's.",
             "examples": [
               "America/Santo_Domingo"
             ],
@@ -1137,7 +1185,7 @@
                 "type": "null"
               }
             ],
-            "description": "When its jurisdiction, currency and primary tax id became immutable, if they did.",
+            "description": "When its fiscal profile (jurisdiction, currency, tax ids) became immutable, if it did.",
             "title": "Fiscal Profile Locked At"
           },
           "functional_currency": {
@@ -3513,7 +3561,7 @@
         ]
       },
       "post": {
-        "description": "Register a company of the caller's organization; the caller becomes its owner.\n\nThe caller must hold the identity provider's project role ``ledger.organization.admin``. The request\nacts in ``Ledger-Mode``: its ``Idempotency-Key`` is kept per mode. The company is both modes'.",
+        "description": "Register a company of the caller's organization; the caller becomes its owner.\n\nThe caller must hold the identity provider's project role ``ledger.organization.admin``. The request\nacts in ``Ledger-Mode``: its ``Idempotency-Key`` is kept per mode. The company is both modes'. Its\nfiscal profile must fit the installed regime of its jurisdiction: one no regime governs is refused\n(``jurisdiction_unsupported``), as are a functional currency the regime does not let it keep its books\nin (``currency_unsupported``) and a tax id of another country's scheme where the regime allows its own\ncountry's only (``tax_id_foreign``).",
         "operationId": "create_company_v1_companies_post",
         "parameters": [
           {
@@ -4354,7 +4402,7 @@
         ]
       },
       "patch": {
-        "description": "Change a company, if it is at a version ``If-Match`` names.",
+        "description": "Change a company, if it is at a version ``If-Match`` names: what the request names changes.\n\nIts fiscal profile (jurisdiction, functional currency, tax ids) changes only until it is locked (409\n``fiscal_profile_locked``), and only to one the installed regime of its jurisdiction allows, as at\nregistration. ``tax_ids`` is the whole list: an id it no longer lists is released, and one it lists\nanew that an active company holds refuses the change (409 ``tax_id_taken``).",
         "operationId": "change_company_v1_companies__company_id__patch",
         "parameters": [
           {
