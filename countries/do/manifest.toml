@@ -4,11 +4,12 @@ kind = "country"
 summary = "Dominican Republic: regime 'do' (DGII's tax law as data) and channel 'do-ecf-v1' (e-CF)."
 owners = ["@balegre0"]
 
-# The regime is the kernel's data alone (import-linter keeps it pure); the channel's adapters read and sign XML
-# with fiscal-kit's hardened reader and signature profile. Without a channel entry the pack gets no generated
-# _manifest.py (whose model is the platform's) until a channel (v2-M3) brings one.
+# The regime is the kernel's data alone (import-linter keeps it pure); the channel's adapters read XML with
+# fiscal-kit's hardened reader and verify its signature profile, and sign through its SignerPort (whose calls
+# are the platform's SystemCall). Without a channel entry the pack gets no generated _manifest.py (whose model
+# is the platform's) until a channel (v2-M3) brings one.
 [dependencies]
-packages = ["kernel", "fiscal-kit"]
+packages = ["kernel", "platform", "fiscal-kit"]
 python = ["cryptography>=50.0.2", "httpx>=0.28.1", "lxml>=6.1.3", "pydantic>=2.14.1"]
 test = ["signxml>=5.1.0", "types-lxml>=2026.2.16", "xmlschema>=4.3.2"]
 

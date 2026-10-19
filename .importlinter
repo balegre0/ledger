@@ -146,7 +146,6 @@ forbidden_modules =
     ledger_devtools
     ledger_identity
     ledger_invoicing
-    ledger_platform
     ledger_testing
 allow_indirect_imports = True
 

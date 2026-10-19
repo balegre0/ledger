@@ -19,6 +19,7 @@ from ledger_fiscal_kit.ports import (
     SigningCertificateNotValidError,
     SigningClockSkewError,
     XmlToSign,
+    is_audience,
 )
 from ledger_kernel.errors import ErrorKind, InvalidValueError
 from ledger_kernel.ids import CompanyId, OrganizationId
@@ -121,6 +122,7 @@ def test_a_seed_over_the_limit_is_refused() -> None:
 @pytest.mark.parametrize("audience", ["ecf.dgii.gov.do", "10.0.0.1:443", "[::1]:8443", "a"])
 def test_an_audience_is_a_host(audience: str) -> None:
     assert replace(SEED, audience=audience).audience == audience
+    assert is_audience(audience)
 
 
 @pytest.mark.parametrize(
@@ -129,6 +131,7 @@ def test_an_audience_is_a_host(audience: str) -> None:
 def test_an_audience_that_is_not_a_host_is_refused(audience: str) -> None:
     with pytest.raises(InvalidValueError, match=r"seed_to_sign.audience"):
         replace(SEED, audience=audience)
+    assert not is_audience(audience)
 
 
 def test_requests_show_no_document() -> None:

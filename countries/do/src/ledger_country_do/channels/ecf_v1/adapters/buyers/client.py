@@ -4,7 +4,8 @@ The buyer is looked up in DGII's directory; no entry means it is no electronic r
 apply (the client hands it the printed representation). The directory's URLs are the buyer's to write, so
 each is checked before anything is sent, and every request goes to an address checked public, never to a name
 resolved again (``endpoints``). They are bases to which DGII's standard paths are appended (F5). When the
-buyer publishes an authentication URL, its seed, read hardened, is signed and exchanged for its token
+buyer publishes an authentication URL, its seed is signed (``XmlSigner.sign_seed`` refuses anything but DGII's
+``SemillaModel``, read hardened; its audience the endpoint's host and port) and exchanged for its token
 (``validacioncertificado``: issuer to buyer, DGII is not in the middle). The signed e-CF is posted to its
 reception (multipart ``xml``, named RNC + e-NCF), and the answer must be a **signed ARECF**:
 
@@ -56,13 +57,12 @@ lazy from cryptography import x509
 from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import endpoint, pinned, system_resolve
 from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import TokenAnswer
 from ledger_country_do.channels.ecf_v1.adapters.http import ACCEPTED_ENCODING, DEFAULT_TIMEOUTS, bounded
-from ledger_country_do.channels.ecf_v1.adapters.signing.seeds import require_seed
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import INBOUND, verify_enveloped
 from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import checked
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError, EcfUnavailableError
 from ledger_country_do.channels.ecf_v1.domain.notation import parse_dgii_moment
-from ledger_fiscal_kit.xml.hardened import XmlDocumentError, texts
+from ledger_fiscal_kit.xml.hardened import texts
 from ledger_kernel.tax_ids import masked
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import Endpoint, Resolve
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DirectoryEntry
@@ -322,9 +322,8 @@ class BuyerClient:
     async def _token(self, at: Endpoint, deadline: float, draft: EcfDraft, buyer: str) -> str:
         seed = await self._exchange(at, _SEED, deadline, headers={"Accept": "application/xml"})
         try:
-            require_seed(seed)
-            signed = await self._signer.sign_seed(seed)
-        except (EcfInvalidError, XmlDocumentError) as error:
+            signed = await self._signer.sign_seed(seed, audience=at.authority)
+        except EcfInvalidError as error:
             raise BuyerUnavailableError(_SEED.name) from error
         self._audit(SeedSigned(draft.issuer.rnc, buyer, at.host, self._clock()))
         answer = await self._exchange(

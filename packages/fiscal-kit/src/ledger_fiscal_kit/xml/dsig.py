@@ -64,7 +64,7 @@ from ledger_fiscal_kit.xml.hardened import (
     require_plain,
     require_readable,
 )
-from ledger_kernel.errors import InvalidInputError
+from ledger_kernel.errors import InvalidInputError, InvalidValueError
 
 C14N: Final = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
 RSA_SHA256: Final = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"
@@ -90,6 +90,8 @@ _COMMENTS: Final = "a document to sign holds no comment and no processing instru
 _XML_ATTRIBUTES: Final = "a document to sign carries no xml: attribute on its root"
 _SHORT: Final = f"the signing key is shorter than {MIN_KEY_BITS} bits"
 _NOT_ITS_KEY: Final = "the certificate is not the signing key's"
+_MADE: Final = object()
+"""``Prepared``'s token: only ``prepare`` holds it."""
 
 
 class DocumentSignedError(XmlDocumentError):
@@ -204,13 +206,16 @@ def _c14n(document: bytes) -> bytes:
 class Prepared:
     """A document ``prepare`` checked and digested: what it lacks is a signature value over ``to_sign``.
 
-    Made by ``prepare`` only. It holds the document, so it is never logged nor shown (its ``repr`` is the
-    object's); completing it changes nothing in it, so it may be completed again.
+    Made by ``prepare`` alone (``made`` is its private token; anything else is refused, so no document reaches
+    ``complete`` without ``prepare``'s checks). It holds the document, so it is never logged nor shown (its
+    ``repr`` is the object's); completing it changes nothing in it, so it may be completed again.
     """
 
     __slots__ = ("_digest", "_document", "_to_sign")
 
-    def __init__(self, document: bytes, digest: str, to_sign: bytes) -> None:
+    def __init__(self, made: object, document: bytes, digest: str, to_sign: bytes) -> None:
+        if made is not _MADE:
+            raise InvalidValueError(field="prepared", requirement="made by dsig.prepare")
         self._document = document
         self._digest = digest
         self._to_sign = to_sign
@@ -223,12 +228,13 @@ class Prepared:
     def complete(self, signature_value: bytes, certificate: x509.Certificate) -> bytes:
         """The document signed, once ``signature_value`` over ``to_sign`` is the key of ``certificate``'s.
 
-        ``SigningPairError`` when it is not, or when ``certificate`` may not sign (see the module): a value
-        made elsewhere (a certification entity's) is checked before it is written into a document.
+        ``NotAnRsaKeyError`` when ``certificate``'s key is not RSA; ``SigningPairError`` when the value is not
+        its key's, or when ``certificate`` may not sign (see the module): a value made elsewhere (a
+        certification entity's) is checked before it is written into a document.
         """
         public_key = certificate.public_key()
         if not isinstance(public_key, RSAPublicKey):
-            raise SigningPairError(_NOT_ITS_KEY)
+            raise NotAnRsaKeyError
         require_signing_pair(public_key, certificate)
         try:
             public_key.verify(signature_value, self._to_sign, padding.PKCS1v15(), hashes.SHA256())
@@ -261,7 +267,7 @@ def prepare(document: bytes) -> Prepared:
         hashlib.sha256(etree.tostring(tree, method="c14n", exclusive=False, with_comments=False)).digest()
     )
     in_scope = {prefix: uri for prefix, uri in root.nsmap.items() if prefix is not None}
-    return Prepared(document, digest, _c14n(signed_info(digest, in_scope).encode()))
+    return Prepared(_MADE, document, digest, _c14n(signed_info(digest, in_scope).encode()))
 
 
 def sign_enveloped(document: bytes, key: PrivateKeyTypes, certificate: x509.Certificate) -> bytes:

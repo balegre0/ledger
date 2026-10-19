@@ -40,6 +40,15 @@ class SignatureProfile(StrEnum):
     """Enveloped XMLDSig, C14N 1.0, SHA-256, RSA-SHA256: DGII's (``xml.dsig.PROFILES``)."""
 
 
+def is_audience(value: str) -> bool:
+    """Whether ``value`` may be a seed's audience: a host name or address, with its port if any.
+
+    For a caller that derives audiences from its configuration, to refuse one when it is configured rather
+    than at its first seed (``SeedToSign`` applies the same rule).
+    """
+    return _AUDIENCE.fullmatch(value) is not None
+
+
 def _require_moded(owner: str, tenant: Tenant) -> None:
     if tenant.mode is None:
         raise InvalidValueError(field=f"{owner}.tenant", requirement="a tenant in a mode")
@@ -91,7 +100,7 @@ class SeedToSign:
         _require_moded("seed_to_sign", self.tenant)
         if len(self.seed) > MAX_SEED_BYTES:
             raise InvalidValueError(field="seed_to_sign.seed", requirement=f"at most {MAX_SEED_BYTES} bytes")
-        if _AUDIENCE.fullmatch(self.audience) is None:
+        if not is_audience(self.audience):
             raise InvalidValueError(field="seed_to_sign.audience", requirement="a host, with its port if any")
 
 
@@ -148,7 +157,11 @@ class SignerPort(Protocol, metaclass=ABCMeta):
 
     @abstractmethod
     async def certificate_validity(self, call: SystemCall, tenant: Tenant) -> CertificateValidity | None:
-        """When the certificate serving ``tenant``'s company and mode may sign; ``None`` without one."""
+        """When the certificate serving ``tenant``'s company and mode may sign; ``None`` without one.
+
+        ``tenant`` names a mode (it chooses the certificate): a tenant without one is refused
+        (``InvalidValueError``, a defect of the caller), never answered with either mode's certificate.
+        """
 
 
 def is_signer_port(value: object) -> TypeIs[SignerPort]:

@@ -9,6 +9,11 @@ channel `do-ecf-v1` (DGII's e-CF: XML, schemas, signature, DGII's web services, 
 - `src/ledger_country_do/channels/ecf_v1/`: `domain` <- `application` <- `adapters`. The hardened XML reader and
   the signature profile (and what may sign) are fiscal-kit's (`ledger_fiscal_kit.xml`); the verifier, trust,
   names, stamp and the seed's shape stay here.
+- Signing goes through fiscal-kit's `SignerPort` (`adapters/signing/port.py`, `PortSigner`): the signer decides
+  whether its certificate covers the moment a document states; the channel never holds a key.
+- **Binding rule for every caller of `Emitter.send`** (v2-M3b's advance job included): `send` parks on every
+  pack error; any other exception escaping it is a defect whose outcome is **unknown**: the document may be at
+  DGII, so it is never sent again, only resumed as a parked one (track ids or `consultarfce` first).
 - [`docs/runbooks/do/testecf-spike.md`](../../docs/runbooks/do/testecf-spike.md): running the spike against
   DGII's TesteCF; [`docs/spike-findings.md`](docs/spike-findings.md): what it settled.
 

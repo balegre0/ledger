@@ -36,6 +36,7 @@ from ledger_country_do.channels.ecf_v1.adapters.signing.trust import (
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import SignatureInvalidError
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf
 from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import SchemaViolationError
+from ledger_country_do.channels.ecf_v1.application.ports import XmlSigner
 from ledger_country_do.channels.ecf_v1.domain.drafts import Buyer
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
@@ -170,7 +171,11 @@ async def buyers(party: Party, dgii: DgiiClient, fake: FakeDgii) -> AsyncIterato
 
 async def signed(signer: KeyPairSigner, sequence: int = 1) -> bytes:
     draft = credit_invoice(sequence)
-    return await signer.sign_document(ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT))
+    return await signer.sign_document(
+        ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT),
+        signed_at=SIGNED_AT,
+        reference=str(draft.encf),
+    )
 
 
 def receipt(receiver: Issued, clock: ManualClock, **changes: str) -> bytes:
@@ -532,7 +537,11 @@ async def test_the_buyer_on_the_e_cf_is_the_identity_its_receipt_must_carry(
 ) -> None:
     other = Buyer(rnc="131880738", name="OTRO COMPRADOR SRL")
     draft = credit_invoice(buyer=other)
-    document = await party.signer.sign_document(ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT))
+    document = await party.signer.sign_document(
+        ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT),
+        signed_at=SIGNED_AT,
+        reference=str(draft.encf),
+    )
     fake.state.receiver_requires_auth = False
     async with over(party, simulator, httpx.ASGITransport(app=fake.app)).opened() as client:
         with pytest.raises(CounterpartyCertificateError, match="not the buyer"):
@@ -571,6 +580,51 @@ async def test_a_client_s_own_clock_is_the_system_s(
 
 
 # -- Review round: the seed audit, every checked address, one classification -------------------------------
+
+
+@final
+class Audiences(XmlSigner):
+    """Signs with ``inner``, recording each seed's audience."""
+
+    __slots__ = ("_inner", "seen")
+
+    def __init__(self, inner: KeyPairSigner) -> None:
+        self._inner = inner
+        self.seen: list[str] = []
+
+    @override
+    async def sign_document(self, document: bytes, *, signed_at: datetime, reference: str) -> bytes:
+        return await self._inner.sign_document(document, signed_at=signed_at, reference=reference)
+
+    @override
+    async def sign_seed(self, seed: bytes, *, audience: str) -> bytes:
+        self.seen.append(audience)
+        return await self._inner.sign_seed(seed, audience=audience)
+
+
+@pytest.mark.parametrize(
+    ("base", "audience"),
+    [
+        (SIMULATOR, SIMULATOR_HOST),
+        (SIMULATOR.replace(SIMULATOR_HOST, f"{SIMULATOR_HOST}:8443"), "ecf.fake.test:8443"),
+    ],
+    ids=["https-port", "own-port"],
+)
+async def test_a_buyer_seed_is_signed_for_the_endpoint_it_came_from(
+    party: Party, fake: FakeDgii, base: str, audience: str
+) -> None:
+    signer = Audiences(party.signer)
+    client = BuyerClient(
+        signer,
+        listed(base, base),
+        trust=party.trust,
+        transport=httpx.ASGITransport(app=fake.app),
+        resolve=public_dns,
+        clock=party.clock,
+    )
+    async with client.opened():
+        await client.deliver(T, credit_invoice(), await signed(party.signer))
+    assert signer.seen == [audience]
 
 
 async def test_every_buyer_seed_signed_is_audited_without_secrets(party: Party, fake: FakeDgii) -> None:
