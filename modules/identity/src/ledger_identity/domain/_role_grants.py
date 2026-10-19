@@ -21,6 +21,8 @@ ROLE_GRANTS: Final = MappingProxyType(
                 Permission("invoicing.invoices.issue"),
                 Permission("invoicing.invoices.read"),
                 Permission("invoicing.invoices.void"),
+                Permission("signer.certificates.manage"),
+                Permission("signer.certificates.read"),
             }
         ),
         Role.ADMIN: frozenset(
@@ -33,6 +35,8 @@ ROLE_GRANTS: Final = MappingProxyType(
                 Permission("invoicing.invoices.issue"),
                 Permission("invoicing.invoices.read"),
                 Permission("invoicing.invoices.void"),
+                Permission("signer.certificates.manage"),
+                Permission("signer.certificates.read"),
             }
         ),
         Role.ACCOUNTANT: frozenset(
@@ -43,6 +47,7 @@ ROLE_GRANTS: Final = MappingProxyType(
                 Permission("invoicing.invoices.issue"),
                 Permission("invoicing.invoices.read"),
                 Permission("invoicing.invoices.void"),
+                Permission("signer.certificates.read"),
             }
         ),
         Role.ISSUER: frozenset(
@@ -51,12 +56,14 @@ ROLE_GRANTS: Final = MappingProxyType(
                 Permission("invoicing.invoices.create"),
                 Permission("invoicing.invoices.issue"),
                 Permission("invoicing.invoices.read"),
+                Permission("signer.certificates.read"),
             }
         ),
         Role.VIEWER: frozenset(
             {
                 Permission("identity.companies.read"),
                 Permission("invoicing.invoices.read"),
+                Permission("signer.certificates.read"),
             }
         ),
     }

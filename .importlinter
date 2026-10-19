@@ -13,6 +13,7 @@ root_packages =
     ledger_invoicing
     ledger_kernel
     ledger_platform
+    ledger_signer
     ledger_testing
 include_external_packages = True
 
@@ -21,6 +22,7 @@ name = Workspace layers
 type = layers
 layers =
     ledger_app_api | ledger_app_migrate | ledger_app_worker
+    ledger_signer
     ledger_invoicing
     ledger_identity
     ledger_country_do
@@ -97,6 +99,7 @@ forbidden_modules =
     ledger_identity
     ledger_invoicing
     ledger_kernel
+    ledger_signer
     ledger_testing
 allow_indirect_imports = True
 
@@ -115,6 +118,7 @@ forbidden_modules =
     ledger_identity
     ledger_invoicing
     ledger_kernel
+    ledger_signer
     ledger_testing
 allow_indirect_imports = True
 
@@ -133,6 +137,7 @@ forbidden_modules =
     ledger_identity
     ledger_invoicing
     ledger_kernel
+    ledger_signer
     ledger_testing
 allow_indirect_imports = True
 
@@ -149,6 +154,7 @@ forbidden_modules =
     ledger_devtools
     ledger_identity
     ledger_invoicing
+    ledger_signer
     ledger_testing
 allow_indirect_imports = True
 
@@ -165,6 +171,7 @@ forbidden_modules =
     ledger_identity
     ledger_invoicing
     ledger_platform
+    ledger_signer
 allow_indirect_imports = True
 
 [importlinter:contract:devtools-declared-edges]
@@ -181,6 +188,7 @@ forbidden_modules =
     ledger_fiscal_kit
     ledger_identity
     ledger_invoicing
+    ledger_signer
     ledger_testing
 allow_indirect_imports = True
 
@@ -198,6 +206,7 @@ forbidden_modules =
     ledger_devtools
     ledger_identity
     ledger_invoicing
+    ledger_signer
     ledger_testing
 allow_indirect_imports = True
 
@@ -215,6 +224,7 @@ forbidden_modules =
     ledger_devtools
     ledger_fiscal_kit
     ledger_invoicing
+    ledger_signer
     ledger_testing
 allow_indirect_imports = True
 
@@ -232,6 +242,7 @@ forbidden_modules =
     ledger_devtools
     ledger_fiscal_kit
     ledger_kernel
+    ledger_signer
     ledger_testing
 allow_indirect_imports = True
 
@@ -251,6 +262,7 @@ forbidden_modules =
     ledger_identity
     ledger_invoicing
     ledger_platform
+    ledger_signer
     ledger_testing
 allow_indirect_imports = True
 
@@ -268,6 +280,23 @@ forbidden_modules =
     ledger_devtools
     ledger_fiscal_kit
     ledger_identity
+    ledger_invoicing
+    ledger_signer
+    ledger_testing
+allow_indirect_imports = True
+
+[importlinter:contract:signer-declared-edges]
+name = signer imports only the workspace packages it declares
+type = forbidden
+source_modules =
+    ledger_signer
+forbidden_modules =
+    ledger_app_api
+    ledger_app_migrate
+    ledger_app_worker
+    ledger_country_do
+    ledger_country_do_testing
+    ledger_devtools
     ledger_invoicing
     ledger_testing
 allow_indirect_imports = True
@@ -287,6 +316,7 @@ forbidden_modules =
     ledger_fiscal_kit
     ledger_identity
     ledger_invoicing
+    ledger_signer
 allow_indirect_imports = True
 
 [importlinter:contract:do-regime-is-pure]
@@ -314,6 +344,7 @@ forbidden_modules =
     ledger_identity
     ledger_invoicing
     ledger_platform
+    ledger_signer
     ledger_testing
     lxml
     multipart
@@ -370,6 +401,7 @@ forbidden_modules =
     ledger_identity
     ledger_invoicing
     ledger_platform
+    ledger_signer
     ledger_testing
     lxml
     multipart
@@ -397,6 +429,7 @@ type = forbidden
 source_modules =
     ledger_identity
     ledger_invoicing
+    ledger_signer
 forbidden_modules =
     ledger_country_do
 
@@ -408,6 +441,7 @@ source_modules =
 forbidden_modules =
     ledger_identity
     ledger_invoicing
+    ledger_signer
 
 [importlinter:contract:identity-is-protected]
 name = Only identity imports its insides
@@ -418,6 +452,7 @@ source_modules =
     ledger_invoicing
     ledger_kernel
     ledger_platform
+    ledger_signer
 forbidden_modules =
     ledger_identity.domain
     ledger_identity.application
@@ -466,6 +501,7 @@ forbidden_modules =
     ledger_fiscal_kit
     ledger_invoicing
     ledger_platform
+    ledger_signer
     ledger_testing
     lxml
     multipart
@@ -534,6 +570,7 @@ source_modules =
     ledger_identity
     ledger_kernel
     ledger_platform
+    ledger_signer
 forbidden_modules =
     ledger_invoicing.domain
     ledger_invoicing.application
@@ -579,6 +616,7 @@ forbidden_modules =
     ledger_fiscal_kit
     ledger_identity
     ledger_platform
+    ledger_signer
     ledger_testing
     lxml
     multipart
@@ -638,6 +676,143 @@ forbidden_modules =
     xmlschema
 allow_indirect_imports = True
 
+[importlinter:contract:signer-is-protected]
+name = Only signer imports its insides
+type = forbidden
+source_modules =
+    ledger_country_do
+    ledger_fiscal_kit
+    ledger_identity
+    ledger_invoicing
+    ledger_kernel
+    ledger_platform
+forbidden_modules =
+    ledger_signer.domain
+    ledger_signer.application
+    ledger_signer.adapters
+    ledger_signer.assembly
+    ledger_signer._manifest
+allow_indirect_imports = True
+
+[importlinter:contract:signer-layers]
+name = signer is layered
+type = layers
+containers =
+    ledger_signer
+exhaustive = True
+layers =
+    assembly
+    adapters
+    application
+    api
+    domain
+    events
+    _manifest
+
+[importlinter:contract:signer-domain-is-pure]
+name = signer's domain and events import the kernel and the standard library only
+type = forbidden
+source_modules =
+    ledger_signer.domain
+    ledger_signer.events
+forbidden_modules =
+    alembic
+    cryptography
+    fastapi
+    google
+    granian
+    grpc
+    grpc_tools
+    httpx
+    joserfc
+    ledger_app_api
+    ledger_app_migrate
+    ledger_app_worker
+    ledger_country_do
+    ledger_country_do_testing
+    ledger_devtools
+    ledger_fiscal_kit
+    ledger_identity
+    ledger_invoicing
+    ledger_platform
+    ledger_testing
+    lxml
+    multipart
+    mypy_protobuf
+    opentelemetry
+    pathspec
+    prometheus_client
+    psycopg
+    py
+    pydantic
+    pydantic_settings
+    pytest
+    python_multipart
+    signxml
+    sqlalchemy
+    starlette
+    structlog
+    testcontainers
+    tzdata
+    xmlschema
+
+[importlinter:contract:signer-application-is-pure]
+name = signer's use cases import no third party, adapter or country
+type = forbidden
+source_modules =
+    ledger_signer.application
+forbidden_modules =
+    alembic
+    cryptography
+    fastapi
+    google
+    granian
+    grpc
+    grpc_tools
+    httpx
+    joserfc
+    ledger_country_do
+    ledger_signer.adapters
+    lxml
+    multipart
+    mypy_protobuf
+    opentelemetry
+    pathspec
+    prometheus_client
+    psycopg
+    py
+    pydantic
+    pydantic_settings
+    pytest
+    python_multipart
+    signxml
+    sqlalchemy
+    starlette
+    structlog
+    testcontainers
+    tzdata
+    xmlschema
+allow_indirect_imports = True
+
+[importlinter:contract:signer-custody]
+name = Nothing but signer and the apps of the signer role reaches signer's custody, even indirectly
+type = forbidden
+source_modules =
+    ledger_app_api
+    ledger_app_migrate
+    ledger_app_worker
+    ledger_country_do
+    ledger_country_do_testing
+    ledger_devtools
+    ledger_fiscal_kit
+    ledger_identity
+    ledger_invoicing
+    ledger_kernel
+    ledger_platform
+    ledger_testing
+forbidden_modules =
+    ledger_signer.adapters.custody
+
 [importlinter:contract:production-never-imports-test-tooling]
 name = Production code never imports test tooling
 type = forbidden
@@ -651,8 +826,8 @@ source_modules =
     ledger_invoicing
     ledger_kernel
     ledger_platform
+    ledger_signer
 forbidden_modules =
-    google
     grpc_tools
     hypothesis
     ledger_country_do_testing
@@ -676,6 +851,7 @@ source_modules =
     ledger_country_do
     ledger_identity
     ledger_invoicing
+    ledger_signer
 forbidden_modules =
     ledger_platform.http.proving
 allow_indirect_imports = True
@@ -704,4 +880,7 @@ forbidden_modules =
     ledger_platform.http
     ledger_platform.jobs
     ledger_platform.observability
+    ledger_signer.adapters
+    ledger_signer.application
+    ledger_signer.domain
 allow_indirect_imports = True

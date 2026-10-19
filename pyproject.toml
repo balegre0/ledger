@@ -40,6 +40,7 @@ workspace = [
     "ledger-testing",
     "signxml>=5.1.0",
     "types-lxml>=2026.2.16",
+    "types-protobuf>=7.35.1.20260906",
     "xmlschema>=4.3.2",
 ]
 
@@ -55,6 +56,7 @@ ledger-identity = { workspace = true }
 ledger-invoicing = { workspace = true }
 ledger-kernel = { workspace = true }
 ledger-platform = { workspace = true }
+ledger-signer = { workspace = true }
 ledger-testing = { workspace = true }
 
 [tool.ruff.lint.isort]
@@ -70,6 +72,7 @@ known-first-party = [
     "ledger_invoicing",
     "ledger_kernel",
     "ledger_platform",
+    "ledger_signer",
     "ledger_testing",
 ]
 # <<< end of what ledger-devtools sync generates

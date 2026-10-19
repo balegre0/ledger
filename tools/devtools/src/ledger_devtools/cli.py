@@ -25,6 +25,7 @@ from ledger_kernel.errors import LedgerError
 
 _PROBLEMS: Final = 1
 _UNREADABLE: Final = 2
+_BEHIND: Final = "installed packages are behind: run `uv sync --all-packages`, then sync again"
 _ORPHAN: Final = (
     "generated, but no manifest or contract implies it any more: run `uv run ledger-devtools sync`"
 )
@@ -97,7 +98,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
     a contract breaks a rule (what it writes follows from them) and exits 1. Both exit 1 too when protoc
     refuses contracts it accepted a moment before. Both exit 2 when the tree has no readable manifest, protoc
     or its plugins are not installed, a module the ``api`` app mounts is not installed, or the snapshots could
-    not be made.
+    not be made. A module the ``api`` app mounts that is not installed stops ``check`` before anything, and
+    ``sync`` only before the snapshots: a new module is installed from the ``pyproject.toml`` sync writes, so
+    sync writes every other file first and asks for ``uv sync --all-packages``, after which it completes.
     """
     parser = argparse.ArgumentParser(prog="ledger-devtools")
     parser.add_argument("command", choices=_Arguments.commands)
@@ -125,11 +128,12 @@ def _checked(command: str, root: Path, workspace: Workspace) -> int:
     ]
     if problems:
         return _report(problems)
-    try:
-        require_installed(mounted(workspace))
-    except NotInstalledError as error:
-        sys.stderr.write(f"{error}\n")
-        return _UNREADABLE
+    if command == "check":
+        try:
+            require_installed(mounted(workspace))
+        except NotInstalledError as error:
+            sys.stderr.write(f"{error}\n")
+            return _UNREADABLE
     try:
         return _run(command, root, workspace)
     except SnapshotsUnavailableError as error:
@@ -157,6 +161,11 @@ def _run(command: str, root: Path, workspace: Workspace) -> int:
     for path in unwanted:
         (root / path).unlink()
         sys.stdout.write(f"deleted {path.as_posix()}\n")
+    try:  # a new module installs from the pyproject just written: its snapshot waits for that
+        require_installed(mounted(workspace))
+    except NotInstalledError as error:
+        sys.stderr.write(f"{error.manifest}: {error.distribution} is not installed: {_BEHIND}\n")
+        return _UNREADABLE
     documents = openapi_documents(root)
     _write(root, documents, _stale(root, documents))
     return 0

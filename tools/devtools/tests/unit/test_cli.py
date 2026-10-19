@@ -260,17 +260,32 @@ prefixes = ["/v1/zzbills"]
 """
 
 
-def test_a_module_the_api_mounts_must_be_installed(
+def test_check_needs_every_module_the_api_mounts_installed(
     tree: Path, capsys: pytest.CaptureFixture[str], write: Writer
 ) -> None:
     write("modules/zzbilling", UNINSTALLED, ())
-    for command in ("check", "sync"):
-        code, lines, error = run(capsys, command, "--root", str(tree))
-        assert (code, lines) == (2, [])
-        assert error == (
-            "modules/zzbilling/manifest.toml: ledger-zzbilling is not installed, so its OpenAPI document "
-            "cannot be made: run `uv sync --all-packages`\n"
-        )
+    code, lines, error = run(capsys, "check", "--root", str(tree))
+    assert (code, lines) == (2, [])
+    assert error == (
+        "modules/zzbilling/manifest.toml: ledger-zzbilling is not installed, so its OpenAPI document "
+        "cannot be made: run `uv sync --all-packages`\n"
+    )
+
+
+def test_sync_writes_what_installs_a_new_module_then_asks_for_the_install(
+    tree: Path, capsys: pytest.CaptureFixture[str], write: Writer
+) -> None:
+    """A new mounted module cannot be installed before sync writes its pyproject: sync writes it first."""
+    write("modules/zzbilling", UNINSTALLED, ())
+    code, lines, error = run(capsys, "sync", "--root", str(tree))
+    assert code == 2
+    assert "wrote modules/zzbilling/pyproject.toml" in lines
+    assert error == (
+        "modules/zzbilling/manifest.toml: ledger-zzbilling is not installed: installed packages are behind: "
+        "run `uv sync --all-packages`, then sync again\n"
+    )
+    assert (tree / "modules/zzbilling/pyproject.toml").is_file()
+    assert run(capsys, "sync", "--root", str(tree)) == (2, [], error)  # nothing more to write meanwhile
 
 
 def test_sync_writes_every_other_file_before_it_makes_the_snapshots(
