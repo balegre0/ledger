@@ -191,39 +191,36 @@ def test_a_role_isolates_one_module_at_most(repository: Path, capsys: pytest.Cap
 
 
 SIGNER_APP: Final = """[package]
-name = "signer"
+name = "signing"
 kind = "app"
 summary = "An app planted by a test: the signer's role."
 owners = ["@o"]
 
 [dependencies]
 packages = ["platform"]
-modules = ["vault"]
 
 [app]
-script = "ledger-signer"
+script = "ledger-signing"
 role = "signer"
 """
 PLANTED_DOCSTRING: Final = '"""Planted."""\n'
-CUSTODY_KEY: Final = f"{PLANTED_DOCSTRING}\nfrom ledger_vault.adapters.custody import KEY\n"
-"""A planted module importing the custody's key."""
+CUSTODY_KEY: Final = f"{PLANTED_DOCSTRING}\nfrom ledger_signer.adapters.custody.keys import KEY\n"
+"""Code importing a key of the signer's custody."""
 PLANTED_FILES: Final = {
-    "modules/vault/manifest.toml": VAULT,
-    "modules/vault/src/ledger_vault/__init__.py": PLANTED_DOCSTRING,
-    "modules/vault/src/ledger_vault/assembly.py": CUSTODY_KEY,
-    "modules/vault/src/ledger_vault/adapters/__init__.py": PLANTED_DOCSTRING,
-    "modules/vault/src/ledger_vault/adapters/custody.py": f'{PLANTED_DOCSTRING}\nKEY = "k"\n',
-    "apps/signer/manifest.toml": SIGNER_APP,
-    "apps/signer/src/ledger_app_signer/__init__.py": PLANTED_DOCSTRING,
-    "apps/signer/src/ledger_app_signer/main.py": f"{PLANTED_DOCSTRING}\nimport ledger_vault.assembly\n",
+    "modules/signer/src/ledger_signer/adapters/custody/keys.py": f'{PLANTED_DOCSTRING}\nKEY = "k"\n',
+    "apps/signing/manifest.toml": SIGNER_APP,
+    "apps/signing/src/ledger_app_signing/__init__.py": PLANTED_DOCSTRING,
+    "apps/signing/src/ledger_app_signing/main.py": f"{PLANTED_DOCSTRING}\nimport ledger_platform.runtime\n",
 }
-"""An isolated module whose assembly imports its custody, and the app of its role importing the assembly."""
+"""A key in the workspace's own signer custody, and an app of its role (it imports the platform alone, as the
+real one will: the runtime assembles the module). Named ``signing``: an app named like the module it runs
+collides in devtools' lookups by name (to be settled with the real ``apps/signer``)."""
 LEAKS: Final = {
-    "apps/api/src/ledger_app_api/leak.py": "import ledger_vault.adapters.custody\n",
-    "packages/testing/src/ledger_testing/leak.py": "from ledger_vault.adapters import custody\n",
+    "apps/api/src/ledger_app_api/leak.py": "import ledger_signer.adapters.custody.keys\n",
+    "packages/testing/src/ledger_testing/leak.py": "from ledger_signer.adapters.custody import keys\n",
     "modules/identity/src/ledger_identity/adapters/leak.py": CUSTODY_KEY,
-    "modules/vault/src/ledger_vault/__init__.py": CUSTODY_KEY,
-    "modules/invoicing/src/ledger_invoicing/adapters/reexported.py": "from ledger_vault import KEY\n",
+    "modules/signer/src/ledger_signer/__init__.py": CUSTODY_KEY,
+    "modules/invoicing/src/ledger_invoicing/adapters/reexported.py": "from ledger_signer import KEY\n",
 }
 """An app of another role, a test kit and a module importing the custody; its re-export, imported."""
 
@@ -243,9 +240,9 @@ def write_files(root: Path, files: Mapping[str, str]) -> None:
 
 
 CUSTODY_CONTRACT: Final = (
-    "Nothing but vault and the apps of the signer role reaches vault's custody, even indirectly"
+    "Nothing but signer and the apps of the signer role reaches signer's custody, even indirectly"
 )
-APPS_CONTRACT: Final = "The apps of the signer role reach vault's custody through its assembly only"
+APPS_CONTRACT: Final = "The apps of the signer role reach signer's custody through its assembly only"
 
 
 def lint_imports(root: Path) -> tuple[int, str]:
@@ -266,7 +263,7 @@ def lint_imports(root: Path) -> tuple[int, str]:
 def test_import_linter_breaks_on_anything_but_the_role_s_apps_reaching_the_custody(
     repository: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    write_files(without_the_signer(repository), PLANTED_FILES)
+    write_files(repository, PLANTED_FILES)
     assert main(["sync", "--root", str(repository)]) == 0
     capsys.readouterr()
     assert main(["check", "--root", str(repository)]) == 0, capsys.readouterr().out
@@ -282,7 +279,49 @@ def test_import_linter_breaks_on_anything_but_the_role_s_apps_reaching_the_custo
     broken = report.split("Broken contracts", 1)[1].split(CUSTODY_CONTRACT, 1)[1].lstrip(" -")
     section = broken.split(" ---", 1)[0]
     for importer in ("ledger_app_api.leak", "ledger_testing.leak", "ledger_identity.adapters.leak"):
-        assert f"{importer} -> ledger_vault.adapters.custody" in section, section
-    assert "ledger_invoicing.adapters.reexported -> ledger_vault " in section, section
+        assert f"{importer} -> ledger_signer.adapters.custody" in section, section
+    assert "ledger_invoicing.adapters.reexported -> ledger_signer " in section, section
     assert main(["check", "--root", str(repository)]) == 1
-    assert "ledger_vault/__init__.py loads ledger_vault.adapters.custody" in capsys.readouterr().out
+    assert "ledger_signer/__init__.py loads ledger_signer.adapters.custody" in capsys.readouterr().out
+
+
+BILLS: Final = """[package]
+name = "bills"
+kind = "module"
+summary = "A module planted by a test: bills, served by the api."
+owners = ["@o"]
+
+[dependencies]
+packages = ["kernel", "platform"]
+
+[data]
+schema = "bills"
+
+[http]
+mounted_in = ["api"]
+prefixes = ["/v1/bills"]
+"""
+
+
+def test_a_new_mounted_module_syncs_before_it_is_installed_and_asks_for_the_install(
+    repository: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Its pyproject is what installs it: sync writes it and every other file, then asks for the install."""
+    write_files(
+        repository,
+        {
+            "modules/bills/manifest.toml": BILLS,
+            "modules/bills/src/ledger_bills/__init__.py": PLANTED_DOCSTRING,
+        },
+    )
+    assert main(["sync", "--root", str(repository)]) == 2
+    first = capsys.readouterr()
+    assert "wrote modules/bills/pyproject.toml" in first.out.splitlines()
+    assert "wrote modules/bills/src/ledger_bills/_manifest.py" in first.out.splitlines()
+    assert first.err == (
+        "modules/bills/manifest.toml: ledger-bills is not installed: installed packages are behind: "
+        "run `uv sync --all-packages`, then sync again\n"
+    )
+    assert main(["sync", "--root", str(repository)]) == 2  # what it could write is written
+    assert capsys.readouterr().out == ""
+    assert main(["check", "--root", str(repository)]) == 2

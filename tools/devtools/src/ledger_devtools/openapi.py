@@ -50,6 +50,8 @@ class NotInstalledError(LedgerError):
     def __init__(self, manifest: str, distribution: str) -> None:
         cannot = "is not installed, so its OpenAPI document cannot be made: run `uv sync --all-packages`"
         super().__init__(f"{manifest}: {distribution} {cannot}")
+        self.manifest: Final = manifest
+        self.distribution: Final = distribution
 
 
 def require_installed(modules: Iterable[Package]) -> None:
