@@ -20,7 +20,7 @@ from ledger_identity.adapters.http import (
     organization,
 )
 from ledger_identity.adapters.http.context import ApiContext
-from ledger_identity.adapters.postgres.schema import migrations
+from ledger_identity.adapters.postgres.schema import MIGRATIONS, migrations
 from ledger_identity.adapters.postgres.unit import PgUnits
 from ledger_identity.adapters.standings import cached_standings
 from ledger_identity.api import IDENTITY_API
@@ -72,5 +72,5 @@ def assemble(context: ModuleContext) -> ModuleParts:
     )
 
 
-MODULE: Final = Module(manifest=MANIFEST, assemble=assemble)
+MODULE: Final = Module(manifest=MANIFEST, assemble=assemble, migrations=MIGRATIONS)
 """What the entry point ``ledger.modules: identity`` names (Decision 13)."""

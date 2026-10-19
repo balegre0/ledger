@@ -228,6 +228,9 @@ class Module:
     assemble: Callable[[ModuleContext], ModuleParts]
     settings: type[PackageSettings] | None = None
     """The model of its settings section, if its manifest declares one (``[package] settings``)."""
+    migrations: SchemaMigrations | None = None
+    """Its schema's revisions, for what migrates it without assembling it: the suites of the modules that
+    depend on it (``ledger_testing.modules``). The app takes them from what its assembly hands over."""
 
 
 def bind_parts(

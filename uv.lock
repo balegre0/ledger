@@ -806,12 +806,14 @@ version = "0.1.0"
 source = { editable = "modules/invoicing" }
 dependencies = [
     { name = "alembic" },
+    { name = "ledger-identity" },
     { name = "ledger-platform" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.20.0" },
+    { name = "ledger-identity", editable = "modules/identity" },
     { name = "ledger-platform", editable = "packages/platform" },
 ]
 

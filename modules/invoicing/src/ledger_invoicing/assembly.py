@@ -7,7 +7,7 @@ current (readiness).
 from typing import Final
 
 from ledger_invoicing._manifest import MANIFEST
-from ledger_invoicing.adapters.postgres.schema import migrations
+from ledger_invoicing.adapters.postgres.schema import MIGRATIONS, migrations
 from ledger_platform.runtime import Module, ModuleParts
 lazy from ledger_platform.runtime import ModuleContext
 
@@ -18,5 +18,5 @@ def assemble(context: ModuleContext) -> ModuleParts:
     return ModuleParts(migrations=migrations())
 
 
-MODULE: Final = Module(manifest=MANIFEST, assemble=assemble)
+MODULE: Final = Module(manifest=MANIFEST, assemble=assemble, migrations=MIGRATIONS)
 """What the entry point ``ledger.modules: invoicing`` names (Decision 13)."""

@@ -202,11 +202,14 @@ def _coverage(package: Package) -> str:
 def _deptry(package: Package) -> str | None:
     """Deptry's module map (the distributions known to install modules named otherwise) and its ignores.
 
-    A distribution no module imports by name (``LOADED_BY_OTHERS``) is never reported unused.
+    A distribution no module imports by name (``LOADED_BY_OTHERS``) is never reported unused, nor is a module
+    the package depends on: that edge is the manifest's, whose imports import-linter holds to it, and it may
+    be there for the module's events or for the order the schemas migrate in, which no import shows.
     """
-    declared = {distribution_of(requirement) for requirement in package.manifest.dependencies.python}
+    dependencies = package.manifest.dependencies
+    declared = {distribution_of(requirement) for requirement in dependencies.python}
     renames = sorted(distribution for distribution in declared if renamed(distribution))
-    loaded = sorted(declared & LOADED_BY_OTHERS)
+    loaded = sorted((declared & LOADED_BY_OTHERS) | {f"ledger-{module}" for module in dependencies.modules})
     sections: list[str] = []
     if renames:
         lines = ((distribution, import_names(distribution)) for distribution in renames)

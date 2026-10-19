@@ -205,7 +205,6 @@ forbidden_modules =
     ledger_country_do
     ledger_country_do_testing
     ledger_devtools
-    ledger_identity
     ledger_kernel
     ledger_testing
 allow_indirect_imports = True

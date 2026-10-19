@@ -16,6 +16,7 @@ a fresh, empty database with the schemas (``fresh_database_name``, ``fresh``, ``
 copies another's conftest.
 """
 
+import graphlib
 from dataclasses import dataclass
 from typing import ClassVar, final
 lazy from collections.abc import Sequence
@@ -33,9 +34,19 @@ from ledger_testing.database import bootstrap, migrate
 lazy from ledger_platform.config.manifest import PackageManifest
 lazy from ledger_platform.data.migrations import SchemaMigrations
 lazy from ledger_platform.data.notifier import Channel
+lazy from ledger_platform.runtime.contexts import Module
 lazy from ledger_platform.runtime.registries import Discover, Discovered
 lazy from ledger_testing.issuer import LocalIssuer
 lazy from ledger_testing.postgres import Template
+
+
+class NeedUnmetError(LedgerError):
+    """A module the one under test depends on is not installed, or its entry point names no revisions."""
+
+    code: ClassVar[str] = "testing_need_unmet"
+
+    def __init__(self, module: str, problem: str) -> None:
+        super().__init__(f"{module!r} {problem}: the module under test depends on it")
 
 
 class SchemaLessModuleError(LedgerError):
@@ -54,8 +65,8 @@ class ModuleUnderTest:
 
     manifest: PackageManifest
     migrations: SchemaMigrations
-    needs: tuple[SchemaMigrations, ...] = ()
-    """The schemas of the modules it depends on: the app that serves it assembles them too."""
+    discover: Discover = installed
+    """Where the modules it depends on are found: the installed entry points, unless a test says otherwise."""
 
     def __post_init__(self) -> None:
         if self.manifest.schema_name is None:
@@ -65,6 +76,29 @@ class ModuleUnderTest:
     def schema(self) -> str:
         """The schema the package owns."""
         return self.migrations.schema
+
+    @property
+    def needs(self) -> tuple[SchemaMigrations, ...]:
+        """The revisions of the modules it depends on: the app that serves it assembles them too.
+
+        Read from the manifests, transitively, each module after those it depends on itself; each is the
+        revisions its entry point names (``Module.migrations``). A package that is not a module needs none.
+        """
+        if self.manifest.package.kind is not PackageKind.MODULE:
+            return ()
+        modules = {module.manifest.package.name: module for module in installed_modules(self.discover)}
+        graph: dict[str, tuple[str, ...]] = {}
+        pending = list(self.manifest.dependencies.modules)
+        while pending:
+            name = pending.pop()
+            if name in graph:
+                continue
+            if name not in modules:
+                raise NeedUnmetError(name, "is not installed")
+            graph[name] = modules[name].manifest.dependencies.modules
+            pending.extend(graph[name])
+        order = tuple(graphlib.TopologicalSorter(graph).static_order())
+        return tuple(_revisions(modules[name]) for name in order)
 
     @property
     def schemas(self) -> tuple[str, ...]:
@@ -81,14 +115,15 @@ class ModuleUnderTest:
         """The event types the package's units may publish."""
         return frozenset(event.type for event in self.manifest.events.publishes)
 
-    def discovering(self, discover: Discover = installed) -> Discover:
-        """``discover`` as the app that serves this module's tests finds it: this module and what it needs.
+    def discovering(self) -> Discover:
+        """Its ``discover`` as the app that serves its tests finds it: this module and what it needs.
 
         Every module installed in the workspace is an entry point, so an app that found them all would need
         every schema in every module's test database. A module under test is served with the modules it
         depends on (transitively, by their manifests) and nothing else; entry points that are not modules
         (regimes, channels) are as installed. A package that is not a module is served with every module.
         """
+        discover = self.discover
         if self.manifest.package.kind is not PackageKind.MODULE:
             return discover
         manifests = {module.manifest.package.name: module.manifest for module in installed_modules(discover)}
@@ -116,6 +151,13 @@ class ModuleUnderTest:
             else (platform_migrations(), *self.needs, self.migrations)
         )
         migrate(template, *revisions)
+
+
+def _revisions(module: Module) -> SchemaMigrations:
+    """The revisions ``module``'s entry point names (``NeedUnmetError`` without)."""
+    if module.migrations is None:
+        raise NeedUnmetError(module.manifest.package.name, "names no revisions")
+    return module.migrations
 
 
 @final

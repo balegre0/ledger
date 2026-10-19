@@ -7,6 +7,7 @@ description = "Commercial documents: invoices, credit and debit notes, their lin
 requires-python = ">=3.15"
 dependencies = [
     "ledger-platform",
+    "ledger-identity",
     "alembic>=1.20.0",
 ]
 
@@ -15,6 +16,7 @@ invoicing = "ledger_invoicing.assembly:MODULE"
 
 [tool.uv.sources]
 ledger-platform = { workspace = true }
+ledger-identity = { workspace = true }
 
 [build-system]
 requires = ["uv_build>=0.13.0,<0.14.0"]
@@ -32,3 +34,8 @@ show_missing = true
 skip_covered = true
 exclude_lines = []  # no "pragma: no cover": every line counts
 partial_branches = []  # no "pragma: no branch": every branch counts
+
+[tool.deptry.per_rule_ignores]
+DEP002 = [
+    "ledger-identity",
+]

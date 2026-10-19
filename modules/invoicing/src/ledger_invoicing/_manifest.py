@@ -21,6 +21,9 @@ MANIFEST: Final = PackageManifest.model_validate(
             "packages": [
                 "platform",
             ],
+            "modules": [
+                "identity",
+            ],
             "python": [
                 "alembic>=1.20.0",
             ],

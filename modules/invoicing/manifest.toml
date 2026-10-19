@@ -6,6 +6,7 @@ owners = ["@balegre0"]
 
 [dependencies]
 packages = ["platform"]
+modules = ["identity"]
 python = ["alembic>=1.20.0"]
 
 [data]

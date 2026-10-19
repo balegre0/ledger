@@ -415,6 +415,14 @@ def test_distributions_no_module_imports_by_name_are_never_reported_unused(tree:
     assert "per_rule_ignores" not in kernel
 
 
+def test_a_module_a_module_depends_on_is_never_reported_unused(tree: Path, write: Writer) -> None:
+    """A module edge is the manifest's (import-linter checks its imports): for events or migrations too."""
+    write("modules/billing", BILLING, ())
+    workspace = Workspace.load(tree)
+    billing = tomllib.loads(pyproject_text(workspace.by_name("billing"), workspace))
+    assert billing["tool"]["deptry"]["per_rule_ignores"] == {"DEP002": ["ledger-identity"]}
+
+
 def test_every_package_imports_only_the_workspace_packages_it_declares(tree: Path, write: Writer) -> None:
     write("packages/testing", TESTING, ())
     text = importlinter_text(Workspace.load(tree))
