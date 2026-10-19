@@ -28,7 +28,7 @@ from ledger_invoicing.domain.ids import InvoiceId
 from ledger_invoicing.domain.invoice import Invoice, InvoiceStatus, Opening
 from ledger_invoicing.domain.lines import LineTerms
 from ledger_invoicing.domain.parties import Seller, party
-from ledger_invoicing.domain.pricing import EstablishmentRef, Terms, price
+from ledger_invoicing.domain.pricing import Dating, EstablishmentRef, Terms, price
 from ledger_invoicing.domain.text import parse_external_reference, parse_reason
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.money import Currency, Money
@@ -84,7 +84,11 @@ def issued(regime: RegimeDef, terms: Terms = TERMS, *, corrects: Invoice | None 
         terms=terms,
     )
     pricing = price(
-        terms, regime=regime, functional_currency=DOP, establishment=SANTIAGO, today=date(2026, 10, 12)
+        terms,
+        regime=regime,
+        functional_currency=DOP,
+        establishment=SANTIAGO,
+        dating=Dating(today=date(2026, 10, 12)),
     )
     invoice, _ = Invoice.new(
         opening,
@@ -176,7 +180,9 @@ def test_a_draft_has_no_seller_and_a_document_without_country_fields_names_no_re
         external_reference=None,
         terms=terms,
     )
-    pricing = price(terms, regime=regime, functional_currency=DOP, establishment=SANTIAGO, today=NOW.date())
+    pricing = price(
+        terms, regime=regime, functional_currency=DOP, establishment=SANTIAGO, dating=Dating(today=NOW.date())
+    )
     draft, _ = Invoice.new(opening, corrects=None, pricing=pricing, seller=None, now=NOW)
     view = view_of(draft)
     assert (view.status, view.seller, view.buyer, view.issued_at) == (InvoiceStatus.DRAFT, None, None, None)

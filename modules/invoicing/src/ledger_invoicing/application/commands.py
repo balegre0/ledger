@@ -35,7 +35,7 @@ from ledger_invoicing.domain.errors import (
 from ledger_invoicing.domain.ids import InvoiceId
 from ledger_invoicing.domain.invoice import Invoice, InvoiceStatus, Opening, require_correction_named
 from ledger_invoicing.domain.parties import Seller
-from ledger_invoicing.domain.pricing import Terms, local_date, price
+from ledger_invoicing.domain.pricing import Dating, Terms, local_date, price
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.tenancy import Tenant
 lazy from ledger_identity.api import CompanyInfo
@@ -157,9 +157,10 @@ class InvoicingCommands:
         """
         tenant = tenant_of(call)
         require_correction_named(creation.kind, named=creation.corrects is not None)
+        tax_point = await self._tax_point_of(tenant, creation.corrects)
         company = await self._company(call, tenant)
         terms = creation.terms(company.functional_currency)
-        pricing = await self._priced(call, company, terms)
+        pricing = await self._priced(call, company, terms, tax_point)
         opening = Opening(
             id=InvoiceId(self.new_id()),
             tenant=tenant,
@@ -207,8 +208,9 @@ class InvoicingCommands:
             raise InvoiceVersionStaleError(invoice)
         if draft.status is not InvoiceStatus.DRAFT:
             raise InvoiceNotIssuableError(draft.id)
+        tax_point = await self._tax_point_of(tenant, draft.corrects)
         company = await self._company(call, tenant)
-        pricing = await self._priced(call, company, draft.terms)
+        pricing = await self._priced(call, company, draft.terms, tax_point)
         seller = seller_of(company)
 
         async def apply(unit: InvoicingUnit) -> Invoice:
@@ -266,7 +268,26 @@ class InvoicingCommands:
             raise CompanyInactiveError(company.id)
         return company
 
-    async def _priced(self, call: Call, company: CompanyInfo, terms: Terms) -> Pricing:
+    async def _tax_point_of(self, tenant: Tenant, corrects: InvoiceId | None) -> date | None:
+        """The tax point of the invoice a note corrects (``None`` for an invoice): the note's by default.
+
+        Read before the note is priced, in a unit of its own. An issued invoice is never priced again, so what
+        is read here holds when the note's unit locks it and checks it again (``CorrectionInvalidError`` for
+        one missing or not issued, here already).
+        """
+        if corrects is None:
+            return None
+        async with self.units.unit(tenant) as unit:
+            corrected = await unit.invoices.get(corrects)
+        if corrected is None:
+            raise CorrectionInvalidError(CorrectionProblem.NOT_FOUND)
+        if corrected.status is not InvoiceStatus.ISSUED:
+            raise CorrectionInvalidError(CorrectionProblem.NOT_ISSUED)
+        return corrected.pricing.tax_point
+
+    async def _priced(
+        self, call: Call, company: CompanyInfo, terms: Terms, default_tax_point: date | None
+    ) -> Pricing:
         """``terms`` priced with the company's regime, today in its establishment's time zone."""
         establishment = await self._establishment(call, company, terms.establishment)
         return price(
@@ -274,7 +295,9 @@ class InvoicingCommands:
             regime=self._regime(company),
             functional_currency=company.functional_currency,
             establishment=establishment,
-            today=local_date(self.clock(), establishment.time_zone),
+            dating=Dating(
+                today=local_date(self.clock(), establishment.time_zone), tax_point=default_tax_point
+            ),
         )
 
     async def _establishment(self, call: Call, company: CompanyInfo, code: str | None) -> EstablishmentRef:

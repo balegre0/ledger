@@ -621,7 +621,7 @@
                 "type": "null"
               }
             ],
-            "description": "Absent: the issue date.",
+            "description": "Absent: the issue date; for a note, the tax point of the invoice it corrects. Present: on the issue date or at most 400 days before it.",
             "title": "Tax Point"
           },
           "type": {

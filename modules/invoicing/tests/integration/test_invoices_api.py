@@ -181,7 +181,14 @@ async def test_a_note_corrects_an_issued_invoice_which_then_stands_for_it(
     note = await made(
         client, owner, company, {**INVOICE, "type": "credit_note", "corrects": invoice["id"]}, "n-1"
     )
-    assert (note["type"], note["corrects"]) == ("credit_note", invoice["id"])
+    assert (note["type"], note["corrects"], note["tax_point"]) == (
+        "credit_note",
+        invoice["id"],
+        invoice["tax_point"],
+    )
+    early = {**INVOICE, "type": "credit_note", "corrects": invoice["id"], "issue_date": "2020-01-02"}
+    before = await client.post("/v1/invoices", json=early, headers=posting(owner, company, "n-3"))
+    assert code_of(before) == (422, "correction_invalid")
     path = f"/v1/invoices/{invoice['id']}/void"
     refused = await client.post(path, headers=posting(owner, company, "void-1", version=1))
     assert code_of(refused) == (409, "invoice_not_voidable")
@@ -263,6 +270,11 @@ async def test_a_role_reads_or_changes_documents_as_its_permissions_say(
     assert (await client.get("/v1/invoices", headers=reading(viewer, company))).status_code == 200
     created_ = await client.post("/v1/invoices", json=INVOICE, headers=posting(viewer, company, "v-1"))
     assert code_of(created_) == (403, "permission_denied")
+    # The body's shape is the framework's to check, before the route judges the permission (nothing echoed).
+    malformed = await client.post(
+        "/v1/invoices", json={"type": "invoice", "lines": 7}, headers=posting(viewer, company, "v-2")
+    )
+    assert code_of(malformed) == (422, "invalid_request")
     assert (
         await client.post("/v1/invoices", json=INVOICE, headers=posting(issuer, company, "s-1"))
     ).status_code == 201

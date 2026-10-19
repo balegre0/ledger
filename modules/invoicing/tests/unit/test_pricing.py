@@ -26,6 +26,7 @@ from ledger_invoicing.domain.lines import LineTerms
 from ledger_invoicing.domain.pricing import (
     MAX_LINES,
     MAX_TAX_POINT_AGE,
+    Dating,
     EstablishmentRef,
     Terms,
     local_date,
@@ -65,7 +66,9 @@ def in_pesos(*lines: LineTerms) -> Terms:
 
 
 def priced(regime: RegimeDef, terms: Terms) -> Pricing:
-    return price(terms, regime=regime, functional_currency=DOP, establishment=MAIN, today=TODAY)
+    return price(
+        terms, regime=regime, functional_currency=DOP, establishment=MAIN, dating=Dating(today=TODAY)
+    )
 
 
 # ── Lines as a client writes them ───────────────────────────────────────────────
@@ -289,6 +292,40 @@ def test_a_tax_point_is_on_or_before_the_issue_date_and_at_most_400_days_before_
     oldest = TODAY - MAX_TAX_POINT_AGE
     assert priced(regime, replace(in_pesos(), tax_point=oldest)).tax_point == oldest
     assert timedelta(days=400) == MAX_TAX_POINT_AGE
+
+
+def test_a_note_s_tax_point_defaults_to_its_invoice_s_however_old_and_a_named_one_is_bounded(
+    regime: RegimeDef,
+) -> None:
+    """A note credits at its invoice's rate: it takes the invoice's tax point unless it names one."""
+    long_ago = TODAY - MAX_TAX_POINT_AGE - timedelta(days=100)
+    note = price(
+        in_pesos(),
+        regime=regime,
+        functional_currency=DOP,
+        establishment=MAIN,
+        dating=Dating(today=TODAY, tax_point=long_ago),
+    )
+    assert (note.issue_date, note.tax_point) == (TODAY, long_ago)
+    named = date(2026, 10, 1)
+    terms = replace(in_pesos(), tax_point=named)
+    kept = price(
+        terms,
+        regime=regime,
+        functional_currency=DOP,
+        establishment=MAIN,
+        dating=Dating(today=TODAY, tax_point=long_ago),
+    )
+    assert kept.tax_point == named
+    for tax_point in (TODAY + timedelta(days=1), long_ago):
+        with pytest.raises(InvalidTaxPointError):
+            price(
+                replace(terms, tax_point=tax_point),
+                regime=regime,
+                functional_currency=DOP,
+                establishment=MAIN,
+                dating=Dating(today=TODAY, tax_point=long_ago),
+            )
 
 
 def test_today_is_the_establishment_s_date() -> None:

@@ -6,7 +6,8 @@ the day it is issued, with the seller as the company is then. Every change makes
 and returns the event that announces it, if any.
 
 A credit or debit note names the invoice it corrects: an issued invoice of the same company, mode and
-direction, in its currency (Decision 10; credit-note balances are a later slice). An issued document is voided
+direction, in its currency, dated on or before the note (Decision 10, review I1; credit-note balances are a
+later slice). An issued document is voided
 only while no channel accepted it and no draft or issued note corrects it (Decision 11): an accepted one is
 corrected by a note, and a corrected one stands for its notes. Which channels accepted it is the
 fiscal mirror's, written by ``fiscal`` from M3b; until then ``accepted_by`` stays empty and the refusal is
@@ -133,9 +134,7 @@ class Invoice:
         kind = opening.kind
         require_correction_named(kind, named=corrects is not None)
         if corrects is not None:
-            _require_correctable(
-                corrects, tenant=opening.tenant, direction=opening.direction, currency=opening.terms.currency
-            )
+            _require_correctable(corrects, opening.tenant, opening.direction, opening.terms.currency, pricing)
         draft = cls(
             id=opening.id,
             tenant=opening.tenant,
@@ -173,9 +172,7 @@ class Invoice:
         if (None if corrected is None else corrected.id) != self.corrects:
             raise InvalidValueError(field="corrected", requirement="the invoice the note names")
         if corrected is not None:
-            _require_correctable(
-                corrected, tenant=self.tenant, direction=self.direction, currency=self.terms.currency
-            )
+            _require_correctable(corrected, self.tenant, self.direction, self.terms.currency, pricing)
         issued = _issued(self, seller=seller, pricing=pricing, now=now, version=self.version + 1)
         return issued, _announced(issued)
 
@@ -218,9 +215,11 @@ def require_correction_named(kind: DocumentKind, *, named: bool) -> None:
 
 
 def _require_correctable(
-    corrected: Invoice, *, tenant: Tenant, direction: Direction, currency: Currency
+    corrected: Invoice, tenant: Tenant, direction: Direction, currency: Currency, pricing: Pricing
 ) -> None:
     """Refuse a note's invoice unless it is an issued invoice of the note's tenant, direction and currency.
+
+    It must also be dated on or before the note (``pricing``: the note's, as it is made or issued).
 
     Another company's or mode's document is refused as a missing one: nothing about it is told.
     """
@@ -234,6 +233,8 @@ def _require_correctable(
         raise CorrectionInvalidError(CorrectionProblem.OTHER_DIRECTION)
     if corrected.terms.currency != currency:
         raise CorrectionInvalidError(CorrectionProblem.OTHER_CURRENCY)
+    if corrected.pricing.issue_date > pricing.issue_date:
+        raise CorrectionInvalidError(CorrectionProblem.AFTER_THE_NOTE)
 
 
 def _issued(invoice: Invoice, *, seller: Seller, pricing: Pricing, now: datetime, version: int) -> Invoice:

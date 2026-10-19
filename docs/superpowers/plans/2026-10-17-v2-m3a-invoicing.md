@@ -52,6 +52,11 @@ profile and its establishments come through `IdentityApi`.
     regime's document types decide nothing yet (no `ecf_type` field exists in the DO regime). Whether a document
     names one at all is checked first, before identity is asked (422 `correction_unexpected` /
     `correction_required`).
+    **Review I1 (owner ruling, 2026-10-19):** a note is never dated before the invoice it corrects (422
+    `correction_invalid`, "corrects is dated after the note"), checked on the invoice its unit locks, when it
+    is made and when a draft note is issued. A note's tax point defaults to its invoice's (it credits or debits
+    at the rate the invoice charged), read before it is priced, however old: `MAX_TAX_POINT_AGE` bounds only a
+    tax point a document names, which for a note too lies on its issue date or at most 400 days before it.
 11. **Void**: only an `issued` invoice, with an optional reason; refused (409 `invoice_not_voidable`) when any
     channel accepted it (the mirror is empty in this slice, so the rule is stated and unreachable until M3b),
     and while a draft or issued note corrects it. Creating or issuing a note locks the invoice it corrects, and

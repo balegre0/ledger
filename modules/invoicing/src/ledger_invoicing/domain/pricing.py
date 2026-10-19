@@ -6,7 +6,9 @@ company's jurisdiction, at the document's tax point (rule 12: never ``now()``):
 - the document's currency (and the functional one) must have as many minor-unit places as the regime rounds
   to (Decision 8);
 - the issue date defaults to today in the establishment's time zone and is never after it, the tax point
-  defaults to the issue date and lies on it or at most ``MAX_TAX_POINT_AGE`` before it (Decision 6);
+  defaults to the issue date and lies on it or at most ``MAX_TAX_POINT_AGE`` before it (Decision 6); a note's
+  defaults to the tax point of the invoice it corrects instead, however old (it credits or debits at the
+  rate the invoice charged), and one it names is bounded as any document's;
 - each line's base is ``quantity x unit_price - discount`` rounded half up to the currency's minor unit
   (Decision 4), and each tax category it names is resolved to a snapshot ``{category, kind, percent, since}``
   of the rate in effect on the tax point;
@@ -202,6 +204,18 @@ class Pricing:
     """The regime's country fields, as sent."""
 
 
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Dating:
+    """What a document's dates are judged by when it is priced."""
+
+    today: date
+    """The date in the establishment's time zone: the issue date when the terms name none, and the latest."""
+    tax_point: date | None = None
+    """The tax point when the terms name none, taken as it is, however old: a note's is its invoice's. Without
+    one, the tax point is the issue date."""
+
+
 def local_date(instant: datetime, time_zone: str) -> date:
     """The date ``instant`` (aware) falls on in ``time_zone`` (an IANA name): an establishment's today.
 
@@ -218,22 +232,27 @@ def price(
     regime: RegimeDef,
     functional_currency: Currency,
     establishment: EstablishmentRef,
-    today: date,
+    dating: Dating,
 ) -> Pricing:
     """``terms`` priced with ``regime`` for a company keeping its books in ``functional_currency``.
 
-    ``today`` is the date in the establishment's time zone: the issue date when the terms name none.
+    ``dating`` says what its dates default to and how late they may be. That a note is not dated before its
+    invoice is checked where the invoice is read under its lock (``Invoice``).
     """
     places = regime.rounding.places
     for currency in (terms.currency, functional_currency):
         if currency.minor_units != places:
             raise CurrencyNotSupportedByRegimeError(currency.code, places)
+    today = dating.today
     issue_date = today if terms.issue_date is None else terms.issue_date
     if issue_date > today:
         raise InvalidIssueDateError
-    tax_point = issue_date if terms.tax_point is None else terms.tax_point
-    if not issue_date - MAX_TAX_POINT_AGE <= tax_point <= issue_date:
-        raise InvalidTaxPointError(MAX_TAX_POINT_AGE.days)
+    if terms.tax_point is not None:
+        tax_point = terms.tax_point
+        if not issue_date - MAX_TAX_POINT_AGE <= tax_point <= issue_date:
+            raise InvalidTaxPointError(MAX_TAX_POINT_AGE.days)
+    else:
+        tax_point = issue_date if dating.tax_point is None else dating.tax_point
     rate = _exchange_rate(terms, functional_currency)
     fiscal = _country_fields(terms.fiscal, regime)
     categories = {category.key: category for category in regime.tax_categories}
@@ -301,11 +320,9 @@ def _rates_of(
             raise InvalidLineError(position, "taxes", "one category of each tax")
         taxes.add(tax)
         try:
-            category.rates.at(tax_point)
+            sinces[key] = category.rates.entry_at(tax_point).since
         except NotInEffectError as error:
             raise TaxRateNotInEffectError(position, index) from error
-        # The entry `at` chose: the newest that started on or before the tax point.
-        sinces[key] = next(entry.since for entry in category.rates.entries if entry.since <= tax_point)
     return sinces
 
 

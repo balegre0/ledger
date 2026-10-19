@@ -25,7 +25,7 @@ from ledger_invoicing.domain.ids import INVOICE_PREFIX, InvoiceId
 from ledger_invoicing.domain.invoice import Invoice, InvoiceStatus, Opening, require_correction_named
 from ledger_invoicing.domain.lines import LineTerms
 from ledger_invoicing.domain.parties import Seller, party
-from ledger_invoicing.domain.pricing import EstablishmentRef, Terms, price
+from ledger_invoicing.domain.pricing import Dating, EstablishmentRef, Terms, price
 from ledger_invoicing.domain.text import parse_external_reference, parse_reason
 from ledger_invoicing.events import InvoiceIssued, InvoiceVoided
 from ledger_kernel.errors import ErrorKind, InvalidValueError
@@ -61,7 +61,7 @@ def pricing(regime: RegimeDef) -> Pricing:
         regime=regime,
         functional_currency=DOP,
         establishment=EstablishmentRef(code="MAIN", time_zone="America/Santo_Domingo"),
-        today=date(2026, 10, 12),
+        dating=Dating(today=date(2026, 10, 12)),
     )
 
 
@@ -167,7 +167,7 @@ def test_issuing_a_draft_snapshots_the_seller_and_announces_it(pricing: Pricing,
         regime=regime,
         functional_currency=DOP,
         establishment=pricing.establishment,
-        today=date(2026, 10, 20),
+        dating=Dating(today=date(2026, 10, 20)),
     )
     invoice, issued = created.issue(seller=SELLER, pricing=repriced, corrected=None, now=LATER)
     assert (invoice.status, invoice.version, invoice.seller, invoice.pricing.issue_date) == (
@@ -272,6 +272,21 @@ def test_a_note_corrects_an_issued_invoice_of_its_company_mode_and_direction(pri
             new(pricing, kind=DocumentKind.DEBIT_NOTE, corrects=corrected)
         assert str(caught.value) == f"corrects {problem}"
         assert (caught.value.kind, caught.value.code) == (ErrorKind.INVALID, "correction_invalid")
+
+
+def test_a_note_is_never_dated_before_the_invoice_it_corrects(pricing: Pricing) -> None:
+    """Checked when a note is made and again when a draft note is issued, on the invoice as it is locked."""
+    later = replace(pricing, issue_date=pricing.issue_date + timedelta(days=1))
+    original = issued_invoice(later)
+    with pytest.raises(CorrectionInvalidError) as caught:
+        new(pricing, kind=DocumentKind.CREDIT_NOTE, corrects=original, seller=SELLER)
+    assert str(caught.value) == "corrects is dated after the note"
+    assert caught.value.code == "correction_invalid"
+    same_day, _ = new(later, kind=DocumentKind.CREDIT_NOTE, corrects=original, seller=SELLER)
+    assert same_day.corrects == original.id
+    note, _ = new(later, kind=DocumentKind.CREDIT_NOTE, corrects=original)
+    with pytest.raises(CorrectionInvalidError, match=r"^corrects is dated after the note$"):
+        note.issue(seller=SELLER, pricing=pricing, corrected=original, now=LATER)
 
 
 def test_whether_a_document_names_an_invoice_is_checked_before_anything_else() -> None:

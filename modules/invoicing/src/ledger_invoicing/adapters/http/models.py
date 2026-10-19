@@ -147,7 +147,13 @@ class NewInvoice(_Shape):
         description="Units of the functional currency per one of the document's: only in another currency.",
     )
     issue_date: date | None = Field(default=None, description="Absent: today, in the establishment's zone.")
-    tax_point: date | None = Field(default=None, description="Absent: the issue date.")
+    tax_point: date | None = Field(
+        default=None,
+        description=(
+            "Absent: the issue date; for a note, the tax point of the invoice it corrects. "
+            "Present: on the issue date or at most 400 days before it."
+        ),
+    )
     establishment: str | None = Field(
         default=None, min_length=1, max_length=CODE_LENGTH, description="Its code. Absent: MAIN."
     )

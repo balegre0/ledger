@@ -10,7 +10,7 @@ from hypothesis import strategies as st
 
 from ledger_invoicing.domain.errors import AmountOutOfRangeError, CurrencyNotSupportedByRegimeError
 from ledger_invoicing.domain.lines import LineTerms
-from ledger_invoicing.domain.pricing import EstablishmentRef, Terms, price
+from ledger_invoicing.domain.pricing import Dating, EstablishmentRef, Terms, price
 from ledger_kernel.money import CURRENCIES, Money
 from ledger_kernel.regimes import RoundingPoint
 lazy from ledger_invoicing.domain.pricing import Pricing
@@ -62,7 +62,7 @@ def priced(
         regime=regime,
         functional_currency=DOP,
         establishment=MAIN,
-        today=date(2026, 10, 12),
+        dating=Dating(today=date(2026, 10, 12)),
     )
 
 

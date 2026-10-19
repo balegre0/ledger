@@ -50,6 +50,7 @@ from ledger_invoicing.domain.pricing import EstablishmentRef
 from ledger_invoicing.domain.text import parse_external_reference, parse_reason
 from ledger_invoicing.events import InvoiceIssued, InvoiceVoided
 from ledger_kernel.access import CompanyNotFoundError, Principal, PrincipalKind, SubjectId
+from ledger_kernel.dated import Since, Timeline
 from ledger_kernel.errors import ErrorKind, InvalidValueError
 from ledger_kernel.ids import CompanyId, OrganizationId, format_id, new_id
 from ledger_kernel.jurisdiction import parse_jurisdiction
@@ -498,6 +499,101 @@ async def test_a_note_corrects_an_issued_invoice_of_its_company_and_mode(world: 
         ):
             await world.commands.create(call, replace(debit, corrects=corrects))
     assert len(world.stored()) == 2
+
+
+def raised_on(regime: RegimeDef, day: date, percent: str) -> RegimeDef:
+    """``regime`` with ``do.itbis.standard`` at ``percent`` from ``day`` on."""
+    categories = tuple(
+        replace(
+            category,
+            rates=Timeline(
+                Since(day, replace(category.rates.entries[0].value, percent=Decimal(percent))),
+                *category.rates.entries,
+            ),
+        )
+        if category.key == "do.itbis.standard"
+        else category
+        for category in regime.tax_categories
+    )
+    return replace(regime, tax_categories=categories)
+
+
+async def test_a_note_credits_at_the_rate_its_invoice_charged(world: World, regime: RegimeDef) -> None:
+    """The rate rose between the invoice and its note: the note takes the invoice's tax point, not its own."""
+    world.regimes["DO"] = raised_on(regime, date(2026, 10, 10), "20")
+    original = await issued_one(world, replace(INVOICE, issue_date=date(2026, 10, 5)))
+    note = await world.commands.create(
+        CALL, replace(INVOICE, kind=DocumentKind.CREDIT_NOTE, corrects=original.id)
+    )
+    today = await issued_one(world)
+    assert (note.pricing.issue_date, note.pricing.tax_point) == (date(2026, 10, 12), date(2026, 10, 5))
+    assert (original.pricing.totals.tax, note.pricing.totals.tax, today.pricing.totals.tax) == (
+        Money.of("18.00", DOP),
+        Money.of("18.00", DOP),
+        Money.of("20.00", DOP),
+    )
+    named = await world.commands.create(
+        CALL,
+        replace(INVOICE, kind=DocumentKind.CREDIT_NOTE, corrects=original.id, tax_point=date(2026, 10, 11)),
+    )
+    assert (named.pricing.tax_point, named.pricing.totals.tax) == (date(2026, 10, 11), Money.of("20.00", DOP))
+
+
+async def test_an_invoice_older_than_any_tax_point_a_document_may_name_is_still_corrected(
+    world: World,
+) -> None:
+    world.now = NOON - timedelta(days=500)
+    original = await issued_one(world)
+    world.now = NOON
+    draft = await world.commands.create(
+        CALL, replace(DRAFT, kind=DocumentKind.CREDIT_NOTE, corrects=original.id)
+    )
+    world.now = NOON + timedelta(days=3)
+    note = await world.commands.issue(CALL, draft.id)
+    assert (note.pricing.issue_date, note.pricing.tax_point) == (
+        date(2026, 10, 15),
+        original.pricing.tax_point,
+    )
+    assert original.pricing.tax_point == date(2025, 5, 30)
+
+
+async def test_a_note_dated_before_its_invoice_is_refused_and_nothing_stored(world: World) -> None:
+    original = await issued_one(world)
+    early = replace(
+        INVOICE, kind=DocumentKind.CREDIT_NOTE, corrects=original.id, issue_date=date(2026, 10, 5)
+    )
+    with pytest.raises(CorrectionInvalidError, match=r"^corrects is dated after the note$"):
+        await world.commands.create(CALL, early)
+    assert (world.stored(), len(world.state.events)) == ([original], 1)
+
+
+async def test_a_note_s_invoice_is_read_before_the_note_is_priced(world: World) -> None:
+    draft = await world.commands.create(CALL, DRAFT)
+    asked = len(world.directory.calls)
+    for corrects, problem in (
+        (InvoiceId(UUID(int=5)), "names no invoice of the company in this mode"),
+        (draft.id, "is not an issued document"),
+    ):
+        units = world.state.units
+        with pytest.raises(CorrectionInvalidError, match=rf"^corrects {problem}$"):
+            await world.commands.create(
+                CALL, replace(INVOICE, kind=DocumentKind.CREDIT_NOTE, corrects=corrects)
+            )
+        assert world.state.units == units + 1  # the read: identity is not asked, no unit applies anything
+    assert len(world.directory.calls) == asked
+
+
+async def test_a_note_whose_invoice_is_gone_by_the_time_it_is_locked_is_refused(world: World) -> None:
+    original = await issued_one(world)
+    change = await world.commands.prepare_create(
+        CALL, replace(INVOICE, kind=DocumentKind.CREDIT_NOTE, corrects=original.id)
+    )
+    del world.state.invoices[original.id]
+    with pytest.raises(
+        CorrectionInvalidError, match=r"^corrects names no invoice of the company in this mode$"
+    ):
+        async with world.commands.units.unit(change.tenant) as unit:
+            await change.apply(unit)
 
 
 # ── Issuing a draft ─────────────────────────────────────────────────────────────

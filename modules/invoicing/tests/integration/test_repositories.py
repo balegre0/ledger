@@ -41,7 +41,7 @@ from ledger_invoicing.domain.ids import InvoiceId
 from ledger_invoicing.domain.invoice import Invoice, InvoiceStatus, Opening
 from ledger_invoicing.domain.lines import LineTerms
 from ledger_invoicing.domain.parties import Seller, party
-from ledger_invoicing.domain.pricing import EstablishmentRef, Terms, price
+from ledger_invoicing.domain.pricing import Dating, EstablishmentRef, Terms, price
 from ledger_invoicing.domain.text import ExternalReference, parse_external_reference, parse_reason
 from ledger_kernel.access import Principal, PrincipalKind, SubjectId
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
@@ -88,7 +88,9 @@ def tenant_of(mode: Mode = Mode.TEST, organization: OrganizationId | None = None
 
 def _document(regime: RegimeDef, opening: Opening, *, corrects: Invoice | None, draft: bool) -> Invoice:
     """The document ``opening`` asks for, priced with ``regime`` as of ``TODAY``: a draft, or issued."""
-    pricing = price(opening.terms, regime=regime, functional_currency=DOP, establishment=MAIN, today=TODAY)
+    pricing = price(
+        opening.terms, regime=regime, functional_currency=DOP, establishment=MAIN, dating=Dating(today=TODAY)
+    )
     seller = None if draft else SELLER
     invoice, _ = Invoice.new(opening, corrects=corrects, pricing=pricing, seller=seller, now=NOW)
     return invoice
@@ -293,7 +295,7 @@ async def test_an_issued_draft_is_kept_at_its_next_version_priced_anew(
         regime=regime,
         functional_currency=DOP,
         establishment=MAIN,
-        today=TODAY + timedelta(days=2),
+        dating=Dating(today=TODAY + timedelta(days=2)),
     )
     issued, _ = draft.issue(seller=SELLER, pricing=later, corrected=None, now=NOW + timedelta(days=2))
 

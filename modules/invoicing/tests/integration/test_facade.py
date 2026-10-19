@@ -19,7 +19,7 @@ from ledger_invoicing.domain.ids import InvoiceId
 from ledger_invoicing.domain.invoice import Invoice, Opening
 from ledger_invoicing.domain.lines import LineTerms
 from ledger_invoicing.domain.parties import Seller, party
-from ledger_invoicing.domain.pricing import EstablishmentRef, Terms, price
+from ledger_invoicing.domain.pricing import Dating, EstablishmentRef, Terms, price
 from ledger_kernel.access import Principal, PrincipalKind, SubjectId
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
@@ -80,7 +80,7 @@ async def kept(database: BoundDatabase, regime: RegimeDef, *, draft: bool = Fals
         regime=regime,
         functional_currency=DOP,
         establishment=EstablishmentRef(code="MAIN", time_zone="America/Santo_Domingo"),
-        today=date(2026, 10, 12),
+        dating=Dating(today=date(2026, 10, 12)),
     )
     seller = (
         None if draft else Seller(legal_name="Acme SRL", tax_id=TaxId(TaxIdScheme("do.rnc"), "101850043"))

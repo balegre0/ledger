@@ -195,6 +195,8 @@ class CorrectionProblem(StrEnum):
     NOT_AN_INVOICE = "is a note, not an invoice"
     OTHER_DIRECTION = "is of the other direction"
     OTHER_CURRENCY = "is in another currency"
+    AFTER_THE_NOTE = "is dated after the note"
+    """A note is never issued before the invoice it corrects."""
 
 
 class CorrectionInvalidError(InvalidInputError):
