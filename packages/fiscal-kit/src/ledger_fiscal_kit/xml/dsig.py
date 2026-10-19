@@ -258,6 +258,8 @@ def prepare(document: bytes) -> Prepared:
         raise UnsignableDocumentError(_XML_ATTRIBUTES)
     if root.tag == SIGNATURE or root.find(f".//{SIGNATURE}") is not None:
         raise DocumentSignedError
+    # Not ``c14n.canonical``: that would read the document a second time, and this tree is the one checked
+    # above (no comment, processing instruction or ``xml:`` attribute), so the digest covers what was checked.
     digest = _b64(
         hashlib.sha256(etree.tostring(tree, method="c14n", exclusive=False, with_comments=False)).digest()
     )

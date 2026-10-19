@@ -50,7 +50,7 @@ _FIX: Final = Correction(
 )
 _PIN: Final = PinnedSchema(
     format=_Format.ORDER,
-    published=_PUBLISHED,
+    published=lambda: _PUBLISHED,
     sha256=hashlib.sha256(_PUBLISHED).hexdigest(),
     corrections=(_FIX,),
 )
@@ -72,7 +72,7 @@ def test_a_schema_is_corrected_as_pinned_and_compiles_once_corrected() -> None:
 
 
 def test_a_schema_whose_bytes_changed_is_drift_at_first_use() -> None:
-    schemas = _set(replace(_PIN, published=_PUBLISHED.replace(b"10", b"11")))
+    schemas = _set(replace(_PIN, published=lambda: _PUBLISHED.replace(b"10", b"11")))
     with pytest.raises(SchemaChangedError, match=r"^the schema order\.xsd is not the file pinned$") as caught:
         schemas.violations(_Format.ORDER, _SIGNED)
     assert isinstance(caught.value, SchemaDriftError)
@@ -152,6 +152,26 @@ def test_a_format_the_set_does_not_pin_is_a_defect() -> None:
 def test_a_pin_under_another_format_is_a_defect() -> None:
     with pytest.raises(InvalidValueError, match=r"^pins\[receipt\.xsd\]\.format must be receipt\.xsd$"):
         SchemaSet[_Format]({_Format.RECEIPT: _PIN})
+
+
+def test_a_schema_is_read_at_its_first_use_never_when_the_set_is_built() -> None:
+    reads: list[_Format] = []
+
+    def published() -> bytes:
+        reads.append(_Format.ORDER)
+        return _PUBLISHED
+
+    schemas = _set(replace(_PIN, published=published))
+    assert reads == []
+    schemas.schema(_Format.ORDER)
+    assert reads == [_Format.ORDER]
+
+
+def test_a_set_keeps_its_own_pins_whatever_its_caller_does_later() -> None:
+    pins = {_Format.ORDER: _PIN}
+    schemas = SchemaSet[_Format](pins)
+    del pins[_Format.ORDER]
+    assert schemas.violations(_Format.ORDER, _SIGNED) == ()
 
 
 def test_a_pin_never_shows_the_schema() -> None:

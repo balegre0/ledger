@@ -224,7 +224,13 @@ class Authority(Protocol, metaclass=ABCMeta):
 
 
 class EcfFormat(Protocol, metaclass=ABCMeta):
-    """DGII's XML formats: documents written and checked against DGII's schemas."""
+    """DGII's XML formats: documents written and checked against DGII's schemas.
+
+    A schema check raises fiscal-kit's errors, not the pack's (``EcfError``), so ``Emitter.sign`` lets them
+    pass as they are: ``SchemaViolationError`` (invalid: DGII's schema refuses the document),
+    ``SchemaDriftError`` (internal: a vendored schema is not as pinned) and ``XmlDocumentError`` (invalid: the
+    bytes are not a document read hardened). ``signed`` also raises the verifier's signature errors.
+    """
 
     @abstractmethod
     def ecf(self, draft: EcfDraft, totals: Totals, *, signed_at: datetime) -> bytes:

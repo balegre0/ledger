@@ -19,8 +19,9 @@ import hashlib
 import threading
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 from typing import ClassVar, Final, final, override
-lazy from collections.abc import Mapping
+lazy from collections.abc import Callable, Mapping
 
 from lxml import etree
 
@@ -56,9 +57,10 @@ class PinnedSchema[F: StrEnum]:
     """The schema of ``format`` exactly as its authority published it, with its SHA-256 and corrections."""
 
     format: F
-    published: bytes = field(repr=False)
+    published: Callable[[], bytes] = field(repr=False)
+    """Reads the file as published: called at the schema's first use, never when a set is built."""
     sha256: str
-    """Of ``published``, lowercase hexadecimal."""
+    """Of the bytes ``published`` reads, lowercase hexadecimal."""
     corrections: tuple[Correction, ...] = ()
 
 
@@ -135,7 +137,7 @@ class SchemaSet[F: StrEnum]:
         for format_, pin in pins.items():
             if pin.format is not format_:
                 raise InvalidValueError(field=f"pins[{format_.value}].format", requirement=format_.value)
-        self._pins: Final[Mapping[F, PinnedSchema[F]]] = pins
+        self._pins: Final[Mapping[F, PinnedSchema[F]]] = MappingProxyType(dict(pins))
         self._compiled: Final = _Compiled[F]()
 
     def _pin(self, format_: F) -> PinnedSchema[F]:
@@ -147,9 +149,10 @@ class SchemaSet[F: StrEnum]:
     def corrected(self, format_: F) -> bytes:
         """The schema of ``format_`` with its corrections applied; ``SchemaDriftError`` if not as pinned."""
         pin = self._pin(format_)
-        if hashlib.sha256(pin.published).hexdigest() != pin.sha256:
+        published = pin.published()
+        if hashlib.sha256(published).hexdigest() != pin.sha256:
             raise SchemaChangedError(format_)
-        text = pin.published.decode("utf-8-sig")
+        text = published.decode("utf-8-sig")
         for correction in pin.corrections:
             found = text.count(correction.wrong)
             if found != correction.count:

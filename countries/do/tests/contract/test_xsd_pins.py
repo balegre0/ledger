@@ -44,7 +44,9 @@ def test_the_corrected_schemas_do_not_compile_as_published(format_: Format) -> N
 
 
 def test_a_schema_that_changed_is_drift() -> None:
-    changed = PinnedSchema(format=Format.SEED, published=b"<changed/>", sha256=PUBLISHED[Format.SEED].sha256)
+    changed = PinnedSchema(
+        format=Format.SEED, published=lambda: b"<changed/>", sha256=PUBLISHED[Format.SEED].sha256
+    )
     with pytest.raises(SchemaDriftError, match="is not the file pinned"):
         SchemaSet[Format]({Format.SEED: changed}).corrected(Format.SEED)
 
@@ -53,7 +55,7 @@ def test_a_correction_that_no_longer_applies_is_drift() -> None:
     fixed = published_bytes(Format.ACECF).replace(b"(?:", b"(")
     pinned = PinnedSchema(
         format=Format.ACECF,
-        published=fixed,
+        published=lambda: fixed,
         sha256=hashlib.sha256(fixed).hexdigest(),
         corrections=CORRECTIONS[Format.ACECF],
     )

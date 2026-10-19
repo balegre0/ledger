@@ -4,6 +4,7 @@ The pins (each file's SHA-256) and the corrections are the pack's (``adapters.xs
 checking the pins and validating are the kit's (``ledger_fiscal_kit.xml.schemas``).
 """
 
+from functools import partial
 from importlib.resources import files
 from types import MappingProxyType
 from typing import Final
@@ -24,7 +25,7 @@ DO_SCHEMAS: Final = SchemaSet[Format](
         {
             format_: PinnedSchema(
                 format=format_,
-                published=published_bytes(format_),
+                published=partial(published_bytes, format_),
                 sha256=PUBLISHED[format_].sha256,
                 corrections=CORRECTIONS.get(format_, ()),
             )
@@ -32,4 +33,4 @@ DO_SCHEMAS: Final = SchemaSet[Format](
         }
     )
 )
-"""Every format DGII defines, each schema checked against its pin at its first use."""
+"""Every format DGII defines, each file read and checked against its pin at its first use (none at import)."""
