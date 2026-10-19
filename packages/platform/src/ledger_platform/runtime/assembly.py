@@ -3,10 +3,11 @@
 What a role assembles (Decision 2). A module isolated in a role (``[data] isolated_in``, spec §3.7) is run by
 that role's app alone: the ``signer`` app assembles its isolated modules and nothing else (no other module, no
 channel, no platform job or schedule; the platform's schema only for its schedule leases), each reading no
-other module's API. Every other role assembles an isolated module as a client (its API, the ports it provides,
-its routers and checks) and *relays* it: the worker's fan-out moves its outbox and inbox, and nothing else of
-that role touches its schema, which its login cannot enter (no consumer, job, schedule, purge or readiness
-check of it). An isolated module that hands a consumer or a job handler to another role is a defect.
+other module's API, and refuses to start without one. Every other role assembles an isolated module as a
+client (its API, the ports it provides, its routers and checks) and *relays* it: the worker's fan-out moves
+its outbox and inbox, and nothing else of that role touches its schema, which its login cannot enter (no
+consumer, job, schedule, purge or readiness check of it). An isolated module that hands a consumer or a job
+handler to another role is a defect.
 
 Every settings section of the packages the role assembles is read first (``runtime.sections``). What every
 package hands back is checked against its manifest before anything starts: a schema of its own with its own
@@ -176,6 +177,17 @@ class HandlerDuplicateError(LedgerError):
 
     def __init__(self, label: str, name: str) -> None:
         super().__init__(f"{label} {name!r} has two handlers")
+
+
+class IsolatedModuleMissingError(LedgerError):
+    """An app of a role that runs only its isolated modules, with none of them installed and active."""
+
+    code: ClassVar[str] = "isolated_module_missing"
+
+    def __init__(self, role: AppRole) -> None:
+        super().__init__(
+            f"the {role} app runs the modules isolated in its role, and none is installed and active"
+        )
 
 
 class IsolatedPartsError(LedgerError):
@@ -576,6 +588,10 @@ def assemble(shared: Shared, discover: Discover) -> Assembled:
     active = tuple(
         module for module in every if module.manifest.package.status is not PackageStatus.SUSPENDED
     )
+    if (
+        isolating and not active
+    ):  # every other role warns of no module (``app.no_modules``): this one has no use
+        raise IsolatedModuleMissingError(role)
     modules = active if isolating else _ordered(active)  # in its own role, a module depends on nothing
     sections = read_sections(
         (

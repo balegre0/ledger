@@ -3,7 +3,8 @@
 A single manifest is validated by the platform's model when the workspace is loaded; what is checked here is
 how manifests agree: names and directories, unique values, dependencies that exist, an acyclic module graph,
 consumers with a producer, schedules with a job kind, modules made of layers only, countries named by their
-directories, settings sections apart, an isolated module's custody out of what loads with any of it.
+directories, settings sections apart, one isolated module per role, an isolated module's custody out of what
+loads with any of it.
 """
 
 import ast
@@ -358,6 +359,26 @@ def _custody_stays_out_of_what_loads_first(workspace: Workspace) -> Iterator[Pro
                 yield Problem(package.manifest_path, f"{relative.as_posix()} {rule}")
 
 
+def _a_role_isolates_one_module(workspace: Workspace) -> Iterator[Problem]:
+    """A role isolates one module at most (rule of two, Decision 2): a second is reported, naming both.
+
+    The runtime runs a role's isolated modules side by side without their dependencies; until a second one is
+    needed, that is decided by its own design, not by this one's.
+    """
+    first: dict[str, Package] = {}
+    for package in sorted(workspace.modules, key=lambda module: module.name):
+        role = package.manifest.isolated_in
+        if role is None:
+            continue
+        earlier = first.setdefault(role, package)
+        if earlier is not package:
+            both = f"modules '{earlier.name}' and '{package.name}'"
+            yield Problem(
+                package.manifest_path,
+                f"{both} are both isolated in the {role}'s role: a role isolates one module",
+            )
+
+
 _RULES: Final[tuple[Callable[[Workspace], Iterator[Problem]], ...]] = (
     _names_are_directories,
     _values_are_unique,
@@ -371,6 +392,7 @@ _RULES: Final[tuple[Callable[[Workspace], Iterator[Problem]], ...]] = (
     _modules_are_layers,
     _countries_are_their_directories,
     _settings_sections_are_apart,
+    _a_role_isolates_one_module,
     _custody_stays_out_of_what_loads_first,
 )
 

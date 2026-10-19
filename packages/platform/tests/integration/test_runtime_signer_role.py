@@ -24,6 +24,7 @@ from pydantic import SecretStr, TypeAdapter
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 lazy from fastapi import FastAPI
+lazy from prometheus_client import CollectorRegistry
 
 from ledger_kernel.events import Event
 from ledger_kernel.ids import CompanyId, OrganizationId
@@ -33,11 +34,15 @@ from ledger_platform.config.settings import Settings
 from ledger_platform.data.migrations import SchemaMigrations
 from ledger_platform.data.roles import APP, MIGRATOR, SIGNER
 from ledger_platform.events.consumers import ConsumerSpec
+from ledger_platform.events.dispatcher import Dispatcher
 from ledger_platform.jobs.outcomes import Done, JobSpec
+from ledger_platform.runtime import app as runtime_app
 from ledger_platform.runtime.app import App
 from ledger_platform.runtime.contexts import Module, ModuleParts
 from ledger_platform.runtime.registries import MODULES, Discovered
 from ledger_testing.database import TEST_LOGINS, fresh_database
+lazy from ledger_platform.data.database import Database
+lazy from ledger_platform.data.notifier import Signals
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
 lazy from ledger_platform.events.consumers import RawEvent
 lazy from ledger_platform.jobs.outcomes import Job, JobOutcome
@@ -123,6 +128,14 @@ INBOX: Final = """
     VALUES ('vault.renamed', %s, 'probe.thing.renamed', 1, 'probe', %s, %s, 'test', now(),
             '{"name": "renamed"}')
 """
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Renamed(Event):
+    TYPE: ClassVar[str] = "probe.thing.renamed"
+    VERSION: ClassVar[int] = 1
+    name: str
 
 
 @final
@@ -293,6 +306,34 @@ async def test_the_worker_fans_out_an_isolated_schema_it_cannot_read(
         "listen": True,
         "workers": True,
     }
+
+
+async def test_the_worker_relays_an_ordinary_module_s_event_into_the_isolated_inbox(
+    fresh: Fresh, modules: Modules, eventually: Eventually, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fan-out inserts into ``vault.inbox`` as ``ledger_relay``; the signer's app handles it later."""
+    fanned: list[tuple[str, ...]] = []
+
+    def recording(
+        database: Database, *, schemas: Sequence[str], signals: Signals, registry: CollectorRegistry
+    ) -> Dispatcher:
+        fanned.append(tuple(schemas))
+        return Dispatcher(database, schemas=schemas, signals=signals, registry=registry)
+
+    monkeypatch.setattr(runtime_app, "Dispatcher", recording)
+    worker = App("worker", settings=fresh.settings(APP), discover=modules.discover())
+
+    async def relayed() -> bool:
+        query = "SELECT consumer, type, status FROM vault.inbox"
+        return fresh.rows(query) == [("vault.renamed", "probe.thing.renamed", "ready")]
+
+    async with serving(worker.asgi()):
+        async with worker.bound("probe").unit(TENANT) as unit:
+            unit.publish(Renamed(scope=TENANT, subject=uuid.uuid7(), aggregate_version=1, name="renamed"))
+        await eventually(relayed)
+    assert fanned == [SCHEMAS]  # the fan-out covers the relayed schema with the others
+    assert modules.renamed == []  # the row waits for the signer's app: the worker runs nothing of vault's
+    assert fresh.rows("SELECT count(*) FROM probe.outbox") == [(0,)]
 
 
 async def test_the_signer_app_runs_its_consumer_and_its_schedule(

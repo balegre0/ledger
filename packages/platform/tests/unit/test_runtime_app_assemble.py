@@ -48,6 +48,7 @@ from ledger_platform.runtime.assembly import (
     DuplicateSchemaError,
     ForeignSchemaError,
     HandlerDuplicateError,
+    IsolatedModuleMissingError,
     IsolatedPartsError,
     JobNotProvidedError,
     JobUndeclaredError,
@@ -75,11 +76,11 @@ from ledger_platform.runtime.sections import (
 )
 from ledger_testing.waiting import Watched
 lazy from ledger_platform.config.manifest import AppRole
-lazy from ledger_platform.config.settings import Environment
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
 lazy from ledger_platform.events.consumers import RawEvent
 lazy from ledger_platform.jobs.outcomes import Job, JobOutcome
+lazy from ledger_platform.runtime import Environment
 lazy from ledger_platform.runtime.assembly import Member
 lazy from ledger_platform.runtime.contexts import AssembledChannels, ChannelContext, ModuleContext
 lazy from ledger_platform.runtime.registries import Discover
@@ -1027,7 +1028,25 @@ def test_the_signer_role_needs_the_direct_url() -> None:
     with pytest.raises(DirectUrlMissingError, match="signer"):
         App("signer", settings=BARE, discover=discovering())
     with pytest.raises(RoleMismatchError, match="signer app does not migrate"):
-        App("signer", settings=SETTINGS, discover=discovering()).migrate()
+        App("signer", settings=SETTINGS, discover=discovering(Vault().module())).migrate()
+
+
+def test_a_signer_without_an_isolated_module_does_not_start() -> None:
+    """Every other role warns (``app.no_modules``); the signer's whole purpose is its isolated modules."""
+    suspended = manifest_text("vault", VAULT, isolated=True).replace(
+        'owners = ["@o"]\n', 'owners = ["@o"]\nstatus = "suspended"\n'
+    )
+    for discover in (
+        discovering(),
+        discovering(module("beta", beta)),
+        discovering(Module(manifest=load_manifest(suspended), assemble=beta)),
+    ):
+        with pytest.raises(IsolatedModuleMissingError) as caught:
+            App("signer", settings=SETTINGS, discover=discover)
+        assert caught.value.code == "isolated_module_missing"
+        assert str(caught.value) == (
+            "the signer app runs the modules isolated in its role, and none is installed and active"
+        )
 
 
 def test_the_signer_pool_need_counts_its_runners() -> None:
