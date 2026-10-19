@@ -5,7 +5,7 @@ from typing import Final, final
 
 from ledger_identity.adapters.permissions import MembershipPermissions
 from ledger_identity.adapters.standings import IdentityStandings
-from ledger_platform.http import CachedStandings, Idempotency, company_in_path
+from ledger_platform.http import CachedStandings, Idempotency, company_in_path, ledger_mode_of
 lazy from ledger_identity.domain.text import TimeZone
 lazy from ledger_kernel.jurisdiction import Jurisdiction
 lazy from ledger_kernel.regimes import TaxIdSchemes
@@ -13,6 +13,7 @@ lazy from ledger_platform.auth import PermissionSource
 lazy from ledger_platform.config.manifest import ChannelEntry
 lazy from ledger_platform.data import BoundDatabase
 lazy from ledger_platform.http import Authentication, Caller, InCompany
+lazy from ledger_platform.http.mode import ModeDependency
 lazy from ledger_platform.runtime.registries import Regimes
 
 STANDING_TTL: Final = 30.0
@@ -29,6 +30,8 @@ class ApiContext:
     database: BoundDatabase
     """identity's units, in its schema and role."""
     caller: Caller
+    mode: ModeDependency
+    """The request's mode, settled once its caller is proven (``ledger_mode_of``)."""
     in_company: InCompany
     idempotency: Idempotency
     regimes: Regimes
@@ -71,6 +74,7 @@ class ApiContext:
         return cls(
             database=database,
             caller=caller,
+            mode=ledger_mode_of(caller),
             in_company=company_in_path(caller, permission_source),
             idempotency=Idempotency(),
             regimes=regimes,

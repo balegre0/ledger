@@ -43,7 +43,6 @@ from ledger_platform.http import (
     if_match_required,
     in_organization,
     json_response,
-    ledger_mode,
     page_of_items,
     page_query,
     precondition_checked,
@@ -77,7 +76,7 @@ def stored(
 def router(context: ApiContext) -> APIRouter:
     """The companies' routes."""
     companies = APIRouter(prefix="/v1/companies", tags=["companies"])
-    caller, database = context.caller, context.database
+    caller, database, mode_of = context.caller, context.database, context.mode
     in_company = context.in_company
     reader, manager = (
         allowed(in_company, COMPANIES_READ),
@@ -94,7 +93,7 @@ def router(context: ApiContext) -> APIRouter:
     )
     async def create_company(
         principal: Annotated[Principal, Depends(registrar)],
-        mode: Annotated[Mode, Depends(ledger_mode)],
+        mode: Annotated[Mode, Depends(mode_of)],
         body: NewCompany,
         request: Request,
         key: Annotated[str, Depends(idempotency_key)],
@@ -205,7 +204,7 @@ def router(context: ApiContext) -> APIRouter:
     )
     async def deactivate_company(
         access: Annotated[CompanyAccess, Depends(manager)],
-        mode: Annotated[Mode, Depends(ledger_mode)],
+        mode: Annotated[Mode, Depends(mode_of)],
         key: Annotated[str, Depends(idempotency_key)],
         condition: Annotated[IfMatch, Depends(if_match)],
         request: Request,

@@ -8,21 +8,59 @@ them, so only an app that serves no module's routes is made that way. Some token
 are a deployment's mistake, refused at once.
 """
 
-from typing import Final, final, override
+from contextlib import aclosing
+from typing import Annotated, Final, final, override
+lazy from collections.abc import AsyncGenerator
 lazy from contextlib import AbstractAsyncContextManager
 
+from fastapi import Depends
+lazy from fastapi import Request
+lazy from fastapi.security import HTTPAuthorizationCredentials
 lazy from prometheus_client import CollectorRegistry
 
 from ledger_platform.auth.keys import HttpKeys, PublishedKeys
 from ledger_platform.auth.tokens import TokenPolicy, TokenSettingsMissingError, TokenVerifier
-from ledger_platform.http.deps import Verifier, authenticated, with_standing
+from ledger_platform.http.deps import BEARER, Verifier, authenticated
+from ledger_platform.http.mode import MODE_KEY
 from ledger_platform.http.rate import RateLimiter
+from ledger_platform.http.standing import ApiClientRevokedError, resolve
+from ledger_platform.http.versions import VERSION_HEADER, VERSION_KEY, VersionUnknownError, parse_version
 lazy from ledger_kernel.access import Principal
 lazy from ledger_platform.config.settings import Settings
 lazy from ledger_platform.http.deps import Caller
 lazy from ledger_platform.http.standing import Standings
 
 _TOKEN_SETTINGS: Final = ("token_issuer", "token_audience", "token_jwks_url")
+
+
+def _with_standing(caller: Caller, standings: Standings) -> Caller:
+    """``caller``, which also settles what the request is as its caller stands (``standing``).
+
+    The caller is proven first (401), then asked its standing: an API client that was revoked is refused
+    (401 ``api_client_revoked``); the mode its API client is bound to becomes the request's
+    (``ledger_mode_of``); and the version it speaks is settled: a ``Ledger-Version`` the request names is
+    read (400 ``version_unknown`` for one that does not exist, or for two), else the pins decide. The answer
+    to every request, this one's or not, names its version (``create_app``).
+    """
+
+    async def standing(
+        request: Request,
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(BEARER)],
+    ) -> AsyncGenerator[Principal]:
+        async with aclosing(caller(request, credentials)) as proven:
+            principal = await anext(proven)
+            known = await standings.of(principal)
+            if known.revoked:
+                raise ApiClientRevokedError
+            sent = request.headers.getlist(VERSION_HEADER)
+            if len(sent) > 1:
+                raise VersionUnknownError
+            request.scope[VERSION_KEY] = resolve(parse_version(sent[0]) if sent else None, known)
+            if known.mode is not None:
+                request.scope[MODE_KEY] = known.mode
+            yield principal
+
+    return standing
 
 
 @final
@@ -67,9 +105,9 @@ class Authentication:
         """The caller dependency of a module that knows how its callers stand (identity keeps that).
 
         It proves the caller as ``caller`` does and settles the request's version and mode, and refuses a
-        revoked API client (``with_standing``).
+        revoked API client (``_with_standing``).
         """
-        return with_standing(self.caller, standings)
+        return _with_standing(self.caller, standings)
 
     def resources(self) -> tuple[AbstractAsyncContextManager[object], ...]:
         """What the app opens while it runs: the client that fetches the provider's keys, if any."""

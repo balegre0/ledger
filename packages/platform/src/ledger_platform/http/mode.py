@@ -4,8 +4,10 @@ The value is one of the exact words ``test`` and ``live``, sent once: no other c
 header's name is matched in any case, as HTTP says. A refusal never repeats what was sent.
 
 A human's request names its mode in the header. An API client's credential carries its own (``MODE_KEY``,
-left in the request by ``with_standing``): the header is then optional, and may only repeat it (403
-``mode_mismatch`` otherwise).
+left in the request by the caller once it is proven and its standing known): the header is then optional, and
+may only repeat it (403 ``mode_mismatch`` otherwise). The mode is the caller's to settle, so the dependency is
+made of the caller (``ledger_mode_of(caller)``) and depends on it: the caller is proven, and its credential's
+mode known, before the mode is read, whatever order a route declares its dependencies in.
 
 FastAPI reads the header as optional, so that a missing one is our 400 (``mode_required``) and not its
 422; the app's OpenAPI document says what is true of a moded route instead: the header is required, ``test``
@@ -13,14 +15,17 @@ or ``live`` (``require_mode_header``).
 """
 
 from typing import Annotated, ClassVar, Final
+lazy from collections.abc import Callable, Coroutine
 
-from fastapi import Header
+from fastapi import Depends, Header
 lazy from fastapi import Request
 
 from ledger_kernel.errors import ForbiddenError
 from ledger_kernel.tenancy import Mode
 from ledger_platform.http.documents import operations_of, parameters_of
 from ledger_platform.http.problems import BadRequestError
+lazy from ledger_kernel.access import Principal
+lazy from ledger_platform.http.deps import Caller
 
 MODE_HEADER: Final = "Ledger-Mode"
 MODE_KEY: Final = "ledger.mode"
@@ -56,28 +61,39 @@ class ModeMismatchError(ForbiddenError):
         super().__init__("this credential acts in the other mode only")
 
 
-async def ledger_mode(
-    request: Request,
-    header: Annotated[str | None, Header(alias=MODE_HEADER, description=_DESCRIPTION)] = None,
-) -> Mode:
-    """The request's mode: its credential's, else the header's (``ModeRequiredError`` without one).
+type ModeDependency = Callable[[Request, Principal, str | None], Coroutine[object, object, Mode]]
+"""The dependency ``ledger_mode_of`` makes: a route declares ``Annotated[Mode, Depends(...)]``."""
 
-    ``ModeInvalidError`` for any value that is not a mode, whatever the credential; ``ModeMismatchError`` for
-    a mode other than the credential's. ``header`` documents the parameter and says whether there is one;
-    every line of it is read, so that two lines (which FastAPI would reduce to one) are refused rather than
-    one of them chosen.
+
+def ledger_mode_of(caller: Caller) -> ModeDependency:
+    """The dependency giving the request's mode: its credential's, else the header's.
+
+    It depends on ``caller``, so the caller is proven (and its credential's mode known) first. Without a
+    header the credential's mode, else ``ModeRequiredError``; ``ModeInvalidError`` for any value that is not
+    a mode, whatever the credential; ``ModeMismatchError`` for a mode other than the credential's. ``header``
+    documents the parameter and says whether there is one; every line of it is read, so that two lines (which
+    FastAPI would reduce to one) are refused rather than one of them chosen.
     """
-    bound = request.scope.get(MODE_KEY)
-    if header is None:
-        if isinstance(bound, Mode):
-            return bound
-        raise ModeRequiredError
-    sent = request.headers.getlist(MODE_HEADER)
-    mode = _MODES.get(sent[0]) if len(sent) == 1 else None
-    if mode is None:
-        raise ModeInvalidError
-    if isinstance(bound, Mode) and mode is not bound:
-        raise ModeMismatchError
+
+    async def mode(
+        request: Request,
+        principal: Annotated[Principal, Depends(caller)],
+        header: Annotated[str | None, Header(alias=MODE_HEADER, description=_DESCRIPTION)] = None,
+    ) -> Mode:
+        del principal  # proven, which is what settles the credential's mode
+        bound = request.scope.get(MODE_KEY)
+        if header is None:
+            if isinstance(bound, Mode):
+                return bound
+            raise ModeRequiredError
+        sent = request.headers.getlist(MODE_HEADER)
+        named = _MODES.get(sent[0]) if len(sent) == 1 else None
+        if named is None:
+            raise ModeInvalidError
+        if isinstance(bound, Mode) and named is not bound:
+            raise ModeMismatchError
+        return named
+
     return mode
 
 

@@ -31,7 +31,6 @@ from ledger_platform.http import (
     holding,
     idempotency_key,
     json_response,
-    ledger_mode,
     page_of_items,
     page_query,
     problems,
@@ -48,7 +47,7 @@ lazy from ledger_platform.http import StoredResponse
 def router(context: ApiContext) -> APIRouter:
     """The API clients' routes."""
     clients = APIRouter(prefix="/v1/api_clients", tags=["api clients"])
-    database = context.database
+    database, mode_of = context.database, context.mode
     administrator = holding(context.caller, ORGANIZATION_ADMIN)
 
     @clients.post(
@@ -60,7 +59,7 @@ def router(context: ApiContext) -> APIRouter:
     )
     async def register_client(
         principal: Annotated[Principal, Depends(administrator)],
-        mode: Annotated[Mode, Depends(ledger_mode)],
+        mode: Annotated[Mode, Depends(mode_of)],
         key: Annotated[str, Depends(idempotency_key)],
         body: NewApiClient,
         request: Request,
@@ -90,7 +89,7 @@ def router(context: ApiContext) -> APIRouter:
     @clients.get("", response_model=Page[ApiClientView], responses=problems(400, 401, 403, 422))
     async def list_clients(
         principal: Annotated[Principal, Depends(administrator)],
-        mode: Annotated[Mode, Depends(ledger_mode)],
+        mode: Annotated[Mode, Depends(mode_of)],
         page: Annotated[PageRequest, Depends(page_query)],
     ) -> Page[ApiClientView]:
         """The API clients of the caller's organization in the request's mode, revoked ones too."""
@@ -102,7 +101,7 @@ def router(context: ApiContext) -> APIRouter:
     async def read_client(
         client_id: str,
         principal: Annotated[Principal, Depends(administrator)],
-        mode: Annotated[Mode, Depends(ledger_mode)],
+        mode: Annotated[Mode, Depends(mode_of)],
     ) -> ApiClientView:
         """An API client of the caller's organization, in the request's mode."""
         wanted = parse_api_client_ref(client_id)
@@ -114,7 +113,7 @@ def router(context: ApiContext) -> APIRouter:
     async def revoke_client(
         client_id: str,
         principal: Annotated[Principal, Depends(administrator)],
-        mode: Annotated[Mode, Depends(ledger_mode)],
+        mode: Annotated[Mode, Depends(mode_of)],
     ) -> ApiClientView:
         """Revoke an API client: its tokens stop counting at once (within a minute where cached).
 

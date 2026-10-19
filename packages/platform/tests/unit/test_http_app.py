@@ -12,16 +12,19 @@ import httpx
 import pytest
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPBearer
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SpanExporter
 from opentelemetry.trace import SpanKind, StatusCode, format_span_id, format_trace_id
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, TypeAdapter, field_validator
 from structlog.testing import capture_logs
 lazy from fastapi import FastAPI, Request
+lazy from fastapi.security import HTTPAuthorizationCredentials
 lazy from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 lazy from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 lazy from prometheus_client import CollectorRegistry
 
+from ledger_kernel.access import Principal, SubjectId
 from ledger_kernel.errors import (
     ConflictError,
     ErrorKind,
@@ -33,10 +36,11 @@ from ledger_kernel.errors import (
     UnavailableError,
     described,
 )
+from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_platform.config.settings import LogFormat, Settings
 from ledger_platform.http.app import ApiInfo, Observability, create_app
 from ledger_platform.http.metrics import AmbiguousRouteError
-from ledger_platform.http.mode import ledger_mode
+from ledger_platform.http.mode import ledger_mode_of
 from ledger_platform.http.problems import PROBLEM_JSON
 from ledger_platform.observability.health import Health
 from ledger_platform.observability.logs import configure_logging
@@ -1222,11 +1226,21 @@ async def test_every_traced_response_names_its_request(
     assert expected is None or request_id == expected
 
 
+async def anyone(
+    request: Request, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(HTTPBearer())]
+) -> AsyncGenerator[Principal]:
+    """A caller proven by nothing: what a document needs of a moded route's caller."""
+    del request, credentials
+    yield Principal(
+        subject=SubjectId("1"), organization=organization_of("1001"), provider_organization="1001"
+    )
+
+
 def test_the_app_s_document_says_a_moded_route_requires_its_mode(observability: Observability) -> None:
     moded = APIRouter()
 
     @moded.post("/v1/moded")
-    async def act(mode: Annotated[Mode, Depends(ledger_mode)]) -> dict[str, str]:
+    async def act(mode: Annotated[Mode, Depends(ledger_mode_of(anyone))]) -> dict[str, str]:
         return {"mode": mode.value}
 
     built = build(observability, moded)

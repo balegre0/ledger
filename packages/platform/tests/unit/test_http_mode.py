@@ -1,43 +1,63 @@
 """``Ledger-Mode`` (§9.7): the exact words ``test`` and ``live``, sent once; anything else is a 400."""
 
-from typing import Annotated
-lazy from collections.abc import Awaitable, Callable
+from typing import Annotated, Final
+lazy from collections.abc import AsyncGenerator
 
 import httpx
 import pytest
 from fastapi import Depends, FastAPI
-lazy from fastapi import Request, Response
+from fastapi.security import HTTPBearer
+lazy from fastapi import Request
+lazy from fastapi.security import HTTPAuthorizationCredentials
 
+from ledger_kernel.access import Principal, SubjectId
 from ledger_kernel.errors import ErrorKind
 from ledger_kernel.tenancy import Mode
+from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_platform.http.mode import (
     MODE_HEADER,
     MODE_KEY,
     ModeInvalidError,
     ModeMismatchError,
     ModeRequiredError,
-    ledger_mode,
+    ledger_mode_of,
     require_mode_header,
 )
 from ledger_platform.http.problems import PROBLEM_JSON, install_problem_handlers
+lazy from ledger_platform.http.deps import Caller
 
 SECRET_LOOKING: str = "live; tax_id=101850043"
 """A value no mode is, carrying something a problem must never repeat."""
+_BEARER: Final = HTTPBearer(auto_error=False)
+CALLER: Final = Principal(
+    subject=SubjectId("1"), organization=organization_of("1001"), provider_organization="1001"
+)
 
 
-def app() -> FastAPI:
+def proven(carried: Mode | None) -> Caller:
+    """A caller proven without a token; its credential carries ``carried`` (an API client's), if any."""
+
+    async def caller(
+        request: Request, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_BEARER)]
+    ) -> AsyncGenerator[Principal]:
+        del credentials
+        if carried is not None:
+            request.scope[MODE_KEY] = carried
+        yield CALLER
+
+    return caller
+
+
+def client(carried: Mode | None = None) -> httpx.AsyncClient:
+    """A client of a moded route whose caller's credential carries ``carried``, if any."""
     built = FastAPI()
     install_problem_handlers(built)
 
     @built.get("/moded")
-    async def moded(mode: Annotated[Mode, Depends(ledger_mode)]) -> dict[str, str]:
+    async def moded(mode: Annotated[Mode, Depends(ledger_mode_of(proven(carried)))]) -> dict[str, str]:
         return {"mode": mode.value}
 
-    return built
-
-
-def client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app()), base_url="http://t")
+    return httpx.AsyncClient(transport=httpx.ASGITransport(built), base_url="http://t")
 
 
 @pytest.mark.parametrize("sent", ["test", "live"])
@@ -106,29 +126,16 @@ def test_the_mode_errors_are_invalid_input_with_stable_codes() -> None:
     assert (ModeMismatchError().kind, ModeMismatchError.code) == (ErrorKind.FORBIDDEN, "mode_mismatch")
 
 
-def credentialed(mode: Mode) -> httpx.AsyncClient:
-    """A client of a route whose caller's credential carries ``mode`` (an API client's), as ``with_standing``
-    leaves it in the request."""
-    built = app()
-
-    @built.middleware("http")
-    async def bound(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
-        request.scope[MODE_KEY] = mode
-        return await call_next(request)
-
-    return httpx.AsyncClient(transport=httpx.ASGITransport(built), base_url="http://t")
-
-
 @pytest.mark.parametrize("mode", [Mode.TEST, Mode.LIVE])
 async def test_a_credential_that_carries_its_mode_needs_no_header_and_may_repeat_it(mode: Mode) -> None:
-    async with credentialed(mode) as moded:
+    async with client(mode) as moded:
         bare = await moded.get("/moded")
         repeated = await moded.get("/moded", headers={MODE_HEADER: mode.value})
     assert (bare.json(), repeated.json()) == ({"mode": mode.value}, {"mode": mode.value})
 
 
 async def test_a_credential_cannot_act_in_the_other_mode() -> None:
-    async with credentialed(Mode.TEST) as moded:
+    async with client(Mode.TEST) as moded:
         response = await moded.get("/moded", headers={MODE_HEADER: "live"})
     assert (response.status_code, response.headers["content-type"], response.json()["code"]) == (
         403,
@@ -139,14 +146,14 @@ async def test_a_credential_cannot_act_in_the_other_mode() -> None:
 
 @pytest.mark.parametrize("sent", ["prod", "Test", "", "x" * 1000])
 async def test_a_header_that_is_no_mode_is_refused_whatever_the_credential_says(sent: str) -> None:
-    async with credentialed(Mode.TEST) as moded:
+    async with client(Mode.TEST) as moded:
         response = await moded.get("/moded", headers={MODE_HEADER: sent})
     assert (response.status_code, response.json()["code"]) == (400, "mode_invalid")
     assert len(sent) < 100 or sent not in response.text
 
 
 async def test_two_headers_are_refused_even_to_a_credential_that_carries_a_mode() -> None:
-    async with credentialed(Mode.TEST) as moded:
+    async with client(Mode.TEST) as moded:
         response = await moded.get("/moded", headers=[(MODE_HEADER, "test"), (MODE_HEADER, "test")])
     assert (response.status_code, response.json()["code"]) == (400, "mode_invalid")
 

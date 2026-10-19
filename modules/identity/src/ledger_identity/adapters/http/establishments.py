@@ -29,7 +29,6 @@ from ledger_platform.http import (
     attempt_of,
     idempotency_key,
     json_response,
-    ledger_mode,
     page_of_items,
     page_query,
     problems,
@@ -58,7 +57,7 @@ def moded(access: CompanyAccess, mode: Mode) -> Tenant:
 def router(context: ApiContext) -> APIRouter:
     """The routes of establishments."""
     establishments = APIRouter(prefix="/v1/companies/{company_id}/establishments", tags=["establishments"])
-    database = context.database
+    database, mode_of = context.database, context.mode
     reader, manager = (
         allowed(context.in_company, COMPANIES_READ),
         allowed(context.in_company, COMPANIES_MANAGE),
@@ -67,7 +66,7 @@ def router(context: ApiContext) -> APIRouter:
     @establishments.post("", status_code=HTTPStatus.CREATED, response_model=EstablishmentView, responses=OPEN)
     async def open_establishment(
         access: Annotated[CompanyAccess, Depends(manager)],
-        mode: Annotated[Mode, Depends(ledger_mode)],
+        mode: Annotated[Mode, Depends(mode_of)],
         key: Annotated[str, Depends(idempotency_key)],
         body: NewEstablishment,
         request: Request,

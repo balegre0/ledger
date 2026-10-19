@@ -25,7 +25,7 @@ from ledger_platform.http import create_app
 from ledger_platform.http.app import ApiInfo, Observability
 from ledger_platform.http.authentication import Authentication
 from ledger_platform.http.deps import authenticated
-from ledger_platform.http.mode import ledger_mode
+from ledger_platform.http.mode import ledger_mode_of
 from ledger_platform.http.standing import (
     ApiClientRevokedError,
     CachedStandings,
@@ -94,7 +94,16 @@ def app(
 
     @routes.get("/moded")
     async def moded(
-        principal: Annotated[Principal, Depends(caller)], mode: Annotated[Mode, Depends(ledger_mode)]
+        principal: Annotated[Principal, Depends(caller)],
+        mode: Annotated[Mode, Depends(ledger_mode_of(caller))],
+    ) -> str:
+        del principal
+        return mode.value
+
+    @routes.get("/mode-first")
+    async def mode_first(
+        mode: Annotated[Mode, Depends(ledger_mode_of(caller))],
+        principal: Annotated[Principal, Depends(caller)],
     ) -> str:
         del principal
         return mode.value
@@ -289,6 +298,17 @@ async def test_a_human_names_its_mode_and_an_api_client_s_credential_carries_it(
     assert (bare.json(), repeated.json()) == ("live", "live")
     other = await client.get("/moded", headers=bearer(local_issuer, **{"Ledger-Mode": "test"}))
     assert (other.status_code, PROBLEM.validate_json(other.content)["code"]) == (403, "mode_mismatch")
+
+
+async def test_a_route_that_reads_its_mode_before_its_caller_still_holds_a_credential_to_its_mode(
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, standings: Knowing
+) -> None:
+    """The mode depends on the caller: whatever the order a route declares them in, the credential rules."""
+    standings.standing = Standing(mode=Mode.TEST)
+    refused = await client.get("/mode-first", headers=bearer(local_issuer, **{"Ledger-Mode": "live"}))
+    assert (refused.status_code, PROBLEM.validate_json(refused.content)["code"]) == (403, "mode_mismatch")
+    bare = await client.get("/mode-first", headers=bearer(local_issuer))
+    assert (bare.status_code, bare.json()) == (200, "test")
 
 
 async def test_a_revoked_api_client_is_refused_whatever_its_token_says(

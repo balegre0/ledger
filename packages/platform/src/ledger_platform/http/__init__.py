@@ -27,7 +27,7 @@ from ledger_platform.http.idempotency import (
     idempotency_key,
     json_response,
 )
-from ledger_platform.http.mode import ledger_mode
+from ledger_platform.http.mode import ledger_mode_of
 from ledger_platform.http.models import Page, page_of_items, page_query
 from ledger_platform.http.openapi import precondition_checked, problems, success
 from ledger_platform.http.problems import BadRequestError, Problem
@@ -65,7 +65,7 @@ __all__ = [
     "if_match_required",
     "in_organization",
     "json_response",
-    "ledger_mode",
+    "ledger_mode_of",
     "page_of_items",
     "page_query",
     "precondition_checked",
