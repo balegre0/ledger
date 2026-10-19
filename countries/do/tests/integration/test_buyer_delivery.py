@@ -35,7 +35,6 @@ from ledger_country_do.channels.ecf_v1.adapters.signing.trust import (
 )
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import SignatureInvalidError
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import DoctypeRefusedError
 from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import SchemaViolationError
 from ledger_country_do.channels.ecf_v1.domain.drafts import Buyer
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
@@ -43,7 +42,7 @@ from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.fake_dgii.app import FakeDgii
 from ledger_country_do_testing.fake_dgii.receiver import arecf
 from ledger_country_do_testing.fake_dgii.state import dgii_check
-from ledger_country_do_testing.pki import Authority, organization
+from ledger_country_do_testing.pki import organization
 from ledger_country_do_testing.samples import (
     BUYER,
     ISSUER,
@@ -54,12 +53,14 @@ from ledger_country_do_testing.samples import (
 )
 from ledger_country_do_testing.signatures import sign_with_signxml
 from ledger_country_do_testing.transports import FAKE_HOSTS
+from ledger_fiscal_kit.xml.hardened import DoctypeRefusedError
 from ledger_testing.clock import ManualClock
+from ledger_testing.pki import Authority
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.client import DirectoryLookup
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import Resolve
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
 lazy from ledger_country_do_testing.local_signer import KeyPairSigner
-lazy from ledger_country_do_testing.pki import Issued
+lazy from ledger_testing.pki import Issued
 
 T: Final = Environment.TESTECF
 SIMULATOR: Final = f"{FAKE_HOSTS.ecf}/testecf/emisorreceptor"

@@ -8,7 +8,6 @@ lazy import httpx
 
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import INBOUND
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf, rfce
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import MAX_DOCUMENT, texts
 from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import violations
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.notation import SANTO_DOMINGO
@@ -25,11 +24,13 @@ from ledger_country_do_testing.fake_dgii.state import (
     dgii_check,
 )
 from ledger_country_do_testing.local_signer import KeyPairSigner
-from ledger_country_do_testing.pki import Authority, person
+from ledger_country_do_testing.pki import person
 from ledger_country_do_testing.samples import SIGNED_AT, SIGNER_VALID_FROM, consumer_invoice, credit_invoice
 from ledger_country_do_testing.signatures import forge
-lazy from ledger_country_do_testing.pki import Issued
+from ledger_fiscal_kit.xml.hardened import MAX_DOCUMENT, texts
+from ledger_testing.pki import Authority
 lazy from ledger_testing.clock import ManualClock
+lazy from ledger_testing.pki import Issued
 
 AUTH: Final = "/testecf/autenticacion/api/autenticacion"
 RECEPTION: Final = "/testecf/recepcion/api/facturaselectronicas"

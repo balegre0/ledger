@@ -5,8 +5,9 @@ from cryptography.hazmat.primitives.serialization import BestAvailableEncryption
 
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import verify_enveloped
 from ledger_country_do_testing.local_signer import BundleIncompleteError, KeyPairSigner
-from ledger_country_do_testing.pki import OPENING_PHRASE, Authority, bundle, person
+from ledger_country_do_testing.pki import person
 from ledger_country_do_testing.signatures import SHAPES
+from ledger_testing.pki import OPENING_PHRASE, Authority, bundle
 
 
 async def test_a_bundle_opens_into_a_signer_of_documents_and_seeds() -> None:

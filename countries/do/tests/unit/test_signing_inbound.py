@@ -16,8 +16,9 @@ from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import (
     SignatureInvalidError,
     verify_enveloped,
 )
-from ledger_country_do_testing.pki import Authority, organization, person, rsa_key
+from ledger_country_do_testing.pki import organization, person
 from ledger_country_do_testing.signatures import SHAPES, forge
+from ledger_testing.pki import Authority, rsa_key
 
 ECF: Final = SHAPES["ecf"]
 

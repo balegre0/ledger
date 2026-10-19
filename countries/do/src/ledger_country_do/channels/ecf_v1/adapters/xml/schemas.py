@@ -17,15 +17,15 @@ from typing import ClassVar, Final, final, override
 
 from lxml import etree
 
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import (
+from ledger_country_do.channels.ecf_v1.adapters.xsd.published import CORRECTIONS, PUBLISHED
+from ledger_country_do.channels.ecf_v1.domain.errors import EcfError, EcfInvalidError
+from ledger_fiscal_kit.xml.hardened import (
     SIGNATURE,
     MalformedDocumentError,
     parser,
     require_plain,
     require_readable,
 )
-from ledger_country_do.channels.ecf_v1.adapters.xsd.published import CORRECTIONS, PUBLISHED
-from ledger_country_do.channels.ecf_v1.domain.errors import EcfError, EcfInvalidError
 from ledger_kernel.errors import truncate
 lazy from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 

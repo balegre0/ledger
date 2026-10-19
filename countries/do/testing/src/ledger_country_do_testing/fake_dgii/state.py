@@ -17,10 +17,10 @@ from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import (
     SignatureInvalidError,
     verify_enveloped,
 )
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import UnreadableDocumentError
 from ledger_country_do_testing.signatures import verify_with_signxml
+from ledger_fiscal_kit.xml.hardened import XmlDocumentError
 lazy from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import VerificationProfile
-lazy from ledger_country_do_testing.pki import Issued
+lazy from ledger_testing.pki import Issued
 
 TOKEN_LIFETIME: Final = timedelta(hours=1)
 """DT-DGII: a token lasts one hour, "for now" (its words)."""
@@ -92,7 +92,7 @@ class VerifierCheck(SignatureCheck):
     def verify(self, signed: bytes) -> bool:
         try:
             verified = verify_enveloped(signed, self._profile)
-        except SignatureInvalidError, UnreadableDocumentError:
+        except SignatureInvalidError, XmlDocumentError:
             return False
         return self._trusted is None or verified.certificate in self._trusted
 

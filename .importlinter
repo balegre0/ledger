@@ -8,6 +8,7 @@ root_packages =
     ledger_country_do
     ledger_country_do_testing
     ledger_devtools
+    ledger_fiscal_kit
     ledger_identity
     ledger_invoicing
     ledger_kernel
@@ -23,6 +24,7 @@ layers =
     ledger_invoicing
     ledger_identity
     ledger_country_do
+    ledger_fiscal_kit
     ledger_platform
     ledger_kernel
 
@@ -88,6 +90,7 @@ forbidden_modules =
     ledger_country_do
     ledger_country_do_testing
     ledger_devtools
+    ledger_fiscal_kit
     ledger_identity
     ledger_invoicing
     ledger_kernel
@@ -105,6 +108,7 @@ forbidden_modules =
     ledger_country_do
     ledger_country_do_testing
     ledger_devtools
+    ledger_fiscal_kit
     ledger_identity
     ledger_invoicing
     ledger_kernel
@@ -122,6 +126,7 @@ forbidden_modules =
     ledger_country_do
     ledger_country_do_testing
     ledger_devtools
+    ledger_fiscal_kit
     ledger_identity
     ledger_invoicing
     ledger_kernel
@@ -158,7 +163,6 @@ forbidden_modules =
     ledger_identity
     ledger_invoicing
     ledger_platform
-    ledger_testing
 allow_indirect_imports = True
 
 [importlinter:contract:devtools-declared-edges]
@@ -172,6 +176,24 @@ forbidden_modules =
     ledger_app_worker
     ledger_country_do
     ledger_country_do_testing
+    ledger_fiscal_kit
+    ledger_identity
+    ledger_invoicing
+    ledger_testing
+allow_indirect_imports = True
+
+[importlinter:contract:fiscal-kit-declared-edges]
+name = fiscal-kit imports only the workspace packages it declares
+type = forbidden
+source_modules =
+    ledger_fiscal_kit
+forbidden_modules =
+    ledger_app_api
+    ledger_app_migrate
+    ledger_app_worker
+    ledger_country_do
+    ledger_country_do_testing
+    ledger_devtools
     ledger_identity
     ledger_invoicing
     ledger_testing
@@ -189,6 +211,7 @@ forbidden_modules =
     ledger_country_do
     ledger_country_do_testing
     ledger_devtools
+    ledger_fiscal_kit
     ledger_invoicing
     ledger_testing
 allow_indirect_imports = True
@@ -205,6 +228,7 @@ forbidden_modules =
     ledger_country_do
     ledger_country_do_testing
     ledger_devtools
+    ledger_fiscal_kit
     ledger_kernel
     ledger_testing
 allow_indirect_imports = True
@@ -221,6 +245,7 @@ forbidden_modules =
     ledger_country_do
     ledger_country_do_testing
     ledger_devtools
+    ledger_fiscal_kit
     ledger_identity
     ledger_invoicing
     ledger_platform
@@ -239,6 +264,7 @@ forbidden_modules =
     ledger_country_do
     ledger_country_do_testing
     ledger_devtools
+    ledger_fiscal_kit
     ledger_identity
     ledger_invoicing
     ledger_testing
@@ -256,6 +282,7 @@ forbidden_modules =
     ledger_country_do
     ledger_country_do_testing
     ledger_devtools
+    ledger_fiscal_kit
     ledger_identity
     ledger_invoicing
 allow_indirect_imports = True
@@ -279,6 +306,7 @@ forbidden_modules =
     ledger_country_do.channels
     ledger_country_do_testing
     ledger_devtools
+    ledger_fiscal_kit
     ledger_identity
     ledger_invoicing
     ledger_platform
@@ -378,6 +406,7 @@ name = Only identity imports its insides
 type = forbidden
 source_modules =
     ledger_country_do
+    ledger_fiscal_kit
     ledger_invoicing
     ledger_kernel
     ledger_platform
@@ -424,6 +453,7 @@ forbidden_modules =
     ledger_country_do
     ledger_country_do_testing
     ledger_devtools
+    ledger_fiscal_kit
     ledger_invoicing
     ledger_platform
     ledger_testing
@@ -486,6 +516,7 @@ name = Only invoicing imports its insides
 type = forbidden
 source_modules =
     ledger_country_do
+    ledger_fiscal_kit
     ledger_identity
     ledger_kernel
     ledger_platform
@@ -529,6 +560,7 @@ forbidden_modules =
     ledger_country_do
     ledger_country_do_testing
     ledger_devtools
+    ledger_fiscal_kit
     ledger_identity
     ledger_platform
     ledger_testing
@@ -594,6 +626,7 @@ source_modules =
     ledger_app_migrate
     ledger_app_worker
     ledger_country_do
+    ledger_fiscal_kit
     ledger_identity
     ledger_invoicing
     ledger_kernel

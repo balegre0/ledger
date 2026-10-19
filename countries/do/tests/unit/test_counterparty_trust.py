@@ -19,8 +19,9 @@ from ledger_country_do.channels.ecf_v1.adapters.signing.trust import (
     identities,
 )
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import VerifiedSignature
-from ledger_country_do_testing.pki import CERTIFYING, SIGNING, Authority, organization, person, rsa_key
-lazy from ledger_country_do_testing.pki import Issued
+from ledger_country_do_testing.pki import organization, person
+from ledger_testing.pki import CERTIFYING, SIGNING, Authority, rsa_key
+lazy from ledger_testing.pki import Issued
 
 AT: Final = datetime(2026, 10, 13, 13, 30, tzinfo=UTC)
 BUYER_RNC: Final = "131098193"

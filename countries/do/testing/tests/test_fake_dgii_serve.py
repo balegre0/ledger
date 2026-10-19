@@ -8,8 +8,9 @@ from granian.constants import Interfaces
 from ledger_country_do_testing.fake_dgii import serve
 from ledger_country_do_testing.fake_dgii.app import create_app
 from ledger_country_do_testing.local_signer import KeyPairSigner
-from ledger_country_do_testing.pki import Authority, person
+from ledger_country_do_testing.pki import person
 from ledger_country_do_testing.signatures import forge
+from ledger_testing.pki import Authority
 
 AUTH = "/testecf/autenticacion/api/autenticacion"
 

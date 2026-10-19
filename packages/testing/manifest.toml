@@ -1,13 +1,14 @@
 [package]
 name = "testing"
 kind = "package"
-summary = "The shared test harness: a pytest plugin, PostgreSQL, a local OpenID provider, clocks. Dev-only."
+summary = "The shared test harness: a pytest plugin, PostgreSQL, a local OpenID provider, clocks, a test PKI. Dev-only."
 owners = ["@balegre0"]
 
 [dependencies]
 packages = ["kernel", "platform"]
 python = [
     "alembic>=1.20.0",
+    "cryptography>=50.0.2",
     "httpx>=0.28.1",
     "joserfc>=1.7.5",
     "psycopg[binary]>=3.3.6",

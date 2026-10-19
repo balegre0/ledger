@@ -63,7 +63,7 @@ from ledger_country_do.channels.ecf_v1.adapters.http import (
     MAX_ANSWER,
     bounded,
 )
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import texts
+from ledger_country_do.channels.ecf_v1.adapters.signing.seeds import require_seed
 from ledger_country_do.channels.ecf_v1.application.ports import (
     Answer,
     Authority,
@@ -77,6 +77,7 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError
 from ledger_country_do.channels.ecf_v1.domain.notation import SANTO_DOMINGO, parse_dgii_moment
 from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage
+from ledger_fiscal_kit.xml.hardened import XmlDocumentError
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import MessageAnswer
 lazy from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
@@ -318,9 +319,9 @@ class DgiiClient(Authority):
 
     async def _signed(self, seed: bytes) -> bytes:
         try:
-            texts(seed)
+            require_seed(seed)
             return await self._signer.sign_seed(seed)
-        except EcfInvalidError as error:
+        except (EcfInvalidError, XmlDocumentError) as error:
             raise AuthorityUnavailableError(Failure.UNREADABLE, Service.SEED.value) from error
 
     async def _authenticate(

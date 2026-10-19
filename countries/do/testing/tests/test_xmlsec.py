@@ -3,8 +3,8 @@ from datetime import UTC, datetime
 import pytest
 
 from ledger_country_do.channels.ecf_v1.domain.notation import NaiveMomentError
-from ledger_country_do_testing.pki import Authority, pem
 from ledger_country_do_testing.xmlsec import CONTEXT, XMLSEC_IMAGE, Xmlsec, XmlsecCommandError
+from ledger_testing.pki import Authority, pem
 
 
 def test_xmlsec1_refuses_a_document_without_a_signature_and_a_naive_moment() -> None:

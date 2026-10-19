@@ -44,15 +44,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 lazy from starlette.types import Message, Receive
 
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import (
-    MAX_DOCUMENT,
-    UnreadableDocumentError,
-    texts,
-)
 from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import corrected
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.notation import SANTO_DOMINGO
 from ledger_country_do_testing.fake_dgii.state import STATUS_WORDS, Received, Status
+from ledger_fiscal_kit.xml.hardened import MAX_DOCUMENT, XmlDocumentError, texts
 from ledger_kernel.errors import InvalidInputError
 lazy from ledger_country_do_testing.fake_dgii.state import Credentials, FakeState, SignatureCheck
 
@@ -127,7 +123,7 @@ def readable(document: bytes) -> bool:
     """Whether ``document`` is XML the hardened parser reads."""
     try:
         texts(document)
-    except UnreadableDocumentError:
+    except XmlDocumentError:
         return False
     return True
 
