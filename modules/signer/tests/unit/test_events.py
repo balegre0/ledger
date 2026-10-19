@@ -3,9 +3,11 @@
 Payloads travel through the platform's codec and read back.
 """
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Final
 from uuid import UUID
+lazy from collections.abc import Callable
 
 import pytest
 from pydantic import TypeAdapter
@@ -15,7 +17,14 @@ from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.tenancy import Mode, OrganizationScope, Tenant
 from ledger_platform.data.codec import canonical_json, payload_of
 from ledger_signer._manifest import MANIFEST
-from ledger_signer.events import CertificateExpiring, CertificateInstalled, CertificateRetired
+from ledger_signer.domain.certificates import BackendKind, RetiredReason
+from ledger_signer.events import (
+    BACKENDS,
+    RETIRED_REASONS,
+    CertificateExpiring,
+    CertificateInstalled,
+    CertificateRetired,
+)
 lazy from ledger_kernel.events import Event
 
 NOT_AFTER: Final = datetime(2027, 10, 19, 12, tzinfo=UTC)
@@ -55,7 +64,7 @@ def expiring() -> CertificateExpiring:
         aggregate_version=1,
         certificate=CERTIFICATE,
         not_after=NOT_AFTER,
-        days_left=7,
+        threshold_days=7,
     )
 
 
@@ -82,7 +91,7 @@ def test_every_event_is_its_company_s_in_no_mode_about_its_certificate() -> None
     for event in (installed(), retired(), expiring()):
         assert (event.scope, event.subject) == (COMPANY, event.certificate)
     assert (installed().modes, installed().replaces) == ((Mode.TEST, Mode.LIVE), (REPLACED,))
-    assert (expiring().not_after, expiring().days_left) == (NOT_AFTER, 7)
+    assert (expiring().not_after, expiring().threshold_days) == (NOT_AFTER, 7)
 
 
 @pytest.mark.parametrize(
@@ -100,6 +109,27 @@ def test_an_event_outside_a_company_or_in_a_mode_is_a_defect(
         CertificateRetired(
             scope=scope, subject=CERTIFICATE, aggregate_version=2, certificate=CERTIFICATE, reason="retired"
         )
+
+
+DEFECTS: Final[list[Callable[[], object]]] = [
+    lambda: replace(installed(), modes=()),
+    lambda: replace(installed(), modes=(Mode.TEST, Mode.TEST)),
+    lambda: replace(installed(), backend="vault"),
+    lambda: replace(retired(), reason="lost"),
+    lambda: replace(expiring(), threshold_days=-1),
+]
+"""Each makes an event our code could not have published."""
+
+
+@pytest.mark.parametrize("defect", DEFECTS)
+def test_an_event_with_words_its_consumers_do_not_know_is_a_defect(defect: Callable[[], object]) -> None:
+    with pytest.raises(InvalidValueError):
+        defect()
+
+
+def test_the_events_words_are_the_domain_s() -> None:
+    assert frozenset(str(kind) for kind in BackendKind) == BACKENDS
+    assert frozenset(str(reason) for reason in RetiredReason) == RETIRED_REASONS
 
 
 def test_an_event_about_another_certificate_than_its_subject_is_a_defect() -> None:
@@ -138,7 +168,7 @@ def test_a_retirement_and_an_expiry_notice_travel_and_read_back() -> None:
     assert notice == {
         "certificate": str(CERTIFICATE),
         "not_after": "2027-10-19T12:00:00+00:00",
-        "days_left": 7,
+        "threshold_days": 7,
     }
     read = CertificateExpiring(
         scope=COMPANY,
@@ -146,6 +176,6 @@ def test_a_retirement_and_an_expiry_notice_travel_and_read_back() -> None:
         aggregate_version=1,
         certificate=UUID(TEXT.validate_python(notice["certificate"])),
         not_after=MOMENT.validate_python(notice["not_after"]),
-        days_left=NUMBER.validate_python(notice["days_left"]),
+        threshold_days=NUMBER.validate_python(notice["threshold_days"]),
     )
     assert read == expiring()

@@ -34,7 +34,7 @@ def a_view() -> CertificateView:
         status=CertificateStatus.ACTIVE,
         fingerprint_sha256=bytes(32),
         serial_number="1f",
-        subject="CN=Holder",
+        subject="serialNumber=VATDO-101850043,CN=Holder",
         issuer="CN=Authority",
         not_before=NOW,
         not_after=NOW + timedelta(days=365),
@@ -68,6 +68,12 @@ def test_a_view_holds_the_public_part_of_a_certificate_and_no_secret() -> None:
     assert {field.name for field in dataclasses.fields(CertificateView)}.isdisjoint(
         {"key", "private_key", "credential", "sealed", "password"}
     )
+
+
+def test_a_view_never_shows_its_subject() -> None:
+    """A subject may name a person or hold a tax id."""
+    assert "101850043" not in repr(a_view())
+    assert "VATDO" not in str(a_view())
 
 
 def test_is_signer_api_recognizes_an_implementation_and_refuses_another_object() -> None:

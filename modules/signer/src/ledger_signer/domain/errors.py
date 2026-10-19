@@ -57,6 +57,15 @@ class CertificateNotYetValidError(InvalidInputError):
         super().__init__("the certificate is not valid yet")
 
 
+class CertificateValidityTooShortError(InvalidInputError):
+    """A certificate valid for less than the signing skew from now: it could never sign a document."""
+
+    code: ClassVar[str] = "certificate_validity_too_short"
+
+    def __init__(self) -> None:
+        super().__init__("the certificate expires too soon to sign any document")
+
+
 class CertificateRetiredError(ConflictError):
     """A retired certificate asked to sign: it never signs again."""
 

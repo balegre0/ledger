@@ -28,6 +28,7 @@ from ledger_signer.domain.errors import (
     CertificateNotForSigningError,
     CertificateNotYetValidError,
     CertificateRetiredError,
+    CertificateValidityTooShortError,
     ClockSkewError,
     NotCoveredError,
 )
@@ -116,14 +117,22 @@ class CertificateFacts:
         _require_window("certificate_facts", self.not_before, self.not_after)
 
 
-def admit(facts: CertificateFacts, *, now: datetime) -> None:
+def admit(facts: CertificateFacts, *, now: datetime, skew: timedelta) -> None:
     """Refuse a certificate that cannot sign for its company now; the first rule it breaks, in this order.
 
     ``CertificateKeyUnsupportedError`` (not RSA, or under ``MIN_RSA_BITS``), ``CertificateNotForSigningError``
     (an authority's, or a key usage without a signature), ``CertificateKeyMismatchError``,
-    ``CertificateExpiredError`` (``not_after`` is past or now), ``CertificateNotYetValidError``.
+    ``CertificateExpiredError`` (``not_after`` is past or now), ``CertificateNotYetValidError``,
+    ``CertificateValidityTooShortError`` (it expires within ``skew``, the signing skew: no document's window
+    would ever fit, ``Certificate.require_signable``).
+
+    Not checked yet, each deferred to where it belongs: that the subject names the company (the channel's
+    requirements, v2-M3b: how a holder is named is a country's); that it chains to an accepted certification
+    authority of the country; and revocation (OCSP or CRL, v2-M5). Spec §10 is amended accordingly.
     """
     _require_aware("now", now)
+    if skew < _NO_TIME:
+        raise InvalidValueError(field="skew", requirement="no shorter than nothing")
     if facts.rsa_bits is None or facts.rsa_bits < MIN_RSA_BITS:
         raise CertificateKeyUnsupportedError(MIN_RSA_BITS)
     if facts.is_authority or not facts.may_sign:
@@ -134,6 +143,8 @@ def admit(facts: CertificateFacts, *, now: datetime) -> None:
         raise CertificateExpiredError
     if facts.not_before > now:
         raise CertificateNotYetValidError
+    if facts.not_after - now < skew:
+        raise CertificateValidityTooShortError
 
 
 @final

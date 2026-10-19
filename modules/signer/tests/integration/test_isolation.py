@@ -9,8 +9,10 @@ from typing import Final
 
 import pytest
 from psycopg.errors import InsufficientPrivilege
+from pydantic import TypeAdapter
 from sqlalchemy import func, select, table
 from sqlalchemy.exc import DBAPIError
+lazy import psycopg
 lazy from sqlalchemy import Select
 
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
@@ -21,6 +23,23 @@ lazy from ledger_platform.data.database import Database
 
 COMPANY: Final = Tenant(organization=OrganizationId(new_id()), company=CompanyId(new_id()), mode=None)
 TABLES: Final = ("certificates", "custody")
+RELAYED_OR_NOT: Final = (
+    "certificates",
+    "custody",
+    "outbox",
+    "inbox",
+    "jobs",
+    "subscriptions",
+    "idempotency_keys",
+    "audit_events",
+)
+GRANTED: Final = TypeAdapter(bool)
+COLUMNS: Final = TypeAdapter(list[tuple[str, str]])
+COLUMN_UPDATES: Final = (
+    "SELECT table_name, column_name FROM information_schema.column_privileges"
+    " WHERE grantee = 'ledger_relay' AND table_schema = 'signer' AND privilege_type = 'UPDATE'"
+    " ORDER BY column_name"
+)
 
 
 def refused(caught: pytest.ExceptionInfo[DBAPIError]) -> bool:
@@ -60,3 +79,24 @@ async def test_the_signer_s_login_reads_them(module_database: BoundDatabase, nam
     async with module_database.unit(COMPANY) as unit:
         seen = (await unit.connection.execute(count(name))).scalar_one()
     assert seen == 0
+
+
+async def test_the_relay_moves_the_signer_s_events_and_reads_nothing_else(
+    admin: psycopg.AsyncConnection,
+) -> None:
+    """``ledger_relay`` (the worker's fan-out) reaches the outbox, the inbox and the subscriptions only."""
+    granted: dict[str, set[str]] = {}
+    for name in RELAYED_OR_NOT:
+        for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
+            answer = await admin.execute(
+                "SELECT has_table_privilege('ledger_relay', %s, %s)", (f"signer.{name}", privilege)
+            )
+            row = await answer.fetchone()
+            if row is not None and GRANTED.validate_python(row[0]):
+                granted.setdefault(name, set()).add(privilege)
+    assert granted == {"outbox": {"SELECT", "DELETE"}, "inbox": {"INSERT"}, "subscriptions": {"SELECT"}}
+    columns = await admin.execute(COLUMN_UPDATES)
+    assert COLUMNS.validate_python(await columns.fetchall()) == [
+        ("outbox", "attempts"),
+        ("outbox", "unrouted_since"),
+    ]

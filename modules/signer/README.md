@@ -15,6 +15,13 @@ ADR 0010; plan `docs/superpowers/plans/2026-10-19-v2-m2b-signer.md`).
 - Settings: `LEDGER_SIGNER_*` ([`adapters/settings.py`](src/ledger_signer/adapters/settings.py)): the client
   roles' signer address and token, the signer's callers' tokens, backends, KMS and signing skew (never below
   300 s, the skew a channel assumes).
+- Certificates (`domain/certificates.py`): an import is refused unless the certificate is an RSA (2048 bits or
+  more) signing certificate of its key, valid now and for at least the signing skew. Not checked yet: that its
+  subject names the company (the channel's requirements, v2-M3b), that it chains to an accepted certification
+  authority of the country, and revocation (v2-M5). A certificate serves one mode or both; installing one takes
+  its modes from the company's active certificates, each retired `replaced` once it serves none. Re-importing the
+  same certificate (under another idempotency key) therefore retires the old row and adds an identical one, with
+  the same fingerprint.
 - Custody (`adapters/custody`) is the only code that touches key material; only the signer's app may import it
   (import-linter's `signer-custody` contracts).
 - Assembly: `assembly.py` (`MODULE`, entry point `ledger.modules: signer`).

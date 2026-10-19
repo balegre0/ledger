@@ -1,13 +1,15 @@
 """What signer announces (§3.5): its certificates installed, retired and about to expire.
 
 Each is about one certificate (its subject, and its ``certificate``), scoped to the certificate's company
-without a mode: a certificate is shared by its company's modes (it says which it serves). Backends, modes and
-reasons travel as their words: this module sits below the domain and knows none of its types. No event carries
-anything secret or personal: no key, credential, subject name or fingerprint.
+without a mode: a certificate is shared by its company's modes (it says which it serves). Backends, modes
+and reasons travel as their words (``BACKENDS``, ``RETIRED_REASONS``: the domain's, which a test keeps
+equal): this module sits below the domain and knows none of its types; an event with a word its consumers do
+not know is a defect. No event carries anything secret or personal: no key, credential, subject name or
+fingerprint.
 """
 
 from dataclasses import dataclass
-from typing import ClassVar, final
+from typing import ClassVar, Final, final, override
 lazy from datetime import datetime
 lazy from uuid import UUID
 
@@ -15,6 +17,11 @@ from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.events import Event
 from ledger_kernel.tenancy import Tenant
 lazy from ledger_kernel.tenancy import Mode
+
+BACKENDS: Final = frozenset({"local", "remote"})
+"""Where a certificate's key is: the domain's ``BackendKind``."""
+RETIRED_REASONS: Final = frozenset({"replaced", "retired", "company_deactivated"})
+"""Why a certificate was retired: the domain's ``RetiredReason``."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -42,12 +49,22 @@ class CertificateInstalled(CertificateEvent):
     TYPE: ClassVar[str] = "signer.certificate.installed"
     VERSION: ClassVar[int] = 1
     modes: tuple[Mode, ...]
-    """The modes it serves, one or both."""
+    """The modes it serves, one or both, each once."""
     backend: str
     """``local`` or ``remote``."""
     not_after: datetime
     replaces: tuple[UUID, ...]
     """The active certificates that served one of its modes before it: each serves the rest, or is retired."""
+
+    @override
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not self.modes or len(frozenset(self.modes)) != len(self.modes):
+            raise InvalidValueError(
+                field="certificate_installed.modes", requirement="one mode or both, each once"
+            )
+        if self.backend not in BACKENDS:
+            raise InvalidValueError(field="certificate_installed.backend", requirement="local or remote")
 
 
 @final
@@ -60,13 +77,35 @@ class CertificateRetired(CertificateEvent):
     reason: str
     """``replaced``, ``retired`` or ``company_deactivated``."""
 
+    @override
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.reason not in RETIRED_REASONS:
+            raise InvalidValueError(
+                field="certificate_retired.reason", requirement="replaced, retired or company_deactivated"
+            )
+
 
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CertificateExpiring(CertificateEvent):
-    """An active certificate expires in ``days_left`` days (public ``certificate.expiring``)."""
+    """An active certificate expires within ``threshold_days`` days (public ``certificate.expiring``).
+
+    The notice of one of the configured thresholds (``LEDGER_SIGNER_EXPIRY_NOTICE_DAYS``), not a count of the
+    days left: a certificate installed with ten days left is told ``14`` at once. How long it has left is
+    ``not_after`` less the moment the event occurred.
+    """
 
     TYPE: ClassVar[str] = "signer.certificate.expiring"
     VERSION: ClassVar[int] = 1
     not_after: datetime
-    days_left: int
+    threshold_days: int
+    """The threshold whose notice this is: ``0`` when it expires now."""
+
+    @override
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.threshold_days < 0:
+            raise InvalidValueError(
+                field="certificate_expiring.threshold_days", requirement="no fewer than 0"
+            )

@@ -7,7 +7,7 @@ Ids are internal UUIDs; the public ``crt_…`` form exists at the HTTP edge only
 """
 
 from abc import ABCMeta, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar, Final, Protocol, TypeIs, final, runtime_checkable
 lazy from collections.abc import Sequence
 lazy from datetime import datetime
@@ -48,8 +48,8 @@ class CertificateView:
     """SHA-256 of its DER encoding."""
     serial_number: str
     """Hexadecimal."""
-    subject: str
-    """RFC 4514."""
+    subject: str = field(repr=False)
+    """RFC 4514; it may name a person or hold a tax id, so it is never shown."""
     issuer: str
     """RFC 4514."""
     not_before: datetime

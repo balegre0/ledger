@@ -27,7 +27,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.schema import SchemaItem
 
 from ledger_platform.data import ModuleTable
-from ledger_signer.domain.certificates import FINGERPRINT_BYTES, BackendKind, CertificateStatus
+from ledger_signer.domain.certificates import (
+    FINGERPRINT_BYTES,
+    BackendKind,
+    CertificateStatus,
+    RetiredReason,
+)
 
 SCHEMA: Final = "signer"
 """signer's schema: its tables and the chassis's (``chassis_schema_v1`` and ``_v2``), under its roles."""
@@ -65,6 +70,14 @@ class CertificateRecord(SignerTable):
             f"octet_length(fingerprint_sha256) = {FINGERPRINT_BYTES}", name="ck_certificates_fingerprint"
         ),
         CheckConstraint("not_after > not_before", name="ck_certificates_validity"),
+        _one_of("retired_reason", RetiredReason, name="ck_certificates_retired_reason"),
+        CheckConstraint(
+            (
+                "(status = 'active') = (retired_at IS NULL AND retired_reason IS NULL)"
+                " AND (retired_at IS NULL) = (retired_reason IS NULL)"
+            ),
+            name="ck_certificates_retirement",
+        ),
         _active_in("test"),
         _active_in("live"),
     )

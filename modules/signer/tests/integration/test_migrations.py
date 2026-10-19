@@ -17,7 +17,7 @@ from ledger_platform.data.tables import chassis_tables
 from ledger_platform.runtime.app import App
 from ledger_signer.adapters.postgres.schema import MIGRATIONS
 from ledger_signer.adapters.postgres.tables import SignerTable
-from ledger_signer.domain.certificates import BackendKind, CertificateStatus
+from ledger_signer.domain.certificates import BackendKind, CertificateStatus, RetiredReason
 from ledger_testing.migrations import (
     check_constraints,
     combined,
@@ -101,10 +101,22 @@ def test_the_check_constraints_are_the_models_and_allow_exactly_the_domains_word
     assert set(QUOTED.findall(checks["ck_certificates_status"])) == {
         str(status) for status in CertificateStatus
     }
+    assert set(QUOTED.findall(checks["ck_certificates_retired_reason"])) == {
+        str(reason) for reason in RetiredReason
+    }
     assert {
         name: checks[name]
-        for name in ("ck_certificates_modes", "ck_certificates_fingerprint", "ck_certificates_validity")
+        for name in (
+            "ck_certificates_modes",
+            "ck_certificates_fingerprint",
+            "ck_certificates_validity",
+            "ck_certificates_retirement",
+        )
     } == {
+        "ck_certificates_retirement": (
+            "CHECK ((((status = 'active'::text) = ((retired_at IS NULL) AND (retired_reason IS NULL)))"
+            " AND ((retired_at IS NULL) = (retired_reason IS NULL))))"
+        ),
         "ck_certificates_modes": "CHECK ((serves_test OR serves_live OR (status = 'retired'::text)))",
         "ck_certificates_fingerprint": "CHECK ((octet_length(fingerprint_sha256) = 32))",
         "ck_certificates_validity": "CHECK ((not_after > not_before))",

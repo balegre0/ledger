@@ -177,6 +177,30 @@ async def test_an_active_certificate_serves_a_mode(module_database: BoundDatabas
     assert violated(caught) == ("CheckViolation", "ck_certificates_modes")
 
 
+@pytest.mark.parametrize(
+    ("changes", "check"),
+    [
+        ({"retired_at": NOW}, "ck_certificates_retirement"),
+        ({"retired_reason": "retired"}, "ck_certificates_retirement"),
+        ({"status": "retired"}, "ck_certificates_retirement"),
+        ({"status": "retired", "retired_at": NOW}, "ck_certificates_retirement"),
+        (
+            {"status": "retired", "retired_at": NOW, "retired_reason": "lost"},
+            "ck_certificates_retired_reason",
+        ),
+    ],
+)
+async def test_a_certificate_is_retired_with_a_moment_and_a_known_reason_or_not_at_all(
+    module_database: BoundDatabase, changes: dict[str, object], check: str
+) -> None:
+    tenant = a_company()
+    row = certificate_of(tenant) | changes
+    with pytest.raises(IntegrityError) as caught:
+        async with module_database.unit(tenant) as unit:
+            await unit.connection.execute(insert(CertificateRecord).values(row))
+    assert violated(caught) == ("CheckViolation", check)
+
+
 async def test_a_custody_row_cannot_point_at_another_company_s_certificate(
     module_database: BoundDatabase,
 ) -> None:

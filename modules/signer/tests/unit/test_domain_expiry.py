@@ -4,7 +4,7 @@ The configured days; the window a certificate is installed in, told at once; not
 expired certificate.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Final
 
 import pytest
@@ -24,43 +24,52 @@ def days_before(days: float) -> datetime:
 
 def test_a_certificate_installed_long_before_it_expires_gets_every_notice() -> None:
     assert notices(NOT_AFTER, days=DAYS, now=days_before(365)) == tuple(
-        Notice(days_left=day, at=days_before(day)) for day in DAYS
+        Notice(threshold_days=day, at=days_before(day)) for day in DAYS
     )
 
 
 def test_a_certificate_installed_inside_a_window_is_told_that_window_at_once() -> None:
     now = days_before(10)
     assert notices(NOT_AFTER, days=DAYS, now=now) == (
-        Notice(days_left=14, at=now),
-        Notice(days_left=7, at=days_before(7)),
-        Notice(days_left=1, at=days_before(1)),
-        Notice(days_left=0, at=NOT_AFTER),
+        Notice(threshold_days=14, at=now),
+        Notice(threshold_days=7, at=days_before(7)),
+        Notice(threshold_days=1, at=days_before(1)),
+        Notice(threshold_days=0, at=NOT_AFTER),
     )
 
 
 def test_a_notice_due_at_the_installation_is_the_window_s() -> None:
     now = days_before(7)
     assert notices(NOT_AFTER, days=DAYS, now=now) == (
-        Notice(days_left=7, at=now),
-        Notice(days_left=1, at=days_before(1)),
-        Notice(days_left=0, at=NOT_AFTER),
+        Notice(threshold_days=7, at=now),
+        Notice(threshold_days=1, at=days_before(1)),
+        Notice(threshold_days=0, at=NOT_AFTER),
     )
 
 
 def test_the_last_day_is_told_at_once_then_the_expiry_itself() -> None:
     now = days_before(0.5)
     assert notices(NOT_AFTER, days=DAYS, now=now) == (
-        Notice(days_left=1, at=now),
-        Notice(days_left=0, at=NOT_AFTER),
+        Notice(threshold_days=1, at=now),
+        Notice(threshold_days=0, at=NOT_AFTER),
     )
 
 
 def test_zero_is_the_moment_it_expires_and_the_order_of_days_does_not_matter() -> None:
     assert notices(NOT_AFTER, days=(0, 30), now=days_before(365)) == (
-        Notice(days_left=30, at=days_before(30)),
-        Notice(days_left=0, at=NOT_AFTER),
+        Notice(threshold_days=30, at=days_before(30)),
+        Notice(threshold_days=0, at=NOT_AFTER),
     )
     assert notices(NOT_AFTER, days=(), now=days_before(365)) == ()
+
+
+def test_notices_are_in_utc_whatever_zone_they_were_asked_in() -> None:
+    santo_domingo = timezone(timedelta(hours=-4))
+    planned = notices(
+        NOT_AFTER.astimezone(santo_domingo), days=(7,), now=days_before(10).astimezone(santo_domingo)
+    )
+    assert planned == (Notice(threshold_days=7, at=days_before(7)),)
+    assert all(notice.at.tzinfo is UTC for notice in planned)
 
 
 def test_an_expired_certificate_is_told_nothing() -> None:
@@ -94,13 +103,13 @@ def test_notices_are_never_past_and_each_upcoming_day_is_told_at_its_moment(
     planned = notices(NOT_AFTER, days=days, now=now)
     assert [notice.at for notice in planned] == sorted(notice.at for notice in planned)
     assert all(now <= notice.at <= NOT_AFTER for notice in planned)
-    assert len({notice.days_left for notice in planned}) == len(planned)
-    on_time = {notice.days_left for notice in planned if notice.at == days_before(notice.days_left)}
+    assert len({notice.threshold_days for notice in planned}) == len(planned)
+    on_time = {notice.threshold_days for notice in planned if notice.at == days_before(notice.threshold_days)}
     assert on_time == {day for day in days if days_before(day) >= now}
-    assert all(notice.days_left in days for notice in planned)
-    caught_up = [notice for notice in planned if notice.at != days_before(notice.days_left)]
+    assert all(notice.threshold_days in days for notice in planned)
+    caught_up = [notice for notice in planned if notice.at != days_before(notice.threshold_days)]
     reached = [day for day in days if days_before(day) < now]
     if reached and not any(days_before(day) == now for day in days):
-        assert caught_up == [Notice(days_left=min(reached), at=now)]
+        assert caught_up == [Notice(threshold_days=min(reached), at=now)]
     else:
         assert caught_up == []

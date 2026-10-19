@@ -9,7 +9,7 @@ certificate retired meanwhile is told nothing (the job finds it retired).
 """
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, timedelta
 from typing import final
 lazy from collections.abc import Sequence
 lazy from datetime import datetime
@@ -20,31 +20,33 @@ from ledger_kernel.errors import InvalidValueError
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Notice:
-    """Tell the company, ``at``, that its certificate expires within ``days_left`` days."""
+    """Tell the company, ``at`` (UTC), that its certificate expires within ``threshold_days`` days."""
 
-    days_left: int
+    threshold_days: int
     at: datetime
 
 
 def notices(not_after: datetime, *, days: Sequence[int], now: datetime) -> tuple[Notice, ...]:
     """The notices of a certificate expiring at ``not_after``, installed ``now``, by moment (see the module).
 
+    Every moment is in UTC, whatever the zone of the ones given.
+
     Each of ``days`` (distinct, none negative: a defect otherwise) whose moment is not past; and the notice of
     the window it is installed in (the fewest days whose moment is not ahead), at ``now``, when that moment
     has passed. None for a certificate that has expired.
     """
-    for moment in (not_after, now):
-        if moment.utcoffset() is None:
-            raise InvalidValueError(field="notices", requirement="aware datetimes")
+    if not_after.utcoffset() is None or now.utcoffset() is None:
+        raise InvalidValueError(field="notices", requirement="aware datetimes")
+    not_after, now = not_after.astimezone(UTC), now.astimezone(UTC)
     if len(frozenset(days)) != len(days) or any(day < 0 for day in days):
         raise InvalidValueError(field="notices.days", requirement="distinct days, none negative")
     if not_after <= now:
         return ()
-    planned = [Notice(days_left=day, at=not_after - timedelta(days=day)) for day in days]
+    planned = [Notice(threshold_days=day, at=not_after - timedelta(days=day)) for day in days]
     upcoming = [notice for notice in planned if notice.at >= now]
     reached = [notice for notice in planned if notice.at <= now]
     if reached:  # the window it is installed in: its notice is now, unless it falls due now anyway
-        window = min(reached, key=lambda notice: notice.days_left)
+        window = min(reached, key=lambda notice: notice.threshold_days)
         if window.at < now:
-            upcoming.append(Notice(days_left=window.days_left, at=now))
+            upcoming.append(Notice(threshold_days=window.threshold_days, at=now))
     return tuple(sorted(upcoming, key=lambda notice: notice.at))

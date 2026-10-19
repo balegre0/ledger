@@ -70,6 +70,17 @@ def upgrade() -> None:
         sa.CheckConstraint("status IN ('active', 'retired')", name="ck_certificates_status"),
         sa.CheckConstraint("octet_length(fingerprint_sha256) = 32", name="ck_certificates_fingerprint"),
         sa.CheckConstraint("not_after > not_before", name="ck_certificates_validity"),
+        sa.CheckConstraint(
+            "retired_reason IN ('replaced', 'retired', 'company_deactivated')",
+            name="ck_certificates_retired_reason",
+        ),
+        sa.CheckConstraint(
+            (
+                "(status = 'active') = (retired_at IS NULL AND retired_reason IS NULL)"
+                " AND (retired_at IS NULL) = (retired_reason IS NULL)"
+            ),
+            name="ck_certificates_retirement",
+        ),
         schema=S,
     )
     _active_in("test")

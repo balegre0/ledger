@@ -34,6 +34,7 @@ from ledger_signer.domain.errors import (
     CertificateNotForSigningError,
     CertificateNotYetValidError,
     CertificateRetiredError,
+    CertificateValidityTooShortError,
     ClockSkewError,
     NotCoveredError,
 )
@@ -112,8 +113,8 @@ def certificate(
 
 
 def test_a_certificate_that_may_sign_now_is_admitted() -> None:
-    admit(facts(), now=NOW)
-    admit(facts(rsa_bits=4096, not_before=NOW, not_after=NOW + TICK), now=NOW)  # both edges of its validity
+    admit(facts(), now=NOW, skew=SKEW)
+    admit(facts(rsa_bits=4096, not_before=NOW, not_after=NOW + SKEW), now=NOW, skew=SKEW)  # every edge
 
 
 @pytest.mark.parametrize(
@@ -126,11 +127,15 @@ def test_a_certificate_that_may_sign_now_is_admitted() -> None:
         ({"matches_key": False}, CertificateKeyMismatchError),
         ({"not_before": NOW - timedelta(days=365), "not_after": NOW}, CertificateExpiredError),
         ({"not_before": NOW + TICK, "not_after": NOW + timedelta(days=365)}, CertificateNotYetValidError),
+        (
+            {"not_before": NOW - timedelta(days=1), "not_after": NOW + SKEW - TICK},
+            CertificateValidityTooShortError,
+        ),
     ],
 )
 def test_each_refusal(changes: Changes, refusal: type[LedgerError]) -> None:
     with pytest.raises(refusal):
-        admit(facts(**changes), now=NOW)
+        admit(facts(**changes), now=NOW, skew=SKEW)
 
 
 def test_refusals_come_in_their_order() -> None:
@@ -148,10 +153,11 @@ def test_refusals_come_in_their_order() -> None:
             {"not_before": NOW - timedelta(days=2), "not_after": NOW - timedelta(days=1)},
             CertificateExpiredError,
         ),
+        ({"not_before": NOW + TICK, "not_after": NOW + 2 * TICK}, CertificateNotYetValidError),
     ]
     for changes, refusal in order:
         with pytest.raises(refusal):
-            admit(facts(**changes), now=NOW)
+            admit(facts(**changes), now=NOW, skew=SKEW)
 
 
 def test_import_refusals_are_the_client_s_and_name_nothing_of_the_certificate() -> None:
@@ -161,6 +167,7 @@ def test_import_refusals_are_the_client_s_and_name_nothing_of_the_certificate() 
         CertificateKeyMismatchError(),
         CertificateExpiredError(),
         CertificateNotYetValidError(),
+        CertificateValidityTooShortError(),
     ]
     assert [(error.kind, error.code) for error in refusals] == [
         (ErrorKind.INVALID, "certificate_key_unsupported"),
@@ -168,6 +175,7 @@ def test_import_refusals_are_the_client_s_and_name_nothing_of_the_certificate() 
         (ErrorKind.INVALID, "certificate_key_mismatch"),
         (ErrorKind.INVALID, "certificate_expired"),
         (ErrorKind.INVALID, "certificate_not_yet_valid"),
+        (ErrorKind.INVALID, "certificate_validity_too_short"),
     ]
     assert str(refusals[0]) == "the certificate's key is not an RSA key of at least 2048 bits"
     for error in refusals:
@@ -193,9 +201,11 @@ def test_facts_our_code_could_not_have_read_are_a_defect(changes: Changes) -> No
         facts(**changes)
 
 
-def test_admitting_needs_an_aware_clock() -> None:
+def test_admitting_needs_an_aware_clock_and_a_skew() -> None:
     with pytest.raises(InvalidValueError):
-        admit(facts(), now=NOW.replace(tzinfo=None))
+        admit(facts(), now=NOW.replace(tzinfo=None), skew=SKEW)
+    with pytest.raises(InvalidValueError):
+        admit(facts(), now=NOW, skew=-TICK)
 
 
 # ── The aggregate ───────────────────────────────────────────────────────────────
