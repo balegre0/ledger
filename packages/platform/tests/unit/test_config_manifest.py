@@ -365,3 +365,25 @@ def test_only_a_module_is_isolated() -> None:
     with pytest.raises(InvalidManifestError) as caught:
         load_manifest(SIGNER_MODULE.replace('kind = "module"', 'kind = "package"'))
     assert caught.value.problems == ("data.isolated_in: only a module may be isolated",)
+
+
+def test_a_consumer_runs_inside_a_unit_unless_it_declares_the_outside_style() -> None:
+    assert load_manifest(MODULE).events.consumes[0].style == "inside"
+    outside = load_manifest(MODULE.replace("ordered = true", 'style = "outside"'))
+    assert outside.events.consumes[0].style == "outside"
+
+
+def test_an_ordered_consumer_cannot_run_outside_a_unit() -> None:
+    with pytest.raises(InvalidManifestError) as caught:
+        load_manifest(MODULE.replace("ordered = true", 'ordered = true\nstyle = "outside"'))
+    assert caught.value.problems[0].startswith("events.consumes.0.style: ")
+    assert "ordered" in caught.value.problems[0]
+
+
+def test_an_outside_consumer_s_handler_has_a_time_of_its_own() -> None:
+    assert load_manifest(MODULE).events.consumes[0].timeout == timedelta(seconds=60)
+    timed = load_manifest(MODULE.replace("ordered = true", 'style = "outside"\ntimeout = "5s"'))
+    assert timed.events.consumes[0].timeout == timedelta(seconds=5)
+    with pytest.raises(InvalidManifestError) as caught:
+        load_manifest(MODULE.replace("ordered = true", 'timeout = "0s"'))
+    assert caught.value.problems[0].startswith("events.consumes.0.timeout: ")

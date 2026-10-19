@@ -162,8 +162,9 @@ class PoolTooSmallError(LedgerError):
 
     def __init__(self, role: str, size: int, need: PoolNeed) -> None:
         pool = f"the {role}'s pool of {size} connections (LEDGER_DATABASE_POOL_SIZE)"
-        jobs = f"{need.jobs} for jobs (their concurrency), {need.renewals} for their lease renewals"
-        parts = f"{jobs}, {need.runners} for its runners, {need.headroom}"
+        jobs = f"{need.jobs} for jobs (their concurrency)"
+        renewals = f"{need.renewals} for lease renewals (running jobs, outside consumers)"
+        parts = f"{jobs}, {renewals}, {need.runners} for its runners, {need.headroom}"
         super().__init__(f"{pool} is smaller than the {need.total} it may hold at once: {parts} of headroom")
 
 
@@ -175,7 +176,8 @@ class PoolNeed:
     jobs: int = 0
     """Every job kind's ``concurrency``: a running job holds its unit's connection."""
     renewals: int = 0
-    """One per running job too: its lease is renewed in a unit of its own while its handler holds one."""
+    """One per running job and per outside consumer too: its lease is renewed in a unit of its own while its
+    handler holds one (an outside handler, through the facades it calls)."""
     runners: int = 0
     """One per inbox runner and per job runner (claims, outcomes), the fan-out's and the scheduler's."""
     headroom: int = POOL_HEADROOM
@@ -196,9 +198,10 @@ def pool_need(role: AppRole, members: Sequence[Member]) -> PoolNeed:
     if loops is None:
         return PoolNeed()
     jobs = sum(decl.concurrency for member in members for decl, _ in member.kinds.values())
+    outside = sum(consumer.outside for member in members for consumer in member.consumers)
     return PoolNeed(
         jobs=jobs,
-        renewals=jobs,
+        renewals=jobs + outside,
         runners=sum(len(member.consumers) + bool(member.kinds) for member in members) + loops,
     )
 

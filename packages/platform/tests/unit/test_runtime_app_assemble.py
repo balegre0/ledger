@@ -24,7 +24,7 @@ from ledger_platform.config.manifest import ChannelEntry, load_manifest
 from ledger_platform.config.settings import PackageSettings, Settings, section_prefix
 from ledger_platform.data.database import Database
 from ledger_platform.data.migrations import SchemaMigrations
-from ledger_platform.events.consumers import ConsumerSpec
+from ledger_platform.events.consumers import ConsumerMismatchError, ConsumerSpec
 from ledger_platform.jobs.maintenance import maintenance_jobs
 from ledger_platform.jobs.outcomes import Done, JobSpec
 from ledger_platform.runtime import app as runtime_app
@@ -812,10 +812,49 @@ def test_a_worker_s_pool_holds_every_job_its_renewals_its_runners_and_headroom()
         App("worker", settings=sized(no_overflow, 15), discover=discover)  # the need without the renewals
     assert str(caught.value) == (
         "the worker's pool of 15 connections (LEDGER_DATABASE_POOL_SIZE) is smaller than the 23 it may hold "
-        "at once: 8 for jobs (their concurrency), 8 for their lease renewals, 5 for its runners, "
+        "at once: 8 for jobs (their concurrency), 8 for lease renewals (running jobs, outside consumers), "
+        "5 for its runners, "
         "2 of headroom"
     )
     assert caught.value.code == "pool_too_small"
+
+
+async def notice(event: RawEvent) -> None:
+    del event
+
+
+OUTSIDE: Final = CONSUMES + 'style = "outside"\n'
+
+
+def noticing(context: ModuleContext) -> ModuleParts:
+    return ModuleParts(
+        consumers=(ConsumerSpec(name="probe.echo", outside=notice),),
+        migrations=migrations(context.database.schema),
+    )
+
+
+def test_an_outside_consumer_holds_a_second_connection_for_its_lease_renewals() -> None:
+    """Its handler's units and its row's lease renewals at once (§3.5): jobs 1 + 1 (the platform's purges),
+    renewals 2 + 1; runners 1 inbox + 1 job runner + fan-out + scheduler; headroom 2: 11."""
+    discover = discovering(module("probe", noticing, OUTSIDE))
+    no_overflow = SETTINGS.model_copy(update={"database_pool_overflow": 0})
+    (consumer,) = members(App("worker", settings=sized(no_overflow, 11), discover=discover))[
+        "probe"
+    ].consumers
+    assert consumer.outside
+    with pytest.raises(PoolTooSmallError) as caught:
+        App("worker", settings=sized(no_overflow, 10), discover=discover)
+    assert str(caught.value) == (
+        "the worker's pool of 10 connections (LEDGER_DATABASE_POOL_SIZE) is smaller than the 11 it may hold "
+        "at once: 2 for jobs (their concurrency), 3 for lease renewals (running jobs, outside consumers), "
+        "4 for its runners, "
+        "2 of headroom"
+    )
+
+
+def test_an_outside_consumer_of_an_inside_declaration_is_a_defect() -> None:
+    with pytest.raises(ConsumerMismatchError, match=r"probe\.echo \(outside\)"):
+        App("worker", settings=SETTINGS, discover=discovering(module("probe", noticing, CONSUMES)))
 
 
 def test_the_api_and_migrate_need_the_headroom_only() -> None:
@@ -1015,6 +1054,26 @@ def test_an_isolated_module_handing_consumers_outside_its_role_is_a_defect(part:
     App("signer", settings=SETTINGS, discover=discover)
 
 
+def test_an_isolated_module_s_outside_consumer_runs_in_its_role_alone() -> None:
+    """Isolation holds whatever the style: relayed in another role, handing a consumer there is a defect."""
+    body = 'isolated_in = "signer"\n\n' + OUTSIDE
+
+    def sealed(context: ModuleContext) -> ModuleParts:
+        own = context.role == "signer"
+        return ModuleParts(
+            consumers=(ConsumerSpec(name="probe.echo", outside=notice),) if own else (),
+            migrations=migrations(context.database.schema),
+        )
+
+    signer = App("signer", settings=SETTINGS, discover=discovering(module("probe", sealed, body)))
+    assert [consumer.outside for consumer in members(signer)["probe"].consumers] == [True]
+    worker = App("worker", settings=SETTINGS, discover=discovering(module("probe", sealed, body)))
+    assert members(worker)["probe"].relay_only
+    assert members(worker)["probe"].consumers == ()
+    with pytest.raises(IsolatedPartsError):
+        App("worker", settings=SETTINGS, discover=discovering(module("probe", noticing, body)))
+
+
 def test_an_isolated_module_reads_no_api_in_its_role() -> None:
     vault = Vault(reads=True)
     discover = discovering(vault.module(), module("beta", beta))
@@ -1060,7 +1119,8 @@ def test_the_signer_pool_need_counts_its_runners() -> None:
         App("signer", settings=sized(no_overflow, 10), discover=discover)
     assert str(caught.value) == (
         "the signer's pool of 10 connections (LEDGER_DATABASE_POOL_SIZE) is smaller than the 11 it may hold "
-        "at once: 3 for jobs (their concurrency), 3 for their lease renewals, 3 for its runners, "
+        "at once: 3 for jobs (their concurrency), 3 for lease renewals (running jobs, outside consumers), "
+        "3 for its runners, "
         "2 of headroom"
     )
     App("worker", settings=sized(no_overflow, 9), discover=discover)
