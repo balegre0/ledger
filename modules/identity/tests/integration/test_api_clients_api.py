@@ -1,24 +1,31 @@
 """``/v1/api_clients``: machine users registered for a mode, and what their credentials then carry."""
 
 from datetime import date
-from typing import Final
+from typing import Final, final
 
 import pytest
+from pydantic import TypeAdapter
 lazy import httpx
 lazy import psycopg
 
+from ledger_identity.adapters.standings import STANDING_TTL, cached_standings
 from ledger_identity.domain.ids import API_CLIENT_PREFIX
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN
-from ledger_kernel.access import PrincipalKind
+from ledger_kernel.access import Principal, PrincipalKind, SubjectId
 from ledger_kernel.ids import format_id, parse_id
+from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_platform.http import CURRENT_VERSION
 from ledger_platform.http.versions import VERSION_HEADER
 from ledger_testing.api import created, document, page
+lazy from ledger_platform.data import BoundDatabase
+lazy from ledger_platform.runtime import App
 lazy from ledger_testing.api import TestPrincipal
 lazy from ledger_testing.issuer import LocalIssuer
 
 NEW: Final = {"subject": "4001", "name": " Odoo   connector "}
 EARLIER: Final = date(2026, 1, 1)
+DOCUMENT: Final = TypeAdapter(dict[str, object])
+PATHS: Final = TypeAdapter(dict[str, dict[str, dict[str, object]]])
 
 
 def machine(local_issuer: LocalIssuer, subject: str = "4001") -> TestPrincipal:
@@ -208,6 +215,45 @@ async def test_a_revoked_client_s_credential_is_refused_at_once(
     await client.delete(f"/v1/api_clients/{made}", headers=owner.bearer() | {"Ledger-Mode": "test"})
     refused = await client.get("/v1/api_clients", headers=machine(local_issuer).bearer())
     assert (refused.status_code, document(refused)["code"]) == (401, "api_client_revoked")
+
+
+@final
+class Seconds:
+    """A monotonic clock the test moves."""
+
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+async def test_a_revocation_shows_within_the_30_seconds_a_replica_remembers_a_standing(
+    client: httpx.AsyncClient, owner: TestPrincipal, module_database: BoundDatabase
+) -> None:
+    """What the revoking route promises (within 30 s, cached per replica), through identity's own cache."""
+    made = await register_in(client, owner, "test")
+    clock = Seconds()
+    standings = cached_standings(module_database, clock=clock)
+    robot = Principal(
+        subject=SubjectId("4001"),
+        organization=organization_of("1001"),
+        provider_organization="1001",
+        kind=PrincipalKind.MACHINE,
+    )
+    assert not (await standings.of(robot)).revoked
+    await client.delete(f"/v1/api_clients/{made}", headers=owner.bearer() | {"Ledger-Mode": "test"})
+    clock.now += STANDING_TTL - 0.1
+    assert not (await standings.of(robot)).revoked  # this replica still remembers it active
+    clock.now += 0.2
+    assert (await standings.of(robot)).revoked
+    assert STANDING_TTL == 30.0  # the documented bound
+
+
+def test_the_revoking_route_says_how_soon_a_revocation_shows(api: App) -> None:
+    paths = PATHS.validate_python(DOCUMENT.validate_python(api.asgi().openapi())["paths"])
+    said = " ".join(str(paths["/v1/api_clients/{client_id}"]["delete"]["description"]).split())
+    assert "within 30 s, cached per replica" in said
 
 
 async def test_a_machine_user_that_is_no_client_is_refused_whatever_it_names(

@@ -2365,7 +2365,7 @@
     },
     "/v1/api_clients/{client_id}": {
       "delete": {
-        "description": "Revoke an API client: its tokens stop counting at once (within a minute where cached).\n\nIdempotent: a client revoked already is answered as revoked, and nothing changes or is recorded.",
+        "description": "Revoke an API client: its tokens stop counting within 30 s, cached per replica.\n\nIdempotent: a client revoked already is answered as revoked, and nothing changes or is recorded.",
         "operationId": "revoke_client_v1_api_clients__client_id__delete",
         "parameters": [
           {

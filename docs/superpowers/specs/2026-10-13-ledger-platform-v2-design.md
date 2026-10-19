@@ -1662,7 +1662,7 @@ README/spec copies of the table are deleted ([05] D36).
   (`ModuleContext.auth.caller`); the token-only caller is the chassis's own and stays private. Once the token is
   proven it asks the platform's `StandingsPort`, which identity provides (`[extension_points] provides =
   ["StandingsPort"]`) and the app binds once after assembly: a revoked API client is refused (401
-  `api_client_revoked`), a machine that is no API client too (403 `api_client_unregistered`), the client's mode
+  `api_client_revoked`, within 30 s: each replica remembers a standing that long), a machine that is no API client too (403 `api_client_unregistered`), the client's mode
   becomes the request's (`ledger_mode_of(caller)` depends on the caller, so the order a route declares them in
   never matters) and the pins settle the version. An app in which no module provides the port knows no API
   client: it refuses every machine (fail closed). A module opts into nothing: invoicing's routes get all of it.

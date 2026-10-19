@@ -3,7 +3,8 @@
 An organization's administrator (the identity provider's project role ``ledger.organization.admin``) registers
 a Zitadel machine user for the mode the request acts in (``Ledger-Mode``); from then on that user's tokens
 carry the mode (``Ledger-Mode`` is optional for it) and its version pin. Registering is a ``POST``: it
-keeps its ``Idempotency-Key``. Revoking is naturally idempotent and takes none. A client is found, listed and
+keeps its ``Idempotency-Key``. Revoking is naturally idempotent and takes none; a replica that remembers the
+client's standing (30 s at most) takes its tokens until it asks again. A client is found, listed and
 revoked in its own mode.
 """
 
@@ -115,7 +116,7 @@ def router(context: ApiContext) -> APIRouter:
         principal: Annotated[Principal, Depends(administrator)],
         mode: Annotated[Mode, Depends(mode_of)],
     ) -> ApiClientView:
-        """Revoke an API client: its tokens stop counting at once (within a minute where cached).
+        """Revoke an API client: its tokens stop counting within 30 s, cached per replica.
 
         Idempotent: a client revoked already is answered as revoked, and nothing changes or is recorded.
         """
