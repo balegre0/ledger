@@ -118,6 +118,18 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("(status = 'voided') = (voided_at IS NOT NULL)", name="ck_invoices_voided"),
         sa.CheckConstraint(
+            "num_nulls(seller_legal_name, seller_tax_scheme, seller_tax_value) IN (0, 3)",
+            name="ck_invoices_seller_tax_id",
+        ),
+        sa.CheckConstraint(
+            "num_nulls(buyer_tax_scheme, buyer_tax_value) IN (0, 2)", name="ck_invoices_buyer_tax_id"
+        ),
+        sa.CheckConstraint(
+            "buyer_legal_name IS NOT NULL OR num_nonnulls(buyer_tax_scheme, buyer_address, buyer_email) = 0",
+            name="ck_invoices_buyer_named",
+        ),
+        sa.CheckConstraint("void_reason IS NULL OR status = 'voided'", name="ck_invoices_void_reason"),
+        sa.CheckConstraint(
             "num_nulls(functional_currency, functional_net, functional_tax, functional_gross) IN (0, 4)",
             name="ck_invoices_functional",
         ),

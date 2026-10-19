@@ -15,7 +15,10 @@ from ledger_kernel.ids import InvalidPublicIdError, format_id, parse_id
 _SUFFIX: Final = "[0-7][0-9a-hjkmnp-tv-z]{25}"
 """A TypeID's 26 base32 characters (Crockford's alphabet, lower case): 128 bits, so the first is at most 7."""
 
-type InvoiceRef = Annotated[str, StringConstraints(pattern=rf"^{INVOICE_PREFIX}_{_SUFFIX}$")]
+INVOICE_REF_PATTERN: Final = rf"^{INVOICE_PREFIX}_{_SUFFIX}$"
+"""What a document's public id looks like, as a schema states it."""
+
+type InvoiceRef = Annotated[str, StringConstraints(pattern=INVOICE_REF_PATTERN)]
 """A document, by its public id (``inv_01h455vb4pex5vsknk084sn02q``)."""
 
 

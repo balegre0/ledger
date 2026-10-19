@@ -34,7 +34,12 @@ from ledger_invoicing.adapters.postgres.tables import (
     InvoiceRecord,
     InvoiceTaxRecord,
 )
-from ledger_invoicing.application.ports import Invoices
+from ledger_invoicing.application.ports import (
+    ForeignTenantError,
+    Invoices,
+    StaleWriteError,
+    UnmirroredAcceptanceError,
+)
 from ledger_invoicing.domain.ids import InvoiceId
 from ledger_invoicing.domain.invoice import Invoice, InvoiceStatus
 from ledger_invoicing.domain.lines import LineTerms
@@ -57,33 +62,6 @@ lazy from ledger_kernel.tenancy import Mode
 
 type StoredValue = str | dict[str, StoredValue]
 """A country field's value as JSON keeps it: text, or an object of them."""
-
-
-class ForeignTenantError(LedgerError):
-    """A repository of one tenant's unit was handed another tenant's document to keep."""
-
-    code: ClassVar[str] = "invoice_foreign_tenant"
-
-    def __init__(self) -> None:
-        super().__init__("a unit keeps the documents of its own company and mode only")
-
-
-class StaleWriteError(LedgerError):
-    """A change of a document that is not the version after the one kept: the unit did not hold it locked."""
-
-    code: ClassVar[str] = "invoice_write_stale"
-
-    def __init__(self) -> None:
-        super().__init__("a change keeps the version after the one the unit holds locked")
-
-
-class UnmirroredAcceptanceError(LedgerError):
-    """A document a channel accepted, before the fiscal mirror that would keep it exists (M3b)."""
-
-    code: ClassVar[str] = "invoice_acceptance_unmirrored"
-
-    def __init__(self) -> None:
-        super().__init__("no channel's acceptance can be kept before the fiscal mirror exists")
 
 
 @final
@@ -216,8 +194,35 @@ _TAX_COLUMNS: Final = (
 _NOT_VOIDED: Final = InvoiceRecord.status != InvoiceStatus.VOIDED.value
 
 
-def _tax_id(scheme: str | None, value: str | None) -> TaxId | None:
-    return None if scheme is None or value is None else TaxId(TaxIdScheme(scheme), value)
+_SELLER: Final = "seller"
+"""The prefix of the seller's columns."""
+
+
+class IncompleteRowError(LedgerError):
+    """A row holds part of columns that go together: a defect the table's checks should have kept out."""
+
+    code: ClassVar[str] = "invoice_row_incomplete"
+
+    def __init__(self, columns: str) -> None:
+        super().__init__(f"invoices.{columns}_* are set in part: the row is not whole")
+
+
+def tax_id_of(scheme: str | None, value: str | None, *, columns: str) -> TaxId | None:
+    """The tax id of the columns ``<columns>_scheme`` and ``_value``: both set, or neither (``None``)."""
+    if scheme is None and value is None:
+        return None
+    if scheme is None or value is None:
+        raise IncompleteRowError(columns)
+    return TaxId(TaxIdScheme(scheme), value)
+
+
+def seller_of(legal_name: str | None, scheme: str | None, value: str | None) -> Seller | None:
+    """The seller of the ``seller_*`` columns: its name and its tax id, or none of them (a draft)."""
+    if legal_name is None and scheme is None and value is None:
+        return None
+    if legal_name is None or scheme is None or value is None:
+        raise IncompleteRowError(_SELLER)
+    return Seller(legal_name=legal_name, tax_id=TaxId(TaxIdScheme(scheme), value))
 
 
 def _fields(stored: Mapping[str, Mapping[str, StoredValue]]) -> CountryFields:
@@ -245,7 +250,7 @@ def _terms(row: _InvoiceRow, lines: Sequence[_LineRow], line_taxes: Sequence[_Li
     if row.buyer_legal_name is not None:
         buyer = Party(
             legal_name=LegalName(row.buyer_legal_name),
-            tax_id=_tax_id(row.buyer_tax_scheme, row.buyer_tax_value),
+            tax_id=tax_id_of(row.buyer_tax_scheme, row.buyer_tax_value, columns="buyer_tax"),
             address=None if row.buyer_address is None else Address(row.buyer_address),
             email=None if row.buyer_email is None else Email(row.buyer_email),
         )
@@ -342,7 +347,6 @@ def _invoice(row: _InvoiceRow, parts: _Parts) -> Invoice:
         for tax in parts.taxes
     )
     regime = RegimeKey(row.regime)
-    seller_tax_id = _tax_id(row.seller_tax_scheme, row.seller_tax_value)
     return Invoice(
         id=InvoiceId(row.id),
         tenant=Tenant(OrganizationId(row.organization_id), CompanyId(row.company_id), row.mode),
@@ -366,11 +370,7 @@ def _invoice(row: _InvoiceRow, parts: _Parts) -> Invoice:
             functional=_functional(row, parts.taxes),
             fiscal=terms.fiscal.get(regime, MappingProxyType({})),
         ),
-        seller=(
-            None
-            if row.seller_legal_name is None or seller_tax_id is None
-            else Seller(legal_name=row.seller_legal_name, tax_id=seller_tax_id)
-        ),
+        seller=seller_of(row.seller_legal_name, row.seller_tax_scheme, row.seller_tax_value),
         accepted_by=(),
         void_reason=None if row.void_reason is None else Reason(row.void_reason),
         version=row.version,

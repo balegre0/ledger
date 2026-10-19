@@ -19,11 +19,6 @@ from sqlalchemy import func, select
 lazy import psycopg
 
 from ledger_identity.api import CompanyInfo
-from ledger_invoicing.adapters.postgres.repositories import (
-    ForeignTenantError,
-    StaleWriteError,
-    UnmirroredAcceptanceError,
-)
 from ledger_invoicing.adapters.postgres.tables import (
     InvoiceLineRecord,
     InvoiceLineTaxRecord,
@@ -32,7 +27,15 @@ from ledger_invoicing.adapters.postgres.tables import (
 )
 from ledger_invoicing.adapters.postgres.unit import PgUnits, UnscopedUnitError, bind
 from ledger_invoicing.application.commands import Creation, InvoicingCommands
-from ledger_invoicing.application.ports import CompanyLookup, InvoiceFilters, Invoices, InvoicingUnits
+from ledger_invoicing.application.ports import (
+    CompanyLookup,
+    ForeignTenantError,
+    InvoiceFilters,
+    Invoices,
+    InvoicingUnits,
+    StaleWriteError,
+    UnmirroredAcceptanceError,
+)
 from ledger_invoicing.domain.errors import CorrectionInvalidError, InvoiceNotVoidableError
 from ledger_invoicing.domain.ids import InvoiceId
 from ledger_invoicing.domain.invoice import Invoice, InvoiceStatus, Opening
@@ -584,7 +587,7 @@ async def test_a_note_that_locked_the_invoice_first_refuses_the_void_asked_meanw
     assert (await read(module_database, world.tenant, invoice.id)) == invoice
 
 
-async def test_a_note_being_issued_holds_its_invoice_against_a_void(
+async def test_a_void_waits_for_a_note_being_issued_and_is_refused_by_the_note_once_it_is_issued(
     module_database: BoundDatabase, migrated: WorkerDatabase, regime: RegimeDef
 ) -> None:
     world = World(module_database, regime)
@@ -593,6 +596,8 @@ async def test_a_note_being_issued_holds_its_invoice_against_a_void(
     issuing, units = world.holding(module_database, regime, invoice.id)
     issue = asyncio.create_task(issuing.commands.issue(world.call, draft.id))
     await units.holding.wait()  # it holds the note, then the invoice: the lock order
+    # The draft note alone refuses the void: what this proves is that the void waits for the issue, which
+    # holds the invoice, and then reads the note as issued (the order of the lock, not its outcome).
     void = asyncio.create_task(world.commands.void(world.call, invoice.id, None))
     await eventually(lambda: waits_for_a_lock(app_url(migrated)))
     assert not void.done()
@@ -600,3 +605,35 @@ async def test_a_note_being_issued_holds_its_invoice_against_a_void(
     assert (await issue).status is InvoiceStatus.ISSUED
     with pytest.raises(InvoiceNotVoidableError):
         await void
+
+
+async def test_two_documents_made_at_once_under_one_business_key_keep_the_first_and_name_it(
+    module_database: BoundDatabase, migrated: WorkerDatabase, regime: RegimeDef
+) -> None:
+    """The second insert waits on the unique index, does nothing once the first commits, and reads its holder:
+    its transaction is whole, it reads on and commits (no unique violation aborted it)."""
+    tenant = tenant_of()
+    first, second = (
+        made(regime, tenant, reference="ORD-1"),
+        made(regime, tenant, reference="ORD-1", draft=True),
+    )
+    holding, release = asyncio.Event(), asyncio.Event()
+
+    async def keep_first(unit: InvoicingUnit) -> None:
+        assert await unit.invoices.add(first) is None
+        holding.set()
+        await release.wait()
+
+    async def keep_second(unit: InvoicingUnit) -> tuple[InvoiceId | None, Invoice | None]:
+        holder = await unit.invoices.add(second)
+        return holder, None if holder is None else await unit.invoices.get(holder)
+
+    winner = asyncio.create_task(in_unit(module_database, tenant, keep_first))
+    await holding.wait()
+    loser = asyncio.create_task(in_unit(module_database, tenant, keep_second))
+    await eventually(lambda: waits_for_a_lock(app_url(migrated)))  # on the business key's index
+    assert not loser.done()
+    release.set()
+    await winner
+    assert await loser == (first.id, first)
+    assert (await rows(module_database, tenant))["invoices"] == 1

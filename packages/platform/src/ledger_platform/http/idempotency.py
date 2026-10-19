@@ -17,7 +17,8 @@ platform's job (Decision 6).
 * What is stored is replayed exactly: the status, the body's bytes and the headers in their order, less those
   a replay must not repeat (cookies, credentials, the date, the length and the hop-by-hop headers). A server
   failure (5xx) is never stored (``ServerFailureResponseError`` carries it out of the transaction so that it
-  rolls back), nor a body over ``MAX_STORED_BODY`` (a defect of the route).
+  rolls back), nor a body over the module's limit (``max_stored_body``, by default ``DEFAULT_STORED_BODY``:
+  a defect of the route).
 * Times are the database's (the unit's ``now``, its transaction's start).
 """
 
@@ -53,10 +54,10 @@ _COMPONENT: Final = "idempotency"
 """What this module's option errors name (``InvalidOptionError.component``)."""
 DEFAULT_RETENTION: Final = timedelta(days=7)
 MAX_KEY_LENGTH: Final = 255
-MAX_STORED_BODY: Final = 4 * 1024 * 1024
-"""Bytes of a response body a key keeps at most (4 MiB): a write's answer is a document, never a download. An
-answer can outgrow its request (a document priced line by line answers more than its 1 MiB request sent), so a
-key keeps four times what a JSON request may hold."""
+DEFAULT_STORED_BODY: Final = 1024 * 1024
+"""Bytes of a response body a key keeps at most, unless its module says more (``max_stored_body``): 1 MiB. A
+write's answer is a document, never a download; a module whose answers outgrow their requests (a document
+priced line by line) keeps more."""
 REPLAYED_HEADER: Final = "Idempotent-Replayed"
 JSON: Final = "application/json"
 _SERVER_FAILURE: Final = 500
@@ -143,12 +144,12 @@ class UnansweredIdempotencyKeyError(LedgerError):
 
 
 class OversizedStoredResponseError(LedgerError):
-    """The work answered a body larger than ``MAX_STORED_BODY``: a bug in the route."""
+    """The work answered a body larger than its module keeps (``max_stored_body``): a bug in the route."""
 
     code: ClassVar[str] = "idempotency_response_oversized"
 
-    def __init__(self, size: int) -> None:
-        super().__init__(f"a response of {size} bytes is over the {MAX_STORED_BODY} an idempotency key keeps")
+    def __init__(self, size: int, limit: int) -> None:
+        super().__init__(f"a response of {size} bytes is over the {limit} bytes an idempotency key keeps")
 
 
 class ServerFailureResponseError(LedgerError):
@@ -254,12 +255,12 @@ class Attempt:
         return cls(principal=f"user:{principal.subject}", route=route, key=key, request_hash=digest.digest())
 
 
-def _storable(response: StoredResponse) -> list[list[str]]:
+def _storable(response: StoredResponse, limit: int) -> list[list[str]]:
     """The headers of ``response`` to store, in their order; raises if the response is not to be stored."""
     if response.status >= _SERVER_FAILURE:
         raise ServerFailureResponseError(response)
-    if len(response.body) > MAX_STORED_BODY:
-        raise OversizedStoredResponseError(len(response.body))
+    if len(response.body) > limit:
+        raise OversizedStoredResponseError(len(response.body), limit)
     return [
         [name, value] for name, value in response.headers.items() if name.lower() not in _UNSTORED_HEADERS
     ]
@@ -269,14 +270,25 @@ def _storable(response: StoredResponse) -> list[list[str]]:
 class Idempotency:
     """Runs the work of a request once per key (see the module)."""
 
-    __slots__ = ("_retention",)
+    __slots__ = ("_max_stored_body", "_retention")
 
-    def __init__(self, *, retention: timedelta = DEFAULT_RETENTION) -> None:
+    def __init__(
+        self, *, retention: timedelta = DEFAULT_RETENTION, max_stored_body: int = DEFAULT_STORED_BODY
+    ) -> None:
+        """Keys kept ``retention``, each with an answer of at most ``max_stored_body`` bytes."""
         if retention <= timedelta(0):
             raise InvalidOptionError(
                 component=_COMPONENT, option="retention", requirement="longer than zero", value=retention
             )
+        if max_stored_body < 1:
+            raise InvalidOptionError(
+                component=_COMPONENT,
+                option="max_stored_body",
+                requirement="1 byte or more",
+                value=max_stored_body,
+            )
         self._retention = retention
+        self._max_stored_body = max_stored_body
 
     async def once(
         self, unit: UnitOfWork, attempt: Attempt, work: Callable[[], Awaitable[StoredResponse]]
@@ -326,7 +338,7 @@ class Idempotency:
             .values(
                 response_status=response.status,
                 response_body=response.body,
-                response_headers=_storable(response),
+                response_headers=_storable(response, self._max_stored_body),
             )
         )
         return Outcome(response, replayed=False)

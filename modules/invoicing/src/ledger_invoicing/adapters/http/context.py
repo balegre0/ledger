@@ -1,7 +1,7 @@
 """What invoicing's routes are built with: its use cases, the caller, its access and the keys of POSTs."""
 
 from dataclasses import dataclass
-from typing import final
+from typing import Final, final
 
 from ledger_invoicing.adapters.permissions import IdentityPermissions
 from ledger_invoicing.application.queries import InvoicingQueries
@@ -17,6 +17,10 @@ lazy from ledger_platform.auth import CompanyAccess, PermissionSource
 lazy from ledger_platform.data import BoundDatabase
 lazy from ledger_platform.http import Authentication, InCompany
 lazy from ledger_platform.http.mode import ModeDependency
+
+MAX_STORED_ANSWER: Final = 4 * 1024 * 1024
+"""The answer an ``Idempotency-Key`` keeps at most: 4 MiB. A document's 1 MiB request can come back larger,
+priced line by line (1000 lines, their taxes and amounts), and its key must keep that answer whole."""
 
 
 @final
@@ -59,7 +63,7 @@ class ApiContext:
             queries=InvoicingQueries(units=commands.units),
             mode=ledger_mode_of(caller),
             in_company=company_in_header(caller, permission_source),
-            idempotency=Idempotency(),
+            idempotency=Idempotency(max_stored_body=MAX_STORED_ANSWER),
             tax_ids=tax_ids,
         )
 

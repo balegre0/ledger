@@ -7,8 +7,8 @@ from typing import Final
 lazy from uuid import UUID
 
 import pytest
-from psycopg.errors import ForeignKeyViolation, InsufficientPrivilege
-from sqlalchemy import func, insert, select, text
+from psycopg.errors import CheckViolation, ForeignKeyViolation, InsufficientPrivilege
+from sqlalchemy import delete, func, insert, select, text, update
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 from ledger_invoicing.adapters.postgres.tables import (
@@ -189,3 +189,85 @@ async def test_invoicing_s_role_reaches_no_other_schema(
         async with module_database.unit(tenant_of()) as unit:
             await unit.connection.execute(text(statement))
     assert isinstance(caught.value.orig, InsufficientPrivilege)
+
+
+@pytest.mark.parametrize(
+    ("change", "constraint"),
+    [
+        ({"seller_tax_value": None}, "ck_invoices_seller_tax_id"),
+        ({"seller_tax_scheme": None, "seller_tax_value": None}, "ck_invoices_seller_tax_id"),
+        ({"buyer_legal_name": "Beta", "buyer_tax_scheme": "do.rnc"}, "ck_invoices_buyer_tax_id"),
+        ({"buyer_tax_scheme": "do.rnc", "buyer_tax_value": "130000012"}, "ck_invoices_buyer_named"),
+        ({"buyer_email": "compras@beta.example"}, "ck_invoices_buyer_named"),
+        ({"void_reason": "Wrong buyer"}, "ck_invoices_void_reason"),
+    ],
+    ids=[
+        "seller-half-tax-id",
+        "seller-without-tax-id",
+        "buyer-half-tax-id",
+        "buyer-unnamed",
+        "email",
+        "reason",
+    ],
+)
+async def test_a_row_holds_the_columns_that_go_together_whole(
+    module_database: BoundDatabase, change: dict[str, object], constraint: str
+) -> None:
+    tenant = tenant_of()
+    with pytest.raises(IntegrityError) as caught:
+        async with module_database.unit(tenant) as unit:
+            await unit.connection.execute(insert(InvoiceRecord).values({**invoice_of(tenant), **change}))
+    refusal = caught.value.orig
+    assert isinstance(refusal, CheckViolation)
+    assert refusal.diag.constraint_name == constraint
+
+
+async def test_a_unit_writes_no_line_or_tax_of_another_tenant(module_database: BoundDatabase) -> None:
+    victim = tenant_of()
+    theirs = await seeded(module_database, victim)
+    mine = Tenant(victim.organization, victim.company, Mode.LIVE)  # the same company, the other mode
+    tax = {
+        **keys(victim),
+        "invoice_id": theirs,
+        "position": 1,
+        "place": 0,
+        "category": "do.itbis.standard",
+        "kind": "standard",
+        "percent": Decimal(18),
+        "since": date(2019, 1, 1),
+        "tax": Decimal(18),
+    }
+    total = {**keys(victim), "invoice_id": theirs, "place": 1, "category": "do.itbis.reduced"}
+    total |= {"percent": Decimal(16), "base": Decimal(1), "tax": Decimal(0)}
+    for table, row in (
+        (InvoiceLineRecord, {**line_of(victim, theirs), "position": 1}),
+        (InvoiceLineTaxRecord, tax),
+        (InvoiceTaxRecord, total),
+    ):
+        with pytest.raises(ProgrammingError) as caught:
+            async with module_database.unit(mine) as unit:
+                await unit.connection.execute(insert(table).values(row))
+        assert isinstance(caught.value.orig, InsufficientPrivilege), table.__tablename__
+
+
+async def test_a_unit_changes_and_deletes_nothing_of_another_tenant_and_moves_no_row_to_one(
+    module_database: BoundDatabase,
+) -> None:
+    victim, mine = tenant_of(), tenant_of()
+    await seeded(module_database, victim)
+    own = await seeded(module_database, mine)
+    async with module_database.unit(mine) as unit:
+        for table in (InvoiceLineTaxRecord, InvoiceTaxRecord, InvoiceLineRecord):
+            assert (await unit.connection.execute(delete(table).where(table.invoice_id != own))).rowcount == 0
+        changed = await unit.connection.execute(
+            update(InvoiceRecord).where(InvoiceRecord.id != own).values(status="voided", voided_at=NOW)
+        )
+        assert changed.rowcount == 0
+    one = dict.fromkeys(("invoices", "invoice_lines", "invoice_line_taxes", "invoice_taxes"), 1)
+    assert await counts(module_database, victim) == one
+    with pytest.raises(ProgrammingError) as caught:
+        async with module_database.unit(mine) as unit:
+            await unit.connection.execute(
+                update(InvoiceRecord).where(InvoiceRecord.id == own).values(company_id=victim.company)
+            )
+    assert isinstance(caught.value.orig, InsufficientPrivilege)  # a row is not moved to another tenant

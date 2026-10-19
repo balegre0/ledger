@@ -1489,7 +1489,7 @@
         ]
       },
       "post": {
-        "description": "Create a document of the company: issued at once, or a draft with ``draft: true``.\n\nA credit or debit note names the issued invoice it corrects (``corrects``). The business key\n(``external_reference``) is the company's once per mode and type: a duplicate is 409\n``external_reference_taken``, its problem naming the holder (``existing_id``).",
+        "description": "Create a document of the company: issued at once, or a draft with ``draft: true``.\n\nNeeds ``invoicing.invoices.create``, unless it retries a request that succeeded. A credit or debit\nnote names the issued invoice it corrects (``corrects``). The business key\n(``external_reference``) is the company's once per mode and type: a duplicate is 409\n``external_reference_taken``, its problem naming the holder (``existing_id``).",
         "operationId": "create_invoice_v1_invoices_post",
         "parameters": [
           {
@@ -1838,59 +1838,73 @@
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "description": "An RFC 9457 problem document: what every failure answers. A code may add members of its own.",
-                  "properties": {
-                    "code": {
-                      "description": "The stable code to match on.",
-                      "title": "Code",
-                      "type": "string"
-                    },
-                    "detail": {
-                      "anyOf": [
-                        {
+                  "allOf": [
+                    {
+                      "additionalProperties": true,
+                      "description": "An RFC 9457 problem document: what every failure answers. A code may add members of its own.",
+                      "properties": {
+                        "code": {
+                          "description": "The stable code to match on.",
+                          "title": "Code",
                           "type": "string"
                         },
-                        {
-                          "type": "null"
-                        }
-                      ],
-                      "title": "Detail"
-                    },
-                    "request_id": {
-                      "anyOf": [
-                        {
+                        "detail": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "title": "Detail"
+                        },
+                        "request_id": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "The request's id, also its Request-Id header.",
+                          "title": "Request Id"
+                        },
+                        "status": {
+                          "title": "Status",
+                          "type": "integer"
+                        },
+                        "title": {
+                          "title": "Title",
                           "type": "string"
                         },
-                        {
-                          "type": "null"
+                        "type": {
+                          "description": "urn:ledger:error:<code>",
+                          "title": "Type",
+                          "type": "string"
                         }
+                      },
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
                       ],
-                      "description": "The request's id, also its Request-Id header.",
-                      "title": "Request Id"
+                      "title": "Problem",
+                      "type": "object"
                     },
-                    "status": {
-                      "title": "Status",
-                      "type": "integer"
-                    },
-                    "title": {
-                      "title": "Title",
-                      "type": "string"
-                    },
-                    "type": {
-                      "description": "urn:ledger:error:<code>",
-                      "title": "Type",
-                      "type": "string"
+                    {
+                      "properties": {
+                        "existing_id": {
+                          "description": "The document holding the external_reference (external_reference_taken only).",
+                          "pattern": "^inv_[0-7][0-9a-hjkmnp-tv-z]{25}$",
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
                     }
-                  },
-                  "required": [
-                    "type",
-                    "title",
-                    "status",
-                    "code"
-                  ],
-                  "title": "Problem",
-                  "type": "object"
+                  ]
                 }
               }
             },
@@ -2487,7 +2501,7 @@
     },
     "/v1/invoices/{invoice_id}/issue": {
       "post": {
-        "description": "Issue a draft at a version ``If-Match`` names, priced again today and sold by the company as it is.\n\nOne that is not a draft is 409 ``invoice_not_issuable``; one changed while it was priced, 409\n``invoice_changed``.",
+        "description": "Issue a draft at a version ``If-Match`` names, priced again today and sold by the company as it is.\n\nNeeds ``invoicing.invoices.issue``, unless it retries a request that succeeded. One that is not a\ndraft is 409 ``invoice_not_issuable``; one changed while it was priced, 409 ``invoice_changed``.",
         "operationId": "issue_invoice_v1_invoices__invoice_id__issue_post",
         "parameters": [
           {
@@ -3159,7 +3173,7 @@
     },
     "/v1/invoices/{invoice_id}/void": {
       "post": {
-        "description": "Void an issued document at a version ``If-Match`` names, for a ``reason`` if given.\n\nRefused (409 ``invoice_not_voidable``) unless it is issued, while a draft or issued note corrects it,\nand once a fiscal channel accepted it: a credit note corrects it then.",
+        "description": "Void an issued document at a version ``If-Match`` names, for a ``reason`` if given.\n\nNeeds ``invoicing.invoices.void``, unless it retries a request that succeeded. Refused (409\n``invoice_not_voidable``) unless it is issued, while a draft or issued note corrects it, and once a\nfiscal channel accepted it: a credit note corrects it then.",
         "operationId": "void_invoice_v1_invoices__invoice_id__void_post",
         "parameters": [
           {

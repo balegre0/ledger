@@ -150,3 +150,27 @@ def test_every_route_needs_a_bearer_token_and_declares_what_it_requires() -> Non
     ]
     assert len(mine) == len(operations())
     assert unguarded_routes(routes) == ()
+
+
+ALL_OF: Final = TypeAdapter(dict[str, list[dict[str, object]]])
+
+
+def test_a_creation_s_conflict_declares_the_holder_of_a_taken_business_key() -> None:
+    """§9.6: ``external_reference_taken`` names the document that holds the key in ``existing_id``."""
+    answers = published()["paths"]["/v1/invoices"]["post"].get("responses", {})
+    schema = ALL_OF.validate_python(answers["409"].get("content", {})["application/problem+json"]["schema"])
+    problem, extension = schema["allOf"]
+    assert problem["title"] == "Problem"
+    assert extension == {
+        "type": "object",
+        "properties": {
+            "existing_id": {
+                "type": "string",
+                "pattern": r"^inv_[0-7][0-9a-hjkmnp-tv-z]{25}$",
+                "description": "The document holding the external_reference (external_reference_taken only).",
+            }
+        },
+    }
+    for path, method, operation in operations():
+        if (path, method) != ("/v1/invoices", "post") and "409" in operation.get("responses", {}):
+            assert "existing_id" not in str(operation.get("responses", {})["409"])

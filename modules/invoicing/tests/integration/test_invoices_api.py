@@ -8,10 +8,11 @@ lazy from collections.abc import Mapping
 import pytest
 lazy import httpx
 
+from ledger_invoicing.adapters.http.context import MAX_STORED_ANSWER
 from ledger_invoicing.adapters.http.models import InvoiceView
 from ledger_invoicing.domain.ids import INVOICE_PREFIX
 from ledger_kernel.ids import format_id, new_id, parse_id
-from ledger_platform.http.idempotency import MAX_STORED_BODY
+from ledger_platform.http.idempotency import DEFAULT_STORED_BODY
 from ledger_platform.http.limits import MAX_BODY_BYTES
 from ledger_testing.api import TestPrincipal, created, document, page
 lazy from ledger_testing.issuer import LocalIssuer
@@ -344,7 +345,8 @@ async def test_the_largest_document_a_request_can_carry_is_kept_and_its_answer_r
     line = {**LINE, "description": "é" * 440}
     body = {**INVOICE, "lines": [line] * 1000}
     sent = await client.post("/v1/invoices", json=body, headers=posting(owner, company, "big"))
-    assert len(sent.request.content) < MAX_BODY_BYTES < len(sent.content) <= MAX_STORED_BODY
+    assert len(sent.request.content) < MAX_BODY_BYTES
+    assert DEFAULT_STORED_BODY < len(sent.content) <= MAX_STORED_ANSWER  # over the default a key keeps
     assert sent.status_code == 201
     again = await client.post("/v1/invoices", json=body, headers=posting(owner, company, "big"))
     assert (again.content, again.headers["idempotent-replayed"]) == (sent.content, "true")
@@ -390,3 +392,108 @@ async def test_a_buyer_is_kept_as_sent_its_tax_id_read_by_its_scheme(
         "address": "Calle 1, Santo Domingo",
         "email": "compras@beta.example",
     }
+
+
+# ── A retry is answered before the permission it needs is judged (I1) ──────────
+
+
+async def granted(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str, subject: str, role: str
+) -> None:
+    response = await client.put(
+        f"/v1/companies/{company}/memberships/{subject}", json={"role": role}, headers=owner.bearer()
+    )
+    assert response.status_code in {200, 201}, response.text
+
+
+async def test_a_retry_after_its_company_was_deactivated_replays_and_a_new_request_is_refused(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
+) -> None:
+    first = await client.post("/v1/invoices", json=INVOICE, headers=posting(owner, company, "i-1"))
+    version = (await client.get(f"/v1/companies/{company}", headers=owner.bearer())).headers["etag"]
+    deactivated = await client.post(
+        f"/v1/companies/{company}/deactivate", headers=owner.posting("off") | {"If-Match": version}
+    )
+    assert deactivated.status_code == 200, deactivated.text
+    retried = await client.post("/v1/invoices", json=INVOICE, headers=posting(owner, company, "i-1"))
+    assert (retried.status_code, retried.content, retried.headers["idempotent-replayed"]) == (
+        201,
+        first.content,
+        "true",
+    )
+    fresh = await client.post("/v1/invoices", json=INVOICE, headers=posting(owner, company, "i-2"))
+    assert code_of(fresh) == (403, "permission_denied")
+    assert (await client.get("/v1/invoices", headers=reading(owner, company))).status_code == 200
+
+
+async def test_a_retry_after_a_downgrade_to_viewer_replays_and_a_new_request_is_refused(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str, local_issuer: LocalIssuer
+) -> None:
+    clerk = TestPrincipal(local_issuer, subject="3002")
+    await granted(client, owner, company, clerk.subject, "issuer")
+    created_ = await client.post("/v1/invoices", json=DRAFT, headers=posting(clerk, company, "d-1"))
+    issue = f"/v1/invoices/{document(created_)['id']}/issue"
+    issued = await client.post(issue, headers=posting(clerk, company, "issue-1", version=1))
+    assert issued.status_code == 200
+    await granted(client, owner, company, clerk.subject, "viewer")
+    for path, key, version, answered in (
+        ("/v1/invoices", "d-1", None, created_),
+        (issue, "issue-1", 1, issued),
+    ):
+        body = DRAFT if version is None else None
+        retried = await client.post(path, json=body, headers=posting(clerk, company, key, version=version))
+        assert (retried.content, retried.headers["idempotent-replayed"]) == (answered.content, "true")
+    fresh = await client.post("/v1/invoices", json=DRAFT, headers=posting(clerk, company, "d-2"))
+    assert code_of(fresh) == (403, "permission_denied")
+
+
+async def test_a_retry_by_a_caller_that_lost_every_role_in_the_company_is_refused(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str, local_issuer: LocalIssuer
+) -> None:
+    clerk = TestPrincipal(local_issuer, subject="3002")
+    await granted(client, owner, company, clerk.subject, "issuer")
+    created_ = await client.post("/v1/invoices", json=INVOICE, headers=posting(clerk, company, "i-1"))
+    assert created_.status_code == 201
+    revoked = await client.delete(
+        f"/v1/companies/{company}/memberships/{clerk.subject}", headers=owner.bearer()
+    )
+    assert revoked.status_code in {200, 204}, revoked.text
+    retried = await client.post("/v1/invoices", json=INVOICE, headers=posting(clerk, company, "i-1"))
+    assert code_of(retried) == (404, "company_not_found")
+    assert str(document(created_)["id"]) not in retried.text
+
+
+# ── Amounts money cannot hold, and amounts written in other forms (M4) ──────────
+
+
+@pytest.mark.parametrize(
+    ("change", "code"),
+    [
+        ({"lines": [{**LINE, "quantity": "999999999999999999", "unit_price": "10"}]}, "amount_out_of_range"),
+        (
+            {"lines": [{**LINE, "quantity": "1", "unit_price": "600000000000000000"}] * 2},
+            "amount_out_of_range",
+        ),
+        ({"lines": [{**LINE, "quantity": "1.1234567"}]}, "invalid_request"),
+        ({"currency": "USD", "exchange_rate": "1.1234567890123"}, "invalid_request"),
+        ({"lines": [{**LINE, "quantity": 2}]}, "invalid_request"),
+        ({"lines": [{**LINE, "unit_price": 50.5}]}, "invalid_request"),
+        ({"currency": "USD", "exchange_rate": 60}, "invalid_request"),
+    ],
+    ids=[
+        "line-gross",
+        "document-total",
+        "quantity-places",
+        "rate-places",
+        "quantity-number",
+        "price-number",
+        "rate-number",
+    ],
+)
+async def test_an_amount_money_cannot_hold_or_not_written_as_a_string_is_refused_as_invalid(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str, change: dict[str, object], code: str
+) -> None:
+    response = await client.post(
+        "/v1/invoices", json={**INVOICE, **change}, headers=posting(owner, company, "x")
+    )
+    assert code_of(response) == (422, code)

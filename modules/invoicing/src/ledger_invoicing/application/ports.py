@@ -13,12 +13,13 @@ invoice, and no invoice is voided under a note.
 
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
-from typing import Literal, Protocol, final
+from typing import ClassVar, Literal, Protocol, final
 lazy from collections.abc import Callable, Mapping
 lazy from contextlib import AbstractAsyncContextManager
 lazy from datetime import datetime
 lazy from uuid import UUID
 
+from ledger_kernel.errors import LedgerError
 lazy from ledger_identity.api import CompanyInfo
 lazy from ledger_invoicing.domain.ids import InvoiceId
 lazy from ledger_invoicing.domain.invoice import Invoice, InvoiceStatus
@@ -31,6 +32,34 @@ lazy from ledger_kernel.pagination import Page, PageRequest
 lazy from ledger_kernel.regimes import Direction, DocumentKind, RegimeDef
 lazy from ledger_kernel.tenancy import Tenant
 lazy from ledger_platform.runtime.calls import Call
+
+
+class ForeignTenantError(LedgerError):
+    """A unit's documents were handed another tenant's document to keep: a defect of the caller."""
+
+    code: ClassVar[str] = "invoice_foreign_tenant"
+
+    def __init__(self) -> None:
+        super().__init__("a unit keeps the documents of its own company and mode only")
+
+
+class StaleWriteError(LedgerError):
+    """A change of a document that is not the version after the one kept: the unit did not hold it locked."""
+
+    code: ClassVar[str] = "invoice_write_stale"
+
+    def __init__(self) -> None:
+        super().__init__("a change keeps the version after the one the unit holds locked")
+
+
+class UnmirroredAcceptanceError(LedgerError):
+    """A document a channel accepted, before the fiscal mirror that would keep it exists (M3b)."""
+
+    code: ClassVar[str] = "invoice_acceptance_unmirrored"
+
+    def __init__(self) -> None:
+        super().__init__("no channel's acceptance can be kept before the fiscal mirror exists")
+
 
 type RegimeOf = Callable[[Jurisdiction], RegimeDef | None]
 """The installed regime that governs a jurisdiction, if any (its subdivision's, else its country's)."""
@@ -55,6 +84,8 @@ class Invoices(Protocol, metaclass=ABCMeta):
         """Keep a new document: ``None`` once kept, else the document of its type holding its business key.
 
         Nothing is kept when the business key is taken: it is unique per company, mode and type for ever.
+        Another tenant's document is refused (``ForeignTenantError``), as is one a channel accepted
+        (``UnmirroredAcceptanceError``): a defect of the caller, before anything is kept.
         """
 
     @abstractmethod
@@ -67,7 +98,11 @@ class Invoices(Protocol, metaclass=ABCMeta):
 
     @abstractmethod
     async def update(self, invoice: Invoice) -> None:
-        """Keep ``invoice`` in place of the version kept of it, which the unit holds locked."""
+        """Keep ``invoice`` in place of the version kept of it, which the unit holds locked.
+
+        ``StaleWriteError`` unless the version kept is the one before ``invoice``'s; refused as ``add``
+        refuses, too.
+        """
 
     @abstractmethod
     async def corrected_by(self, invoice: InvoiceId) -> bool:

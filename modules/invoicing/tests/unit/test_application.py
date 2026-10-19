@@ -20,10 +20,13 @@ from ledger_invoicing.application.ports import (
     Audit,
     CompanyLookup,
     Events,
+    ForeignTenantError,
     InvoiceFilters,
     Invoices,
     InvoicingUnit,
     InvoicingUnits,
+    StaleWriteError,
+    UnmirroredAcceptanceError,
 )
 from ledger_invoicing.application.queries import InvoicingQueries
 from ledger_invoicing.domain.errors import (
@@ -169,8 +172,16 @@ class MemoryInvoices(Invoices):
         self._staged = staged
         self._tenant = tenant
 
+    def _require_own(self, invoice: Invoice) -> None:
+        """What ``PgInvoices`` refuses before any statement: another tenant's document, an accepted one."""
+        if invoice.tenant != self._tenant:
+            raise ForeignTenantError
+        if invoice.accepted_by:
+            raise UnmirroredAcceptanceError
+
     @override
     async def add(self, invoice: Invoice) -> InvoiceId | None:
+        self._require_own(invoice)
         reference = invoice.external_reference
         for other in self._staged.invoices.values():
             same_key = (other.tenant, other.kind, other.external_reference) == (
@@ -196,6 +207,10 @@ class MemoryInvoices(Invoices):
 
     @override
     async def update(self, invoice: Invoice) -> None:
+        self._require_own(invoice)
+        kept = self._staged.invoices.get(invoice.id)
+        if kept is None or kept.version != invoice.version - 1:  # as PgInvoices compares and sets
+            raise StaleWriteError
         self._staged.invoices[invoice.id] = invoice
 
     @override

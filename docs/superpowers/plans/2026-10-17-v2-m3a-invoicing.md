@@ -94,10 +94,23 @@ profile and its establishments come through `IdentityApi`.
 ## Rules decided in Task 5 (HTTP; the owner reviews them)
 
 - **Two steps per use case**: `prepare_create` / `prepare_issue` / `prepare_void` do what happens outside any
-  unit (identity asked, the document priced) and return a `Change` that the route applies in the unit that
-  claims the `Idempotency-Key` (§9.5: key, document, event and audit commit together; rule 13 forbids asking
-  identity inside it). A retry is replayed before identity is asked again (`Idempotency.replayed`, a look that
-  claims nothing), so a company deactivated after the first answer does not turn its retry into a refusal.
+  unit (identity asked, the document priced) and return a `Change` that the route applies, in a unit of the
+  change's own tenant, that claims the `Idempotency-Key` (§9.5: key, document, event and audit commit
+  together; rule 13 forbids asking identity inside it).
+- **A retry is replayed before the permission it needs (owner ruling, review I1).** Every route's first
+  dependency is the caller (401) with a role in the company (404) holding `invoicing.invoices.read` (403; a
+  deactivated company keeps its reads). A `POST` then looks for its key (`Idempotency.replayed`, a look that
+  claims nothing): a retry of a request that succeeded replays the caller's own answer (the key is scoped to
+  the organization, the mode, the principal and the route, and the request's company is part of what it
+  fingerprints). Only a new request needs the specific permission (`create`, `issue` or `void`, 403
+  `permission_denied`) and has its body read. So a retry after the company was deactivated, or after the
+  caller was downgraded to viewer, replays; a retry by a caller that lost every role is 404; a new request
+  after deactivation is 403.
+- **The authorization window.** The permission is judged once, when the request arrives; `prepare_*` then asks
+  identity (the company, which must be active, and its establishment) and the change is applied in a later
+  unit. A role revoked, or a company deactivated, between the two (milliseconds) does not stop the change: the
+  same window every request has between its check and its commit. invoicing keeps no copy of roles to check
+  again under its lock; identity's own changes (`identity.membership.revoked`) are not consumed in this slice.
 - **`If-Match` on issue and void** (§9.7, as identity's deactivation): 428 without it, 412 when the document is
   not at a version it names; every answer of a document carries `ETag`. A replay comes before `If-Match` is
   judged, so a retried change answers as it first did.
@@ -105,9 +118,14 @@ profile and its establishments come through `IdentityApi`.
   tenant's). A business key's conflict names its holder in the problem's `existing_id` member (§9.6), which the
   platform now renders for any error that declares `problem_members()`.
 - **Bodies**: a document is created within the 1 MiB request limit (§10); its answer can be larger (1000 priced
-  lines), so an idempotency key keeps up to 4 MiB of answer (`MAX_STORED_BODY`, 1 MiB before). Limits are in
-  the schema: 1-1000 lines, 1-10 taxes per line, amounts as plain decimals with their places, country fields
-  bounded.
+  lines), so invoicing's idempotency keys keep up to 4 MiB of answer (`Idempotency(max_stored_body=...)`, a
+  module's option; the platform's default stays 1 MiB). Limits are in the schema: 1-1000 lines, 1-10 taxes
+  per line, amounts as strings of plain decimals with their places (a JSON number is 422), country fields
+  bounded; an amount money cannot hold (a line's gross or a total at 10^18) is 422 `amount_out_of_range`.
+- **Rows are whole**: the columns that go together are checked by the table (the seller's name and tax id, a
+  buyer's tax id's scheme and value, a buyer named when anything of it is set, a void reason only when voided)
+  and read whole or refused (`invoice_row_incomplete`, a defect).
+- **`existing_id`** is declared in the creation's 409 schema (§9.6).
 - **Lists** take `type`, `direction`, `status` and `external_reference` filters with `page_query`.
 - **Response**: §9.3's envelope (`id`, `object: "invoice"`, `livemode`, `created`, `updated`), `version`, the
   terms and their pricing, `functional_totals` for another currency, and `fiscal: []` (channel entries, M3b).
