@@ -99,6 +99,10 @@ class Establishments(Protocol, metaclass=ABCMeta):
     async def page(self, company: CompanyId, request: PageRequest) -> Page[Establishment]:
         """The establishments of ``company``, in id order."""
 
+    @abstractmethod
+    async def update(self, establishment: Establishment) -> None:
+        """Keep ``establishment`` in place of what was kept of it (its time zone)."""
+
 
 class Memberships(Protocol, metaclass=ABCMeta):
     """Who holds, or held, which role in the companies of the unit's organization."""
@@ -159,6 +163,7 @@ type AuditAction = Literal[
     "membership.grant",
     "membership.revoke",
     "establishment.open",
+    "establishment.change_time_zone",
 ]
 """What a use case records it did (§10: identity's changes are audited); the part before the dot names the
 kind of subject."""

@@ -147,6 +147,17 @@ class CompanyChanges(_Shape):
         ),
     )
 
+    time_zone: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description=(
+            "With a new jurisdiction only, and required then: the IANA zone the MAIN establishment keeps. "
+            "A company with other establishments keeps its jurisdiction."
+        ),
+        examples=["America/Santo_Domingo"],
+    )
+
     @model_validator(mode="after")
     def changes_something(self) -> Self:
         """A change names at least one thing to change."""

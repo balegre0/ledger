@@ -191,7 +191,9 @@ def router(context: ApiContext) -> APIRouter:
         Its fiscal profile (jurisdiction, functional currency, tax ids) changes only until it is locked (409
         ``fiscal_profile_locked``), and only to one the installed regime of its jurisdiction allows, as at
         registration. ``tax_ids`` is the whole list: an id it no longer lists is released, and one it lists
-        anew that an active company holds refuses the change (409 ``tax_id_taken``).
+        anew that an active company holds refuses the change (409 ``tax_id_taken``). A new jurisdiction names
+        the zone the MAIN establishment keeps (``time_zone``, 422 ``time_zone_required`` without it), and is
+        refused to a company with other establishments (409 ``establishments_exist``).
         """
         jurisdiction = body.jurisdiction
         changes = commands.Changes(
@@ -208,6 +210,7 @@ def router(context: ApiContext) -> APIRouter:
             if body.tax_ids is None
             else tuple(item.tax_id for item in tax_ids_of(context, body.tax_ids)),
             regime_of=context.regime_of,
+            time_zone=None if body.time_zone is None else parse_time_zone(body.time_zone),
         )
         with precondition_checked(StaleVersionError):
             async with database.unit(access.tenant) as unit:

@@ -784,6 +784,39 @@ async def test_until_it_is_locked_a_profile_changes_and_the_registry_follows_its
     assert (released.status_code, held.status_code, document(held)["code"]) == (201, 409, "tax_id_taken")
 
 
+async def test_a_new_jurisdiction_names_the_zone_its_main_establishment_keeps(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
+) -> None:
+    """The old regime's zone would be stale: a change of jurisdiction says the new one, for ``MAIN``."""
+    path = f"/v1/companies/{company}"
+    moved = {"jurisdiction": {"country": "DO", "subdivision": "DO-01"}}
+    zoneless = await client.patch(path, json=moved, headers=owner.bearer() | {"If-Match": '"1"'})
+    assert (zoneless.status_code, document(zoneless)["code"]) == (422, "time_zone_required")
+    zoned = moved | {"time_zone": "America/Puerto_Rico"}
+    changed = await client.patch(path, json=zoned, headers=owner.bearer() | {"If-Match": '"1"'})
+    assert changed.status_code == 200
+    (main,) = page(await client.get(f"{path}/establishments", headers=owner.bearer()))["items"]
+    assert (main["code"], main["time_zone"]) == ("MAIN", "America/Puerto_Rico")
+    stray = await client.patch(
+        path, json={"time_zone": "America/Santo_Domingo"}, headers=owner.bearer() | {"If-Match": '"2"'}
+    )
+    assert (stray.status_code, document(stray)["code"]) == (422, "time_zone_unused")
+
+
+async def test_a_company_with_establishments_besides_main_keeps_its_jurisdiction(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
+) -> None:
+    """Their zones were chosen under the old jurisdiction: identity will not guess them anew."""
+    path = f"/v1/companies/{company}"
+    opened = await client.post(
+        f"{path}/establishments", json={"code": "SUC1", "name": "Santiago"}, headers=owner.posting("e-1")
+    )
+    assert opened.status_code == 201
+    moved = {"jurisdiction": {"country": "DO", "subdivision": "DO-01"}, "time_zone": "America/Puerto_Rico"}
+    refused = await client.patch(path, json=moved, headers=owner.bearer() | {"If-Match": '"1"'})
+    assert (refused.status_code, document(refused)["code"]) == (409, "establishments_exist")
+
+
 async def test_a_profile_cannot_take_a_tax_id_another_company_holds(
     client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:

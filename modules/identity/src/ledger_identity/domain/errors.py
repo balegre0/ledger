@@ -42,6 +42,33 @@ class JurisdictionUnsupportedError(InvalidInputError):
         super().__init__("no installed regime governs this jurisdiction")
 
 
+class TimeZoneRequiredError(InvalidInputError):
+    """A change of jurisdiction that does not say the zone its ``MAIN`` establishment keeps from then on."""
+
+    code: ClassVar[str] = "time_zone_required"
+
+    def __init__(self) -> None:
+        super().__init__("a change of jurisdiction names the time zone of the MAIN establishment (time_zone)")
+
+
+class TimeZoneUnusedError(InvalidInputError):
+    """A time zone sent with no change of jurisdiction: an establishment's zone is changed with it."""
+
+    code: ClassVar[str] = "time_zone_unused"
+
+    def __init__(self) -> None:
+        super().__init__("time_zone goes with a change of jurisdiction only")
+
+
+class EstablishmentsExistError(ConflictError):
+    """A new jurisdiction for a company with establishments besides ``MAIN``: their zones would be stale."""
+
+    code: ClassVar[str] = "establishments_exist"
+
+    def __init__(self) -> None:
+        super().__init__("a company with establishments besides MAIN keeps its jurisdiction")
+
+
 class CurrencyUnsupportedError(InvalidInputError):
     """A functional currency the regime of the company's jurisdiction does not let it keep its books in."""
 

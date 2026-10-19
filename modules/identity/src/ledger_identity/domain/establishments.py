@@ -5,7 +5,7 @@ date of the documents it issues. Every company has a ``MAIN`` one from the day i
 country adds (branches, emission points, issuing series) is the channel's to model, not identity's.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final, final
 lazy from datetime import datetime
 
@@ -47,6 +47,10 @@ class Establishment:
             time_zone=time_zone,
             created_at=now,
         )
+
+    def keeping(self, time_zone: TimeZone) -> Establishment:
+        """The establishment in ``time_zone`` (its company changed jurisdiction)."""
+        return replace(self, time_zone=time_zone)
 
     @classmethod
     def main(cls, company: Company, *, time_zone: TimeZone, now: datetime) -> Establishment:

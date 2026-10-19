@@ -285,6 +285,10 @@ class MemoryEstablishments(Establishments):
         mine = [e for e in self._state.establishments.values() if e.tenant == self._tenant(company)]
         return paged(mine, request, key=lambda establishment: establishment.id)
 
+    @override
+    async def update(self, establishment: Establishment) -> None:
+        self._state.establishments[establishment.id] = establishment
+
     def _tenant(self, company: CompanyId) -> Tenant:
         return Tenant(self._organization, company, None)
 

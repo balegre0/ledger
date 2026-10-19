@@ -522,6 +522,18 @@ class PgEstablishments(Establishments):
         rows = (await self._connection.execute(statement)).all()
         return page_of([_establishment(row) for row in rows], request, key=lambda found: found.id)
 
+    @override
+    async def update(self, establishment: Establishment) -> None:
+        _require_own(establishment.tenant.organization, self._organization)
+        await self._connection.execute(
+            update(EstablishmentRecord)
+            .where(
+                EstablishmentRecord.organization_id == self._organization,
+                EstablishmentRecord.id == establishment.id,
+            )
+            .values(time_zone=establishment.time_zone)
+        )
+
     def _of(self, company: CompanyId) -> Select[UUID, UUID, UUID, str, str, str, datetime]:
         return _ESTABLISHMENT.where(
             EstablishmentRecord.organization_id == self._organization,

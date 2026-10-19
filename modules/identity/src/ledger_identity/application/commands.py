@@ -13,14 +13,18 @@ from ledger_identity.domain.errors import (
     ApiClientHumanError,
     ApiClientNotFoundError,
     EstablishmentCodeTakenError,
+    EstablishmentsExistError,
     StaleVersionError,
     TaxIdTakenError,
+    TimeZoneRequiredError,
+    TimeZoneUnusedError,
 )
 from ledger_identity.domain.establishments import Establishment
 from ledger_identity.domain.membership import Actor, Roster, found, grant, revoke
 from ledger_identity.domain.organization import Organization, require_organization_admin
 from ledger_identity.domain.roles import COMPANIES_MANAGE
 from ledger_kernel.access import CompanyNotFoundError, PrincipalKind
+from ledger_kernel.pagination import PageRequest
 lazy from ledger_identity.application.ports import AuditAction, IdentityUnit
 lazy from ledger_identity.domain.api_clients import ApiClientSpec
 lazy from ledger_identity.domain.ids import ApiClientId
@@ -55,6 +59,8 @@ class Changes:
     jurisdiction: Jurisdiction | None = None
     functional_currency: Currency | None = None
     tax_ids: tuple[TaxId, ...] | None = None
+    time_zone: TimeZone | None = None
+    """The zone ``MAIN`` keeps once the jurisdiction changes: required then, refused otherwise."""
 
     def profile_of(self, company: Company) -> FiscalProfile | None:
         """``company``'s profile with these changes, if any part of it changes at all."""
@@ -196,11 +202,16 @@ async def change_company(
     current = await _admitted(unit, company_id, admits, actor)
     profile = changes.profile_of(current)
     changed, updated = current.change(legal_name=changes.legal_name, profile=profile, now=unit.now)
+    moved = changed.profile.jurisdiction != current.profile.jurisdiction
+    if not moved and changes.time_zone is not None:
+        raise TimeZoneUnusedError
     if updated is None:
         return current
     refiled = changed.profile != current.profile
     if refiled:
         _ = require_fits(changed.profile, changes.regime_of(changed.profile.jurisdiction))
+    if moved:
+        await _move_main(unit, current, changes.time_zone)
     await _replace(unit, current, changed)
     if changed.profile.tax_ids != current.profile.tax_ids and not await unit.companies.retax(changed):
         raise TaxIdTakenError
@@ -208,6 +219,24 @@ async def change_company(
     action: AuditAction = "company.change_profile" if refiled else "company.rename"
     unit.audit.record(action, current.id, before=current, after=changed)
     return changed
+
+
+async def _move_main(unit: IdentityUnit, company: Company, time_zone: TimeZone | None) -> None:
+    """The ``MAIN`` establishment into ``time_zone``, the company changing jurisdiction.
+
+    The old regime's zone would be stale, so the change names the new one (``TimeZoneRequiredError``); a
+    company with establishments besides ``MAIN`` keeps its jurisdiction (``EstablishmentsExistError``): their
+    zones were chosen under the old one, and identity will not guess them anew.
+    """
+    if time_zone is None:
+        raise TimeZoneRequiredError
+    if len((await unit.establishments.page(company.id, PageRequest(size=2))).items) > 1:
+        raise EstablishmentsExistError
+    main = await main_establishment(unit, company.id)
+    moved = main.keeping(time_zone)
+    await unit.establishments.update(moved)
+    detail = {"code": moved.code, "time_zone": moved.time_zone, "previous_time_zone": main.time_zone}
+    unit.audit.record("establishment.change_time_zone", moved.id, before=main, after=moved, detail=detail)
 
 
 async def deactivate_company(

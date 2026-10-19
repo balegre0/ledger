@@ -34,7 +34,10 @@ def only_reads(permissions: Collection[Permission]) -> frozenset[Permission]:
     """Those of ``permissions`` that read: their action, the last part of the code, is ``read``.
 
     Decided by the verb, not by a list, so that the permissions every module declares are covered: a
-    deactivated company keeps its data readable everywhere and issues nothing anywhere (§7.7).
+    deactivated company keeps its data readable everywhere and issues nothing anywhere (§7.7). The naming
+    convention this rests on, which every manifest keeps: a code is ``<module>.<resource>.<action>``, and a
+    permission that only reads has the action ``read`` and nothing that changes anything does (the manifest
+    model refuses any other action than ``read``, ``create``, ``issue``, ``void``, ``manage`` and ``own``).
     """
     return frozenset(permission for permission in permissions if permission.endswith(_READ_VERB))
 

@@ -212,6 +212,23 @@
             ],
             "description": "The whole list, each once, the first the primary one: an id it no longer lists is released, one it lists anew is registered.",
             "title": "Tax Ids"
+          },
+          "time_zone": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "With a new jurisdiction only, and required then: the IANA zone the MAIN establishment keeps. A company with other establishments keeps its jurisdiction.",
+            "examples": [
+              "America/Santo_Domingo"
+            ],
+            "title": "Time Zone"
           }
         },
         "title": "CompanyChanges",
@@ -4386,7 +4403,7 @@
         ]
       },
       "patch": {
-        "description": "Change a company, if it is at a version ``If-Match`` names: what the request names changes.\n\nIts fiscal profile (jurisdiction, functional currency, tax ids) changes only until it is locked (409\n``fiscal_profile_locked``), and only to one the installed regime of its jurisdiction allows, as at\nregistration. ``tax_ids`` is the whole list: an id it no longer lists is released, and one it lists\nanew that an active company holds refuses the change (409 ``tax_id_taken``).",
+        "description": "Change a company, if it is at a version ``If-Match`` names: what the request names changes.\n\nIts fiscal profile (jurisdiction, functional currency, tax ids) changes only until it is locked (409\n``fiscal_profile_locked``), and only to one the installed regime of its jurisdiction allows, as at\nregistration. ``tax_ids`` is the whole list: an id it no longer lists is released, and one it lists\nanew that an active company holds refuses the change (409 ``tax_id_taken``). A new jurisdiction names\nthe zone the MAIN establishment keeps (``time_zone``, 422 ``time_zone_required`` without it), and is\nrefused to a company with other establishments (409 ``establishments_exist``).",
         "operationId": "change_company_v1_companies__company_id__patch",
         "parameters": [
           {
