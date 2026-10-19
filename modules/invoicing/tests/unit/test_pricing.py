@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Final
@@ -8,20 +8,30 @@ import pytest
 
 from ledger_invoicing.domain.errors import (
     AmountOutOfRangeError,
+    CurrencyNotSupportedByRegimeError,
     ExchangeRateRequiredError,
     ExchangeRateUnusedError,
     FieldInvalidError,
     FieldRequiredError,
     FieldUnknownError,
     InvalidExchangeRateError,
+    InvalidIssueDateError,
     InvalidLineError,
     InvalidLinesError,
+    InvalidTaxPointError,
     InvalidTextError,
     TaxRateNotInEffectError,
 )
 from ledger_invoicing.domain.lines import LineTerms
-from ledger_invoicing.domain.pricing import MAX_LINES, EstablishmentRef, Terms, local_date, price
-from ledger_kernel.errors import ErrorKind
+from ledger_invoicing.domain.pricing import (
+    MAX_LINES,
+    MAX_TAX_POINT_AGE,
+    EstablishmentRef,
+    Terms,
+    local_date,
+    price,
+)
+from ledger_kernel.errors import ErrorKind, InvalidValueError
 from ledger_kernel.money import Currency, Money
 from ledger_kernel.regimes import TaxCategoryKind
 lazy from ledger_invoicing.domain.pricing import FieldValue, Pricing
@@ -244,15 +254,15 @@ def test_a_rate_is_chosen_by_the_tax_point_never_by_today(regime: RegimeDef) -> 
         priced(regime, old)
     assert str(caught.value) == "lines.0.taxes.0 has no rate in effect on the tax point"
     assert (caught.value.kind, caught.value.code) == (ErrorKind.INVALID, "tax_rate_not_in_effect")
-    pricing = priced(regime, replace(old, tax_point=date(2019, 6, 1)))
+    pricing = priced(regime, replace(old, issue_date=date(2019, 6, 2), tax_point=date(2019, 6, 1)))
     assert pricing.totals.tax == pesos("12.00")
     assert (pricing.issue_date, pricing.tax_point, pricing.lines[0].taxes[0].since) == (
-        TODAY,
+        date(2019, 6, 2),
         date(2019, 6, 1),
         date(2019, 1, 1),
     )
     with pytest.raises(TaxRateNotInEffectError):
-        priced(regime, replace(old, tax_point=date(2018, 12, 31)))
+        priced(regime, replace(old, issue_date=date(2018, 12, 31)))
 
 
 def test_dates_default_to_today_and_the_tax_point_to_the_issue_date(regime: RegimeDef) -> None:
@@ -263,10 +273,44 @@ def test_dates_default_to_today_and_the_tax_point_to_the_issue_date(regime: Regi
     assert (dated.regime, dated.establishment) == ("do", MAIN)
 
 
+def test_a_document_is_never_dated_after_the_establishment_s_today(regime: RegimeDef) -> None:
+    with pytest.raises(InvalidIssueDateError) as caught:
+        priced(regime, replace(in_pesos(), issue_date=TODAY + timedelta(days=1)))
+    assert str(caught.value) == "issue_date must not be after today in the establishment's time zone"
+    assert (caught.value.kind, caught.value.code) == (ErrorKind.INVALID, "invalid_issue_date")
+
+
+def test_a_tax_point_is_on_or_before_the_issue_date_and_at_most_400_days_before_it(regime: RegimeDef) -> None:
+    for tax_point in (TODAY + timedelta(days=1), TODAY - MAX_TAX_POINT_AGE - timedelta(days=1)):
+        with pytest.raises(InvalidTaxPointError) as caught:
+            priced(regime, replace(in_pesos(), tax_point=tax_point))
+        assert str(caught.value) == "tax_point must be on the issue date or at most 400 days before it"
+        assert (caught.value.kind, caught.value.code) == (ErrorKind.INVALID, "invalid_tax_point")
+    oldest = TODAY - MAX_TAX_POINT_AGE
+    assert priced(regime, replace(in_pesos(), tax_point=oldest)).tax_point == oldest
+    assert timedelta(days=400) == MAX_TAX_POINT_AGE
+
+
 def test_today_is_the_establishment_s_date() -> None:
     late_evening = datetime(2026, 10, 13, 2, 0, tzinfo=UTC)
     assert local_date(late_evening, "America/Santo_Domingo") == date(2026, 10, 12)
     assert local_date(late_evening, "UTC") == date(2026, 10, 13)
+    with pytest.raises(InvalidValueError, match=r"^instant must be an aware datetime$"):
+        local_date(late_evening.replace(tzinfo=None), "UTC")
+
+
+def test_a_currency_the_regime_does_not_round_to_its_minor_unit_is_refused(regime: RegimeDef) -> None:
+    for code in ("JPY", "KWD"):
+        terms = Terms(currency=Currency.of(code), exchange_rate=Decimal("0.4"), lines=(a_line(),))
+        with pytest.raises(CurrencyNotSupportedByRegimeError) as caught:
+            priced(regime, terms)
+        assert str(caught.value) == (
+            f"{code} has other minor units than the 2 places the company's regime rounds to"
+        )
+        assert (caught.value.kind, caught.value.code) == (
+            ErrorKind.INVALID,
+            "currency_not_supported_by_regime",
+        )
 
 
 def test_an_amount_out_of_money_s_range_is_refused_without_repeating_it(regime: RegimeDef) -> None:
@@ -337,13 +381,19 @@ def test_a_regime_that_declares_no_field_refuses_every_one(regime: RegimeDef) ->
     assert priced(regime, with_fields({"do": {}})).fiscal == {}
 
 
+TEXT: Final = "text of 1 to 500 characters, none of them invisible"
+CODE: Final = "text of 1 to 100 characters, none of them invisible"
+DECIMAL: Final = "a plain decimal number below 10^18 with at most 12 decimal places"
+OBJECT: Final = "an object of at most 20 fields named in lower case, each " + TEXT
+
+
 def test_declared_fields_are_kept_when_each_is_of_its_kind(regime_with_fields: RegimeDef) -> None:
     fields: dict[str, FieldValue] = {
-        "ecf_type": "31",
-        "note": "Pedido 7",
+        "ecf_type": "3" * 100,
+        "note": "Pedido 7 " + "x" * 491,
         "replaced_on": "2026-10-01",
-        "rate": "18.50",
-        "replaces": {"ncf": "B0100000123"},
+        "rate": "-" + "1" * 18 + "." + "5" * 12,
+        "replaces": {f"f{index}": "x" * 500 for index in range(20)},
     }
     assert priced(regime_with_fields, with_fields({"do": fields})).fiscal == fields
 
@@ -358,14 +408,26 @@ def test_a_required_field_must_be_sent(regime_with_fields: RegimeDef) -> None:
 @pytest.mark.parametrize(
     ("name", "value", "requirement"),
     [
-        ("ecf_type", {"x": "1"}, "text"),
-        ("note", {"x": "1"}, "text"),
+        ("ecf_type", {"x": "1"}, CODE),
+        ("ecf_type", "x" * 101, CODE),
+        ("ecf_type", "", CODE),
+        ("note", {"x": "1"}, TEXT),
+        ("note", "x" * 501, TEXT),
+        ("note", "a\x00b", TEXT),
+        ("note", "a\N{ZERO WIDTH SPACE}b", TEXT),
         ("replaced_on", "2026-13-01", "a date (YYYY-MM-DD)"),
         ("replaced_on", "20261001", "a date (YYYY-MM-DD)"),
         ("replaced_on", {"x": "1"}, "a date (YYYY-MM-DD)"),
-        ("rate", "1e5", "a plain decimal number"),
-        ("rate", {"x": "1"}, "a plain decimal number"),
-        ("replaces", "B01", "an object"),
+        ("rate", "1e5", DECIMAL),
+        ("rate", "1" * 19, DECIMAL),
+        ("rate", "1." + "1" * 13, DECIMAL),
+        ("rate", {"x": "1"}, DECIMAL),
+        ("replaces", "B01", OBJECT),
+        ("replaces", {"ncf": {"deeper": "x"}}, OBJECT),
+        ("replaces", {"NCF": "x"}, OBJECT),
+        ("replaces", {"ncf": "x" * 501}, OBJECT),
+        ("replaces", {"ncf": "a\x07"}, OBJECT),
+        ("replaces", {f"f{index}": "x" for index in range(21)}, OBJECT),
     ],
 )
 def test_a_field_of_another_kind_is_refused_by_its_name(

@@ -75,6 +75,7 @@ def test_an_external_reference_is_kept_exactly_as_sent() -> None:
         (" ORD-1", "starts or ends with white space"),
         ("ORD-1\n", "starts or ends with white space"),
         ("ORD\x001", "holds a control or format character"),
+        ("ORD-Cafe\N{COMBINING ACUTE ACCENT}", "is not in Unicode NFC"),
     ],
 )
 def test_an_external_reference_that_two_clients_could_read_alike_is_refused(text: str, problem: str) -> None:

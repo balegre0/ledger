@@ -15,13 +15,17 @@ lazy from ledger_kernel.tax_ids import TaxId
 
 
 @final
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclass(frozen=True, slots=True, kw_only=True, repr=False)
 class Seller:
-    """The company that issued the document, as it was then."""
+    """The company that issued the document, as it was then; its ``repr`` shows its tax id masked only."""
 
     legal_name: str
     tax_id: TaxId
     """Its primary tax id."""
+
+    @override
+    def __repr__(self) -> str:
+        return f"Seller(tax_id={self.tax_id!r})"
 
 
 @final

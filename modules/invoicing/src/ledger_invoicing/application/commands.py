@@ -26,13 +26,13 @@ from ledger_invoicing.domain.errors import (
     RegimeMissingError,
 )
 from ledger_invoicing.domain.ids import InvoiceId
-from ledger_invoicing.domain.invoice import Invoice, InvoiceStatus, Opening
+from ledger_invoicing.domain.invoice import Invoice, InvoiceStatus, Opening, require_correction_named
 from ledger_invoicing.domain.parties import Seller
 from ledger_invoicing.domain.pricing import Terms, local_date, price
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.tenancy import Tenant
 lazy from ledger_identity.api import CompanyInfo
-lazy from ledger_invoicing.application.ports import CompanyDirectory, InvoicingUnits, RegimeOf
+lazy from ledger_invoicing.application.ports import CompanyLookup, InvoicingUnits, RegimeOf
 lazy from ledger_invoicing.domain.lines import LineTerms
 lazy from ledger_invoicing.domain.parties import Party
 lazy from ledger_invoicing.domain.pricing import CountryFields, EstablishmentRef, Pricing
@@ -103,7 +103,7 @@ class InvoicingCommands:
     """The use cases that change documents, over the ports they need."""
 
     units: InvoicingUnits
-    directory: CompanyDirectory
+    lookup: CompanyLookup
     regime_of: RegimeOf
     clock: Clock
     """The wall clock: what fixes "today" in an establishment's time zone. Times recorded are the unit's."""
@@ -118,6 +118,7 @@ class InvoicingCommands:
         (``ExternalReferenceTakenError``).
         """
         tenant = tenant_of(call)
+        require_correction_named(creation.kind, named=creation.corrects is not None)
         company = await self._company(call, tenant)
         terms = creation.terms(company.functional_currency)
         pricing = await self._priced(call, company, terms)
@@ -131,7 +132,8 @@ class InvoicingCommands:
         )
         seller = None if creation.draft else seller_of(company)
         async with self.units.unit(tenant) as unit:
-            corrected = None if creation.corrects is None else await unit.invoices.get(creation.corrects)
+            # Locked: a void of the invoice waits for this unit, or this one sees it voided.
+            corrected = None if creation.corrects is None else await unit.invoices.locked(creation.corrects)
             if creation.corrects is not None and corrected is None:
                 raise CorrectionInvalidError(CorrectionProblem.NOT_FOUND)
             invoice, issued = Invoice.new(
@@ -150,7 +152,8 @@ class InvoicingCommands:
         """Issue the draft ``invoice``, priced again on the day it is issued, sold by the company as it is.
 
         ``InvoiceNotFoundError`` for no document of the tenant by that id; ``InvoiceNotIssuableError`` for one
-        that is not a draft; ``InvoiceChangedError`` when it changed while it was priced.
+        that is not a draft, issued by another call meanwhile too; ``InvoiceChangedError`` when it changed
+        otherwise while it was priced. A note locks itself, then the invoice it corrects (the lock order).
         """
         tenant = tenant_of(call)
         async with self.units.unit(tenant) as unit:
@@ -163,29 +166,33 @@ class InvoicingCommands:
         pricing = await self._priced(call, company, draft.terms)
         async with self.units.unit(tenant) as unit:
             current = await unit.invoices.locked(invoice)
-            if current != draft:
+            if current is not None and current.status is not InvoiceStatus.DRAFT:
+                raise InvoiceNotIssuableError(current.id)  # issued (or voided) by another call meanwhile
+            if current is None or current.version != draft.version:
                 raise InvoiceChangedError(invoice)
-            corrected = None if draft.corrects is None else await unit.invoices.get(draft.corrects)
-            issued, event = draft.issue(
+            corrected = None if current.corrects is None else await unit.invoices.locked(current.corrects)
+            issued, event = current.issue(
                 seller=seller_of(company), pricing=pricing, corrected=corrected, now=unit.now
             )
             await unit.invoices.update(issued)
             unit.events.publish(event)
             detail = {"kind": issued.kind.value}
-            unit.audit.record("invoice.issue", issued.id, before=draft, after=issued, detail=detail)
+            unit.audit.record("invoice.issue", issued.id, before=current, after=issued, detail=detail)
         return issued
 
     async def void(self, call: Call, invoice: InvoiceId, reason: Reason | None) -> Invoice:
         """Void the issued document ``invoice``, for ``reason`` if given.
 
         ``InvoiceNotFoundError`` for no document of the tenant by that id; ``InvoiceNotVoidableError`` for one
-        not issued, or one a channel accepted.
+        not issued, one a channel accepted, or one a draft or issued note corrects (read once it is locked, so
+        a note made meanwhile is seen).
         """
         async with self.units.unit(tenant_of(call)) as unit:
             current = await unit.invoices.locked(invoice)
             if current is None:
                 raise InvoiceNotFoundError(invoice)
-            voided, event = current.void(reason=reason, now=unit.now)
+            noted = await unit.invoices.corrected_by(current.id)
+            voided, event = current.void(reason=reason, corrected_by_a_note=noted, now=unit.now)
             await unit.invoices.update(voided)
             unit.events.publish(event)
             detail = {"kind": voided.kind.value}
@@ -194,7 +201,7 @@ class InvoicingCommands:
 
     async def _company(self, call: Call, tenant: Tenant) -> CompanyInfo:
         """The tenant's company, which must be active to make or issue a document."""
-        company = await self.directory.company(call, tenant.company)
+        company = await self.lookup.company(call, tenant.company)
         if not company.active:
             raise CompanyInactiveError(company.id)
         return company
@@ -211,7 +218,7 @@ class InvoicingCommands:
         )
 
     async def _establishment(self, call: Call, company: CompanyInfo, code: str | None) -> EstablishmentRef:
-        found = await self.directory.establishment(call, company.id, code)
+        found = await self.lookup.establishment(call, company.id, code)
         if found is None:
             raise EstablishmentUnknownError
         return found

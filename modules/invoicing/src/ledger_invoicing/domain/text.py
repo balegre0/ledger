@@ -2,8 +2,9 @@
 
 A free text (a description, a name, an address, a reason) is trimmed, its runs of white space are one space,
 it is in Unicode NFC, it holds no control or format character, and it is neither empty nor longer than its
-limit. A business key (``external_reference``) is kept exactly as sent, so two keys a client cannot tell apart
-are refused instead of cleaned. A refusal says which field and what is wrong, never the text.
+limit. A business key (``external_reference``) is kept exactly as sent, so keys a client cannot tell apart are
+refused instead of cleaned: white space around it, an invisible character, a form other than NFC. A refusal
+says which field and what is wrong, never the text.
 """
 
 import re
@@ -36,7 +37,8 @@ _INVISIBLE: Final = "C"
 """Unicode's "other" categories: controls, formats (zero-width joiners), surrogates, unassigned."""
 
 
-def _invisible(text: str) -> bool:
+def invisible(text: str) -> bool:
+    """Whether ``text`` holds a control, format, surrogate or unassigned character."""
     return any(unicodedata.category(character).startswith(_INVISIBLE) for character in text)
 
 
@@ -46,7 +48,7 @@ def _cleaned(field: str, text: str, limit: int) -> str:
         raise InvalidTextError(field, "is empty")
     if len(cleaned) > limit:
         raise InvalidTextError(field, f"is longer than {limit} characters")
-    if _invisible(cleaned):
+    if invisible(cleaned):
         raise InvalidTextError(field, "holds a control or format character")
     return cleaned
 
@@ -73,7 +75,7 @@ def parse_reason(text: str) -> Reason:
 
 def parse_email(text: str, *, field: str) -> Email:
     """An email address: one ``@``, a dotted domain, nothing blank or invisible, at most 254 characters."""
-    if len(text) > MAX_EMAIL or _EMAIL.fullmatch(text) is None or _invisible(text):
+    if len(text) > MAX_EMAIL or _EMAIL.fullmatch(text) is None or invisible(text):
         raise InvalidEmailError(field)
     return Email(text)
 
@@ -85,6 +87,8 @@ def parse_external_reference(text: str) -> ExternalReference:
         raise InvalidTextError(field, f"is not 1 to {MAX_EXTERNAL_REFERENCE} characters")
     if text != text.strip():
         raise InvalidTextError(field, "starts or ends with white space")
-    if _invisible(text):
+    if invisible(text):
         raise InvalidTextError(field, "holds a control or format character")
+    if not unicodedata.is_normalized("NFC", text):
+        raise InvalidTextError(field, "is not in Unicode NFC")
     return ExternalReference(text)

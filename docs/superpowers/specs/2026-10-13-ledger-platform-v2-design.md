@@ -1235,8 +1235,8 @@ channel document      channel-specific state machine (do-ecf-v1: §8.6.4), one p
   self-billed document issued on a supplier's behalf; DGII types 41, 43, 47). One resource covers all; v1/M5's
   separate `/v1/do/documents` is gone.
 - An accepted document is never voided; a credit note corrects it.
-- Lines carry a **resolved tax snapshot**: `{category: "do.itbis.standard", rate_key, percent, since}` taken
-  from the regime at the tax point (rule 12).
+- Lines carry a **resolved tax snapshot**: `{category: "do.itbis.standard", kind, percent, since}` taken from
+  the regime at the tax point (rule 12); the category and `since` name the rate in the regime's timeline.
 - **Business key**: `external_reference` unique per `(company, mode, type)` forever; a duplicate answers 409
   `external_reference_taken` with `existing_id`.
 

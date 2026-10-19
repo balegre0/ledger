@@ -18,7 +18,7 @@ from ledger_identity.api import CompanyInactiveError, CompanyInfo
 from ledger_invoicing.application.commands import Creation, InvoicingCommands
 from ledger_invoicing.application.ports import (
     Audit,
-    CompanyDirectory,
+    CompanyLookup,
     Events,
     Invoices,
     InvoicingUnit,
@@ -26,6 +26,8 @@ from ledger_invoicing.application.ports import (
 )
 from ledger_invoicing.domain.errors import (
     CorrectionInvalidError,
+    CorrectionRequiredError,
+    CorrectionUnexpectedError,
     EstablishmentUnknownError,
     ExternalReferenceTakenError,
     InvoiceChangedError,
@@ -178,6 +180,15 @@ class MemoryInvoices(Invoices):
     async def update(self, invoice: Invoice) -> None:
         self._staged.invoices[invoice.id] = invoice
 
+    @override
+    async def corrected_by(self, invoice: InvoiceId) -> bool:
+        return any(
+            other.corrects == invoice
+            and other.tenant == self._tenant
+            and other.status is not InvoiceStatus.VOIDED
+            for other in self._staged.invoices.values()
+        )
+
 
 @final
 class MemoryEvents(Events):
@@ -228,7 +239,7 @@ class MemoryUnits(InvoicingUnits):
 
 
 @final
-class Directory(CompanyDirectory):
+class Lookup(CompanyLookup):
     """identity, as invoicing asks it: one company and its establishments."""
 
     def __init__(self) -> None:
@@ -259,13 +270,13 @@ class World:
 
     def __init__(self, regime: RegimeDef) -> None:
         self.state = State()
-        self.directory = Directory()
+        self.directory = Lookup()
         self.now = NOON
         self.regimes: dict[str, RegimeDef] = {"DO": regime}
         self.ids: list[UUID] = []
         self.commands = InvoicingCommands(
             units=MemoryUnits(self.state, self.clock),
-            directory=self.directory,
+            lookup=self.directory,
             regime_of=self.regime_of,
             clock=self.clock,
             new_id=self.new_id,
@@ -398,6 +409,21 @@ async def test_an_external_reference_is_held_once_per_company_mode_and_type(worl
     assert (await world.commands.create(replace(CALL, scope=live), keyed)).tenant == live
 
 
+async def test_whether_a_document_names_an_invoice_is_checked_before_identity_is_asked(world: World) -> None:
+    with pytest.raises(CorrectionUnexpectedError):
+        await world.commands.create(CALL, replace(INVOICE, corrects=InvoiceId(UUID(int=5))))
+    with pytest.raises(CorrectionRequiredError):
+        await world.commands.create(CALL, replace(INVOICE, kind=DocumentKind.CREDIT_NOTE))
+    assert (world.directory.calls, world.state.units) == ([], 0)
+
+
+async def test_a_note_is_in_its_invoice_s_currency(world: World) -> None:
+    original = await issued_one(world)
+    dollars = replace(INVOICE, kind=DocumentKind.CREDIT_NOTE, corrects=original.id, currency=USD)
+    with pytest.raises(CorrectionInvalidError, match=r"^corrects is in another currency$"):
+        await world.commands.create(CALL, replace(dollars, exchange_rate=Decimal(60)))
+
+
 async def test_a_note_corrects_an_issued_invoice_of_its_company_and_mode(world: World) -> None:
     original = await issued_one(world)
     debit = replace(INVOICE, kind=DocumentKind.DEBIT_NOTE, corrects=original.id)
@@ -489,15 +515,33 @@ async def test_issuing_a_draft_needs_its_company_active(world: World) -> None:
         await world.commands.issue(CALL, draft.id)
 
 
-async def test_a_draft_note_is_issued_only_while_its_invoice_still_stands(world: World) -> None:
+async def test_a_note_whose_invoice_was_voided_while_it_was_priced_is_not_issued(world: World) -> None:
     original = await issued_one(world)
-    credit = replace(DRAFT, kind=DocumentKind.CREDIT_NOTE, corrects=original.id)
-    first = await world.commands.create(CALL, credit)
-    second = await world.commands.create(CALL, credit)
-    assert (await world.commands.issue(CALL, first.id)).status is InvoiceStatus.ISSUED
-    await world.commands.void(CALL, original.id, None)
+    note = await world.commands.create(
+        CALL, replace(DRAFT, kind=DocumentKind.CREDIT_NOTE, corrects=original.id)
+    )
+    voided, _ = original.void(reason=None, corrected_by_a_note=False, now=NOON)
+
+    def voided_meanwhile() -> None:
+        world.state.invoices[original.id] = voided
+
+    world.state.while_waiting = voided_meanwhile
     with pytest.raises(CorrectionInvalidError, match=r"^corrects is not an issued document$"):
-        await world.commands.issue(CALL, second.id)
+        await world.commands.issue(CALL, note.id)
+
+
+async def test_a_draft_issued_by_someone_else_meanwhile_is_not_issued_twice(world: World) -> None:
+    draft = await world.commands.create(CALL, DRAFT)
+    seller = Seller(legal_name="Acme SRL", tax_id=RNC)
+    elsewhere, _ = draft.issue(seller=seller, pricing=draft.pricing, corrected=None, now=NOON)
+
+    def issued_meanwhile() -> None:
+        world.state.invoices[draft.id] = elsewhere
+
+    world.state.while_waiting = issued_meanwhile
+    with pytest.raises(InvoiceNotIssuableError):
+        await world.commands.issue(CALL, draft.id)
+    assert world.state.events == []
 
 
 # ── Voiding ─────────────────────────────────────────────────────────────────────
@@ -522,6 +566,43 @@ async def test_voiding_an_issued_document_announces_and_records_it(world: World)
         direction=Direction.SALES,
     )
     assert world.state.audited[-1] == Audited("invoice.void", issued.id, issued, voided, {"kind": "invoice"})
+
+
+async def test_an_invoice_a_draft_or_issued_note_corrects_is_not_voided(world: World) -> None:
+    original = await issued_one(world)
+    note = await world.commands.create(
+        CALL, replace(DRAFT, kind=DocumentKind.CREDIT_NOTE, corrects=original.id)
+    )
+    with pytest.raises(InvoiceNotVoidableError):
+        await world.commands.void(CALL, original.id, None)
+    await world.commands.issue(CALL, note.id)
+    with pytest.raises(InvoiceNotVoidableError):
+        await world.commands.void(CALL, original.id, None)
+    await world.commands.void(CALL, note.id, None)
+    assert (await world.commands.void(CALL, original.id, None)).status is InvoiceStatus.VOIDED
+
+
+async def test_a_note_made_while_its_invoice_is_voided_stops_the_void(world: World) -> None:
+    # The fake serializes nothing: it shows what the void decides once the note is visible to it. That the
+    # two serialize on the invoice's row lock (the note's unit locks the invoice it corrects, the void locks
+    # it before it asks for notes) only PostgreSQL proves: Task 4's repository test.
+    original = await issued_one(world)
+    note = replace(original, id=InvoiceId(new_id()), kind=DocumentKind.CREDIT_NOTE, corrects=original.id)
+
+    def a_note_is_made_meanwhile() -> None:
+        world.state.invoices[note.id] = note
+
+    world.state.while_waiting = a_note_is_made_meanwhile
+    with pytest.raises(InvoiceNotVoidableError):
+        await world.commands.void(CALL, original.id, None)
+
+
+async def test_a_voided_document_is_not_voided_again(world: World) -> None:
+    issued = await issued_one(world)
+    await world.commands.void(CALL, issued.id, None)
+    with pytest.raises(InvoiceNotVoidableError):
+        await world.commands.void(CALL, issued.id, None)
+    assert len(world.state.events) == 2
 
 
 async def test_what_is_not_issued_or_not_there_is_not_voided(world: World) -> None:

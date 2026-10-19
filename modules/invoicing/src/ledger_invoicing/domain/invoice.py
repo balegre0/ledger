@@ -6,15 +6,16 @@ the day it is issued, with the seller as the company is then. Every change makes
 and returns the event that announces it, if any.
 
 A credit or debit note names the invoice it corrects: an issued invoice of the same company, mode and
-direction (Decision 10; credit-note balances are a later slice). An issued document is voided only while no
-channel accepted it (Decision 11): an accepted one is corrected by a note. Which channels accepted it is the
+direction, in its currency (Decision 10; credit-note balances are a later slice). An issued document is voided
+only while no channel accepted it and no draft or issued note corrects it (Decision 11): an accepted one is
+corrected by a note, and a corrected one stands for its notes. Which channels accepted it is the
 fiscal mirror's, written by ``fiscal`` from M3b; until then ``accepted_by`` stays empty and the refusal is
 stated, not reachable through the API.
 """
 
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import final
+from typing import final, override
 lazy from datetime import datetime
 
 from ledger_invoicing.domain.errors import (
@@ -32,6 +33,7 @@ lazy from ledger_invoicing.domain.ids import InvoiceId
 lazy from ledger_invoicing.domain.parties import Seller
 lazy from ledger_invoicing.domain.pricing import Pricing, Terms
 lazy from ledger_invoicing.domain.text import ExternalReference, Reason
+lazy from ledger_kernel.money import Currency
 lazy from ledger_kernel.regimes import Direction
 lazy from ledger_kernel.tenancy import Tenant
 
@@ -58,9 +60,13 @@ class InvoiceStatus(StrEnum):
 
 
 @final
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclass(frozen=True, slots=True, kw_only=True, repr=False)
 class Invoice:
-    """A commercial document at a version: each change returns it changed and the event that says so."""
+    """A commercial document at a version: each change returns it changed and the event that says so.
+
+    Its ``repr`` names it, its kind, status and version: nothing a client wrote (lines, buyer, reason) or the
+    seller's name.
+    """
 
     id: InvoiceId
     tenant: Tenant
@@ -102,6 +108,11 @@ class Invoice:
         if (self.kind is DocumentKind.INVOICE) != (self.corrects is None):
             raise InvalidValueError(field="invoice.corrects", requirement="set exactly when it is a note")
 
+    @override
+    def __repr__(self) -> str:
+        shown = f"kind={self.kind.value!r}, status={self.status.value!r}, version={self.version}"
+        return f"Invoice(id={self.id!r}, {shown})"
+
     @classmethod
     def new(
         cls,
@@ -117,12 +128,11 @@ class Invoice:
         ``corrects`` is the document a note names, as the company's unit read it (``None``: it names none).
         """
         kind = opening.kind
-        if kind is DocumentKind.INVOICE and corrects is not None:
-            raise CorrectionUnexpectedError
-        if kind is not DocumentKind.INVOICE and corrects is None:
-            raise CorrectionRequiredError
+        require_correction_named(kind, named=corrects is not None)
         if corrects is not None:
-            _require_correctable(corrects, tenant=opening.tenant, direction=opening.direction)
+            _require_correctable(
+                corrects, tenant=opening.tenant, direction=opening.direction, currency=opening.terms.currency
+            )
         draft = cls(
             id=opening.id,
             tenant=opening.tenant,
@@ -160,13 +170,21 @@ class Invoice:
         if (None if corrected is None else corrected.id) != self.corrects:
             raise InvalidValueError(field="corrected", requirement="the invoice the note names")
         if corrected is not None:
-            _require_correctable(corrected, tenant=self.tenant, direction=self.direction)
+            _require_correctable(
+                corrected, tenant=self.tenant, direction=self.direction, currency=self.terms.currency
+            )
         issued = _issued(self, seller=seller, pricing=pricing, now=now, version=self.version + 1)
         return issued, _announced(issued)
 
-    def void(self, *, reason: Reason | None, now: datetime) -> tuple[Invoice, InvoiceVoided]:
-        """The issued document voided, for ``reason`` if given, at its next version."""
-        if self.status is not InvoiceStatus.ISSUED or self.accepted_by:
+    def void(
+        self, *, reason: Reason | None, corrected_by_a_note: bool, now: datetime
+    ) -> tuple[Invoice, InvoiceVoided]:
+        """The issued document voided, for ``reason`` if given, at its next version.
+
+        Refused while a channel accepted it, or while a draft or issued note corrects it
+        (``corrected_by_a_note``, as the unit that locked it reads its notes): the note stands on it.
+        """
+        if self.status is not InvoiceStatus.ISSUED or self.accepted_by or corrected_by_a_note:
             raise InvoiceNotVoidableError(self.id)
         voided = replace(
             self,
@@ -185,8 +203,21 @@ class Invoice:
         )
 
 
-def _require_correctable(corrected: Invoice, *, tenant: Tenant, direction: Direction) -> None:
-    """Refuse a note's invoice unless it is an issued invoice of the note's tenant and direction.
+def require_correction_named(kind: DocumentKind, *, named: bool) -> None:
+    """Refuse an invoice that names a document to correct, and a note that names none.
+
+    Checked first, before anything is read: it depends on the request alone.
+    """
+    if kind is DocumentKind.INVOICE and named:
+        raise CorrectionUnexpectedError
+    if kind is not DocumentKind.INVOICE and not named:
+        raise CorrectionRequiredError
+
+
+def _require_correctable(
+    corrected: Invoice, *, tenant: Tenant, direction: Direction, currency: Currency
+) -> None:
+    """Refuse a note's invoice unless it is an issued invoice of the note's tenant, direction and currency.
 
     Another company's or mode's document is refused as a missing one: nothing about it is told.
     """
@@ -198,6 +229,8 @@ def _require_correctable(corrected: Invoice, *, tenant: Tenant, direction: Direc
         raise CorrectionInvalidError(CorrectionProblem.NOT_AN_INVOICE)
     if corrected.direction is not direction:
         raise CorrectionInvalidError(CorrectionProblem.OTHER_DIRECTION)
+    if corrected.terms.currency != currency:
+        raise CorrectionInvalidError(CorrectionProblem.OTHER_CURRENCY)
 
 
 def _issued(invoice: Invoice, *, seller: Seller, pricing: Pricing, now: datetime, version: int) -> Invoice:

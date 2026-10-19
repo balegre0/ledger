@@ -31,21 +31,50 @@ profile and its establishments come through `IdentityApi`.
    invoice's) and the functional totals are computed once, rounded as the regime says, and stored.
 6. **Tax point and dates**: `issue_date` defaults to today in the establishment's time zone (the company's
    `MAIN` unless `establishment` names another), `tax_point` to the issue date (I11/rule 12: rates are chosen by
-   the tax point, never by `now()`). Both are dates, not instants.
+   the tax point, never by `now()`). Both are dates, not instants. The issue date is never after the
+   establishment's today (422 `invalid_issue_date`); the tax point lies on the issue date or at most 400 days
+   before it (422 `invalid_tax_point`; `MAX_TAX_POINT_AGE`, provisional until a regime states how late a supply
+   may be invoiced). "Today" comes from the clock before any unit opens; the times a unit records are its
+   own, so a document priced a moment before midnight may record a time of the next day.
 7. **Parties**: the seller is the company's snapshot at issue (legal name, primary tax id); the buyer is an
    inline snapshot `{tax_id?, legal_name, address?, email?}` (§7.2). Tax ids are qualified `{scheme, value}`,
    read with the installed regimes' schemes, masked in every log, span and error.
+8. **Currency and rounding** (added at the Task 2-3 review): the kernel's calculator rounds to the regime's
+   `RoundingRule.places` whatever the currency, so a document whose currency (or whose company's functional
+   currency) has other minor units than those places is refused (422 `currency_not_supported_by_regime`: JPY's
+   0, KWD's 3 under DO's 2) until a regime declares how it rounds them. **For the owner (v2-M3):** whether the
+   kernel should round at `min(places, minor_units)` or a regime should declare per-currency rounding.
 9. **Business key**: `external_reference` (1-100, optional) is unique per `(company, mode, type)` forever; a
-   duplicate answers 409 `external_reference_taken` carrying `existing_id`.
-10. **Corrections**: a credit or debit note names the invoice it corrects in `corrects` (an issued invoice of the
-    same company and mode; the regime's document types decide nothing yet: no `ecf_type` field exists in the DO
-    regime).
+   duplicate answers 409 `external_reference_taken` carrying `existing_id`. It is kept exactly as sent and
+   refused with white space around it, an invisible character, or in a form other than Unicode NFC.
+10. **Corrections**: a credit or debit note names the invoice it corrects in `corrects`: an issued invoice (not
+    a note) of the same company, mode and direction, in the note's currency (422 `correction_invalid`); the
+    regime's document types decide nothing yet (no `ecf_type` field exists in the DO regime). Whether a document
+    names one at all is checked first, before identity is asked (422 `correction_unexpected` /
+    `correction_required`).
 11. **Void**: only an `issued` invoice, with an optional reason; refused (409 `invoice_not_voidable`) when any
-    channel accepted it (the mirror is empty in this slice, so the rule is stated and unreachable until M3b).
+    channel accepted it (the mirror is empty in this slice, so the rule is stated and unreachable until M3b),
+    and while a draft or issued note corrects it. Creating or issuing a note locks the invoice it corrects, and
+    a void locks the invoice before it asks for its notes, so the two serialize (lock order: a note before its
+    invoice).
 12. **Country fields** `fiscal.<regime>.<field>`: accepted only for fields the company's regime declares; any
-    other key is 422 `field_unknown` (§9.8). The DO regime declares none yet.
+    other key is 422 `field_unknown` (§9.8). The DO regime declares none yet. Values are bounded (422
+    `field_invalid`): text up to 500 characters and codes up to 100, none invisible; decimals below 10^18 with
+    at most 12 places; objects of at most 20 text fields named in lower case, never nested.
 13. **Facade**: `InvoicingApi.document(call, invoice)` (for fiscal) in `api.py`, bound in `application/facade.py`;
     `apply_fiscal_status` and `IssuePolicy` arrive with `fiscal`.
+
+## Rules the decisions did not fix, decided in Tasks 2-3 (the owner reviews them)
+
+- **Lines**: a discount has at most 12 decimal places, as a unit price; a document has 1 to 1000 lines; a line
+  names one category of each tax (`<regime>.<tax>.<category>`), and taxes on one line do not compound (the
+  kernel's `TaxLine` cannot express ITBIS charged on a price that includes ISC: no regime declares such a tax).
+- **Parties**: the buyer is optional (a consumer sale names none); its email is at most 254 characters.
+- **Same-currency rate**: an `exchange_rate` sent with a document in the functional currency is 422
+  `exchange_rate_unused`.
+- **Drafts** are priced when made and priced again when issued, on the day they are issued, with the seller as
+  the company is then; a draft issued by another call meanwhile answers 409 `invoice_not_issuable`, one
+  changed otherwise 409 `invoice_changed`.
 
 ## Tasks (each ends with `uv run poe check` green, one commit)
 
@@ -54,6 +83,10 @@ profile and its establishments come through `IdentityApi`.
    property tests).
 3. Application: create / issue / void use cases and ports, with the in-memory fake of the module's tests.
 4. Persistence: schema `invoicing` (tables, RLS tenant scope, chassis v1 + v2), repositories, migrations.
+   `Invoices.add` inserts with `ON CONFLICT DO NOTHING` on the business key's unique index and then selects the
+   holder's id (never a caught unique violation, which would abort the unit's transaction). A repository test
+   proves on PostgreSQL that a void of an invoice and the creation (and the issue) of a note correcting it
+   serialize on the invoice's row lock, which the in-memory fake cannot.
 5. HTTP: `/v1/invoices` router, models, OpenAPI snapshot, idempotency, TypeIDs, `Ledger-Company`.
 6. In-process API and events: `InvoicingApi`, `invoicing.invoice.issued/voided`.
 7. Review pass: security (RLS, tax ids in messages), money edge cases, docs, review file.

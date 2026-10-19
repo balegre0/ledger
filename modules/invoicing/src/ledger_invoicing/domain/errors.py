@@ -83,6 +83,39 @@ class InvalidExchangeRateError(InvalidInputError):
         super().__init__(f"exchange_rate must be {requirement}")
 
 
+class CurrencyNotSupportedByRegimeError(InvalidInputError):
+    """A currency whose minor unit has other places than the regime rounds to (Decision 8).
+
+    The kernel's calculator rounds to the regime's places whatever the currency; until a regime says how it
+    rounds a currency with other minor units (JPY's none, KWD's three), such a document is refused.
+    """
+
+    code: ClassVar[str] = "currency_not_supported_by_regime"
+
+    def __init__(self, currency: str, places: int) -> None:
+        super().__init__(
+            f"{currency} has other minor units than the {places} places the company's regime rounds to"
+        )
+
+
+class InvalidIssueDateError(InvalidInputError):
+    """An issue date after today where the document is issued: a document is not dated in the future."""
+
+    code: ClassVar[str] = "invalid_issue_date"
+
+    def __init__(self) -> None:
+        super().__init__("issue_date must not be after today in the establishment's time zone")
+
+
+class InvalidTaxPointError(InvalidInputError):
+    """A tax point after the issue date, or further before it than a document may reach back."""
+
+    code: ClassVar[str] = "invalid_tax_point"
+
+    def __init__(self, days: int) -> None:
+        super().__init__(f"tax_point must be on the issue date or at most {days} days before it")
+
+
 class ExchangeRateRequiredError(InvalidInputError):
     """A document in a currency other than the company's functional one, without the rate between them."""
 
@@ -160,6 +193,7 @@ class CorrectionProblem(StrEnum):
     NOT_ISSUED = "is not an issued document"
     NOT_AN_INVOICE = "is a note, not an invoice"
     OTHER_DIRECTION = "is of the other direction"
+    OTHER_CURRENCY = "is in another currency"
 
 
 class CorrectionInvalidError(InvalidInputError):
@@ -209,12 +243,17 @@ class InvoiceNotIssuableError(ConflictError):
 
 
 class InvoiceNotVoidableError(ConflictError):
-    """Only an issued document that no channel accepted is voided; an accepted one is corrected by a note."""
+    """Only an issued document that no channel accepted and no standing note corrects is voided.
+
+    An accepted one is corrected by a note; one a draft or issued note corrects keeps standing for it.
+    """
 
     code: ClassVar[str] = "invoice_not_voidable"
 
     def __init__(self, invoice: UUID) -> None:
-        super().__init__(f"invoice {_public(invoice)} is not issued, or a channel accepted it")
+        super().__init__(
+            f"invoice {_public(invoice)} is not issued, a channel accepted it, or a note corrects it"
+        )
 
 
 class InvoiceChangedError(ConflictError):

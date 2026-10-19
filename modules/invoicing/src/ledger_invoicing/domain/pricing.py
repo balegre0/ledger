@@ -3,8 +3,10 @@
 ``Terms`` are what the client sent, checked for shape; ``price`` resolves them once against the regime of the
 company's jurisdiction, at the document's tax point (rule 12: never ``now()``):
 
-- the issue date defaults to today in the establishment's time zone, the tax point to the issue date
-  (Decision 6);
+- the document's currency (and the functional one) must have as many minor-unit places as the regime rounds
+  to (Decision 8);
+- the issue date defaults to today in the establishment's time zone and is never after it, the tax point
+  defaults to the issue date and lies on it or at most ``MAX_TAX_POINT_AGE`` before it (Decision 6);
 - each line's base is ``quantity x unit_price - discount`` rounded half up to the currency's minor unit
   (Decision 4), and each tax category it names is resolved to a snapshot ``{category, kind, percent, since}``
   of the rate in effect on the tax point;
@@ -12,7 +14,8 @@ company's jurisdiction, at the document's tax point (rule 12: never ``now()``):
 - a document in another currency than the company's functional one carries the exchange rate (units of the
   functional currency per one of the document's), and its functional totals are converted once, each amount
   rounded as the regime rounds (Decision 5);
-- country fields (``fiscal.<regime>.<field>``) are only those the regime declares, each of its kind
+- country fields (``fiscal.<regime>.<field>``) are only those the regime declares, each of its kind and
+  bounded: text and codes without invisible characters, decimals money can hold, objects of text fields only
   (Decision 12).
 
 **Taxes on one line do not compound.** A line may name several categories, one of each tax (ITBIS and a
@@ -26,7 +29,7 @@ Every amount stays in money's range (below 10^18): a document whose amounts woul
 
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from types import MappingProxyType
 from typing import Final, Literal, assert_type, final
 from zoneinfo import ZoneInfo
@@ -36,18 +39,23 @@ lazy from decimal import Decimal
 
 from ledger_invoicing.domain.errors import (
     AmountOutOfRangeError,
+    CurrencyNotSupportedByRegimeError,
     ExchangeRateRequiredError,
     ExchangeRateUnusedError,
     FieldInvalidError,
     FieldRequiredError,
     FieldUnknownError,
     InvalidExchangeRateError,
+    InvalidIssueDateError,
     InvalidLineError,
     InvalidLinesError,
+    InvalidTaxPointError,
     TaxRateNotInEffectError,
 )
 from ledger_invoicing.domain.lines import bounded
+from ledger_invoicing.domain.text import invisible
 from ledger_kernel.dated import NotInEffectError
+from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.money import InvalidAmountError, Money
 from ledger_kernel.regimes import CategoryTotal, FieldKind, TaxCalculator, TaxCategoryKey, TaxLine, Totals
 lazy from ledger_invoicing.domain.lines import LineTerms
@@ -71,8 +79,21 @@ type FieldValue = str | Mapping[str, FieldValue]
 type CountryFields = Mapping[str, Mapping[str, FieldValue]]
 """``fiscal``: each regime's namespace and the fields under it (§9.8)."""
 
+MAX_TAX_POINT_AGE: Final = timedelta(days=400)
+"""How far before its issue date a document's tax point may be. Provisional: a regime rule replaces it (a law
+says how late a supply may be invoiced); until one exists, a bound keeps a typo from reaching years back."""
+MAX_FIELD_TEXT: Final = 500
+"""The longest text a country field (or a field of an object one) holds."""
+MAX_FIELD_CODE: Final = 100
+MAX_FIELD_OBJECT: Final = 20
+"""The most fields an object country field holds; each is text, never another object."""
+_TEXT: Final = f"text of 1 to {MAX_FIELD_TEXT} characters, none of them invisible"
+_CODE: Final = f"text of 1 to {MAX_FIELD_CODE} characters, none of them invisible"
+_PLAIN_DECIMAL: Final = "a plain decimal number below 10^18 with at most 12 decimal places"
+_OBJECT: Final = f"an object of at most {MAX_FIELD_OBJECT} fields named in lower case, each {_TEXT}"
+_NAME: Final = re.compile(r"[a-z][a-z0-9_]{0,39}", re.ASCII)
 _DATE: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
-_DECIMAL: Final = re.compile(r"-?[0-9]+(?:\.[0-9]+)?", re.ASCII)
+_DECIMAL: Final = re.compile(r"-?[0-9]{1,18}(?:\.[0-9]{1,12})?", re.ASCII)
 _NOTHING: Final[Mapping[str, FieldValue]] = MappingProxyType({})
 _NO_FIELDS: Final[CountryFields] = MappingProxyType({})
 
@@ -182,7 +203,12 @@ class Pricing:
 
 
 def local_date(instant: datetime, time_zone: str) -> date:
-    """The date ``instant`` falls on in ``time_zone`` (an IANA name): an establishment's today."""
+    """The date ``instant`` (aware) falls on in ``time_zone`` (an IANA name): an establishment's today.
+
+    A naive ``instant`` would be read in the server's zone, so it is a defect of the caller.
+    """
+    if instant.utcoffset() is None:
+        raise InvalidValueError(field="instant", requirement="an aware datetime")
     return instant.astimezone(ZoneInfo(time_zone)).date()
 
 
@@ -198,8 +224,16 @@ def price(
 
     ``today`` is the date in the establishment's time zone: the issue date when the terms name none.
     """
+    places = regime.rounding.places
+    for currency in (terms.currency, functional_currency):
+        if currency.minor_units != places:
+            raise CurrencyNotSupportedByRegimeError(currency.code, places)
     issue_date = today if terms.issue_date is None else terms.issue_date
+    if issue_date > today:
+        raise InvalidIssueDateError
     tax_point = issue_date if terms.tax_point is None else terms.tax_point
+    if not issue_date - MAX_TAX_POINT_AGE <= tax_point <= issue_date:
+        raise InvalidTaxPointError(MAX_TAX_POINT_AGE.days)
     rate = _exchange_rate(terms, functional_currency)
     fiscal = _country_fields(terms.fiscal, regime)
     categories = {category.key: category for category in regime.tax_categories}
@@ -357,16 +391,31 @@ def _requirement(definition: FieldDef, value: FieldValue) -> str | None:
     """What ``value`` must be to be of ``definition``'s kind; ``None`` when it is."""
     kind = definition.kind
     match kind:
-        case FieldKind.TEXT | FieldKind.CODE:
-            return None if isinstance(value, str) else "text"
+        case FieldKind.TEXT:
+            return None if _is_text(value, MAX_FIELD_TEXT) else _TEXT
+        case FieldKind.CODE:
+            return None if _is_text(value, MAX_FIELD_CODE) else _CODE
         case FieldKind.DATE:
             return None if isinstance(value, str) and _is_date(value) else "a date (YYYY-MM-DD)"
         case FieldKind.DECIMAL:
             plain = isinstance(value, str) and _DECIMAL.fullmatch(value) is not None
-            return None if plain else "a plain decimal number"
+            return None if plain else _PLAIN_DECIMAL
         case _:
             assert_type(kind, Literal[FieldKind.OBJECT])  # a new kind fails the type checkers here
-            return "an object" if isinstance(value, str) else None
+            return None if _is_object(value) else _OBJECT
+
+
+def _is_text(value: FieldValue, limit: int) -> bool:
+    return isinstance(value, str) and 1 <= len(value) <= limit and not invisible(value)
+
+
+def _is_object(value: FieldValue) -> bool:
+    """Whether ``value`` is an object of at most ``MAX_FIELD_OBJECT`` text fields, named in lower case."""
+    if isinstance(value, str) or len(value) > MAX_FIELD_OBJECT:
+        return False
+    return all(
+        _NAME.fullmatch(name) is not None and _is_text(item, MAX_FIELD_TEXT) for name, item in value.items()
+    )
 
 
 def _is_date(text: str) -> bool:
