@@ -9,6 +9,7 @@ from typing import final
 
 from ledger_invoicing.application.commands import tenant_of
 from ledger_invoicing.domain.errors import InvoiceNotFoundError
+lazy from ledger_invoicing.api import AnyCall
 lazy from ledger_invoicing.application.ports import InvoiceFilters, InvoicingUnits
 lazy from ledger_invoicing.domain.ids import InvoiceId
 lazy from ledger_invoicing.domain.invoice import Invoice
@@ -23,8 +24,11 @@ class InvoicingQueries:
 
     units: InvoicingUnits
 
-    async def document(self, call: Call, invoice: InvoiceId) -> Invoice:
-        """The document ``invoice`` of the call's tenant; ``InvoiceNotFoundError`` otherwise."""
+    async def document(self, call: AnyCall, invoice: InvoiceId) -> Invoice:
+        """The document ``invoice`` of the call's tenant; ``InvoiceNotFoundError`` otherwise.
+
+        A request's call or the platform's (``InvoicingApi.document``): either names the tenant it reads.
+        """
         async with self.units.unit(tenant_of(call)) as unit:
             found = await unit.invoices.get(invoice)
         if found is None:

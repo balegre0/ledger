@@ -1,9 +1,22 @@
 """What invoicing announces (§3.5): the facts other modules build on. Imported by the domain to emit them.
 
-Each is scoped to its document's tenant (organization, company, mode: a document exists in one mode, §7.1);
-its subject is the document and its ``aggregate_version`` the version the change left. Payloads are thin: a
-consumer reads the document through ``InvoicingApi`` and never learns a buyer, a description or an amount from
-an event. Kinds and directions travel as their words.
+Each is published in the unit that makes the change it announces, so it commits with the document, its audit
+record and the request's ``Idempotency-Key``, or not at all: a refused request, a draft and a replay announce
+nothing. Its envelope is the outbox row's:
+
+- ``scope``: the document's tenant, its organization, company and mode (a document exists in one mode, §7.1);
+- ``subject``: the document's id (the spec's ``document`` field: the envelope already carries it);
+- ``aggregate_version``: the version the change left (the document's ``ETag``), so a consumer applies events
+  version-monotonically and replays nothing older.
+
+Payloads are thin and stable (``VERSION`` 1: any change to a payload's shape is a new version; the tests pin
+each payload until event schema snapshots check them in CI, §2 rule 9): a consumer reads the document through
+``InvoicingApi.document`` and never learns a party, a tax id, a description or an amount from an event. Kinds
+and directions travel as their words, ids as UUID strings (the platform's codec):
+
+- ``invoicing.invoice.issued`` v1: ``{"kind": "invoice" | "credit_note" | "debit_note", "direction": "sales"
+  | "purchase", "corrects": "<uuid>" | null}``;
+- ``invoicing.invoice.voided`` v1: ``{"kind": ..., "direction": ...}``.
 """
 
 from dataclasses import dataclass

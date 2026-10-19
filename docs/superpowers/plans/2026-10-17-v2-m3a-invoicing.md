@@ -132,6 +132,35 @@ profile and its establishments come through `IdentityApi`.
   The country fields a request sent are stored but not answered: §9.8 puts country response fields in the
   channels' entries, which M3b defines.
 
+## Rules decided in Task 6 (in-process API and events; the owner reviews them)
+
+- **Who reads.** `InvoicingApi.document(call, invoice)` takes a request's `Call` or a `SystemCall` (§3.4 shows
+  `Call`; fiscal's recovery consumer reads with the `SystemCall` of the event's scope, M3b Task 20). The tenant
+  read is the call's scope, which must be a company in a mode (`InvalidValueError`, a defect of the caller);
+  another tenant's document is `InvoiceNotFoundError`, which never names the id. Whether a principal may read
+  is its edge's to judge (the HTTP edge asks for `invoicing.invoices.read`), as identity's API does: the API
+  trusts the call. `@facade` refuses a call made while a unit is open; the facade opens its own.
+- **`InvoiceView`** (frozen DTO, kernel value types; the M3b plan's Assumption B1, with these differences for
+  its Task 12 mapping): `tenant: Tenant` in place of separate organization, company and mode (the scope its
+  events carry and a `SystemCall` about it names; its mode is always set); `kind` for the wire's `type` (the
+  kernel's `DocumentKind`, and no builtin shadowed); line taxes are `{category, kind, percent, since, amount}`
+  (no `rate_key`: the category and `since` name the rate in the regime's timeline, §7.5); `fields` are
+  namespaced `{"<regime>": {...}}` (§9.8), empty when none were sent; it adds `created_at`, `updated_at`,
+  `issued_at`, `voided_at`, `void_reason` and `livemode`. The establishment's code and time zone are on it
+  (B6), as the document stored them when it was priced.
+- **Personal data.** A view carries tax ids qualified and in clear (a module inside the tenant's boundary
+  needs them, §7.3); its `repr` names the id, kind, status and version only, a party's its tax id masked, a
+  line's its tax categories: no name, address, email, description or business key reaches a log through one.
+- **Events** stay thin (§7.3 allows tax ids in clear in internal events; these need none): `issued` v1
+  `{kind, direction, corrects}`, `voided` v1 `{kind, direction}`, scoped to the document's tenant (mode
+  included), subject the document, `aggregate_version` its version. Any change to a payload's shape is a new
+  version; the tests pin both payloads until event schema snapshots exist (§2 rule 9, deferred by M1). Proven
+  on PostgreSQL through the `api` app: an event commits with its change; a draft, a refused request (422, 409,
+  412) and a replay add no row.
+- **Manifest.** Unchanged: an API is bound under its module's name (`ModuleParts.api`), `[extension_points]
+  provides` is for channels' ports (invoicing provides none), and the events were declared in Task 1. Sync
+  adds the `api` layer to `.importlinter`.
+
 ## Tasks (each ends with `uv run poe check` green, one commit)
 
 1. Plan and skeleton: this file; `modules/invoicing` (manifest, README, layers), `uv sync`, devtools sync.

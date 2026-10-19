@@ -47,7 +47,7 @@ lazy from ledger_invoicing.domain.text import ExternalReference, Reason
 lazy from ledger_kernel.clock import Clock
 lazy from ledger_kernel.money import Currency
 lazy from ledger_kernel.regimes import Direction, DocumentKind, RegimeDef
-lazy from ledger_platform.runtime.calls import Call
+lazy from ledger_platform.runtime.calls import Call, SystemCall
 
 _NO_FIELDS: Final[CountryFields] = MappingProxyType({})
 
@@ -110,7 +110,7 @@ class Change:
     apply: Callable[[InvoicingUnit], Awaitable[Invoice]]
 
 
-def tenant_of(call: Call) -> Tenant:
+def tenant_of(call: Call | SystemCall) -> Tenant:
     """The company and mode ``call`` acts in: a document exists in one mode of one company."""
     scope = call.scope
     if not isinstance(scope, Tenant) or scope.mode is None:
