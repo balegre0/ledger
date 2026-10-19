@@ -7,7 +7,7 @@ import pytest
 import xmlschema
 
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf, rfce
-from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import corrected, violations
+from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.drafts import CATEGORY_OF, BillingIndicator, Line
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
@@ -80,9 +80,11 @@ def test_the_builders_write_the_golden_documents_byte_for_byte(name: str) -> Non
 def test_every_golden_document_is_valid_for_both_validators(name: str) -> None:
     document = (GOLDEN / f"{name}.xml").read_bytes()
     root = b"</RFCE>" if CASES[name] is Format.RFCE else b"</ECF>"
-    assert violations(CASES[name], document, unsigned=True) == ()
+    assert DO_SCHEMAS.violations(CASES[name], document, unsigned=True) == ()
     signed_shape = document.replace(root, SIGNATURE + root)
-    xmlschema.XMLSchema10(corrected(CASES[name]).decode("utf-8")).validate(signed_shape.decode("utf-8"))
+    xmlschema.XMLSchema10(DO_SCHEMAS.corrected(CASES[name]).decode("utf-8")).validate(
+        signed_shape.decode("utf-8")
+    )
 
 
 def test_the_zero_rate_and_exempt_golden_s_totals() -> None:

@@ -8,7 +8,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf, rfce
-from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import corrected, violations
+from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS
 from ledger_country_do.channels.ecf_v1.adapters.xml.writer import EmptyTextError, Node, UnwritableTextError
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.drafts import (
@@ -57,7 +57,7 @@ def test_a_document_of_exempt_lines_only_writes_no_taxed_totals() -> None:
     document = ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT)
     assert b"MontoGravadoTotal" not in document
     assert b"IndicadorMontoGravado" not in document
-    assert violations(Format.ECF_32, document, unsigned=True) == ()
+    assert DO_SCHEMAS.violations(Format.ECF_32, document, unsigned=True) == ()
 
 
 def test_the_rfce_summarizes_a_consumer_invoice_with_its_security_code() -> None:
@@ -68,7 +68,7 @@ def test_the_rfce_summarizes_a_consumer_invoice_with_its_security_code() -> None
     )
     assert found == ("E320000000001", "1180.00", "dcp79q")
     assert texts(summary, "Encabezado/Totales/ITBIS1", "Encabezado/Totales/TotalITBIS1") == (None, "180.00")
-    assert violations(Format.RFCE, summary, unsigned=True) == ()
+    assert DO_SCHEMAS.violations(Format.RFCE, summary, unsigned=True) == ()
 
 
 def test_the_writer_leaves_out_a_field_without_a_value_and_writes_numbers_as_they_are() -> None:
@@ -144,7 +144,7 @@ _LINE = st.builds(
         ]
     ),
 )
-XSD_32 = xmlschema.XMLSchema10(corrected(Format.ECF_32).decode("utf-8"))
+XSD_32 = xmlschema.XMLSchema10(DO_SCHEMAS.corrected(Format.ECF_32).decode("utf-8"))
 
 
 @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
@@ -155,7 +155,7 @@ def test_every_drafted_consumer_invoice_is_valid_for_both_validators(
     buyer = Buyer(rnc="131098193", name="CLIENTE") if named else Buyer()
     draft = replace(consumer_invoice(large=named, buyer=buyer), lines=tuple(lines))
     document = ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT)
-    assert violations(Format.ECF_32, document, unsigned=True) == ()
+    assert DO_SCHEMAS.violations(Format.ECF_32, document, unsigned=True) == ()
     signed_shape = document.replace(
         b"</ECF>", b'<Signature xmlns="http://www.w3.org/2000/09/xmldsig#"/></ECF>'
     )

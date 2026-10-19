@@ -35,7 +35,6 @@ from ledger_country_do.channels.ecf_v1.adapters.signing.trust import (
 )
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import SignatureInvalidError
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf
-from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import SchemaViolationError
 from ledger_country_do.channels.ecf_v1.application.ports import XmlSigner
 from ledger_country_do.channels.ecf_v1.domain.drafts import Buyer
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
@@ -55,6 +54,7 @@ from ledger_country_do_testing.samples import (
 from ledger_country_do_testing.signatures import sign_with_signxml
 from ledger_country_do_testing.transports import FAKE_HOSTS
 from ledger_fiscal_kit.xml.hardened import DoctypeRefusedError
+from ledger_fiscal_kit.xml.schemas import SchemaViolationError
 from ledger_testing.clock import ManualClock
 from ledger_testing.pki import Authority
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.client import DirectoryLookup
