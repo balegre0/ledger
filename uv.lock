@@ -807,6 +807,7 @@ source = { editable = "modules/invoicing" }
 dependencies = [
     { name = "alembic" },
     { name = "ledger-identity" },
+    { name = "ledger-kernel" },
     { name = "ledger-platform" },
 ]
 
@@ -814,6 +815,7 @@ dependencies = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.20.0" },
     { name = "ledger-identity", editable = "modules/identity" },
+    { name = "ledger-kernel", editable = "packages/kernel" },
     { name = "ledger-platform", editable = "packages/platform" },
 ]
 

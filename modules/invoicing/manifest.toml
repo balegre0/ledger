@@ -5,7 +5,7 @@ summary = "Commercial documents: invoices, credit and debit notes, their lines a
 owners = ["@balegre0"]
 
 [dependencies]
-packages = ["platform"]
+packages = ["kernel", "platform"]
 modules = ["identity"]
 python = ["alembic>=1.20.0"]
 
@@ -35,6 +35,14 @@ roles = ["owner", "admin", "accountant", "issuer"]
 code = "invoicing.invoices.void"
 summary = "Void an issued document no channel accepted."
 roles = ["owner", "admin", "accountant"]
+
+[[events.publishes]]
+type = "invoicing.invoice.issued"
+version = 1
+
+[[events.publishes]]
+type = "invoicing.invoice.voided"
+version = 1
 
 [http]
 mounted_in = ["api"]
