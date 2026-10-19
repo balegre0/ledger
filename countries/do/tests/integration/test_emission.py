@@ -7,7 +7,6 @@ from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
 from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import verify_enveloped
 from ledger_country_do.channels.ecf_v1.adapters.xml.documents import DgiiXml
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import texts
 from ledger_country_do.channels.ecf_v1.application.emission import (
     SETTLE_DELAY,
     Emitter,
@@ -27,6 +26,7 @@ from ledger_country_do.channels.ecf_v1.domain.status_map import (
 from ledger_country_do_testing.fake_dgii.state import Scripted, Status
 from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
 from ledger_country_do_testing.transports import FAKE_HOSTS, BreaksAfterSending, Counting
+from ledger_fiscal_kit.xml.hardened import texts
 lazy from ledger_country_do.channels.ecf_v1.application.emission import Emitted
 lazy from ledger_country_do_testing.fake_dgii.app import FakeDgii
 lazy from ledger_country_do_testing.local_signer import KeyPairSigner

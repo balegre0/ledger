@@ -8,7 +8,6 @@ from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import (
     verify_enveloped,
 )
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import texts
 from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import violations
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
@@ -16,9 +15,10 @@ from ledger_country_do_testing.answers import json_list, json_object
 from ledger_country_do_testing.fake_dgii.app import DEFAULT_PUBLIC_URL
 from ledger_country_do_testing.fake_dgii.state import DirectoryEntry
 from ledger_country_do_testing.samples import SIGNED_AT, credit_invoice
+from ledger_fiscal_kit.xml.hardened import texts
 lazy from ledger_country_do_testing.fake_dgii.app import FakeDgii
 lazy from ledger_country_do_testing.local_signer import KeyPairSigner
-lazy from ledger_country_do_testing.pki import Issued
+lazy from ledger_testing.pki import Issued
 
 SIMULATOR: Final = "/testecf/emisorreceptor/fe"
 ACECF: Final = (

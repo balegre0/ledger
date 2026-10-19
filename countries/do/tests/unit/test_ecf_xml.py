@@ -8,7 +8,6 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf, rfce
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import texts
 from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import corrected, violations
 from ledger_country_do.channels.ecf_v1.adapters.xml.writer import EmptyTextError, Node, UnwritableTextError
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
@@ -23,6 +22,7 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
 )
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.samples import SIGNED_AT, consumer_invoice, credit_invoice
+from ledger_fiscal_kit.xml.hardened import texts
 
 D = Decimal
 _NAME_LIMIT = 80

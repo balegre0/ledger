@@ -10,6 +10,7 @@ members = [
     "ledger-country-do",
     "ledger-country-do-testing",
     "ledger-devtools",
+    "ledger-fiscal-kit",
     "ledger-identity",
     "ledger-invoicing",
     "ledger-kernel",
@@ -707,6 +708,7 @@ source = { editable = "countries/do" }
 dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
+    { name = "ledger-fiscal-kit" },
     { name = "ledger-kernel" },
     { name = "lxml" },
     { name = "pydantic" },
@@ -716,6 +718,7 @@ dependencies = [
 requires-dist = [
     { name = "cryptography", specifier = ">=50.0.2" },
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "ledger-fiscal-kit", editable = "packages/fiscal-kit" },
     { name = "ledger-kernel", editable = "packages/kernel" },
     { name = "lxml", specifier = ">=6.1.3" },
     { name = "pydantic", specifier = ">=2.14.1" },
@@ -730,7 +733,9 @@ dependencies = [
     { name = "granian" },
     { name = "httpx" },
     { name = "ledger-country-do" },
+    { name = "ledger-fiscal-kit" },
     { name = "ledger-kernel" },
+    { name = "ledger-testing" },
     { name = "lxml" },
     { name = "pydantic" },
     { name = "python-multipart" },
@@ -746,7 +751,9 @@ requires-dist = [
     { name = "granian", specifier = ">=2.8.4" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "ledger-country-do" },
+    { name = "ledger-fiscal-kit" },
     { name = "ledger-kernel" },
+    { name = "ledger-testing" },
     { name = "lxml", specifier = ">=6.1.3" },
     { name = "pydantic", specifier = ">=2.14.1" },
     { name = "python-multipart", specifier = ">=0.0.32" },
@@ -775,6 +782,25 @@ requires-dist = [
     { name = "pathspec", specifier = ">=1.1.1" },
     { name = "pydantic", specifier = ">=2.14.1" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
+]
+
+[[package]]
+name = "ledger-fiscal-kit"
+version = "0.1.0"
+source = { editable = "packages/fiscal-kit" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "ledger-kernel" },
+    { name = "ledger-platform" },
+    { name = "lxml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "cryptography", specifier = ">=50.0.2" },
+    { name = "ledger-kernel", editable = "packages/kernel" },
+    { name = "ledger-platform", editable = "packages/platform" },
+    { name = "lxml", specifier = ">=6.1.3" },
 ]
 
 [[package]]
@@ -875,6 +901,7 @@ version = "0.1.0"
 source = { editable = "packages/testing" }
 dependencies = [
     { name = "alembic" },
+    { name = "cryptography" },
     { name = "httpx" },
     { name = "joserfc" },
     { name = "ledger-kernel" },
@@ -890,6 +917,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.20.0" },
+    { name = "cryptography", specifier = ">=50.0.2" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "joserfc", specifier = ">=1.7.5" },
     { name = "ledger-kernel", editable = "packages/kernel" },

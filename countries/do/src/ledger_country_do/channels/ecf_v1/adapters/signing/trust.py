@@ -11,7 +11,7 @@ certificate may speak for the counterparty (a buyer signing its ARECF):
 - **Time.** The certificate, and its whole chain, is valid at the moment the document says it was signed and
   at the moment it was received here, which may differ by ``skew`` at most either way (clocks differ; a
   receipt dated an hour away is not this exchange's).
-- **Usage.** It may sign (``certificates.signing_problem``: an end entity, ``digitalSignature`` or
+- **Usage.** It may sign (fiscal-kit's ``dsig.signing_problem``: an end entity, ``digitalSignature`` or
   ``nonRepudiation``); an extended key usage, where present, names one of ``purposes`` (document signing,
   e-mail protection, client authentication as qualified certificates write them, or any).
 - **Identity.** Its subject names the counterparty: an RNC or cédula in ``serialNumber`` (bare, or
@@ -33,9 +33,9 @@ from cryptography import x509
 from cryptography.x509 import verification
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from ledger_country_do.channels.ecf_v1.adapters.signing.certificates import signing_problem
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError, EcfInvalidError
 from ledger_country_do.regime.tax_ids import normalize, scheme_of
+from ledger_fiscal_kit.xml.dsig import signing_problem
 lazy from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import VerifiedSignature
 
 DEFAULT_SKEW: Final = timedelta(minutes=5)

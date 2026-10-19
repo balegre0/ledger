@@ -56,12 +56,13 @@ lazy from cryptography import x509
 from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import endpoint, pinned, system_resolve
 from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import TokenAnswer
 from ledger_country_do.channels.ecf_v1.adapters.http import ACCEPTED_ENCODING, DEFAULT_TIMEOUTS, bounded
+from ledger_country_do.channels.ecf_v1.adapters.signing.seeds import require_seed
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import INBOUND, verify_enveloped
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import texts
 from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import checked
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError, EcfUnavailableError
 from ledger_country_do.channels.ecf_v1.domain.notation import parse_dgii_moment
+from ledger_fiscal_kit.xml.hardened import XmlDocumentError, texts
 from ledger_kernel.tax_ids import masked
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import Endpoint, Resolve
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DirectoryEntry
@@ -321,9 +322,9 @@ class BuyerClient:
     async def _token(self, at: Endpoint, deadline: float, draft: EcfDraft, buyer: str) -> str:
         seed = await self._exchange(at, _SEED, deadline, headers={"Accept": "application/xml"})
         try:
-            texts(seed)
+            require_seed(seed)
             signed = await self._signer.sign_seed(seed)
-        except EcfInvalidError as error:
+        except (EcfInvalidError, XmlDocumentError) as error:
             raise BuyerUnavailableError(_SEED.name) from error
         self._audit(SeedSigned(draft.issuer.rnc, buyer, at.host, self._clock()))
         answer = await self._exchange(

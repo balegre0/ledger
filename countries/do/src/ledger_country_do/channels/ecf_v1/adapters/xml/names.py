@@ -16,9 +16,9 @@ lazy from collections.abc import Mapping
 
 from lxml import etree
 
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import parser
 from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import corrected
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
+from ledger_fiscal_kit.xml.hardened import parser
 lazy from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 
 _ELEMENT: Final = "{http://www.w3.org/2001/XMLSchema}element"

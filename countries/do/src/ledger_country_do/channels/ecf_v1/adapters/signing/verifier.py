@@ -3,17 +3,17 @@
 Built against signature wrapping and comment splitting: what is verified is the whole document as it will be
 read, and nothing but DGII's profile is accepted. Two profiles share these rules:
 
-- The document is read hardened (``xml.parsing``) and holds no comment anywhere (a comment inside a value,
-  ``1<!---->0``, would leave C14N without comments, so the signature, unchanged) and no processing instruction
-  inside its root.
+- The document is read hardened (fiscal-kit's ``xml.hardened``) and holds no comment anywhere (a comment
+  inside a value, ``1<!---->0``, would leave C14N without comments, so the signature, unchanged) and no
+  processing instruction inside its root.
 - It holds exactly one ``Signature``, its root's last child; the root itself is not one.
 - ``SignedInfo``: C14N 1.0 (without comments), RSA-SHA256, one ``Reference`` with ``URI=""`` and no other
-  attribute, its transforms the enveloped-signature one alone or followed by C14N 1.0 (``profile.PROFILES``),
+  attribute, its transforms the enveloped-signature one alone or followed by C14N 1.0 (``dsig.PROFILES``),
   SHA-256. No ``Object`` (so no XAdES), ``Manifest``, ``HMACOutputLength``, XPath or other element, no
   foreign element, no text but whitespace outside values.
 - The digest is checked over the canonical form of the whole document (``URI=""``) without the ``Signature``
   element; the enveloped-signature transform removes the element, never the text around it.
-- One signing certificate, an end entity that may sign (``certificates.signing_problem``), RSA of
+- One signing certificate, an end entity that may sign (fiscal-kit's ``dsig.signing_problem``), RSA of
   ``MIN_KEY_BITS`` at least; ``SignatureValue`` is checked with its key and no other (a ``KeyValue`` is never
   used to verify).
 
@@ -56,14 +56,10 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 from lxml import etree
 
-from ledger_country_do.channels.ecf_v1.adapters.signing.certificates import signing_problem
 from ledger_country_do.channels.ecf_v1.adapters.signing.names import names_agree
-from ledger_country_do.channels.ecf_v1.adapters.signing.profile import (
-    MIN_KEY_BITS,
-    PROFILES,
-    XML_NAMESPACE,
-)
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import (
+from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError
+from ledger_fiscal_kit.xml.dsig import MIN_KEY_BITS, PROFILES, XML_NAMESPACE, signing_problem
+from ledger_fiscal_kit.xml.hardened import (
     COMMENT,
     DSIG,
     SIGNATURE,
@@ -72,7 +68,6 @@ from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import (
     require_plain,
     require_readable,
 )
-from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError
 
 
 class VerificationProfile(StrEnum):

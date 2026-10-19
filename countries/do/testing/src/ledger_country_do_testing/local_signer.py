@@ -13,10 +13,10 @@ from cryptography.hazmat.primitives.serialization import pkcs12
 lazy from cryptography import x509
 lazy from cryptography.hazmat.primitives.asymmetric.types import PrivateKeyTypes
 
-from ledger_country_do.channels.ecf_v1.adapters.signing.signer import sign_enveloped
 from ledger_country_do.channels.ecf_v1.application.ports import CertificateValidity, XmlSigner
+from ledger_fiscal_kit.xml.dsig import sign_enveloped
 from ledger_kernel.errors import InvalidInputError
-lazy from ledger_country_do_testing.pki import Issued
+lazy from ledger_testing.pki import Issued
 
 
 class BundleIncompleteError(InvalidInputError):
@@ -68,4 +68,4 @@ class KeyPairSigner(XmlSigner):
 
     @override
     async def sign_seed(self, seed: bytes) -> bytes:
-        return await asyncio.to_thread(sign_enveloped, seed, self._key, self._certificate, seed=True)
+        return await asyncio.to_thread(sign_enveloped, seed, self._key, self._certificate)

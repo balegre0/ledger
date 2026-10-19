@@ -7,8 +7,8 @@ one nested deeper. Nothing is verified here: a document read from outside goes t
 
 from typing import ClassVar, Final
 
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import DSIG, SIGNATURE, texts
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
+from ledger_fiscal_kit.xml.hardened import DSIG, SIGNATURE, texts
 
 _VALUE: Final = f"{SIGNATURE}/{{{DSIG}}}SignatureValue"
 

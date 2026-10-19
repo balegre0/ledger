@@ -63,6 +63,8 @@ from ledger_country_do.channels.ecf_v1.domain.routing import Route
 from ledger_country_do.channels.ecf_v1.domain.status_map import DOCUMENTED, FiscalStatus
 from ledger_country_do_testing.local_signer import BundleIncompleteError, KeyPairSigner
 from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
+from ledger_fiscal_kit.xml.dsig import NotAnRsaKeyError, SigningPairError
+from ledger_fiscal_kit.xml.hardened import XmlDocumentError
 from ledger_kernel.errors import ConflictError, InvalidInputError
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import Resolve
 lazy from ledger_country_do.channels.ecf_v1.application.emission import Emitted, Signed
@@ -80,6 +82,8 @@ _ALLOWED: Final = frozenset({Environment.TESTECF, Environment.CERTECF})
 _ACCEPTED: Final = frozenset({FiscalStatus.ACCEPTED, FiscalStatus.ACCEPTED_WITH_OBSERVATIONS})
 _USAGE: Final = 2
 _NOT_ACCEPTED: Final = 1
+_REPORTED: Final = (EcfError, XmlDocumentError, NotAnRsaKeyError, SigningPairError)
+"""What a run reports by its code instead of a traceback: the pack's errors and the signature profile's."""
 _AUTH_PROBE: Final = "ledger-spike-authentication-check"
 """A track id that does not exist: ``consultaresultado`` needs a token, so asking about it proves one."""
 _RFCE_NOT_DELIVERED: Final = "a consumer invoice sent as an RFCE is not delivered (spec 8.6.5)"
@@ -519,7 +523,7 @@ async def _delivered(signed: Signed, trust: CounterpartyTrust, context: _Run) ->
     try:
         async with buyers.opened() as opened:
             delivery = await opened.deliver(settings.environment, draft, signed.signed_ecf)
-    except EcfError as error:
+    except _REPORTED as error:
         _say(out, f"buyer: {error.code}: {error}")
         return _NOT_ACCEPTED
     if not isinstance(delivery, Delivered):
@@ -599,7 +603,7 @@ async def run(
     except (SettingsError, JournalError) as error:
         _say(out, f"error: {error}")
         return _USAGE
-    except EcfError as error:
+    except _REPORTED as error:
         _say(out, f"error: {error.code}: {error}")
         return _USAGE if error.kind == "invalid" else _NOT_ACCEPTED
 

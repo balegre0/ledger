@@ -6,7 +6,9 @@ channel `do-ecf-v1` (DGII's e-CF: XML, schemas, signature, DGII's web services, 
 - `src/ledger_country_do/regime/`: tax-id schemes (`do.rnc`, `do.cedula`), ITBIS rates, the ten e-CF types,
   dated parameters, rounding and tolerance, in the kernel's regime types (`ledger_kernel.regimes`): the kernel
   and the standard library only. Registered by the entry point `ledger.countries.regimes: do`.
-- `src/ledger_country_do/channels/ecf_v1/`: `domain` <- `application` <- `adapters`.
+- `src/ledger_country_do/channels/ecf_v1/`: `domain` <- `application` <- `adapters`. The hardened XML reader and
+  the signature profile (and what may sign) are fiscal-kit's (`ledger_fiscal_kit.xml`); the verifier, trust,
+  names, stamp and the seed's shape stay here.
 - [`docs/runbooks/do/testecf-spike.md`](../../docs/runbooks/do/testecf-spike.md): running the spike against
   DGII's TesteCF; [`docs/spike-findings.md`](docs/spike-findings.md): what it settled.
 

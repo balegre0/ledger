@@ -3,7 +3,6 @@ from decimal import Decimal
 
 import pytest
 
-from ledger_country_do.channels.ecf_v1.adapters.signing.signer import sign_enveloped
 from ledger_country_do.channels.ecf_v1.adapters.signing.stamp import (
     SignatureValueMissingError,
     signature_value,
@@ -22,7 +21,8 @@ from ledger_country_do.channels.ecf_v1.domain.printed import (
 )
 from ledger_country_do_testing.samples import ISSUED_ON, SIGNED_AT
 from ledger_country_do_testing.signatures import SHAPES
-lazy from ledger_country_do_testing.pki import Issued
+from ledger_fiscal_kit.xml.dsig import sign_enveloped
+lazy from ledger_testing.pki import Issued
 
 
 def test_the_security_code_is_the_signature_value_s_first_six_characters() -> None:
