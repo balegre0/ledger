@@ -44,9 +44,6 @@ type Step = Callable[[AsyncConnection], Awaitable[None]]
 _logger = structlog.stdlib.get_logger(__name__)
 
 
-"""What a wake leaves on a running job: the ``Park`` it records next becomes ``ready``."""
-
-
 class EventTooLargeError(LedgerError):
     """An event's payload exceeds 64 KiB (§3.5): a defect of the producer."""
 

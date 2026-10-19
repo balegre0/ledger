@@ -860,6 +860,7 @@ only the public surfaces and the layering are mandated.
 | 12 | Signer custody | `forbidden` | everything but `ledger_app_signer` and `ledger_signer` → `ledger_signer.adapters.custody` |
 | 13 | Test code never in production | `forbidden` | every production distribution → `ledger_testing`, `ledger_country_*_testing` |
 | 14 | Apps only compose | `forbidden` | `ledger_app_*` → `ledger_<m>.{domain,application,adapters}`, `ledger_country_*` |
+| 15 | Only the chassis proves tokens | `forbidden` | `ledger_<module>`, `ledger_country_*` → `ledger_platform.http.proving` (the token-only caller; every route declares `Authentication.caller`, which applies how its caller stands) |
 
 No `ignore_imports` in new code; if one is ever needed, `ledger-devtools check` counts it as a tracked debt
 metric ([02] Kraken).
@@ -872,7 +873,7 @@ reference docs and event schema snapshots. identity's role table is generated (�
 
 | Command | Does |
 |---|---|
-| `sync` | From manifests: each package's `pyproject.toml` (dependencies, entry points `ledger.modules`, `ledger.countries.regimes`, `ledger.countries.channels`, `ledger.settings`, console scripts, coverage targets, deptry's module map read from the installed distributions' metadata); `_manifest.py` for a module, a package with a schema and a country with a channel; identity's role table (`ledger_identity/domain/_role_grants.py`, §7.7); `.importlinter`; `deploy/local/postgres/init.sql` (schemas, roles, grants, for modules, channels and platform); each module's `openapi.json`; the root `pyproject.toml`'s generated block (the `workspace` dependency group with every dev-only package and every manifest's test dependencies, `[tool.uv.sources]`, ruff's `known-first-party`), so adding a package touches only its directory and generated files |
+| `sync` | From manifests: each package's `pyproject.toml` (dependencies, entry points `ledger.modules`, `ledger.countries.regimes`, `ledger.countries.channels`, `ledger.settings`, console scripts, coverage targets, deptry's module map read from the installed distributions' metadata); `_manifest.py` for a module, a package with a schema and a country with a channel; identity's role table (`ledger_identity/domain/_role_grants.py`, §7.7); `.importlinter`; `deploy/local/postgres/init.sql` (schemas, roles, grants, for modules, channels and platform); each module's `openapi.json`; the root `pyproject.toml`'s generated block (the `workspace` dependency group with every dev-only package and every manifest's test dependencies, `[tool.uv.sources]`, ruff's `known-first-party`), so adding a package touches only its directory and generated files. In two phases: every other file first, then the OpenAPI snapshots, made in a spawned interpreter that imports the files just written (the app they come from imports a module's `_manifest.py` and identity's role table) |
 | `check` | Validates every manifest (schema, name == directory, a country's `iso` == its directory and its regimes' keys its own, unique schema/prefix/permission/event type/consumer/job kind/schedule/http prefix, module and package DAGs including subscription edges, schedules enqueuing declared kinds, modules made of layers, settings sections apart from the platform's names and each other); fails if `sync` would change or delete any file; checks the repository around the manifests (the root's block, members without a manifest, image pins with digests, the build context). Deferred: event schema snapshots, channel `valid_from` ordering (deptry runs in the gate) |
 | `gate` | Deferred: `uv run poe check` runs the gate (§14.3) |
 
@@ -1272,7 +1273,9 @@ channel document      channel-specific state machine (do-ecf-v1: §8.6.4), one p
 - An organization-level Zitadel project role (`ledger.organization.admin`) registers companies (v1 kept).
 - Authorization per request (no cache): `IdentityApi.permissions(call, principal, company)`, one indexed read.
   v1's cache, its invalidation events and the gRPC query service are deleted. No role in a company → 404; a role
-  without the permission → 403 (v1 kept). A deactivated company grants only `*.read`.
+  without the permission → 403 (v1 kept). A deactivated company grants only `*.read`: the naming convention
+  every manifest keeps is that a permission that only reads has the action `read`, and no other does
+  (`only_reads`).
 - Custom roles are a later identity feature; the manifest model supports it.
 
 ### 7.8 Entitlements (design only)
