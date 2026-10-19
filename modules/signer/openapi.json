@@ -1,0 +1,19 @@
+{
+  "components": {
+    "schemas": {},
+    "securitySchemes": {
+      "HTTPBearer": {
+        "bearerFormat": "JWT",
+        "description": "An OAuth 2.0 access token (JWT) of the organization's identity provider.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "title": "ledger-api",
+    "version": "0.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {}
+}

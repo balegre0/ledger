@@ -12,7 +12,6 @@ lazy from fastapi import FastAPI
 from ledger_platform.config.settings import LogFormat, Settings
 from ledger_platform.runtime import SERVER_LOGGERS, serve, serving, serving_logs
 from ledger_platform.runtime.app import STOP_BUDGET, DirectUrlMissingError
-from ledger_platform.runtime.assembly import IsolatedModuleMissingError
 
 URL = "postgresql+psycopg://ledger_app:x@127.0.0.1:1/ledger"
 _RECORD = TypeAdapter(dict[str, object])
@@ -78,13 +77,13 @@ def distribution_version(distribution: str) -> str:
 
 
 @pytest.mark.usefixtures("environment")
-def test_the_signer_factory_refuses_to_start_without_an_isolated_module(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No module of this workspace is isolated in the signer's role yet: its app has nothing to run."""
+def test_the_signer_factory_builds_the_signer_app_without_connecting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The workspace's signer module is isolated in the signer's role: its app serves probes, no route."""
     monkeypatch.setattr(serving, "version", distribution_version)
-    with pytest.raises(IsolatedModuleMissingError):
-        serving.signer()
+    app = serving.signer()
+    assert (app.title, app.version) == ("ledger-signer", "1.2.3")
+    assert {"/livez", "/readyz", "/metrics"} <= paths(app)
+    assert not any(path.startswith("/v1/") for path in paths(app))
 
 
 @pytest.mark.usefixtures("environment")

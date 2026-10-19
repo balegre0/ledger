@@ -7,6 +7,7 @@ generates, and of the root ``pyproject.toml`` only its generated block changed.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -154,7 +155,7 @@ isolated_in = "signer"
 def test_a_planted_isolated_module_gets_the_signer_login_and_a_custody_contract(
     repository: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    source = repository / "modules/vault/src/ledger_vault"
+    source = without_the_signer(repository) / "modules/vault/src/ledger_vault"
     (source / "adapters").mkdir(parents=True)
     (repository / "modules/vault/manifest.toml").write_text(VAULT, encoding="utf-8", newline="\n")
     for package in (source, source / "adapters"):
@@ -227,6 +228,14 @@ LEAKS: Final = {
 """An app of another role, a test kit and a module importing the custody; its re-export, imported."""
 
 
+def without_the_signer(root: Path) -> Path:
+    """The copy without the workspace's own isolated module (and its contract): a role isolates one module, so
+    a planted ``vault`` stands in for it."""
+    for directory in ("modules/signer", "contracts/proto/ledger/signer"):
+        shutil.rmtree(root / directory)
+    return root
+
+
 def write_files(root: Path, files: Mapping[str, str]) -> None:
     for relative, text in files.items():
         (root / relative).parent.mkdir(parents=True, exist_ok=True)
@@ -257,7 +266,7 @@ def lint_imports(root: Path) -> tuple[int, str]:
 def test_import_linter_breaks_on_anything_but_the_role_s_apps_reaching_the_custody(
     repository: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    write_files(repository, PLANTED_FILES)
+    write_files(without_the_signer(repository), PLANTED_FILES)
     assert main(["sync", "--root", str(repository)]) == 0
     capsys.readouterr()
     assert main(["check", "--root", str(repository)]) == 0, capsys.readouterr().out

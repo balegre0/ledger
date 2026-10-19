@@ -1,0 +1,52 @@
+"""The signer, where none can be reached: every call answers ``signer_unavailable`` (Decision 13).
+
+What an app binds as ``SignerPort`` and ``SignerApi`` while it has no client of the signer: a client role
+without the signer's address or its own token, and every role until the client and the facade exist. A route
+then answers 503 and a channel parks; nothing fails at the start, and no app's readiness depends on the signer
+(spec §3.7).
+"""
+
+from typing import final, override
+lazy from collections.abc import Sequence
+
+from ledger_fiscal_kit.ports import SignerPort, SignerUnavailableError
+from ledger_platform.runtime.facade import facade
+from ledger_signer.api import SignerApi
+lazy from ledger_fiscal_kit.ports import CertificateValidity, SeedToSign, Signed, XmlToSign
+lazy from ledger_kernel.ids import CompanyId
+lazy from ledger_kernel.tenancy import Mode, Tenant
+lazy from ledger_platform.runtime.calls import Call, SystemCall
+lazy from ledger_signer.api import CertificateView
+
+
+@final
+class UnavailableSigner(SignerPort, SignerApi):
+    """``SignerPort`` and ``SignerApi`` that answer ``SignerUnavailableError`` to every call."""
+
+    __slots__ = ()
+
+    @override
+    @facade
+    async def sign_xml(self, call: SystemCall, request: XmlToSign) -> Signed:
+        """Never: the signer is unavailable."""
+        raise SignerUnavailableError
+
+    @override
+    @facade
+    async def sign_seed(self, call: SystemCall, request: SeedToSign) -> Signed:
+        """Never: the signer is unavailable."""
+        raise SignerUnavailableError
+
+    @override
+    @facade
+    async def certificate_validity(self, call: SystemCall, tenant: Tenant) -> CertificateValidity | None:
+        """Never: the signer is unavailable."""
+        raise SignerUnavailableError
+
+    @override
+    @facade
+    async def certificates(
+        self, call: Call | SystemCall, company: CompanyId, mode: Mode
+    ) -> Sequence[CertificateView]:
+        """Never: the signer is unavailable."""
+        raise SignerUnavailableError
