@@ -4,8 +4,9 @@ Every package's settings section is read first (``runtime.sections``). What ever
 checked against its manifest before anything starts: a schema of its own with its own migrations, a handler
 for every consumer and job kind it declares and none it does not, an implementation for every extension point
 declared and a provider for every port declared, facades on what other packages call. Every failure is a
-defect of a package or of the deployment, found at the start
-(internal errors, never a client's).
+defect of a package or of the deployment, found at the start (internal errors, never a client's). The
+standings a module provides (``StandingsPort``, identity's) are bound to the app's request authentication,
+so every route's caller applies them.
 """
 
 import graphlib
@@ -41,6 +42,7 @@ from ledger_platform.runtime.keys import ChainDirectory, Directory
 from ledger_platform.runtime.packs import Channels, installed_modules
 from ledger_platform.runtime.registries import Regimes
 from ledger_platform.runtime.sections import Declared, read_sections
+from ledger_platform.runtime.standings import STANDINGS_PORT
 lazy from ledger_kernel.clock import Clock
 lazy from ledger_platform.config.manifest import (
     AppRole,
@@ -450,6 +452,16 @@ class _Assembly:
             for port in points.provides:
                 self._ports.value_of(port)
 
+    def bind_standings(self, provided: frozenset[str]) -> None:
+        """Bind the standings a module provides (identity) to the app's request authentication, if any does.
+
+        Every module's routes declare the one caller: they apply the standings without asking for them. While
+        no module provides them, the caller refuses every machine (it fails closed).
+        """
+        if STANDINGS_PORT.name in provided:
+            standings = STANDINGS_PORT.take(self._ports.value_of(STANDINGS_PORT.name))
+            self._shared.authentication.bind_standings(standings)
+
     def channel(self, pack: ChannelPack, provided: frozenset[str]) -> Handed:
         """Assemble the channel ``pack`` with the ports modules provide; add it to the assembled channels."""
         shared, entry = self._shared, pack.entry
@@ -522,6 +534,7 @@ def assemble(shared: Shared, discover: Discover) -> Assembled:
     handed = [assembly.module(module) for module in modules]
     assembly.require_bindings(modules)
     provided = frozenset(port for module in modules for port in module.manifest.extension_points.provides)
+    assembly.bind_standings(provided)
     handed += [assembly.channel(pack, provided) for pack in packs]
     assembly.seal()
     platform = Handed(

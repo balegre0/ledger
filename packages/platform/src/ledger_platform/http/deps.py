@@ -84,8 +84,8 @@ class Verifier(Protocol, metaclass=ABCMeta):
 
 
 type Caller = Callable[[Request, HTTPAuthorizationCredentials | None], AsyncGenerator[Principal]]
-"""The dependency ``authenticated`` makes (``Authentication.with_standing`` wraps it): a route declares
-``Annotated[Principal, Depends(caller)]``."""
+"""The dependency ``authenticated`` makes (the chassis's own, which ``Authentication.caller`` wraps) and the
+one a module gets (``Authentication.caller``): a route declares ``Annotated[Principal, Depends(caller)]``."""
 type PermissionsDependency[**P] = Callable[P, Coroutine[object, object, PermissionSource]]
 """A dependency handing the module's ``PermissionSource``; its parameters (``P``) are dependencies of its
 own, such as the module's context."""

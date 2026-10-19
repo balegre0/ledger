@@ -1,11 +1,10 @@
 """What identity's routes are built with: its units, the caller, its access and the idempotency of POSTs."""
 
 from dataclasses import dataclass
-from typing import Final, final
+from typing import final
 
 from ledger_identity.adapters.permissions import MembershipPermissions
-from ledger_identity.adapters.standings import IdentityStandings
-from ledger_platform.http import CachedStandings, Idempotency, company_in_path, ledger_mode_of
+from ledger_platform.http import Idempotency, company_in_path, ledger_mode_of
 lazy from ledger_identity.domain.text import TimeZone
 lazy from ledger_kernel.jurisdiction import Jurisdiction
 lazy from ledger_kernel.regimes import TaxIdSchemes
@@ -15,11 +14,6 @@ lazy from ledger_platform.data import BoundDatabase
 lazy from ledger_platform.http import Authentication, Caller, InCompany
 lazy from ledger_platform.http.mode import ModeDependency
 lazy from ledger_platform.runtime.registries import Regimes
-
-STANDING_TTL: Final = 30.0
-"""Seconds how a caller stands is remembered: a change (an API client revoked) shows within this."""
-STANDING_CACHE: Final = 10_000
-"""How many callers' standings are remembered at most."""
 
 
 @final
@@ -63,9 +57,11 @@ class ApiContext:
         regimes: Regimes,
         channels: tuple[ChannelEntry, ...],
     ) -> ApiContext:
-        """The context of the routes: the caller from the chassis, its access from identity's memberships."""
-        standings = CachedStandings(IdentityStandings(database), ttl=STANDING_TTL, size=STANDING_CACHE)
-        caller = authentication.with_standing(standings)
+        """The context of the routes: the caller from the chassis, its access from identity's memberships.
+
+        The chassis's caller applies how callers stand, which identity provides (``assembly``).
+        """
+        caller = authentication.caller
         permissions = MembershipPermissions(database)
 
         async def permission_source() -> PermissionSource:

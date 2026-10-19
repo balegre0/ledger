@@ -272,7 +272,8 @@ class ExtensionPoints(_Section):
     order: dict[QualifiedProtocol, ExtensionOrder] = Field(default_factory=dict)
     """Where its implementation goes in each chain, lowest first (default ``DEFAULT_EXTENSION_ORDER``)."""
     provides: tuple[ProtocolName, ...] = ()
-    """Ports it provides to channels (``SignerPort``, ``CompanyDirectory``)."""
+    """Ports it provides: fiscal-kit's to channels (``SignerPort``, ``CompanyDirectory``), or the platform's
+    ``StandingsPort`` to the app's request authentication (identity)."""
 
     @model_validator(mode="after")
     def order_only_what_is_implemented(self) -> Self:

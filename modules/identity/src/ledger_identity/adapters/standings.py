@@ -8,19 +8,27 @@ caller's organization. An API client's rows are seen one mode at a time (row-lev
 found by looking in each; a machine user is a client in one mode at most.
 """
 
-from typing import final, override
+from time import monotonic
+from typing import Final, final, override
 
 from ledger_identity.adapters.postgres.repositories import PgApiClients, PgOrganizations
 from ledger_kernel.access import PrincipalKind
 from ledger_kernel.tenancy import Mode, OrganizationScope
-from ledger_platform.http import ApiVersion, Standing, Standings
+from ledger_platform.http import ApiVersion, Standing, StandingsPort
+from ledger_platform.runtime.standings import CachedStandings
 lazy from ledger_identity.domain.api_clients import ApiClient
 lazy from ledger_kernel.access import Principal
+lazy from ledger_kernel.clock import MonotonicClock
 lazy from ledger_platform.data import BoundDatabase
+
+STANDING_TTL: Final = 30.0
+"""Seconds a replica remembers how a caller stands: a change (an API client revoked) shows within this."""
+STANDING_CACHE: Final = 10_000
+"""How many callers' standings each replica remembers at most."""
 
 
 @final
-class IdentityStandings(Standings):
+class IdentityStandings(StandingsPort):
     """What a principal stands for: its API client's mode, pin and revocation, and its organization's pin."""
 
     __slots__ = ("_database",)
@@ -55,3 +63,8 @@ class IdentityStandings(Standings):
             if client is not None:
                 found.append(client)
         return max(found, key=lambda client: (client.active, client.created_at), default=None)
+
+
+def cached_standings(database: BoundDatabase, clock: MonotonicClock = monotonic) -> CachedStandings:
+    """What identity provides as the platform's ``StandingsPort``: its standings, remembered per replica."""
+    return CachedStandings(IdentityStandings(database), ttl=STANDING_TTL, size=STANDING_CACHE, clock=clock)

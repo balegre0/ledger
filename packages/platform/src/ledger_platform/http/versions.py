@@ -65,7 +65,7 @@ def parse_version(text: str) -> ApiVersion:
 
 
 def sent_version(scope: Scope) -> ApiVersion | None:
-    """The version a request names, if exactly one that exists; never refuses (see ``with_standing``)."""
+    """The version a request names, if exactly one that exists; never refuses (the caller does)."""
     sent = Headers(scope=scope).getlist(VERSION_HEADER)
     if len(sent) != 1:
         return None

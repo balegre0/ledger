@@ -123,6 +123,11 @@ MANIFEST: Final = PackageManifest.model_validate(
                 },
             ],
         },
+        "extension_points": {
+            "provides": [
+                "StandingsPort",
+            ],
+        },
         "http": {
             "mounted_in": [
                 "api",

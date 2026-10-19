@@ -8,7 +8,6 @@ from ledger_platform.http.deps import (
     InCompany,
     allowed,
     any_principal,
-    authenticated,
     company_in_header,
     company_in_path,
     etag,
@@ -31,7 +30,7 @@ from ledger_platform.http.mode import ledger_mode_of
 from ledger_platform.http.models import Page, page_of_items, page_query
 from ledger_platform.http.openapi import precondition_checked, problems, success
 from ledger_platform.http.problems import BadRequestError, Problem
-from ledger_platform.http.standing import CachedStandings, Standing, Standings
+from ledger_platform.http.standing import Standing, StandingsPort
 from ledger_platform.http.versions import CURRENT_VERSION, ApiVersion
 
 __all__ = [
@@ -40,7 +39,6 @@ __all__ = [
     "ApiVersion",
     "Authentication",
     "BadRequestError",
-    "CachedStandings",
     "Caller",
     "Idempotency",
     "IfMatch",
@@ -48,13 +46,12 @@ __all__ = [
     "Page",
     "Problem",
     "Standing",
-    "Standings",
+    "StandingsPort",
     "StoredResponse",
     "allowed",
     "answer",
     "any_principal",
     "attempt_of",
-    "authenticated",
     "company_in_header",
     "company_in_path",
     "create_app",

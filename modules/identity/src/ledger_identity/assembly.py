@@ -1,10 +1,11 @@
 """identity's assembly (§3.10): what the apps mount of it.
 
-The ``api`` app mounts its routers, ``migrate`` runs its revisions, and every app checks its schema is
-current (readiness). Every app binds its API (``IdentityApi``) for the modules that depend on it. It publishes
-events and consumes none, and runs no job. Tax ids are read with the
-schemes of the installed regimes: identity names no country, and is not ready while no regime is installed
-(readiness ``identity:regimes``): it could read no tax id, and every company registration would be refused.
+The ``api`` app mounts its routers, ``migrate`` runs its revisions, and every app checks its schema is current
+(readiness). Every app binds its API (``IdentityApi``) for the modules that depend on it, and provides the
+platform's ``StandingsPort``: how a caller stands, which every module's routes then apply. It publishes events
+and consumes none, and runs no job. Tax ids are read with the schemes of the installed regimes: identity names
+no country, and is not ready while no regime is installed (readiness ``identity:regimes``): it could read no
+tax id, and every company registration would be refused.
 """
 
 from typing import ClassVar, Final
@@ -21,10 +22,12 @@ from ledger_identity.adapters.http import (
 from ledger_identity.adapters.http.context import ApiContext
 from ledger_identity.adapters.postgres.schema import migrations
 from ledger_identity.adapters.postgres.unit import PgUnits
+from ledger_identity.adapters.standings import cached_standings
 from ledger_identity.api import IDENTITY_API
 from ledger_identity.application.facade import IdentityFacade
 from ledger_kernel.errors import UnavailableError
 from ledger_platform.runtime import Module, ModuleParts
+from ledger_platform.runtime.standings import STANDINGS_PORT
 lazy from ledger_platform.runtime import ModuleContext
 
 
@@ -61,7 +64,11 @@ def assemble(context: ModuleContext) -> ModuleParts:
 
     facade = IdentityFacade(PgUnits(context.database))
     return ModuleParts(
-        api=IDENTITY_API.bind(facade), routers=routers, checks={"regimes": regimes}, migrations=migrations()
+        api=IDENTITY_API.bind(facade),
+        provides=(STANDINGS_PORT.bind(cached_standings(context.database)),),
+        routers=routers,
+        checks={"regimes": regimes},
+        migrations=migrations(),
     )
 
 

@@ -504,6 +504,7 @@ class ModuleContext:
     apis: ApiDirectory                  # apis.get(IdentityApi): only Protocols of declared dependencies
     extensions: ExtensionDirectory      # extensions.get(IssuePolicy): bound by the app (dependency inversion)
     telemetry: Telemetry                # logger, tracer, meter scoped to the module
+    auth: Authentication                # auth.caller: the one caller every route declares (§9.7)
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModuleParts:
@@ -704,7 +705,8 @@ declares = ["IssuePolicy"]          # Protocols in this module's api.py that oth
 implements = []                     # "<module>.<Protocol>" this module implements (bound by apps)
 # [extension_points.order]          # optional: where each implementation goes in the point's chain, lowest first
 # "invoicing.IssuePolicy" = 10      # 0-1000, default 100, ties by module name (ADR 0011)
-provides = []                       # fiscal-kit ports this module provides to channels: "SignerPort", "CompanyDirectory"
+provides = []                       # ports it provides: fiscal-kit's to channels ("SignerPort", "CompanyDirectory"),
+                                    # or the platform's "StandingsPort" to the app's caller (identity, §9.7)
 
 [http]
 mounted_in = ["api"]                # apps whose HTTP surface includes this module's routers
@@ -1656,6 +1658,14 @@ README/spec copies of the table are deleted ([05] D36).
 - Company-scoped resources take the company in the header `Ledger-Company: cmp_…` (the ISV seam, §7.1);
   `/v1/companies/{id}` takes it in the path. Mode comes from the credential (API clients) or, for human tokens,
   the **required** header `Ledger-Mode: test|live` (400 `mode_required` without it on moded routes; owner ruling).
+- **How a caller stands is the chassis's, by default.** Every route declares the one caller a module is given
+  (`ModuleContext.auth.caller`); the token-only caller is the chassis's own and stays private. Once the token is
+  proven it asks the platform's `StandingsPort`, which identity provides (`[extension_points] provides =
+  ["StandingsPort"]`) and the app binds once after assembly: a revoked API client is refused (401
+  `api_client_revoked`), a machine that is no API client too (403 `api_client_unregistered`), the client's mode
+  becomes the request's (`ledger_mode_of(caller)` depends on the caller, so the order a route declares them in
+  never matters) and the pins settle the version. An app in which no module provides the port knows no API
+  client: it refuses every machine (fail closed). A module opts into nothing: invoicing's routes get all of it.
 - Cursor pagination (`limit` 1-100, opaque `starting_after`/`ending_before` cursors, one at a time), `has_more`
   (in the direction read); one generic `Page[T]` model ([05] D23): `items` in id order, `has_more`,
   `next_cursor` (for `starting_after`, `null` when nothing follows) and `previous_cursor` (for `ending_before`,

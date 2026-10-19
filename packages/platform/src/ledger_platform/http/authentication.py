@@ -24,47 +24,20 @@ from ledger_platform.auth.tokens import TokenPolicy, TokenSettingsMissingError, 
 from ledger_platform.http.deps import BEARER, Verifier, authenticated
 from ledger_platform.http.mode import MODE_KEY
 from ledger_platform.http.rate import RateLimiter
-from ledger_platform.http.standing import ApiClientRevokedError, ApiClientUnregisteredError, resolve
+from ledger_platform.http.standing import (
+    NOTHING_KNOWN,
+    ApiClientRevokedError,
+    ApiClientUnregisteredError,
+    StandingsBoundError,
+    resolve,
+)
 from ledger_platform.http.versions import VERSION_HEADER, VERSION_KEY, VersionUnknownError, parse_version
 lazy from ledger_kernel.access import Principal
 lazy from ledger_platform.config.settings import Settings
 lazy from ledger_platform.http.deps import Caller
-lazy from ledger_platform.http.standing import Standings
+lazy from ledger_platform.http.standing import Standing, StandingsPort
 
 _TOKEN_SETTINGS: Final = ("token_issuer", "token_audience", "token_jwks_url")
-
-
-def _with_standing(caller: Caller, standings: Standings) -> Caller:
-    """``caller``, which also settles what the request is as its caller stands (``standing``).
-
-    The caller is proven first (401), then asked its standing: an API client that was revoked is refused
-    (401 ``api_client_revoked``), and a machine user that is no API client (403 ``api_client_unregistered``);
-    the mode its API client is bound to becomes the request's
-    (``ledger_mode_of``); and the version it speaks is settled: a ``Ledger-Version`` the request names is
-    read (400 ``version_unknown`` for one that does not exist, or for two), else the pins decide. The answer
-    to every request, this one's or not, names its version (``create_app``).
-    """
-
-    async def standing(
-        request: Request,
-        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(BEARER)],
-    ) -> AsyncGenerator[Principal]:
-        async with aclosing(caller(request, credentials)) as proven:
-            principal = await anext(proven)
-            known = await standings.of(principal)
-            if known.revoked:
-                raise ApiClientRevokedError
-            if principal.kind is PrincipalKind.MACHINE and known.mode is None:
-                raise ApiClientUnregisteredError
-            sent = request.headers.getlist(VERSION_HEADER)
-            if len(sent) > 1:
-                raise VersionUnknownError
-            request.scope[VERSION_KEY] = resolve(parse_version(sent[0]) if sent else None, known)
-            if known.mode is not None:
-                request.scope[MODE_KEY] = known.mode
-            yield principal
-
-    return standing
 
 
 @final
@@ -79,14 +52,29 @@ class _Unconfigured(Verifier):
 
 @final
 class Authentication:
-    """The caller dependency every module's routers declare, and the resources it needs while the app runs."""
+    """The caller dependency every module's routers declare, and the resources it needs while the app runs.
 
-    __slots__ = ("_keys", "caller")
+    ``caller`` is the only one a module gets: it proves the bearer token (401), holds the caller to its rate
+    (429), then settles the request as its caller stands, through the ``StandingsPort`` a module provides
+    (identity, bound once by the app's assembly, ``bind_standings``): an API client that was revoked is
+    refused (401 ``api_client_revoked``), and a machine user that is no API client (403
+    ``api_client_unregistered``); the mode an API client is bound to becomes the request's
+    (``ledger_mode_of``); and the version the request speaks is settled: a ``Ledger-Version`` it names is read
+    (400 ``version_unknown`` for one that does not exist, or for two), else the pins decide. The answer to
+    every request, this one's or not, names its version (``create_app``). While no standings are bound nobody
+    is known to be an API client, so every machine is refused (it fails closed) and a person speaks what it
+    names, else the current version. The caller that only proves the token is the chassis's own and stays
+    private: no route can skip the standings.
+    """
 
-    def __init__(self, caller: Caller, keys: HttpKeys | None) -> None:
-        self.caller: Final = caller
-        """The FastAPI dependency giving a route its ``Principal`` (``Depends(caller)``)."""
+    __slots__ = ("_keys", "_proven", "_standings", "caller")
+
+    def __init__(self, proven: Caller, keys: HttpKeys | None) -> None:
+        self._proven = proven
         self._keys = keys
+        self._standings: StandingsPort | None = None
+        self.caller: Final = self._standing_caller()
+        """The FastAPI dependency giving a route its ``Principal`` (``Depends(caller)``)."""
 
     @classmethod
     def of(
@@ -105,13 +93,40 @@ class Authentication:
         limiter = RateLimiter(rate=settings.rate_limit_per_second, burst=settings.rate_limit_burst)
         return cls(authenticated(verifier, limiter), keys)
 
-    def with_standing(self, standings: Standings) -> Caller:
-        """The caller dependency of a module that knows how its callers stand (identity keeps that).
+    def bind_standings(self, standings: StandingsPort) -> None:
+        """How callers stand, from the module that keeps it: bound once (``StandingsBoundError`` again)."""
+        if self._standings is not None:
+            raise StandingsBoundError
+        self._standings = standings
 
-        It proves the caller as ``caller`` does and settles the request's version and mode, and refuses a
-        revoked API client (``_with_standing``).
-        """
-        return _with_standing(self.caller, standings)
+    async def _standing_of(self, principal: Principal) -> Standing:
+        """How ``principal`` stands; nothing is known of anyone while no standings are bound."""
+        standings = self._standings
+        return NOTHING_KNOWN if standings is None else await standings.of(principal)
+
+    def _standing_caller(self) -> Caller:
+        proven, standing_of = self._proven, self._standing_of
+
+        async def caller(
+            request: Request,
+            credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(BEARER)],
+        ) -> AsyncGenerator[Principal]:
+            async with aclosing(proven(request, credentials)) as callers:
+                principal = await anext(callers)
+                known = await standing_of(principal)
+                if known.revoked:
+                    raise ApiClientRevokedError
+                if principal.kind is PrincipalKind.MACHINE and known.mode is None:
+                    raise ApiClientUnregisteredError
+                sent = request.headers.getlist(VERSION_HEADER)
+                if len(sent) > 1:
+                    raise VersionUnknownError
+                request.scope[VERSION_KEY] = resolve(parse_version(sent[0]) if sent else None, known)
+                if known.mode is not None:
+                    request.scope[MODE_KEY] = known.mode
+                yield principal
+
+        return caller
 
     def resources(self) -> tuple[AbstractAsyncContextManager[object], ...]:
         """What the app opens while it runs: the client that fetches the provider's keys, if any."""

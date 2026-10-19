@@ -1,7 +1,7 @@
 """How a caller stands (§9.2, §9.7): the version it speaks, the mode its credential carries, revocation.
 
-Identity answers ``Standings``; ``with_standing`` settles the request by it, and every answer names the
-version the request speaks (``Ledger-Version``).
+Identity answers through the ``StandingsPort``; ``Authentication.caller`` settles the request by it, and every
+answer names the version the request speaks (``Ledger-Version``).
 """
 
 from contextlib import asynccontextmanager
@@ -29,9 +29,8 @@ from ledger_platform.http.mode import ledger_mode_of
 from ledger_platform.http.standing import (
     ApiClientRevokedError,
     ApiClientUnregisteredError,
-    CachedStandings,
     Standing,
-    Standings,
+    StandingsPort,
     resolve,
 )
 from ledger_platform.http.versions import (
@@ -43,6 +42,7 @@ from ledger_platform.http.versions import (
     parse_version,
 )
 from ledger_platform.observability.health import Health
+from ledger_platform.runtime.standings import CachedStandings
 from ledger_testing.issuer import AUDIENCE, ISSUER, machine_claims
 lazy from ledger_kernel.access import Principal
 lazy from ledger_platform.observability.tracing import Tracing
@@ -56,7 +56,7 @@ FULLWIDTH: Final = "".join(chr(0xFF10 + int(digit)) if digit.isdigit() else digi
 
 
 @final
-class Knowing(Standings):
+class Knowing(StandingsPort):
     """What is known of the caller; counts the questions."""
 
     def __init__(self) -> None:
@@ -86,7 +86,9 @@ def app(
     local_issuer: LocalIssuer, standings: Knowing, registry: CollectorRegistry, tracing: Tracing
 ) -> FastAPI:
     verifier = TokenVerifier(TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=local_issuer.keys_url))
-    caller = Authentication(authenticated(verifier), None).with_standing(standings)
+    authentication = Authentication(authenticated(verifier), None)
+    authentication.bind_standings(standings)
+    caller = authentication.caller
     routes = APIRouter()
 
     @routes.get("/thing")
@@ -412,7 +414,7 @@ async def test_a_caller_that_is_known_to_nobody_is_asked_again_until_it_is() -> 
 
 async def test_a_caller_that_failed_to_be_asked_is_asked_again() -> None:
     @final
-    class Failing(Standings):
+    class Failing(StandingsPort):
         def __init__(self) -> None:
             self.asked = 0
 

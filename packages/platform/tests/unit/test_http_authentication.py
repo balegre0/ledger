@@ -2,7 +2,7 @@
 
 from contextlib import AsyncExitStack
 from http import HTTPStatus
-from typing import Annotated, Final
+from typing import Annotated, Final, final, override
 
 import httpx
 import pytest
@@ -10,11 +10,14 @@ from fastapi import Depends, FastAPI
 from prometheus_client import CollectorRegistry, generate_latest
 from pydantic import SecretStr
 
+from ledger_kernel.tenancy import Mode
 from ledger_platform.auth.tokens import TokenPolicy, TokenSettingsMissingError
 from ledger_platform.config.settings import Settings
 from ledger_platform.http.authentication import Authentication
+from ledger_platform.http.problems import install_problem_handlers
 from ledger_platform.http.rate import RateLimitedError
-from ledger_testing.issuer import AUDIENCE, ISSUER, SUBJECT
+from ledger_platform.http.standing import Standing, StandingsBoundError, StandingsPort
+from ledger_testing.issuer import AUDIENCE, ISSUER, SUBJECT, machine_claims
 lazy from ledger_kernel.access import Principal
 lazy from ledger_testing.issuer import LocalIssuer
 
@@ -91,3 +94,68 @@ def test_some_token_settings_without_the_others_are_refused() -> None:
         TokenPolicy.of_settings(partly)
     with pytest.raises(TokenSettingsMissingError, match="token_issuer, token_audience, token_jwks_url"):
         Authentication.of(SETTINGS, required=True)
+
+
+@final
+class Stands(StandingsPort):
+    """Every caller stands as ``standing``."""
+
+    def __init__(self, standing: Standing) -> None:
+        self.standing = standing
+
+    @override
+    async def of(self, principal: Principal) -> Standing:
+        del principal
+        return self.standing
+
+
+def configured(local_issuer: LocalIssuer) -> Authentication:
+    return Authentication.of(
+        SETTINGS.model_copy(
+            update={
+                "token_issuer": ISSUER,
+                "token_audience": AUDIENCE,
+                "token_jwks_url": local_issuer.keys_url,
+            }
+        )
+    )
+
+
+async def called(authentication: Authentication, token: str) -> httpx.Response:
+    app = served(authentication)
+    install_problem_handlers(app)  # a refusal is answered as the app answers it
+    transport = httpx.ASGITransport(app)
+    async with AsyncExitStack() as stack:
+        for resource in authentication.resources():
+            await stack.enter_async_context(resource)
+        async with httpx.AsyncClient(transport=transport, base_url="http://ledger.test") as client:
+            return await client.get("/me", headers={"Authorization": f"Bearer {token}"})
+
+
+async def test_with_no_standings_bound_a_person_is_proven_and_a_machine_is_refused(
+    local_issuer: LocalIssuer,
+) -> None:
+    """Nobody knows which machines are API clients: the caller fails closed for a machine."""
+    authentication = configured(local_issuer)
+    person = await called(authentication, local_issuer.token())
+    machine = await called(authentication, local_issuer.token(subject="4001", claims=machine_claims("4001")))
+    assert person.status_code == HTTPStatus.OK
+    assert (machine.status_code, "api_client_unregistered" in machine.text) == (HTTPStatus.FORBIDDEN, True)
+
+
+async def test_the_caller_applies_the_standings_bound_to_it(local_issuer: LocalIssuer) -> None:
+    authentication = configured(local_issuer)
+    port = Stands(Standing(mode=Mode.TEST))
+    authentication.bind_standings(port)
+    machine = local_issuer.token(subject="4001", claims=machine_claims("4001"))
+    assert (await called(authentication, machine)).status_code == HTTPStatus.OK
+    port.standing = Standing(mode=Mode.TEST, revoked=True)
+    revoked = await called(authentication, machine)
+    assert (revoked.status_code, "api_client_revoked" in revoked.text) == (HTTPStatus.UNAUTHORIZED, True)
+
+
+def test_standings_are_bound_once(local_issuer: LocalIssuer) -> None:
+    authentication = configured(local_issuer)
+    authentication.bind_standings(Stands(Standing()))
+    with pytest.raises(StandingsBoundError):
+        authentication.bind_standings(Stands(Standing()))

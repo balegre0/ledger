@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
 from http import HTTPStatus
-from typing import Annotated, ClassVar, Final, LiteralString, final
+from typing import Annotated, ClassVar, Final, LiteralString, final, override
 lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Sequence
 lazy from pathlib import Path
 
@@ -32,13 +32,16 @@ from ledger_platform.config.settings import Settings
 from ledger_platform.data.migrations import SchemaMigrations
 from ledger_platform.data.roles import APP, MIGRATOR
 from ledger_platform.events.consumers import ConsumerSpec
+from ledger_platform.http.standing import Standing, StandingsPort
 from ledger_platform.jobs.outcomes import Done, JobSpec
 from ledger_platform.runtime.app import App
 from ledger_platform.runtime.contexts import Module, ModuleParts
+from ledger_platform.runtime.facade import facade
 from ledger_platform.runtime.registries import MODULES, Discovered
+from ledger_platform.runtime.standings import STANDINGS_PORT
 from ledger_testing import waiting
 from ledger_testing.database import TEST_LOGINS, fresh_database
-from ledger_testing.issuer import SUBJECT
+from ledger_testing.issuer import SUBJECT, machine_claims
 lazy from ledger_kernel.access import Principal
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
 lazy from ledger_platform.events.consumers import RawEvent
@@ -114,6 +117,10 @@ modules = ["probe"]
 [data]
 schema = "other"
 """
+KNOWS_STANDINGS: Final = """
+[extension_points]
+provides = ["StandingsPort"]
+"""
 
 
 @final
@@ -132,10 +139,12 @@ class ProbeModule:
     consuming).
     """
 
-    __slots__ = ("consumes", "exported", "handled", "opened", "scripts")
+    __slots__ = ("consumes", "exported", "handled", "opened", "scripts", "standing")
 
     def __init__(self, scripts: str) -> None:
         self.scripts = scripts
+        self.standing: Standing | None = None
+        """How ``other`` says every caller stands, if it provides the standings (identity's part)."""
         self.handled: list[RawEvent] = []
         self.exported: list[str] = []
         self.consumes = True
@@ -146,7 +155,8 @@ class ProbeModule:
         """Discovery that finds this module and nothing else."""
         manifest = load_manifest(MANIFEST + (CONSUMES if self.consumes else ""))
         module = Module(manifest=manifest, assemble=self._assemble)
-        other = Module(manifest=load_manifest(OTHER), assemble=self._other)
+        knows = KNOWS_STANDINGS if self.standing is not None else ""
+        other = Module(manifest=load_manifest(OTHER + knows), assemble=self._other)
         found = (Discovered("probe", partial(_same, module)), Discovered("other", partial(_same, other)))
 
         def discover(group: str) -> Sequence[Discovered]:
@@ -174,7 +184,11 @@ class ProbeModule:
 
     def _other(self, context: ModuleContext) -> ModuleParts:
         del context
-        return ModuleParts(migrations=SchemaMigrations(schema="other", scripts=f"{self.scripts}/other"))
+        standing = self.standing
+        return ModuleParts(
+            provides=() if standing is None else (STANDINGS_PORT.bind(Stands(standing)),),
+            migrations=SchemaMigrations(schema="other", scripts=f"{self.scripts}/other"),
+        )
 
     async def _ready(self) -> None:
         """Ready while its resource is open."""
@@ -197,6 +211,22 @@ class ProbeModule:
 
 def _same(value: object) -> object:
     return value
+
+
+@final
+class Stands(StandingsPort):
+    """Every caller stands as ``standing``: what identity would say."""
+
+    __slots__ = ("_standing",)
+
+    def __init__(self, standing: Standing) -> None:
+        self._standing = standing
+
+    @override
+    @facade
+    async def of(self, principal: Principal) -> Standing:
+        del principal
+        return self._standing
 
 
 @final
@@ -300,6 +330,35 @@ async def test_the_api_serves_its_modules_routes_to_proven_callers(
     assert live.status_code == HTTPStatus.OK
     assert probe.opened == ["open", "closed"]
     assert set(PATHS.validate_python(document.json()["paths"])) == {"/v1/probes/ping"}
+
+
+async def test_a_module_s_routes_refuse_a_machine_no_module_vouches_for(
+    fresh: Fresh, probe: ProbeModule, local_issuer: LocalIssuer
+) -> None:
+    """``probe`` says nothing of standings and no module provides them: a machine is refused all the same."""
+    await asyncio.to_thread(fresh.migrate, probe)
+    app = App("api", settings=fresh.settings(issuer=local_issuer), discover=probe.discover())
+    machine = {"Authorization": f"Bearer {local_issuer.token(subject='4001', claims=machine_claims('4001'))}"}
+    person = {"Authorization": f"Bearer {local_issuer.token()}"}
+    async with serving(app.asgi()) as client:
+        refused = await client.get("/v1/probes/ping", headers=machine)
+        proven = await client.get("/v1/probes/ping", headers=person)
+    assert (refused.status_code, refused.json()["code"]) == (HTTPStatus.FORBIDDEN, "api_client_unregistered")
+    assert proven.status_code == HTTPStatus.OK
+
+
+async def test_a_module_s_routes_refuse_a_revoked_client_without_asking_for_it(
+    fresh: Fresh, probe: ProbeModule, local_issuer: LocalIssuer
+) -> None:
+    """An invoicing-like module declares a plain ``context.auth.caller``: the standings another module
+    provides (identity's) apply to its routes all the same."""
+    await asyncio.to_thread(fresh.migrate, probe)
+    probe.standing = Standing(mode=Mode.TEST, revoked=True)
+    app = App("api", settings=fresh.settings(issuer=local_issuer), discover=probe.discover())
+    machine = {"Authorization": f"Bearer {local_issuer.token(subject='4001', claims=machine_claims('4001'))}"}
+    async with serving(app.asgi()) as client:
+        refused = await client.get("/v1/probes/ping", headers=machine)
+    assert (refused.status_code, refused.json()["code"]) == (HTTPStatus.UNAUTHORIZED, "api_client_revoked")
 
 
 async def test_the_api_is_not_ready_on_a_database_never_migrated(
