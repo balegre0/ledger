@@ -70,11 +70,31 @@ def test_the_worker_factory_builds_the_worker_app_without_connecting() -> None:
     assert not any(path.startswith("/v1/") for path in paths(app))
 
 
+def distribution_version(distribution: str) -> str:
+    """``importlib.metadata.version`` of the signer's app, which comes with a later task."""
+    del distribution
+    return "1.2.3"
+
+
 @pytest.mark.usefixtures("environment")
-def test_a_worker_without_a_direct_url_does_not_start(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_signer_factory_builds_the_signer_app_without_connecting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(serving, "version", distribution_version)
+    app = serving.signer()
+    assert (app.title, app.version) == ("ledger-signer", "1.2.3")
+    assert {"/livez", "/readyz", "/metrics"} <= paths(app)
+    assert not any(path.startswith("/v1/") for path in paths(app))
+
+
+@pytest.mark.usefixtures("environment")
+@pytest.mark.parametrize("role", ["worker", "signer"])
+def test_an_app_that_listens_without_a_direct_url_does_not_start(
+    monkeypatch: pytest.MonkeyPatch, role: serving.ServedRole
+) -> None:
     monkeypatch.delenv("LEDGER_DATABASE_DIRECT_URL")
-    with pytest.raises(DirectUrlMissingError):
-        serving.worker()
+    monkeypatch.setattr(serving, "version", distribution_version)
+    factory = {"worker": serving.worker, "signer": serving.signer}[role]
+    with pytest.raises(DirectUrlMissingError, match=role):
+        factory()
 
 
 def served(monkeypatch: pytest.MonkeyPatch, role: serving.ServedRole) -> dict[str, object]:
@@ -95,7 +115,7 @@ def served(monkeypatch: pytest.MonkeyPatch, role: serving.ServedRole) -> dict[st
 
 
 @pytest.mark.usefixtures("environment")
-@pytest.mark.parametrize("role", ["api", "worker"])
+@pytest.mark.parametrize("role", ["api", "worker", "signer"])
 def test_serve_hands_granian_the_role_s_factory_on_the_configured_address(
     monkeypatch: pytest.MonkeyPatch, role: serving.ServedRole
 ) -> None:

@@ -1,8 +1,9 @@
-"""Serving an app over HTTP (§3.3, §13): the one Granian setup of the roles that serve (``api``, ``worker``).
+"""Serving an app over HTTP (§3.3, §13): the one Granian setup of the roles that serve.
 
-An app's console script calls ``serve(role)``; Granian then imports this module's factory of the role (``api``
-or ``worker``) in its worker process, and the factory builds the ``App`` from ``LEDGER_*``. One Granian worker
-per replica: an app is scaled by replicas, each sized for one process and its pools.
+``api`` serves its routes; ``worker`` and ``signer`` serve their probes (the signer's gRPC service is a
+resource of its module). An app's console script calls ``serve(role)``; Granian then imports this module's
+factory of the role in its worker process, and the factory builds the ``App`` from ``LEDGER_*``. One Granian
+worker per replica: an app is scaled by replicas, each sized for one process and its pools.
 
 Stopping. On SIGTERM Granian stops accepting, lets the requests in flight finish, then runs the app's
 shutdown, which takes at most ``STOP_BUDGET`` seconds; it kills its worker ``WORKER_KILL_TIMEOUT`` seconds
@@ -34,7 +35,7 @@ from ledger_platform.config.settings import Settings
 from ledger_platform.observability.logs import configure_logging
 from ledger_platform.runtime.app import STOP_BUDGET, App
 
-type ServedRole = Literal["api", "worker"]
+type ServedRole = Literal["api", "worker", "signer"]
 """The roles an HTTP server serves; ``migrate`` runs once and exits."""
 
 SERVER_LOGGERS: Final = ("_granian", "granian.access")
@@ -45,7 +46,11 @@ KILL_MARGIN: Final = 5
 """Seconds Granian waits beyond the app's stop budget before it kills its worker."""
 WORKER_KILL_TIMEOUT: Final = math.ceil(STOP_BUDGET) + KILL_MARGIN
 """Seconds Granian gives its worker to stop: the app's whole stop budget and a margin, inside the grace."""
-_FACTORIES: Final[Mapping[ServedRole, str]] = {"api": f"{__name__}:api", "worker": f"{__name__}:worker"}
+_FACTORIES: Final[Mapping[ServedRole, str]] = {
+    "api": f"{__name__}:api",
+    "worker": f"{__name__}:worker",
+    "signer": f"{__name__}:signer",
+}
 
 
 def serving_logs(settings: Settings, *, service: str) -> dict[str, object]:
@@ -71,6 +76,11 @@ def api() -> FastAPI:
 def worker() -> FastAPI:
     """Granian's factory of the ``worker`` app."""
     return _served("worker")
+
+
+def signer() -> FastAPI:
+    """Granian's factory of the ``signer`` app."""
+    return _served("signer")
 
 
 def serve(role: ServedRole) -> int:

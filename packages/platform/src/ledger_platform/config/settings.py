@@ -28,6 +28,9 @@ SETTINGS_GROUP: Final = "ledger.settings"
 DATABASE_URL_SCHEME: Final = "postgresql+psycopg://"
 """The chassis talks to PostgreSQL through SQLAlchemy's asynchronous psycopg driver, and only that one."""
 
+type Environment = Literal["local", "test", "staging", "production"]
+"""Where an app runs (``LEDGER_ENVIRONMENT``); its modules are told too (``ModuleContext.environment``)."""
+
 
 class LogFormat(StrEnum):
     """How logs are written."""
@@ -174,7 +177,7 @@ class Settings(_ClosedSettings):
 
     model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(env_prefix="LEDGER_")
 
-    environment: Literal["local", "test", "staging", "production"] = Field(default=...)
+    environment: Environment = Field(default=...)
     """Required: a process that forgot to say where it runs must not run with local defaults in production."""
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: LogFormat = LogFormat.CONSOLE

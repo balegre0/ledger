@@ -25,7 +25,7 @@ from ledger_platform.runtime.facade import require_facades
 lazy from ledger_kernel.clock import Clock
 lazy from ledger_kernel.regimes import RegimeDef
 lazy from ledger_platform.config.manifest import AppRole, ChannelEntry, PackageManifest
-lazy from ledger_platform.config.settings import PackageSettings
+lazy from ledger_platform.config.settings import Environment, PackageSettings
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.migrations import SchemaMigrations
 lazy from ledger_platform.events.consumers import ConsumerSpec
@@ -169,6 +169,9 @@ class ModuleContext:
     """The module's manifest (its generated ``_manifest.py``)."""
     role: AppRole
     """The app assembling it: what it mounts depends on it."""
+    environment: Environment
+    """Where the app runs (``LEDGER_ENVIRONMENT``): a module refuses a local-only adapter outside ``local``
+    and ``test`` (a local-file KMS in production)."""
     settings: PackageSettings | None
     """Its own settings section (``LEDGER_<MODULE>_*``), validated; ``None`` if its manifest declares none."""
     database: BoundDatabase
