@@ -56,3 +56,9 @@ Recorded at the review of the runtime's signer role (v2-M2b Task 3); each names 
 4. **No client readiness on the signer.** The client side of the signer module (in `api`, `worker`,
    `receiver`) must hand no readiness check that calls the signer: their readiness never depends on it
    (spec §3.7). v2-M2b Tasks 12 and 13 test it.
+5. **The migrator can read the sealed rows.** `ledger_migrator` may `SET ROLE signer_owner`, which owns
+   `signer.certificates` and `signer.custody` and can disable their row security and read every sealed key
+   and credential (recorded at the review of v2-M2b Task 7). The protection is the envelope: sealed material
+   is useless without the KMS, which only the signer's workload identity may call (port contract
+   `KeyManagement`). Follow-up (v2-M6): run migrations under a migrator that cannot assume the signer's owner
+   outside a rollout, and alert on any session of `signer_owner` that is not a migration.
