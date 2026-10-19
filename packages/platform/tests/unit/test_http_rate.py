@@ -78,24 +78,41 @@ def test_credentials_do_not_share_an_allowance() -> None:
     assert limiter.wait("b") == 0.0
 
 
-def test_the_credentials_it_remembers_are_bounded_and_idle_ones_go_first() -> None:
+def test_the_credentials_it_remembers_are_bounded_and_idle_ones_make_room_one_at_a_time() -> None:
     clock = Clock()
     limiter = limiter_of(clock, keys=3)
     for key in ("a", "b", "c"):
         limiter.wait(key)
-    clock.now += 60  # a, b and c are idle: forgotten when room is needed
-    limiter.wait("d")
-    assert limiter.remembered() == 1
+    clock.now += 60  # a, b and c are idle: each is forgotten when room is needed, not before
+    for key in ("d", "e", "f"):
+        assert limiter.wait(key) == 0.0
+        assert limiter.remembered() == 3
 
 
-def test_when_every_credential_is_active_the_oldest_is_forgotten() -> None:
+def test_when_every_credential_is_active_a_new_one_waits_and_no_allowance_is_reset() -> None:
+    """Forgetting an active credential would give it a fresh burst: a flood of new ones cannot buy that."""
     clock = Clock()
     limiter = limiter_of(clock, rate=1.0, burst=1, keys=2)
-    for key in ("a", "b", "c"):
-        limiter.wait(key)
+    assert (limiter.wait("a"), limiter.wait("b")) == (0.0, 0.0)
+    clock.now += 0.5
+    assert limiter.wait("c") == pytest.approx(0.5)  # until the oldest, a, is idle again
     assert limiter.remembered() == 2
-    assert limiter.wait("a") == 0.0  # forgotten, so it starts afresh
-    assert limiter.wait("c") > 0  # still held
+    assert limiter.wait("a") == pytest.approx(0.5)  # still held: its allowance was not reset
+    clock.now += 0.5
+    assert limiter.wait("c") == 0.0  # a went idle and made room
+    assert limiter.remembered() == 2
+
+
+def test_the_credential_allowed_least_recently_goes_first() -> None:
+    clock = Clock()
+    limiter = limiter_of(clock, rate=1.0, burst=2, keys=2)
+    limiter.wait("a")
+    limiter.wait("b")
+    clock.now += 2
+    limiter.wait("a")  # a is now the most recent: b goes first when room is needed
+    assert limiter.wait("c") == 0.0
+    assert limiter.wait("a") == 0.0  # a kept its place and the rest of its burst
+    assert limiter.wait("a") > 0
 
 
 @pytest.mark.parametrize(

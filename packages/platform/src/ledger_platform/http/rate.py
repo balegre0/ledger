@@ -6,10 +6,15 @@ than a burst's worth ahead of now; one that is not allowed is told how long to w
 asking again earns no further delay. The limiter is per replica: a credential may use the allowance of each
 replica it reaches, which is what a backstop for a runaway caller needs.
 
-It remembers a bounded number of credentials: those idle for a whole burst are forgotten first, and when all
-are active the oldest is, so a flood of credentials cannot grow it.
+It remembers a bounded number of credentials (``max_keys``), in the order they were last allowed. Room for a
+new one is made by forgetting the least recently allowed while it is idle (it would have its whole burst back
+anyway), one at a time from the front: constant time per request. When every credential it remembers is active
+(each was allowed within its last burst), the new one is refused until the oldest goes idle: forgetting an
+active one would hand it a fresh burst, so a flood of credentials can neither grow it nor reset an allowance.
+The settings are ``LEDGER_RATE_LIMIT_PER_SECOND`` and ``LEDGER_RATE_LIMIT_BURST``.
 """
 
+from collections import OrderedDict
 from math import ceil
 from time import monotonic
 from typing import ClassVar, Final, final
@@ -60,29 +65,36 @@ class RateLimiter:
         self._interval = 1.0 / rate
         self._tolerance = burst * self._interval
         self._max_keys = max_keys
-        self._tats: dict[str, float] = {}
+        self._tats: OrderedDict[str, float] = OrderedDict()
 
     def wait(self, key: str) -> float:
         """Seconds ``key`` must wait before this request is allowed: ``0.0`` when it is, and it is counted."""
-        now = self._clock()
-        ahead = max(self._tats.get(key, now) - now, 0.0)  # exactly zero for a credential at rest
+        now, tats = self._clock(), self._tats
+        held = tats.get(key)
+        if held is None and (full := self._room(now)) > 0:
+            return full  # every credential remembered is active: this one waits for room
+        ahead = max((now if held is None else held) - now, 0.0)  # exactly zero for a credential at rest
         late = ahead + self._interval - self._tolerance
         if late > 0:
             return late  # a refusal changes nothing
-        _ = self._tats.pop(key, None)  # put back last: the oldest is the one allowed least recently
-        self._make_room(now)
-        self._tats[key] = now + ahead + self._interval
+        tats[key] = now + ahead + self._interval
+        tats.move_to_end(key)  # the last allowed goes last: the front is the one allowed least recently
         return 0.0
 
     def remembered(self) -> int:
         """How many credentials it remembers."""
         return len(self._tats)
 
-    def _make_room(self, now: float) -> None:
-        """Forget the idle credentials, and the oldest if all are active, until one more fits."""
-        if len(self._tats) < self._max_keys:
-            return
-        for key in [key for key, tat in self._tats.items() if tat <= now]:
-            del self._tats[key]
-        while len(self._tats) >= self._max_keys:
-            del self._tats[next(iter(self._tats))]
+    def _room(self, now: float) -> float:
+        """Make room for one more credential: ``0.0`` once there is, else seconds until the oldest is idle.
+
+        The least recently allowed are forgotten from the front while they are idle (their theoretical arrival
+        is past); an active one is never forgotten.
+        """
+        tats = self._tats
+        while len(tats) >= self._max_keys:
+            oldest, tat = next(iter(tats.items()))
+            if tat > now:
+                return tat - now
+            del tats[oldest]
+        return 0.0

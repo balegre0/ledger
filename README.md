@@ -67,6 +67,11 @@ a stack started under its own project (`-p <name>`) gives its scripts the same `
 An app run on the host takes `LEDGER_*` variables (see `deploy/local/compose.yaml`'s header) and sets
 `LEDGER_HTTP_PORT=8101` for the worker (8100, the api's, is the default).
 
+The api holds every credential to a rate of its own, per replica, behind the ingress's limit (spec §10):
+`LEDGER_RATE_LIMIT_PER_SECOND` (default 50) and `LEDGER_RATE_LIMIT_BURST` (default 100, the requests it may make
+at once). Over it a request is answered 429 with `Retry-After`. Each replica remembers 10 000 credentials at
+most; while all of them are active a new one waits for the oldest to go idle, so no allowance is ever reset.
+
 ## Decisions and operations
 
 - Architecture decisions: [docs/adr/](docs/adr/).
