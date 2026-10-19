@@ -5,7 +5,7 @@ from typing import Final
 
 import pytest
 
-from ledger_invoicing.adapters.postgres.repositories import IncompleteRowError, seller_of, tax_id_of
+from ledger_invoicing.adapters.postgres.repositories import IncompleteRowError, seller_from_columns, tax_id_of
 from ledger_invoicing.domain.parties import Seller
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 
@@ -23,8 +23,8 @@ def test_a_tax_id_is_both_its_columns_or_none() -> None:
 
 
 def test_a_seller_is_its_name_and_its_tax_id_or_none() -> None:
-    assert seller_of(None, None, None) is None
-    assert seller_of("Acme SRL", "do.rnc", "101850043") == Seller(legal_name="Acme SRL", tax_id=RNC)
+    assert seller_from_columns(None, None, None) is None
+    assert seller_from_columns("Acme SRL", "do.rnc", "101850043") == Seller(legal_name="Acme SRL", tax_id=RNC)
     for half in (("Acme SRL", None, None), (None, "do.rnc", "101850043"), ("Acme SRL", "do.rnc", None)):
         with pytest.raises(IncompleteRowError, match=r"^invoices\.seller_\* are set in part"):
-            seller_of(*half)
+            seller_from_columns(*half)

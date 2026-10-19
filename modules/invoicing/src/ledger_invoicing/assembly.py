@@ -13,7 +13,7 @@ from ledger_identity.api import IDENTITY_API
 from ledger_invoicing._manifest import MANIFEST
 from ledger_invoicing.adapters.http import invoices
 from ledger_invoicing.adapters.http.context import ApiContext
-from ledger_invoicing.adapters.identity import IdentityLookup
+from ledger_invoicing.adapters.identity import IdentityApiLookup
 from ledger_invoicing.adapters.postgres.schema import MIGRATIONS, migrations
 from ledger_invoicing.adapters.postgres.unit import PgUnits
 from ledger_invoicing.adapters.regimes import regime_of
@@ -31,7 +31,7 @@ def assemble(context: ModuleContext) -> ModuleParts:
     units = PgUnits(context.database)
     commands = InvoicingCommands(
         units=units,
-        lookup=IdentityLookup(identity),
+        lookup=IdentityApiLookup(identity),
         regime_of=regime_of(context.regimes),
         clock=context.clock,
         new_id=new_id,

@@ -13,7 +13,7 @@ import pytest
 
 from ledger_invoicing.adapters.postgres.unit import PgUnits
 from ledger_invoicing.api import INVOICING_API, InvoiceNotFoundError
-from ledger_invoicing.application.facade import InvoicingFacade, view_of
+from ledger_invoicing.application.facade import InvoicingFacade, info_of
 from ledger_invoicing.application.queries import InvoicingQueries
 from ledger_invoicing.domain.ids import InvoiceId
 from ledger_invoicing.domain.invoice import Invoice, Opening
@@ -96,9 +96,9 @@ async def test_a_document_is_read_by_a_request_s_call_and_by_the_platform_s(
 ) -> None:
     invoice = await kept(module_database, regime)
     draft = await kept(module_database, regime, draft=True)
-    assert await api.document(called_in(TENANT), invoice.id) == view_of(invoice)
+    assert await api.document(called_in(TENANT), invoice.id) == info_of(invoice)
     by_a_consumer = SystemCall(reason="fiscal.commercial_documents", scope=TENANT)
-    assert await api.document(by_a_consumer, draft.id) == view_of(draft)
+    assert await api.document(by_a_consumer, draft.id) == info_of(draft)
 
 
 async def test_another_tenant_s_document_is_as_missing_as_one_never_made(

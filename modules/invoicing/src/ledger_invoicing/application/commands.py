@@ -5,16 +5,16 @@ prices the document with the regime of the company's jurisdiction, and then chan
 the call's tenant, which commits the change, its event and its audit record together or none of them (rule 3).
 A refusal leaves nothing stored, announced or recorded.
 
-Each use case is also two steps: ``prepare_*`` does what happens outside any unit and gives back a ``Change``,
-which ``apply`` makes in a unit its caller opens. The HTTP edge needs that: it claims the request's
-``Idempotency-Key`` in the very unit of the change (§9.5), which no unit opened by the use case could share.
+Each use case is two steps: ``prepare_*`` does what happens outside any unit and gives back a ``Change``,
+which ``apply`` makes in a unit its caller opens, of the change's ``tenant``. The HTTP edge needs that: it
+claims the request's ``Idempotency-Key`` in the very unit of the change (§9.5), which no unit opened by the
+use case could share.
 ``admits`` is what ``If-Match`` names (``IfMatch.admits``): a document at a version it does not admit is
 refused (``InvoiceVersionStaleError``) before anything is decided on it.
 """
 
 from dataclasses import dataclass, field
-from types import MappingProxyType
-from typing import Final, final
+from typing import final
 lazy from collections.abc import Awaitable, Callable
 lazy from datetime import date
 lazy from decimal import Decimal
@@ -35,11 +35,11 @@ from ledger_invoicing.domain.errors import (
 from ledger_invoicing.domain.ids import InvoiceId
 from ledger_invoicing.domain.invoice import Invoice, InvoiceStatus, Opening, require_correction_named
 from ledger_invoicing.domain.parties import Seller
-from ledger_invoicing.domain.pricing import Dating, Terms, local_date, price
+from ledger_invoicing.domain.pricing import NO_FIELDS, Dating, Terms, local_date, price
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.tenancy import Tenant
 lazy from ledger_identity.api import CompanyInfo
-lazy from ledger_invoicing.application.ports import CompanyLookup, InvoicingUnit, InvoicingUnits, RegimeOf
+lazy from ledger_invoicing.application.ports import IdentityLookup, InvoicingUnit, InvoicingUnits, RegimeOf
 lazy from ledger_invoicing.domain.lines import LineTerms
 lazy from ledger_invoicing.domain.parties import Party
 lazy from ledger_invoicing.domain.pricing import CountryFields, EstablishmentRef, Pricing
@@ -48,8 +48,6 @@ lazy from ledger_kernel.clock import Clock
 lazy from ledger_kernel.money import Currency
 lazy from ledger_kernel.regimes import Direction, DocumentKind, RegimeDef
 lazy from ledger_platform.runtime.calls import Call, SystemCall
-
-_NO_FIELDS: Final[CountryFields] = MappingProxyType({})
 
 
 @final
@@ -71,7 +69,7 @@ class Creation:
     tax_point: date | None = None
     establishment: str | None = None
     buyer: Party | None = None
-    fiscal: CountryFields = field(default=_NO_FIELDS, hash=False)
+    fiscal: CountryFields = field(default=NO_FIELDS, hash=False)
     external_reference: ExternalReference | None = None
     corrects: InvoiceId | None = None
     """The invoice a credit or debit note corrects."""
@@ -118,7 +116,7 @@ def tenant_of(call: Call | SystemCall) -> Tenant:
     return scope
 
 
-def seller_of(company: CompanyInfo) -> Seller:
+def seller_from_company(company: CompanyInfo) -> Seller:
     """The company as a document's seller: its legal name and its primary tax id."""
     return Seller(legal_name=company.legal_name, tax_id=company.tax_ids[0])
 
@@ -129,23 +127,11 @@ class InvoicingCommands:
     """The use cases that change documents, over the ports they need."""
 
     units: InvoicingUnits
-    lookup: CompanyLookup
+    lookup: IdentityLookup
     regime_of: RegimeOf
     clock: Clock
     """The wall clock: what fixes "today" in an establishment's time zone. Times recorded are the unit's."""
     new_id: Callable[[], UUID]
-
-    async def create(self, call: Call, creation: Creation) -> Invoice:
-        """Create the document ``creation`` asks for in the call's tenant (``prepare_create``), in a unit."""
-        return await self._made(await self.prepare_create(call, creation))
-
-    async def issue(self, call: Call, invoice: InvoiceId) -> Invoice:
-        """Issue the draft ``invoice`` (``prepare_issue``), in a unit."""
-        return await self._made(await self.prepare_issue(call, invoice))
-
-    async def void(self, call: Call, invoice: InvoiceId, reason: Reason | None) -> Invoice:
-        """Void the issued document ``invoice``, for ``reason`` if given (``prepare_void``), in a unit."""
-        return await self._made(self.prepare_void(call, invoice, reason))
 
     async def prepare_create(self, call: Call, creation: Creation) -> Change:
         """Create the document ``creation`` asks for in the call's tenant: a draft, or issued at once.
@@ -169,7 +155,7 @@ class InvoicingCommands:
             external_reference=creation.external_reference,
             terms=terms,
         )
-        seller = None if creation.draft else seller_of(company)
+        seller = None if creation.draft else seller_from_company(company)
         corrects = creation.corrects
 
         async def apply(unit: InvoicingUnit) -> Invoice:
@@ -211,7 +197,7 @@ class InvoicingCommands:
         tax_point = await self._tax_point_of(tenant, draft.corrects)
         company = await self._company(call, tenant)
         pricing = await self._priced(call, company, draft.terms, tax_point)
-        seller = seller_of(company)
+        seller = seller_from_company(company)
 
         async def apply(unit: InvoicingUnit) -> Invoice:
             current = await unit.invoices.locked(invoice)
@@ -255,11 +241,6 @@ class InvoicingCommands:
             return voided
 
         return Change(tenant_of(call), apply)
-
-    async def _made(self, change: Change) -> Invoice:
-        """``change`` made in a unit of its own tenant."""
-        async with self.units.unit(change.tenant) as unit:
-            return await change.apply(unit)
 
     async def _company(self, call: Call, tenant: Tenant) -> CompanyInfo:
         """The tenant's company, which must be active to make or issue a document."""

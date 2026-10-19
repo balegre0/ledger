@@ -97,7 +97,8 @@ _NAME: Final = re.compile(r"[a-z][a-z0-9_]{0,39}", re.ASCII)
 _DATE: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
 _DECIMAL: Final = re.compile(r"-?[0-9]{1,18}(?:\.[0-9]{1,12})?", re.ASCII)
 _NOTHING: Final[Mapping[str, FieldValue]] = MappingProxyType({})
-_NO_FIELDS: Final[CountryFields] = MappingProxyType({})
+NO_FIELDS: Final[CountryFields] = MappingProxyType({})
+"""No country fields: what a document sent none carries."""
 
 
 def _frozen(value: FieldValue) -> FieldValue:
@@ -134,7 +135,7 @@ class Terms:
     establishment: str | None = None
     """The code of the establishment the document is issued from; the company's ``MAIN`` when ``None``."""
     buyer: Party | None = None
-    fiscal: CountryFields = field(default=_NO_FIELDS, hash=False)
+    fiscal: CountryFields = field(default=NO_FIELDS, hash=False)
 
     def __post_init__(self) -> None:
         if not 1 <= len(self.lines) <= MAX_LINES:

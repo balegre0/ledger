@@ -9,12 +9,11 @@ from typing import final
 
 from ledger_invoicing.application.commands import tenant_of
 from ledger_invoicing.domain.errors import InvoiceNotFoundError
-lazy from ledger_invoicing.api import AnyCall
 lazy from ledger_invoicing.application.ports import InvoiceFilters, InvoicingUnits
 lazy from ledger_invoicing.domain.ids import InvoiceId
 lazy from ledger_invoicing.domain.invoice import Invoice
 lazy from ledger_kernel.pagination import Page, PageRequest
-lazy from ledger_platform.runtime.calls import Call
+lazy from ledger_platform.runtime.calls import AnyCall, Call
 
 
 @final

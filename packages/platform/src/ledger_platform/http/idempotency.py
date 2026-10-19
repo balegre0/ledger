@@ -396,7 +396,11 @@ async def idempotency_key(
             min_length=1,
             max_length=MAX_KEY_LENGTH,
             pattern=r"^[!-~]+$",
-            description="Makes a retry safe: the same key and body change state once and answer the same.",
+            description=(
+                "Makes a retry safe: the same key and body change state once and answer the same. A key is "
+                "the caller's per organization, mode and operation, whatever the company it acts for: reused "
+                "for another request (another company's too) it is refused (422 idempotency_key_reused)."
+            ),
         ),
     ],
 ) -> str:

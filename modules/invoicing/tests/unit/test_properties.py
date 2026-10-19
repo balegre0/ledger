@@ -26,7 +26,9 @@ MAIN: Final = EstablishmentRef(code="MAIN", time_zone="America/Santo_Domingo")
 ITBIS: Final = ("do.itbis.standard", "do.itbis.reduced", "do.itbis.exempt")
 
 quantities = st.decimals(min_value=Decimal("0.000001"), max_value=Decimal(100_000), places=6)
-prices = st.decimals(min_value=Decimal(0), max_value=Decimal(10) ** 11, places=12)
+prices = st.decimals(min_value=Decimal(0), max_value=Decimal(10) ** 8, places=12)
+"""Small enough that a document of 12 lines, taxed and converted at the highest rate, stays below 10^18: what
+leaves money's range is ``huge_documents``' to try (a wider price once made a converted total overflow)."""
 huge_quantities = st.decimals(min_value=Decimal(1), max_value=Decimal(10) ** 18 - 1, places=0)
 huge_prices = st.decimals(min_value=Decimal(0), max_value=Decimal(10) ** 18 - 1, places=12)
 rates = st.decimals(min_value=Decimal("0.0001"), max_value=Decimal(1_000), places=6)

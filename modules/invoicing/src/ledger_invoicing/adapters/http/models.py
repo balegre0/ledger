@@ -224,7 +224,13 @@ class LineTaxView(_Shape):
     kind: TaxCategoryKind
     percent: str = Field(examples=["18"])
     since: date = Field(description="When the rate took effect: with the category, it names the rate.")
-    amount: str = Field(description="This line's tax alone, rounded as the regime rounds a category.")
+    amount: str = Field(
+        description=(
+            "This line's tax alone, as the regime's calculator computes a document of this line only: "
+            "rounded where the regime rounds (per category, per line or per document), else exact. The "
+            "document's tax per category is in its totals."
+        )
+    )
 
 
 class LineView(_Shape):

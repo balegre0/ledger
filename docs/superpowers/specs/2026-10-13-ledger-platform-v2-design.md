@@ -233,14 +233,14 @@ receive an instance from the composition root, so a test passes a fake and an ex
 ```python
 # modules/invoicing/src/ledger_invoicing/api.py
 class InvoicingApi(Protocol):
-    async def document(self, call: Call, document: InvoiceId) -> InvoiceView: ...
+    async def document(self, call: Call | SystemCall, document: InvoiceId) -> InvoiceInfo: ...
     async def apply_fiscal_status(
         self, call: SystemCall, document: InvoiceId, status: FiscalStatusView, version: int
     ) -> Applied: ...   # idempotent: applies only when version > the stored version for status.channel
 
 class IssuePolicy(Protocol):                               # extension point, implemented by fiscal
-    async def check(self, call: Call, document: InvoiceView) -> Sequence[Objection]: ...      # before the unit
-    async def after_issue(self, call: Call, document: InvoiceView, *, budget: timedelta) -> FiscalOutcome: ...
+    async def check(self, call: Call, document: InvoiceInfo) -> Sequence[Objection]: ...      # before the unit
+    async def after_issue(self, call: Call, document: InvoiceInfo, *, budget: timedelta) -> FiscalOutcome: ...
 ```
 
 - `Call` (platform `runtime.calls`) carries the principal, the tenant scope (`organization`, `company`,
@@ -253,7 +253,8 @@ class IssuePolicy(Protocol):                               # extension point, im
 - Facade **commands** reachable from consumers or jobs take an idempotency token (the event id or job key) or
   a monotonic version (`apply_fiscal_status`), so a redelivery is harmless.
 - Facades take and return DTOs, never domain objects or rows; DTOs are `@dataclass(frozen=True, slots=True,
-  kw_only=True)` with kernel value types.
+  kw_only=True)` with kernel value types. A DTO is named `*Info` (`CompanyInfo`, `InvoiceInfo`); `*View` names a module's
+  HTTP response models, so no two classes of a module share a name.
 - Errors crossing a facade are `LedgerError` subclasses with a kind and a stable code (§9.6), exported from
   the module's `api.py`.
 
@@ -1648,6 +1649,9 @@ cannot be probed by type. Internal UUIDs never appear in the API.
   principal, **route**), stored **7 days** with the response in the owning module's `idempotency_keys` table in the
   same transaction as the work (v1 semantics: a failed request keeps nothing; a concurrent twin waits and replays
   with `Idempotent-Replayed: true`; same key with another body → 422 `idempotency_key_reused`).
+  **The company is not part of the scope** (as built, invoicing review M2): a request's `Ledger-Company` is part
+  of what it fingerprints, so the same key used for another company's request is 422 `idempotency_key_reused`.
+  An integrator acting for several companies uses a key per company (the header's OpenAPI description says so).
 - What "the same request" is: the route, the concrete path, the canonical query and the canonical body, each
   length-prefixed. The canonical query is the `(name, value)` pairs **sorted**, so parameters sent in another
   order are the same request, and so are the values of a repeated name sent in another order (`?tag=a&tag=b`

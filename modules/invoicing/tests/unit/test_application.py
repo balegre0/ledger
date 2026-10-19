@@ -18,9 +18,9 @@ from ledger_identity.api import CompanyInactiveError, CompanyInfo
 from ledger_invoicing.application.commands import Creation, InvoicingCommands
 from ledger_invoicing.application.ports import (
     Audit,
-    CompanyLookup,
     Events,
     ForeignTenantError,
+    IdentityLookup,
     InvoiceFilters,
     Invoices,
     InvoicingUnit,
@@ -60,8 +60,10 @@ from ledger_kernel.regimes import Direction, DocumentKind
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Mode, OrganizationScope, Tenant
 from ledger_platform.runtime.calls import Call
+lazy from ledger_invoicing.application.commands import Change
 lazy from ledger_invoicing.application.ports import AuditAction
 lazy from ledger_invoicing.domain.invoice import Invoice
+lazy from ledger_invoicing.domain.text import Reason
 lazy from ledger_invoicing.events import InvoicingEvent
 lazy from ledger_kernel.jurisdiction import Jurisdiction
 lazy from ledger_kernel.pagination import Page
@@ -291,7 +293,7 @@ class MemoryUnits(InvoicingUnits):
 
 
 @final
-class Lookup(CompanyLookup):
+class Lookup(IdentityLookup):
     """identity, as invoicing asks it: one company and its establishments."""
 
     def __init__(self) -> None:
@@ -335,6 +337,21 @@ class World:
         )
         self.queries = InvoicingQueries(units=self.commands.units)
 
+    async def create(self, call: Call, creation: Creation) -> Invoice:
+        """The document ``creation`` asks for, made as the HTTP edge makes it: prepared, then applied."""
+        return await self.applied(await self.commands.prepare_create(call, creation))
+
+    async def issue(self, call: Call, invoice: InvoiceId) -> Invoice:
+        return await self.applied(await self.commands.prepare_issue(call, invoice))
+
+    async def void(self, call: Call, invoice: InvoiceId, reason: Reason | None) -> Invoice:
+        return await self.applied(self.commands.prepare_void(call, invoice, reason))
+
+    async def applied(self, change: Change) -> Invoice:
+        """``change`` made in a unit of its tenant."""
+        async with self.commands.units.unit(change.tenant) as unit:
+            return await change.apply(unit)
+
     def clock(self) -> datetime:
         return self.now
 
@@ -356,14 +373,14 @@ def world(regime: RegimeDef) -> World:
 
 
 async def issued_one(world: World, creation: Creation = INVOICE) -> Invoice:
-    return await world.commands.create(CALL, creation)
+    return await world.create(CALL, creation)
 
 
 # ── Creating ────────────────────────────────────────────────────────────────────
 
 
 async def test_an_invoice_is_issued_at_once_sold_by_the_company_as_identity_knows_it(world: World) -> None:
-    invoice = await world.commands.create(CALL, INVOICE)
+    invoice = await world.create(CALL, INVOICE)
     assert world.stored() == [invoice]
     assert (invoice.id, invoice.tenant, invoice.status, invoice.version) == (
         world.ids[0],
@@ -392,7 +409,7 @@ async def test_an_invoice_is_issued_at_once_sold_by_the_company_as_identity_know
 
 
 async def test_a_draft_is_stored_unannounced_without_its_seller(world: World) -> None:
-    invoice = await world.commands.create(CALL, DRAFT)
+    invoice = await world.create(CALL, DRAFT)
     assert (invoice.status, invoice.seller, world.stored()) == (InvoiceStatus.DRAFT, None, [invoice])
     assert world.state.events == []
     assert world.state.audited == [
@@ -402,21 +419,21 @@ async def test_a_draft_is_stored_unannounced_without_its_seller(world: World) ->
 
 async def test_today_is_the_establishment_s_day_not_the_server_s(world: World) -> None:
     world.now = LATE_EVENING
-    assert (await world.commands.create(CALL, INVOICE)).pricing.issue_date == date(2026, 10, 12)
-    in_tokyo = await world.commands.create(CALL, replace(INVOICE, establishment="TOKYO"))
+    assert (await world.create(CALL, INVOICE)).pricing.issue_date == date(2026, 10, 12)
+    in_tokyo = await world.create(CALL, replace(INVOICE, establishment="TOKYO"))
     assert (in_tokyo.pricing.issue_date, in_tokyo.pricing.establishment) == (date(2026, 10, 13), TOKYO)
 
 
 async def test_an_establishment_the_company_lacks_is_refused_and_nothing_stored(world: World) -> None:
     with pytest.raises(EstablishmentUnknownError) as caught:
-        await world.commands.create(CALL, replace(INVOICE, establishment="NOPE"))
+        await world.create(CALL, replace(INVOICE, establishment="NOPE"))
     assert str(caught.value) == "establishment names no establishment of the company"
     assert (caught.value.kind, caught.value.code) == (ErrorKind.INVALID, "establishment_unknown")
     assert (world.stored(), world.state.events, world.state.audited, world.state.units) == ([], [], [], 0)
 
 
 async def test_a_document_in_another_currency_carries_its_functional_totals(world: World) -> None:
-    dollars = await world.commands.create(CALL, replace(INVOICE, currency=USD, exchange_rate=Decimal(60)))
+    dollars = await world.create(CALL, replace(INVOICE, currency=USD, exchange_rate=Decimal(60)))
     assert dollars.pricing.totals.gross == Money.of("118.00", USD)
     functional = dollars.pricing.functional
     assert functional is not None
@@ -426,17 +443,17 @@ async def test_a_document_in_another_currency_carries_its_functional_totals(worl
 async def test_an_inactive_or_unknown_company_creates_nothing(world: World) -> None:
     world.directory.company_info = replace(ACME, active=False)
     with pytest.raises(CompanyInactiveError):
-        await world.commands.create(CALL, INVOICE)
+        await world.create(CALL, INVOICE)
     world.directory.company_info = None
     with pytest.raises(CompanyNotFoundError):
-        await world.commands.create(CALL, INVOICE)
+        await world.create(CALL, INVOICE)
     assert (world.stored(), world.state.units) == ([], 0)
 
 
 async def test_a_company_no_installed_regime_governs_is_a_defect_of_the_installation(world: World) -> None:
     world.regimes.clear()
     with pytest.raises(RegimeMissingError) as caught:
-        await world.commands.create(CALL, INVOICE)
+        await world.create(CALL, INVOICE)
     assert str(caught.value) == "no installed regime governs the company's jurisdiction"
     assert (caught.value.kind, caught.value.code) == (ErrorKind.INTERNAL, "regime_missing")
 
@@ -444,29 +461,29 @@ async def test_a_company_no_installed_regime_governs_is_a_defect_of_the_installa
 async def test_a_call_that_names_no_company_in_a_mode_is_a_defect_of_its_caller(world: World) -> None:
     for scope in (Tenant(ORGANIZATION, COMPANY, None), OrganizationScope(ORGANIZATION, Mode.TEST)):
         with pytest.raises(InvalidValueError, match=r"^call\.scope must be a company in a mode$"):
-            await world.commands.create(replace(CALL, scope=scope), INVOICE)
+            await world.create(replace(CALL, scope=scope), INVOICE)
     assert world.directory.calls == []
 
 
 async def test_an_external_reference_is_held_once_per_company_mode_and_type(world: World) -> None:
     keyed = replace(INVOICE, external_reference=parse_external_reference("ORD-1"))
-    first = await world.commands.create(CALL, keyed)
+    first = await world.create(CALL, keyed)
     with pytest.raises(ExternalReferenceTakenError) as caught:
-        await world.commands.create(CALL, replace(keyed, draft=True))
+        await world.create(CALL, replace(keyed, draft=True))
     assert caught.value.existing_id == first.id
     assert world.stored() == [first]
     assert len(world.state.events) == 1
     note = replace(keyed, kind=DocumentKind.CREDIT_NOTE, corrects=first.id)
-    assert (await world.commands.create(CALL, note)).external_reference == "ORD-1"
+    assert (await world.create(CALL, note)).external_reference == "ORD-1"
     live = Tenant(ORGANIZATION, COMPANY, Mode.LIVE)
-    assert (await world.commands.create(replace(CALL, scope=live), keyed)).tenant == live
+    assert (await world.create(replace(CALL, scope=live), keyed)).tenant == live
 
 
 async def test_whether_a_document_names_an_invoice_is_checked_before_identity_is_asked(world: World) -> None:
     with pytest.raises(CorrectionUnexpectedError):
-        await world.commands.create(CALL, replace(INVOICE, corrects=InvoiceId(UUID(int=5))))
+        await world.create(CALL, replace(INVOICE, corrects=InvoiceId(UUID(int=5))))
     with pytest.raises(CorrectionRequiredError):
-        await world.commands.create(CALL, replace(INVOICE, kind=DocumentKind.CREDIT_NOTE))
+        await world.create(CALL, replace(INVOICE, kind=DocumentKind.CREDIT_NOTE))
     assert (world.directory.calls, world.state.units) == ([], 0)
 
 
@@ -474,13 +491,13 @@ async def test_a_note_is_in_its_invoice_s_currency(world: World) -> None:
     original = await issued_one(world)
     dollars = replace(INVOICE, kind=DocumentKind.CREDIT_NOTE, corrects=original.id, currency=USD)
     with pytest.raises(CorrectionInvalidError, match=r"^corrects is in another currency$"):
-        await world.commands.create(CALL, replace(dollars, exchange_rate=Decimal(60)))
+        await world.create(CALL, replace(dollars, exchange_rate=Decimal(60)))
 
 
 async def test_a_note_corrects_an_issued_invoice_of_its_company_and_mode(world: World) -> None:
     original = await issued_one(world)
     debit = replace(INVOICE, kind=DocumentKind.DEBIT_NOTE, corrects=original.id)
-    note = await world.commands.create(CALL, debit)
+    note = await world.create(CALL, debit)
     assert (note.corrects, world.state.events[-1]) == (
         original.id,
         InvoiceIssued(
@@ -497,7 +514,7 @@ async def test_a_note_corrects_an_issued_invoice_of_its_company_and_mode(world: 
         with pytest.raises(
             CorrectionInvalidError, match=r"^corrects names no invoice of the company in this mode$"
         ):
-            await world.commands.create(call, replace(debit, corrects=corrects))
+            await world.create(call, replace(debit, corrects=corrects))
     assert len(world.stored()) == 2
 
 
@@ -522,9 +539,7 @@ async def test_a_note_credits_at_the_rate_its_invoice_charged(world: World, regi
     """The rate rose between the invoice and its note: the note takes the invoice's tax point, not its own."""
     world.regimes["DO"] = raised_on(regime, date(2026, 10, 10), "20")
     original = await issued_one(world, replace(INVOICE, issue_date=date(2026, 10, 5)))
-    note = await world.commands.create(
-        CALL, replace(INVOICE, kind=DocumentKind.CREDIT_NOTE, corrects=original.id)
-    )
+    note = await world.create(CALL, replace(INVOICE, kind=DocumentKind.CREDIT_NOTE, corrects=original.id))
     today = await issued_one(world)
     assert (note.pricing.issue_date, note.pricing.tax_point) == (date(2026, 10, 12), date(2026, 10, 5))
     assert (original.pricing.totals.tax, note.pricing.totals.tax, today.pricing.totals.tax) == (
@@ -532,7 +547,7 @@ async def test_a_note_credits_at_the_rate_its_invoice_charged(world: World, regi
         Money.of("18.00", DOP),
         Money.of("20.00", DOP),
     )
-    named = await world.commands.create(
+    named = await world.create(
         CALL,
         replace(INVOICE, kind=DocumentKind.CREDIT_NOTE, corrects=original.id, tax_point=date(2026, 10, 11)),
     )
@@ -545,11 +560,9 @@ async def test_an_invoice_older_than_any_tax_point_a_document_may_name_is_still_
     world.now = NOON - timedelta(days=500)
     original = await issued_one(world)
     world.now = NOON
-    draft = await world.commands.create(
-        CALL, replace(DRAFT, kind=DocumentKind.CREDIT_NOTE, corrects=original.id)
-    )
+    draft = await world.create(CALL, replace(DRAFT, kind=DocumentKind.CREDIT_NOTE, corrects=original.id))
     world.now = NOON + timedelta(days=3)
-    note = await world.commands.issue(CALL, draft.id)
+    note = await world.issue(CALL, draft.id)
     assert (note.pricing.issue_date, note.pricing.tax_point) == (
         date(2026, 10, 15),
         original.pricing.tax_point,
@@ -563,12 +576,12 @@ async def test_a_note_dated_before_its_invoice_is_refused_and_nothing_stored(wor
         INVOICE, kind=DocumentKind.CREDIT_NOTE, corrects=original.id, issue_date=date(2026, 10, 5)
     )
     with pytest.raises(CorrectionInvalidError, match=r"^corrects is dated after the note$"):
-        await world.commands.create(CALL, early)
+        await world.create(CALL, early)
     assert (world.stored(), len(world.state.events)) == ([original], 1)
 
 
 async def test_a_note_s_invoice_is_read_before_the_note_is_priced(world: World) -> None:
-    draft = await world.commands.create(CALL, DRAFT)
+    draft = await world.create(CALL, DRAFT)
     asked = len(world.directory.calls)
     for corrects, problem in (
         (InvoiceId(UUID(int=5)), "names no invoice of the company in this mode"),
@@ -576,9 +589,7 @@ async def test_a_note_s_invoice_is_read_before_the_note_is_priced(world: World) 
     ):
         units = world.state.units
         with pytest.raises(CorrectionInvalidError, match=rf"^corrects {problem}$"):
-            await world.commands.create(
-                CALL, replace(INVOICE, kind=DocumentKind.CREDIT_NOTE, corrects=corrects)
-            )
+            await world.create(CALL, replace(INVOICE, kind=DocumentKind.CREDIT_NOTE, corrects=corrects))
         assert world.state.units == units + 1  # the read: identity is not asked, no unit applies anything
     assert len(world.directory.calls) == asked
 
@@ -600,9 +611,9 @@ async def test_a_note_whose_invoice_is_gone_by_the_time_it_is_locked_is_refused(
 
 
 async def test_issuing_a_draft_prices_it_on_the_day_it_is_issued(world: World) -> None:
-    draft = await world.commands.create(CALL, DRAFT)
+    draft = await world.create(CALL, DRAFT)
     world.now = NOON + timedelta(days=3)
-    issued = await world.commands.issue(CALL, draft.id)
+    issued = await world.issue(CALL, draft.id)
     assert (issued.status, issued.version, issued.seller, issued.issued_at) == (
         InvoiceStatus.ISSUED,
         2,
@@ -627,47 +638,45 @@ async def test_issuing_a_draft_prices_it_on_the_day_it_is_issued(world: World) -
 async def test_issuing_what_is_not_a_draft_or_not_there_is_refused(world: World) -> None:
     issued = await issued_one(world)
     with pytest.raises(InvoiceNotIssuableError):
-        await world.commands.issue(CALL, issued.id)
+        await world.issue(CALL, issued.id)
     with pytest.raises(InvoiceNotFoundError) as caught:
-        await world.commands.issue(CALL, InvoiceId(UUID(int=9)))
+        await world.issue(CALL, InvoiceId(UUID(int=9)))
     assert (caught.value.kind, caught.value.code) == (ErrorKind.NOT_FOUND, "invoice_not_found")
     live = replace(CALL, scope=Tenant(ORGANIZATION, COMPANY, Mode.LIVE))
     with pytest.raises(InvoiceNotFoundError):
-        await world.commands.issue(live, issued.id)
+        await world.issue(live, issued.id)
     assert len(world.state.events) == 1
 
 
 async def test_a_draft_changed_while_it_was_priced_is_not_issued(world: World) -> None:
-    draft = await world.commands.create(CALL, DRAFT)
+    draft = await world.create(CALL, DRAFT)
 
     def someone_else_changes_it() -> None:
         world.state.invoices[draft.id] = replace(draft, version=2)
 
     world.state.while_waiting = someone_else_changes_it
     with pytest.raises(InvoiceChangedError):
-        await world.commands.issue(CALL, draft.id)
+        await world.issue(CALL, draft.id)
     assert world.state.events == []
 
 
 async def test_a_draft_issued_from_an_establishment_gone_since_is_refused(world: World) -> None:
-    draft = await world.commands.create(CALL, replace(DRAFT, establishment="TOKYO"))
+    draft = await world.create(CALL, replace(DRAFT, establishment="TOKYO"))
     del world.directory.establishments["TOKYO"]
     with pytest.raises(EstablishmentUnknownError):
-        await world.commands.issue(CALL, draft.id)
+        await world.issue(CALL, draft.id)
 
 
 async def test_issuing_a_draft_needs_its_company_active(world: World) -> None:
-    draft = await world.commands.create(CALL, DRAFT)
+    draft = await world.create(CALL, DRAFT)
     world.directory.company_info = replace(ACME, active=False)
     with pytest.raises(CompanyInactiveError):
-        await world.commands.issue(CALL, draft.id)
+        await world.issue(CALL, draft.id)
 
 
 async def test_a_note_whose_invoice_was_voided_while_it_was_priced_is_not_issued(world: World) -> None:
     original = await issued_one(world)
-    note = await world.commands.create(
-        CALL, replace(DRAFT, kind=DocumentKind.CREDIT_NOTE, corrects=original.id)
-    )
+    note = await world.create(CALL, replace(DRAFT, kind=DocumentKind.CREDIT_NOTE, corrects=original.id))
     voided, _ = original.void(reason=None, corrected_by_a_note=False, now=NOON)
 
     def voided_meanwhile() -> None:
@@ -675,11 +684,11 @@ async def test_a_note_whose_invoice_was_voided_while_it_was_priced_is_not_issued
 
     world.state.while_waiting = voided_meanwhile
     with pytest.raises(CorrectionInvalidError, match=r"^corrects is not an issued document$"):
-        await world.commands.issue(CALL, note.id)
+        await world.issue(CALL, note.id)
 
 
 async def test_a_draft_issued_by_someone_else_meanwhile_is_not_issued_twice(world: World) -> None:
-    draft = await world.commands.create(CALL, DRAFT)
+    draft = await world.create(CALL, DRAFT)
     seller = Seller(legal_name="Acme SRL", tax_id=RNC)
     elsewhere, _ = draft.issue(seller=seller, pricing=draft.pricing, corrected=None, now=NOON)
 
@@ -688,7 +697,7 @@ async def test_a_draft_issued_by_someone_else_meanwhile_is_not_issued_twice(worl
 
     world.state.while_waiting = issued_meanwhile
     with pytest.raises(InvoiceNotIssuableError):
-        await world.commands.issue(CALL, draft.id)
+        await world.issue(CALL, draft.id)
     assert world.state.events == []
 
 
@@ -698,7 +707,7 @@ async def test_a_draft_issued_by_someone_else_meanwhile_is_not_issued_twice(worl
 async def test_voiding_an_issued_document_announces_and_records_it(world: World) -> None:
     issued = await issued_one(world)
     world.now = NOON + timedelta(hours=1)
-    voided = await world.commands.void(CALL, issued.id, parse_reason("Wrong buyer"))
+    voided = await world.void(CALL, issued.id, parse_reason("Wrong buyer"))
     assert (voided.status, voided.version, voided.void_reason, voided.voided_at) == (
         InvoiceStatus.VOIDED,
         2,
@@ -718,16 +727,14 @@ async def test_voiding_an_issued_document_announces_and_records_it(world: World)
 
 async def test_an_invoice_a_draft_or_issued_note_corrects_is_not_voided(world: World) -> None:
     original = await issued_one(world)
-    note = await world.commands.create(
-        CALL, replace(DRAFT, kind=DocumentKind.CREDIT_NOTE, corrects=original.id)
-    )
+    note = await world.create(CALL, replace(DRAFT, kind=DocumentKind.CREDIT_NOTE, corrects=original.id))
     with pytest.raises(InvoiceNotVoidableError):
-        await world.commands.void(CALL, original.id, None)
-    await world.commands.issue(CALL, note.id)
+        await world.void(CALL, original.id, None)
+    await world.issue(CALL, note.id)
     with pytest.raises(InvoiceNotVoidableError):
-        await world.commands.void(CALL, original.id, None)
-    await world.commands.void(CALL, note.id, None)
-    assert (await world.commands.void(CALL, original.id, None)).status is InvoiceStatus.VOIDED
+        await world.void(CALL, original.id, None)
+    await world.void(CALL, note.id, None)
+    assert (await world.void(CALL, original.id, None)).status is InvoiceStatus.VOIDED
 
 
 async def test_a_note_made_while_its_invoice_is_voided_stops_the_void(world: World) -> None:
@@ -742,23 +749,23 @@ async def test_a_note_made_while_its_invoice_is_voided_stops_the_void(world: Wor
 
     world.state.while_waiting = a_note_is_made_meanwhile
     with pytest.raises(InvoiceNotVoidableError):
-        await world.commands.void(CALL, original.id, None)
+        await world.void(CALL, original.id, None)
 
 
 async def test_a_voided_document_is_not_voided_again(world: World) -> None:
     issued = await issued_one(world)
-    await world.commands.void(CALL, issued.id, None)
+    await world.void(CALL, issued.id, None)
     with pytest.raises(InvoiceNotVoidableError):
-        await world.commands.void(CALL, issued.id, None)
+        await world.void(CALL, issued.id, None)
     assert len(world.state.events) == 2
 
 
 async def test_what_is_not_issued_or_not_there_is_not_voided(world: World) -> None:
-    draft = await world.commands.create(CALL, DRAFT)
+    draft = await world.create(CALL, DRAFT)
     with pytest.raises(InvoiceNotVoidableError):
-        await world.commands.void(CALL, draft.id, None)
+        await world.void(CALL, draft.id, None)
     with pytest.raises(InvoiceNotFoundError):
-        await world.commands.void(CALL, InvoiceId(UUID(int=9)), None)
+        await world.void(CALL, InvoiceId(UUID(int=9)), None)
     assert (world.stored(), len(world.state.audited)) == ([draft], 1)
 
 
@@ -771,7 +778,7 @@ def never(version: int) -> bool:
 
 
 async def test_a_draft_is_issued_only_at_a_version_the_caller_admits(world: World) -> None:
-    draft = await world.commands.create(CALL, DRAFT)
+    draft = await world.create(CALL, DRAFT)
     with pytest.raises(InvoiceVersionStaleError) as caught:
         await world.commands.prepare_issue(CALL, draft.id, admits=never)
     assert (caught.value.kind, caught.value.code) == (ErrorKind.CONFLICT, "invoice_version_stale")
@@ -826,7 +833,7 @@ async def test_a_document_is_read_in_its_tenant_only(world: World) -> None:
 
 async def test_documents_are_listed_as_the_filters_name_them_page_by_page(world: World) -> None:
     first, second = await issued_one(world), await issued_one(world)
-    draft = await world.commands.create(CALL, DRAFT)
+    draft = await world.create(CALL, DRAFT)
     every = await world.queries.documents(CALL, PageRequest(), InvoiceFilters())
     assert every.items == tuple(sorted((first, second, draft), key=lambda invoice: invoice.id))
     drafts = await world.queries.documents(CALL, PageRequest(), InvoiceFilters(status=InvoiceStatus.DRAFT))

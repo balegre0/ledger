@@ -13,12 +13,12 @@ from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.tenancy import OrganizationScope, Tenant
 from ledger_platform.runtime.calls import Call, SystemCall, acting
 from ledger_platform.runtime.facade import facade
-lazy from ledger_identity.api import AnyCall
 lazy from ledger_identity.application.ports import IdentityUnits
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_kernel.ids import CompanyId, OrganizationId
 lazy from ledger_kernel.tax_ids import TaxId
+lazy from ledger_platform.runtime.calls import AnyCall
 
 
 def info(company: Company) -> CompanyInfo:

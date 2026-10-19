@@ -1,41 +1,40 @@
 """invoicing's API for the other modules (``api.InvoicingApi``), over its use cases.
 
 Each method opens the unit its use case needs, in the tenant the call names, and gives back data
-(``InvoiceView``), never a domain object. ``@facade`` refuses a call made while the caller holds a unit.
+(``InvoiceInfo``), never a domain object. ``@facade`` refuses a call made while the caller holds a unit.
 """
 
 from types import MappingProxyType
-from typing import Final, final, override
+from typing import final, override
 
 from ledger_invoicing.api import (
-    EstablishmentView,
-    InvoiceView,
+    EstablishmentOfIssue,
+    InvoiceInfo,
     InvoicingApi,
-    LineTaxView,
-    LineView,
-    PartyView,
-    SellerView,
+    LineInfo,
+    LineTaxInfo,
+    PartyInfo,
+    SellerInfo,
 )
+from ledger_invoicing.domain.pricing import NO_FIELDS
 from ledger_platform.runtime.facade import facade
-lazy from ledger_invoicing.api import AnyCall
 lazy from ledger_invoicing.application.queries import InvoicingQueries
 lazy from ledger_invoicing.domain.ids import InvoiceId
 lazy from ledger_invoicing.domain.invoice import Invoice
 lazy from ledger_invoicing.domain.parties import Party
 lazy from ledger_invoicing.domain.pricing import CountryFields, PricedLine
+lazy from ledger_platform.runtime.calls import AnyCall
 
-_NO_FIELDS: Final[CountryFields] = MappingProxyType({})
 
-
-def _party(party: Party) -> PartyView:
-    return PartyView(
+def _party(party: Party) -> PartyInfo:
+    return PartyInfo(
         legal_name=party.legal_name, tax_id=party.tax_id, address=party.address, email=party.email
     )
 
 
-def _line(line: PricedLine) -> LineView:
+def _line(line: PricedLine) -> LineInfo:
     terms = line.terms
-    return LineView(
+    return LineInfo(
         description=terms.description,
         quantity=terms.quantity,
         unit_price=terms.unit_price,
@@ -43,7 +42,7 @@ def _line(line: PricedLine) -> LineView:
         gross=line.gross,
         base=line.base,
         taxes=tuple(
-            LineTaxView(
+            LineTaxInfo(
                 category=tax.category, kind=tax.kind, percent=tax.percent, since=tax.since, amount=tax.tax
             )
             for tax in line.taxes
@@ -51,12 +50,12 @@ def _line(line: PricedLine) -> LineView:
     )
 
 
-def view_of(invoice: Invoice) -> InvoiceView:
+def info_of(invoice: Invoice) -> InvoiceInfo:
     """What other modules are told of ``invoice``."""
     terms, pricing, seller = invoice.terms, invoice.pricing, invoice.seller
     namespace: str = pricing.regime
-    fields: CountryFields = MappingProxyType({namespace: pricing.fiscal}) if pricing.fiscal else _NO_FIELDS
-    return InvoiceView(
+    fields: CountryFields = MappingProxyType({namespace: pricing.fiscal}) if pricing.fiscal else NO_FIELDS
+    return InvoiceInfo(
         id=invoice.id,
         tenant=invoice.tenant,
         kind=invoice.kind,
@@ -66,14 +65,14 @@ def view_of(invoice: Invoice) -> InvoiceView:
         external_reference=invoice.external_reference,
         corrects=invoice.corrects,
         regime=pricing.regime,
-        establishment=EstablishmentView(
+        establishment=EstablishmentOfIssue(
             code=pricing.establishment.code, time_zone=pricing.establishment.time_zone
         ),
         currency=terms.currency,
         exchange_rate=terms.exchange_rate,
         issue_date=pricing.issue_date,
         tax_point=pricing.tax_point,
-        seller=None if seller is None else SellerView(legal_name=seller.legal_name, tax_id=seller.tax_id),
+        seller=None if seller is None else SellerInfo(legal_name=seller.legal_name, tax_id=seller.tax_id),
         buyer=None if terms.buyer is None else _party(terms.buyer),
         lines=tuple(_line(line) for line in pricing.lines),
         totals=pricing.totals,
@@ -98,5 +97,5 @@ class InvoicingFacade(InvoicingApi):
 
     @override
     @facade
-    async def document(self, call: AnyCall, invoice: InvoiceId) -> InvoiceView:
-        return view_of(await self._queries.document(call, invoice))
+    async def document(self, call: AnyCall, invoice: InvoiceId) -> InvoiceInfo:
+        return info_of(await self._queries.document(call, invoice))

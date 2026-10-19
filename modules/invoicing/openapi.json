@@ -396,7 +396,7 @@
         "description": "A tax a line is charged: the rate resolved at the tax point, kept for ever, and what it comes to.",
         "properties": {
           "amount": {
-            "description": "This line's tax alone, rounded as the regime rounds a category.",
+            "description": "This line's tax alone, as the regime's calculator computes a document of this line only: rounded where the regime rounds (per category, per line or per document), else exact. The document's tax per category is in its totals.",
             "title": "Amount",
             "type": "string"
           },
@@ -1515,12 +1515,12 @@
             }
           },
           {
-            "description": "Makes a retry safe: the same key and body change state once and answer the same.",
+            "description": "Makes a retry safe: the same key and body change state once and answer the same. A key is the caller's per organization, mode and operation, whatever the company it acts for: reused for another request (another company's too) it is refused (422 idempotency_key_reused).",
             "in": "header",
             "name": "Idempotency-Key",
             "required": true,
             "schema": {
-              "description": "Makes a retry safe: the same key and body change state once and answer the same.",
+              "description": "Makes a retry safe: the same key and body change state once and answer the same. A key is the caller's per organization, mode and operation, whatever the company it acts for: reused for another request (another company's too) it is refused (422 idempotency_key_reused).",
               "maxLength": 255,
               "minLength": 1,
               "pattern": "^[!-~]+$",
@@ -2536,12 +2536,12 @@
             }
           },
           {
-            "description": "Makes a retry safe: the same key and body change state once and answer the same.",
+            "description": "Makes a retry safe: the same key and body change state once and answer the same. A key is the caller's per organization, mode and operation, whatever the company it acts for: reused for another request (another company's too) it is refused (422 idempotency_key_reused).",
             "in": "header",
             "name": "Idempotency-Key",
             "required": true,
             "schema": {
-              "description": "Makes a retry safe: the same key and body change state once and answer the same.",
+              "description": "Makes a retry safe: the same key and body change state once and answer the same. A key is the caller's per organization, mode and operation, whatever the company it acts for: reused for another request (another company's too) it is refused (422 idempotency_key_reused).",
               "maxLength": 255,
               "minLength": 1,
               "pattern": "^[!-~]+$",
@@ -3208,12 +3208,12 @@
             }
           },
           {
-            "description": "Makes a retry safe: the same key and body change state once and answer the same.",
+            "description": "Makes a retry safe: the same key and body change state once and answer the same. A key is the caller's per organization, mode and operation, whatever the company it acts for: reused for another request (another company's too) it is refused (422 idempotency_key_reused).",
             "in": "header",
             "name": "Idempotency-Key",
             "required": true,
             "schema": {
-              "description": "Makes a retry safe: the same key and body change state once and answer the same.",
+              "description": "Makes a retry safe: the same key and body change state once and answer the same. A key is the caller's per organization, mode and operation, whatever the company it acts for: reused for another request (another company's too) it is refused (422 idempotency_key_reused).",
               "maxLength": 255,
               "minLength": 1,
               "pattern": "^[!-~]+$",

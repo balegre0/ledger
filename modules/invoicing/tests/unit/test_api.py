@@ -15,14 +15,14 @@ import pytest
 
 from ledger_invoicing.api import (
     INVOICING_API,
-    EstablishmentView,
-    InvoiceView,
-    LineTaxView,
-    LineView,
-    PartyView,
-    SellerView,
+    EstablishmentOfIssue,
+    InvoiceInfo,
+    LineInfo,
+    LineTaxInfo,
+    PartyInfo,
+    SellerInfo,
 )
-from ledger_invoicing.application.facade import InvoicingFacade, view_of
+from ledger_invoicing.application.facade import InvoicingFacade, info_of
 from ledger_invoicing.application.queries import InvoicingQueries
 from ledger_invoicing.domain.ids import InvoiceId
 from ledger_invoicing.domain.invoice import Invoice, InvoiceStatus, Opening
@@ -106,8 +106,8 @@ def test_a_document_is_seen_whole_with_its_tenant_parties_lines_and_country_fiel
     invoice = issued(regime_with_fields)
     pricing = invoice.pricing
     assert pricing.functional is not None
-    view = view_of(invoice)
-    assert view == InvoiceView(
+    view = info_of(invoice)
+    assert view == InvoiceInfo(
         id=invoice.id,
         tenant=TENANT,
         kind=DocumentKind.INVOICE,
@@ -117,20 +117,20 @@ def test_a_document_is_seen_whole_with_its_tenant_parties_lines_and_country_fiel
         external_reference="ORD-7",
         corrects=None,
         regime=RegimeKey("do"),
-        establishment=EstablishmentView(code="SUC1", time_zone="America/Santo_Domingo"),
+        establishment=EstablishmentOfIssue(code="SUC1", time_zone="America/Santo_Domingo"),
         currency=USD,
         exchange_rate=Decimal("60.5"),
         issue_date=date(2026, 10, 10),
         tax_point=date(2026, 10, 1),
-        seller=SellerView(legal_name="Acme SRL", tax_id=RNC),
-        buyer=PartyView(
+        seller=SellerInfo(legal_name="Acme SRL", tax_id=RNC),
+        buyer=PartyInfo(
             legal_name="Beta SRL",
             tax_id=BUYER_RNC,
             address="Calle 1, Santo Domingo",
             email="compras@beta.example",
         ),
         lines=(
-            LineView(
+            LineInfo(
                 description="Widget for Juan Perez",
                 quantity=Decimal("2.5"),
                 unit_price=Decimal("40.10"),
@@ -138,14 +138,14 @@ def test_a_document_is_seen_whole_with_its_tenant_parties_lines_and_country_fiel
                 gross=Money.of("100.250", USD),
                 base=Money.of("100.00", USD),
                 taxes=(
-                    LineTaxView(
+                    LineTaxInfo(
                         category=TaxCategoryKey("do.itbis.standard"),
                         kind=TaxCategoryKind.STANDARD,
                         percent=Decimal(18),
                         since=date(2019, 1, 1),
                         amount=Money.of("18.00", USD),
                     ),
-                    LineTaxView(
+                    LineTaxInfo(
                         category=TaxCategoryKey("do.isc.standard"),
                         kind=TaxCategoryKind.STANDARD,
                         percent=Decimal(10),
@@ -184,7 +184,7 @@ def test_a_draft_has_no_seller_and_a_document_without_country_fields_names_no_re
         terms, regime=regime, functional_currency=DOP, establishment=SANTIAGO, dating=Dating(today=NOW.date())
     )
     draft, _ = Invoice.new(opening, corrects=None, pricing=pricing, seller=None, now=NOW)
-    view = view_of(draft)
+    view = info_of(draft)
     assert (view.status, view.seller, view.buyer, view.issued_at) == (InvoiceStatus.DRAFT, None, None, None)
     assert (view.tenant.mode, view.livemode, view.direction) == (Mode.TEST, False, Direction.PURCHASE)
     assert (view.currency, view.exchange_rate, view.functional_totals, view.fields) == (DOP, None, None, {})
@@ -197,7 +197,7 @@ def test_a_voided_note_names_the_invoice_it_corrects_and_why_it_was_voided(regim
     note = issued(regime, terms, corrects=invoice)
     later = NOW + timedelta(hours=1)
     voided, _ = note.void(reason=parse_reason("Wrong customer"), corrected_by_a_note=False, now=later)
-    view = view_of(voided)
+    view = info_of(voided)
     assert (view.kind, view.corrects, view.status, view.version) == (
         DocumentKind.CREDIT_NOTE,
         invoice.id,
@@ -214,16 +214,16 @@ def test_a_voided_note_names_the_invoice_it_corrects_and_why_it_was_voided(regim
 
 def test_a_view_s_repr_masks_tax_ids_and_shows_nothing_a_client_wrote(regime_with_fields: RegimeDef) -> None:
     """A view is logged as its id, kind, status and version: never a name, an address, an email or a line."""
-    view = view_of(issued(regime_with_fields))
-    assert repr(view) == f"InvoiceView(id={view.id!r}, kind='invoice', status='issued', version=1)"
+    view = info_of(issued(regime_with_fields))
+    assert repr(view) == f"InvoiceInfo(id={view.id!r}, kind='invoice', status='issued', version=1)"
     assert view.seller is not None
     assert view.buyer is not None
     shown = " ".join(repr(part) for part in (view, view.seller, view.buyer, *view.lines))
     for secret in ("101850043", "130000012", "Acme", "Beta", "Calle", "compras@", "Juan", "ORD-7"):
         assert secret not in shown
-    assert repr(view.seller) == f"SellerView(tax_id={RNC!r})"
-    assert repr(view.buyer) == f"PartyView(tax_id={BUYER_RNC!r})"
-    assert repr(view.lines[0]) == "LineView(taxes=('do.itbis.standard', 'do.isc.standard'))"
+    assert repr(view.seller) == f"SellerInfo(tax_id={RNC!r})"
+    assert repr(view.buyer) == f"PartyInfo(tax_id={BUYER_RNC!r})"
+    assert repr(view.lines[0]) == "LineInfo(taxes=('do.itbis.standard', 'do.isc.standard'))"
 
 
 class _NoUnits:

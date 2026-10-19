@@ -6,7 +6,7 @@ from typing import Final, final, override
 import pytest
 
 from ledger_identity.api import CompanyInfo, EstablishmentInfo, IdentityApi
-from ledger_invoicing.adapters.identity import IdentityLookup
+from ledger_invoicing.adapters.identity import IdentityApiLookup
 from ledger_invoicing.adapters.regimes import regime_of
 from ledger_invoicing.domain.pricing import EstablishmentRef
 from ledger_kernel.access import CompanyNotFoundError, Principal, PrincipalKind, SubjectId
@@ -18,9 +18,9 @@ from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.runtime.calls import Call
 from ledger_platform.runtime.registries import Regimes
-lazy from ledger_identity.api import AnyCall
 lazy from ledger_kernel.access import Permission
 lazy from ledger_kernel.regimes import RegimeDef
+lazy from ledger_platform.runtime.calls import AnyCall
 
 ORGANIZATION: Final = OrganizationId(new_id())
 COMPANY: Final = CompanyId(new_id())
@@ -83,7 +83,7 @@ class Identity(IdentityApi):
 
 async def test_identity_is_asked_for_the_company_and_its_establishment_with_the_call() -> None:
     identity = Identity()
-    lookup = IdentityLookup(identity)
+    lookup = IdentityApiLookup(identity)
     assert await lookup.company(CALL, COMPANY) == ACME
     assert await lookup.establishment(CALL, COMPANY, "SUC1") == EstablishmentRef(
         code="SUC1", time_zone="America/Santo_Domingo"

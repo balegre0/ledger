@@ -40,7 +40,11 @@ class SystemCall:
     traceparent: str | None = None
 
 
-def actor_of(call: Call | SystemCall) -> Actor:
+type AnyCall = Call | SystemCall
+"""Who asks: a principal through a request, or the platform itself (a consumer, a job, the receiver)."""
+
+
+def actor_of(call: AnyCall) -> Actor:
     """Who acts in ``call``, as audit rows record it."""
     match call:
         case Call(principal=principal, request_id=request_id):
@@ -51,7 +55,7 @@ def actor_of(call: Call | SystemCall) -> Actor:
 
 
 @contextmanager
-def acting(call: Call | SystemCall) -> Generator[None]:
+def acting(call: AnyCall) -> Generator[None]:
     """``call``'s actor for the length of the block."""
     with acting_as(actor_of(call)):
         yield

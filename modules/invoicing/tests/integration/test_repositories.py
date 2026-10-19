@@ -28,8 +28,8 @@ from ledger_invoicing.adapters.postgres.tables import (
 from ledger_invoicing.adapters.postgres.unit import PgUnits, UnscopedUnitError, bind
 from ledger_invoicing.application.commands import Creation, InvoicingCommands
 from ledger_invoicing.application.ports import (
-    CompanyLookup,
     ForeignTenantError,
+    IdentityLookup,
     InvoiceFilters,
     Invoices,
     InvoicingUnits,
@@ -54,8 +54,10 @@ from ledger_kernel.tenancy import Mode, OrganizationScope, Tenant
 from ledger_platform.runtime.calls import Call
 from ledger_testing.database import app_url
 from ledger_testing.waiting import eventually, waits_for_a_lock
+lazy from ledger_invoicing.application.commands import Change
 lazy from ledger_invoicing.application.ports import InvoicingUnit
 lazy from ledger_invoicing.domain.pricing import CountryFields
+lazy from ledger_invoicing.domain.text import Reason
 lazy from ledger_kernel.pagination import Page
 lazy from ledger_kernel.regimes import RegimeDef
 lazy from ledger_platform.data.bound import BoundDatabase
@@ -417,7 +419,7 @@ async def test_what_a_use_case_announces_and_records_commits_with_the_document(
     module_database: BoundDatabase, admin: psycopg.AsyncConnection, regime: RegimeDef
 ) -> None:
     world = World(module_database, regime)
-    invoice = await world.commands.create(world.call, INVOICE)
+    invoice = await world.create(world.call, INVOICE)
     events = await admin.execute("SELECT type, subject, aggregate_version FROM invoicing.outbox")
     assert await events.fetchall() == [("invoicing.invoice.issued", invoice.id, 1)]
     audited = await admin.execute("SELECT action, subject_id, actor FROM invoicing.audit_events")
@@ -436,7 +438,7 @@ PRINCIPAL: Final = Principal(
 
 
 @final
-class Directory(CompanyLookup):
+class Directory(IdentityLookup):
     """identity, as the use cases ask it: the call's company, active, with its MAIN establishment."""
 
     @override
@@ -537,6 +539,21 @@ class World:
             new_id=new_id,
         )
 
+    async def create(self, call: Call, creation: Creation) -> Invoice:
+        """The document ``creation`` asks for, made as the HTTP edge makes it: prepared, then applied."""
+        return await self.applied(await self.commands.prepare_create(call, creation))
+
+    async def issue(self, call: Call, invoice: InvoiceId) -> Invoice:
+        return await self.applied(await self.commands.prepare_issue(call, invoice))
+
+    async def void(self, call: Call, invoice: InvoiceId, reason: Reason | None) -> Invoice:
+        return await self.applied(self.commands.prepare_void(call, invoice, reason))
+
+    async def applied(self, change: Change) -> Invoice:
+        """``change`` made in a unit of its tenant."""
+        async with self.commands.units.unit(change.tenant) as unit:
+            return await change.apply(unit)
+
     def holding(
         self, database: BoundDatabase, regime: RegimeDef, target: InvoiceId
     ) -> tuple[World, HoldingUnits]:
@@ -558,11 +575,11 @@ async def test_a_void_that_locked_the_invoice_first_refuses_the_note_made_meanwh
     module_database: BoundDatabase, migrated: WorkerDatabase, regime: RegimeDef
 ) -> None:
     world = World(module_database, regime)
-    invoice = await world.commands.create(world.call, INVOICE)
+    invoice = await world.create(world.call, INVOICE)
     voiding, units = world.holding(module_database, regime, invoice.id)
-    void = asyncio.create_task(voiding.commands.void(world.call, invoice.id, None))
+    void = asyncio.create_task(voiding.void(world.call, invoice.id, None))
     await units.holding.wait()
-    note = asyncio.create_task(world.commands.create(world.call, note_of(invoice)))
+    note = asyncio.create_task(world.create(world.call, note_of(invoice)))
     await eventually(lambda: waits_for_a_lock(app_url(migrated)))  # the note waits for the invoice
     assert not note.done()
     units.release.set()
@@ -575,11 +592,11 @@ async def test_a_note_that_locked_the_invoice_first_refuses_the_void_asked_meanw
     module_database: BoundDatabase, migrated: WorkerDatabase, regime: RegimeDef
 ) -> None:
     world = World(module_database, regime)
-    invoice = await world.commands.create(world.call, INVOICE)
+    invoice = await world.create(world.call, INVOICE)
     noting, units = world.holding(module_database, regime, invoice.id)
-    note = asyncio.create_task(noting.commands.create(world.call, note_of(invoice)))
+    note = asyncio.create_task(noting.create(world.call, note_of(invoice)))
     await units.holding.wait()
-    void = asyncio.create_task(world.commands.void(world.call, invoice.id, None))
+    void = asyncio.create_task(world.void(world.call, invoice.id, None))
     await eventually(lambda: waits_for_a_lock(app_url(migrated)))  # the void waits for the invoice
     assert not void.done()
     units.release.set()
@@ -593,14 +610,14 @@ async def test_a_void_waits_for_a_note_being_issued_and_is_refused_by_the_note_o
     module_database: BoundDatabase, migrated: WorkerDatabase, regime: RegimeDef
 ) -> None:
     world = World(module_database, regime)
-    invoice = await world.commands.create(world.call, INVOICE)
-    draft = await world.commands.create(world.call, note_of(invoice, draft=True))
+    invoice = await world.create(world.call, INVOICE)
+    draft = await world.create(world.call, note_of(invoice, draft=True))
     issuing, units = world.holding(module_database, regime, invoice.id)
-    issue = asyncio.create_task(issuing.commands.issue(world.call, draft.id))
+    issue = asyncio.create_task(issuing.issue(world.call, draft.id))
     await units.holding.wait()  # it holds the note, then the invoice: the lock order
     # The draft note alone refuses the void: what this proves is that the void waits for the issue, which
     # holds the invoice, and then reads the note as issued (the order of the lock, not its outcome).
-    void = asyncio.create_task(world.commands.void(world.call, invoice.id, None))
+    void = asyncio.create_task(world.void(world.call, invoice.id, None))
     await eventually(lambda: waits_for_a_lock(app_url(migrated)))
     assert not void.done()
     units.release.set()

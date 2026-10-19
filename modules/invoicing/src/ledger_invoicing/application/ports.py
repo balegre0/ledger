@@ -2,7 +2,7 @@
 
 A unit is one transaction scoped to a company in a mode: row-level security limits what its repositories see
 to that tenant, and every repository names it in every statement (tenancy is checked twice, §2). identity is
-asked outside any unit (rule 13: no facade call while a unit is open), through ``CompanyLookup``. The methods
+asked outside any unit (rule 13: no facade call while a unit is open), through ``IdentityLookup``. The methods
 are abstract so that they need no body: a ``...`` is a statement no test could reach.
 
 **Lock order.** A unit that locks two documents locks the note before the invoice it corrects (issuing a draft
@@ -167,7 +167,7 @@ class InvoicingUnits(Protocol, metaclass=ABCMeta):
         """A unit scoped to ``tenant`` (a company in a mode); it commits when its block ends cleanly."""
 
 
-class CompanyLookup(Protocol, metaclass=ABCMeta):
+class IdentityLookup(Protocol, metaclass=ABCMeta):
     """What invoicing asks identity (``IdentityApi``), never while a unit is open (rule 13).
 
     invoicing's own port, over ``IdentityApi.company`` and ``IdentityApi.establishment`` (the spec's

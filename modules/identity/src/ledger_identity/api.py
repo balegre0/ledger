@@ -14,26 +14,22 @@ lazy from collections.abc import Sequence
 
 from ledger_identity.domain.errors import CompanyInactiveError
 from ledger_kernel.access import CompanyNotFoundError
-from ledger_platform.runtime.calls import Call, SystemCall
 from ledger_platform.runtime.keys import Key
 lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_kernel.ids import CompanyId, OrganizationId
 lazy from ledger_kernel.jurisdiction import Jurisdiction
 lazy from ledger_kernel.money import Currency
 lazy from ledger_kernel.tax_ids import TaxId
+lazy from ledger_platform.runtime.calls import AnyCall, SystemCall
 
 __all__ = [
     "IDENTITY_API",
-    "AnyCall",
     "CompanyInactiveError",
     "CompanyInfo",
     "CompanyNotFoundError",
     "EstablishmentInfo",
     "IdentityApi",
 ]
-
-type AnyCall = Call | SystemCall
-"""Who asks: a principal through a request, or the platform itself."""
 
 
 @final

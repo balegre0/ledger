@@ -11,10 +11,11 @@ missing as one never made (``InvoiceNotFoundError``). Who may read a company's d
 edge's to judge (the HTTP edge asks identity for ``invoicing.invoices.read``): the API trusts the call it is
 given, as identity's does.
 
-A view is a document as it is kept: tax ids are qualified and in clear (a module inside the tenant's boundary
-needs them, fiscal to sign), so a view's ``repr`` (and so any log line, span or error that shows one) names
-its id, kind, status and version only, and a party's ``repr`` its tax id masked. ``apply_fiscal_status`` and
-the ``IssuePolicy`` chain arrive with the ``fiscal`` module (M3b, Decision 13).
+An ``InvoiceInfo`` is a document as it is kept: tax ids are qualified and in clear (a module inside the
+tenant's boundary needs them, fiscal to sign), so its ``repr`` (and so any log line, span or error that shows
+one) names its id, kind, status and version only, and a party's ``repr`` its tax id masked. DTOs are named
+``*Info``, as identity's are; ``*View`` names the HTTP models. ``apply_fiscal_status`` and the
+``IssuePolicy`` chain arrive with the ``fiscal`` module (M3b, Decision 13).
 """
 
 from abc import ABCMeta, abstractmethod
@@ -27,7 +28,6 @@ from ledger_invoicing.domain.errors import InvoiceNotFoundError
 from ledger_invoicing.domain.ids import InvoiceId
 from ledger_invoicing.domain.invoice import InvoiceStatus
 from ledger_kernel.tenancy import Mode
-from ledger_platform.runtime.calls import Call, SystemCall
 from ledger_platform.runtime.keys import Key
 lazy from ledger_invoicing.domain.pricing import CountryFields, FieldValue
 lazy from ledger_kernel.money import Currency, Money
@@ -41,31 +41,28 @@ lazy from ledger_kernel.regimes import (
 )
 lazy from ledger_kernel.tax_ids import TaxId
 lazy from ledger_kernel.tenancy import Tenant
+lazy from ledger_platform.runtime.calls import AnyCall
 
 __all__ = [
     "INVOICING_API",
-    "AnyCall",
     "CountryFields",
-    "EstablishmentView",
+    "EstablishmentOfIssue",
     "FieldValue",
     "InvoiceId",
+    "InvoiceInfo",
     "InvoiceNotFoundError",
     "InvoiceStatus",
-    "InvoiceView",
     "InvoicingApi",
-    "LineTaxView",
-    "LineView",
-    "PartyView",
-    "SellerView",
+    "LineInfo",
+    "LineTaxInfo",
+    "PartyInfo",
+    "SellerInfo",
 ]
-
-type AnyCall = Call | SystemCall
-"""Who asks: a principal through a request, or the platform itself (a consumer, a job)."""
 
 
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
-class EstablishmentView:
+class EstablishmentOfIssue:
     """Where a document was issued from: its establishment's code, and the IANA zone of its dates."""
 
     code: str
@@ -75,7 +72,7 @@ class EstablishmentView:
 
 @final
 @dataclass(frozen=True, slots=True, kw_only=True, repr=False)
-class SellerView:
+class SellerInfo:
     """The company that issued the document, as it was then: its legal name and primary tax id."""
 
     legal_name: str
@@ -83,12 +80,12 @@ class SellerView:
 
     @override
     def __repr__(self) -> str:
-        return f"SellerView(tax_id={self.tax_id!r})"
+        return f"SellerInfo(tax_id={self.tax_id!r})"
 
 
 @final
 @dataclass(frozen=True, slots=True, kw_only=True, repr=False)
-class PartyView:
+class PartyInfo:
     """The other party of a document, as the client sent it: a sale's buyer, a purchase's supplier."""
 
     legal_name: str
@@ -98,13 +95,16 @@ class PartyView:
 
     @override
     def __repr__(self) -> str:
-        return f"PartyView(tax_id={self.tax_id!r})"
+        return f"PartyInfo(tax_id={self.tax_id!r})"
 
 
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
-class LineTaxView:
+class LineTaxInfo:
     """A tax a line is charged: the rate resolved at the tax point, and what it comes to on the line alone.
+
+    ``amount`` is what the regime's calculator computes for a document of this line only: rounded where the
+    regime rounds (per category, per line or per document), else exact.
 
     ``category`` and ``since`` name the rate in the regime's timeline; the document's tax per category is in
     its ``totals`` (a regime that rounds per category does not split it back into lines).
@@ -119,7 +119,7 @@ class LineTaxView:
 
 @final
 @dataclass(frozen=True, slots=True, kw_only=True, repr=False)
-class LineView:
+class LineInfo:
     """A line as the client wrote it and as it was priced, in the document's currency."""
 
     description: str
@@ -131,17 +131,17 @@ class LineView:
     """``quantity x unit_price``, exact."""
     base: Money
     """``gross - discount``, rounded half up to the currency's minor unit: what the line is taxed on."""
-    taxes: tuple[LineTaxView, ...]
+    taxes: tuple[LineTaxInfo, ...]
     """In the order the line names them."""
 
     @override
     def __repr__(self) -> str:
-        return f"LineView(taxes={tuple(tax.category for tax in self.taxes)!r})"
+        return f"LineInfo(taxes={tuple(tax.category for tax in self.taxes)!r})"
 
 
 @final
 @dataclass(frozen=True, slots=True, kw_only=True, repr=False)
-class InvoiceView:
+class InvoiceInfo:
     """A commercial document at a version (its ``ETag``): an invoice, a credit or a debit note.
 
     Everything it charges was resolved once, when it was priced: its regime, its establishment and the day it
@@ -164,16 +164,16 @@ class InvoiceView:
     """The invoice a credit or debit note corrects; ``None`` for an invoice."""
     regime: RegimeKey
     """The regime that priced it: the one that governs the company's jurisdiction."""
-    establishment: EstablishmentView
+    establishment: EstablishmentOfIssue
     currency: Currency
     exchange_rate: Decimal | None
     """Units of the functional currency per one of ``currency``; ``None`` in the functional currency."""
     issue_date: date
     tax_point: date
-    seller: SellerView | None
+    seller: SellerInfo | None
     """Set once it is issued."""
-    buyer: PartyView | None
-    lines: tuple[LineView, ...]
+    buyer: PartyInfo | None
+    lines: tuple[LineInfo, ...]
     totals: Totals
     """In ``currency``."""
     functional_totals: Totals | None
@@ -195,7 +195,7 @@ class InvoiceView:
     @override
     def __repr__(self) -> str:
         shown = f"kind={self.kind.value!r}, status={self.status.value!r}, version={self.version}"
-        return f"InvoiceView(id={self.id!r}, {shown})"
+        return f"InvoiceInfo(id={self.id!r}, {shown})"
 
 
 @runtime_checkable
@@ -206,7 +206,7 @@ class InvoicingApi(Protocol, metaclass=ABCMeta):
     """
 
     @abstractmethod
-    async def document(self, call: AnyCall, invoice: InvoiceId) -> InvoiceView:
+    async def document(self, call: AnyCall, invoice: InvoiceId) -> InvoiceInfo:
         """The document ``invoice`` of the call's tenant, at its current version.
 
         ``InvoiceNotFoundError`` when the tenant has none by that id; ``InvalidValueError`` for a call whose

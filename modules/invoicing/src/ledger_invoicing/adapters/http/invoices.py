@@ -9,11 +9,16 @@ A ``POST`` is answered from its ``Idempotency-Key`` first: a retry of a request 
 answer (``Idempotency.replayed``, the caller's own: the key is the caller's, on its route, in its mode, and
 the request's company is part of what it fingerprints) before the permission the change needs is judged, so a
 caller downgraded to reading, or a company deactivated, since the first answer still gets it. Only a new
-request needs that permission (create, issue or void: 403) and has its body read (422). Creating and issuing
-then ask identity (the company, its establishment), which no unit may be open for (rule 13), and the change is
-applied in the unit that claims the key (``Idempotency.once``): the key, the document, its event and its
-audit commit together, and a failure keeps nothing. Issuing and voiding name the versions they apply to in
-``If-Match`` (412 when none is current); every answer of a document carries its version as ``ETag``.
+request needs that permission (create, issue or void: 403) and has what its body says read (tax ids, text,
+the document: 422). A body's shape is the framework's to check, before the route runs: a malformed body is
+422 ``invalid_request`` even from a caller without the permission, which tells it nothing (the problem
+repeats nothing sent). An ``Idempotency-Key`` is the caller's in its organization and mode, whatever the
+company: the same key for another company's request is 422 ``idempotency_key_reused``, so a caller acting
+for several companies keeps a key per company (§9.5). Creating and issuing then ask identity (the company,
+its establishment), which no unit may be open for (rule 13), and the change is applied in the unit that
+claims the key (``Idempotency.once``): the key, the document, its event and its audit commit together, and a
+failure keeps nothing. Issuing and voiding name the versions they apply to in ``If-Match`` (412 when none is
+current); every answer of a document carries its version as ``ETag``.
 """
 
 from dataclasses import dataclass

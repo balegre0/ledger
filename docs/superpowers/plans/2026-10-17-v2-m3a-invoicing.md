@@ -108,9 +108,16 @@ profile and its establishments come through `IdentityApi`.
   claims nothing): a retry of a request that succeeded replays the caller's own answer (the key is scoped to
   the organization, the mode, the principal and the route, and the request's company is part of what it
   fingerprints). Only a new request needs the specific permission (`create`, `issue` or `void`, 403
-  `permission_denied`) and has its body read. So a retry after the company was deactivated, or after the
-  caller was downgraded to viewer, replays; a retry by a caller that lost every role is 404; a new request
-  after deactivation is 403.
+  `permission_denied`) and has what its body says read. So a retry after the company was deactivated, or after
+  the caller was downgraded to viewer, replays; a retry by a caller that lost every role is 404; a new request
+  after deactivation is 403. **The body's shape comes first (review M1):** FastAPI validates the body model
+  before the route runs, so a malformed body is 422 `invalid_request` even from a caller lacking the
+  permission (the problem repeats nothing sent; a test pins the order); its meaning (tax ids, text, the
+  document) waits for the permission.
+- **An `Idempotency-Key` is not the company's (review M2).** The key's row is the organization's, mode's,
+  principal's and route's; the company is only fingerprinted, so one key reused for another company's request
+  is 422 `idempotency_key_reused`. An integrator acting for several companies keeps a key per company: the
+  header's OpenAPI description, the module README and spec §9.5 say so.
 - **The authorization window.** The permission is judged once, when the request arrives; `prepare_*` then asks
   identity (the company, which must be active, and its establishment) and the change is applied in a later
   unit. A role revoked, or a company deactivated, between the two (milliseconds) does not stop the change: the
@@ -145,7 +152,7 @@ profile and its establishments come through `IdentityApi`.
   another tenant's document is `InvoiceNotFoundError`, which never names the id. Whether a principal may read
   is its edge's to judge (the HTTP edge asks for `invoicing.invoices.read`), as identity's API does: the API
   trusts the call. `@facade` refuses a call made while a unit is open; the facade opens its own.
-- **`InvoiceView`** (frozen DTO, kernel value types; the M3b plan's Assumption B1, with these differences for
+- **`InvoiceInfo`** (frozen DTO, kernel value types; the M3b plan's Assumption B1, with these differences for
   its Task 12 mapping): `tenant: Tenant` in place of separate organization, company and mode (the scope its
   events carry and a `SystemCall` about it names; its mode is always set); `kind` for the wire's `type` (the
   kernel's `DocumentKind`, and no builtin shadowed); line taxes are `{category, kind, percent, since, amount}`
@@ -165,6 +172,32 @@ profile and its establishments come through `IdentityApi`.
 - **Manifest.** Unchanged: an API is bound under its module's name (`ModuleParts.api`), `[extension_points]
   provides` is for channels' ports (invoicing provides none), and the events were declared in Task 1. Sync
   adds the `api` layer to `.importlinter`.
+
+## The whole-branch review's follow-ups (`docs/reviews/2026-10-19-invoicing-review.md`; owner rulings)
+
+- **I1** (fixed): a note's dates; see Decision 10.
+- **M1, M2** (documented): see the Task 5 rules. **M3** (fixed): spec §3.4 shows `document(call: Call |
+  SystemCall, …)`.
+- **M4** (fixed): one `AnyCall` (`ledger_platform.runtime.calls`, used by identity and invoicing); one
+  `NO_FIELDS` (`domain/pricing.py`); `seller_from_company` and `seller_from_columns` in place of two
+  `seller_of`; the API's DTOs are named `*Info` (`InvoiceInfo`, `LineInfo`, `LineTaxInfo`, `PartyInfo`,
+  `SellerInfo`, `EstablishmentOfIssue`) as identity's are, so the HTTP models keep the workspace's `*View`
+  names and their OpenAPI schemas, and spec §3.4 says so (the M3b plan's `InvoiceView` reads `InvoiceInfo`);
+  pricing takes a rate's start from the kernel's `Timeline.entry_at`; the port that asks identity is
+  `IdentityLookup` (it answers establishments too; its adapter over `IdentityApi` is `IdentityApiLookup`),
+  leaving `CompanyDirectory` to fiscal-kit.
+- **M5** (fixed): `InvoicingCommands.create/issue/void` are gone: only tests called them; tests prepare and
+  apply as the HTTP edge does.
+- **M6 (recorded).** A key keeps up to 4 MiB of answer for 7 days and a retry reads its row twice
+  (`replayed`, then `once`); acceptable behind the 1 MiB body limit and the rate limit. Revisit when M3b's
+  re-read replay (its Decision 23) lets a key keep only the document's id.
+- **M7 (for the owner).** A line's base is always rounded half up (Decision 4), whatever the regime's
+  `RoundingRule.mode`: right for DO, to decide with Decision 8 when a regime rounds otherwise. A line tax's
+  `amount` is what the calculator computes for that line alone, rounded where the regime rounds (per category,
+  line or document) and exact otherwise; its description said "rounded as the regime rounds a category", and
+  now says this.
+- **M8 (recorded).** The authorization window stands as stated in the Task 5 rules; when anything consumes
+  `identity.membership.revoked`, invoicing must not cache permissions without consuming it too.
 
 ## Tasks (each ends with `uv run poe check` green, one commit)
 

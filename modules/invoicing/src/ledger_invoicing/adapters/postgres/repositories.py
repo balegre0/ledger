@@ -216,7 +216,7 @@ def tax_id_of(scheme: str | None, value: str | None, *, columns: str) -> TaxId |
     return TaxId(TaxIdScheme(scheme), value)
 
 
-def seller_of(legal_name: str | None, scheme: str | None, value: str | None) -> Seller | None:
+def seller_from_columns(legal_name: str | None, scheme: str | None, value: str | None) -> Seller | None:
     """The seller of the ``seller_*`` columns: its name and its tax id, or none of them (a draft)."""
     if legal_name is None and scheme is None and value is None:
         return None
@@ -370,7 +370,7 @@ def _invoice(row: _InvoiceRow, parts: _Parts) -> Invoice:
             functional=_functional(row, parts.taxes),
             fiscal=terms.fiscal.get(regime, MappingProxyType({})),
         ),
-        seller=seller_of(row.seller_legal_name, row.seller_tax_scheme, row.seller_tax_value),
+        seller=seller_from_columns(row.seller_legal_name, row.seller_tax_scheme, row.seller_tax_value),
         accepted_by=(),
         void_reason=None if row.void_reason is None else Reason(row.void_reason),
         version=row.version,
