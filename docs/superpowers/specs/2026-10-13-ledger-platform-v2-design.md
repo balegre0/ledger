@@ -854,7 +854,7 @@ only the public surfaces and the layering are mandated.
 | 7 | Module public surface | `protected` (one per module) | `ledger_<m>.*` importable only by `ledger_<m>` itself, except `ledger_<m>.api` and `ledger_<m>.events` (by declared dependents) and `ledger_<m>.assembly` (by apps) |
 | 8 | Declared module edges only | `forbidden` (one per module) | `ledger_<m>` → every module not in its `dependencies.modules` |
 | 9 | Acyclic modules | `acyclic_siblings` | over the module set (subscription edges checked by `ledger-devtools check`) |
-| 9b | Flows are leaves | `forbidden` | `ledger_<module>` → `ledger_flow_*` (ADR 0011); flows reach modules through `api`, `events` and declared edges only |
+| 9b | Flows are leaves | `forbidden` | `ledger_<module>` → `ledger_flow_*` (ADR 0011); flows reach modules through `api`, `events` and declared edges only. **Deferred**: not generated until the first flow exists (§16.4) |
 | 10 | Layers inside each package | `layers` with `containers` | §4.5 per module, per channel |
 | 11 | Domain purity | `forbidden` (one per package) | `*.domain`, `*.events`, `*.application` → third-party |
 | 12 | Signer custody | `forbidden` | everything but `ledger_app_signer` and `ledger_signer` → `ledger_signer.adapters.custody` |
@@ -1641,7 +1641,7 @@ cannot be probed by type. Internal UUIDs never appear in the API.
 
 ### 9.5 Idempotency and business keys
 
-- `Idempotency-Key` required on every `POST` (and `DELETE`), ≤ 255 chars, scoped to (organization, mode,
+- `Idempotency-Key` required on every `POST`, ≤ 255 chars, scoped to (organization, mode,
   principal, **route**), stored **7 days** with the response in the owning module's `idempotency_keys` table in the
   same transaction as the work (v1 semantics: a failed request keeps nothing; a concurrent twin waits and replays
   with `Idempotent-Replayed: true`; same key with another body → 422 `idempotency_key_reused`).
@@ -1653,6 +1653,9 @@ cannot be probed by type. Internal UUIDs never appear in the API.
   The canonical body is the validated model's JSON, keys sorted, defaults included.
 - A route that takes `Idempotency-Key` requires `Ledger-Mode` (400 `mode_required` without it): the key is kept
   per mode (Decision 4 of the v2-M1 plan).
+- `DELETE` takes no `Idempotency-Key`: it is naturally idempotent (deleting or revoking what is gone already
+  answers as before and changes nothing), so a retry needs no stored response (as built: revoking an API
+  client, revoking a membership).
 - Routes that forward to the signer (`POST /v1/certificates`) pass the key through `ImportCertificate`; the signer
   stores it in `signer.idempotency_keys`, in the transaction that installs the certificate.
 - `external_reference` (§7.5) is the permanent business key for documents.
