@@ -445,14 +445,24 @@ def test_ports_are_guarded_like_apis() -> None:
 @pytest.mark.parametrize(
     ("body", "name"),
     [
-        ('[extension_points]\ndeclares = ["Policy"]\n', "'beta.Policy'"),
+        ('[extension_points]\ndeclares = ["Policy"]\nrequired = ["Policy"]\n', "'beta.Policy'"),
         ('[extension_points]\nprovides = ["ProbePort"]\n', "'ProbePort'"),
     ],
     ids=["extension-point", "port"],
 )
-def test_every_declared_extension_point_and_port_is_bound_after_assembly(body: str, name: str) -> None:
+def test_every_required_extension_point_and_port_is_bound_after_assembly(body: str, name: str) -> None:
     with pytest.raises(BindingMissingError, match=name):
         App("worker", settings=SETTINGS, discover=discovering(module("beta", body=body)))
+
+
+def test_an_extension_point_nobody_must_implement_assembles_with_an_empty_chain() -> None:
+    """Only a required point fails the start unimplemented; an optional one reads as no implementation."""
+    app = App(
+        "worker",
+        settings=SETTINGS,
+        discover=discovering(module("beta", body='[extension_points]\ndeclares = ["Policy"]\n')),
+    )
+    assert [manifest.package.name for manifest in app.modules] == ["beta"]
 
 
 def test_a_declared_extension_point_implemented_by_another_module_assembles() -> None:

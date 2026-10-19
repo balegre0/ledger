@@ -257,6 +257,11 @@ class _OrderWithoutImplementationError(ValueError):
         super().__init__("an order names only an extension point the module implements")
 
 
+class _RequiredUndeclaredError(ValueError):
+    def __init__(self) -> None:
+        super().__init__("a required extension point is one the module declares")
+
+
 class _CadenceError(ValueError):
     def __init__(self) -> None:
         super().__init__("a schedule has exactly one of every and cron")
@@ -267,6 +272,9 @@ class ExtensionPoints(_Section):
 
     declares: tuple[ProtocolName, ...] = ()
     """Protocols of the module's ``api`` that other modules may implement."""
+    required: tuple[ProtocolName, ...] = ()
+    """Those of its points that must have an implementation: one without fails the start. Any other may have
+    none, and its chain is then empty (ADR 0011)."""
     implements: tuple[QualifiedProtocol, ...] = ()
     """Extension points of other modules it implements: ``<module>.<Protocol>``."""
     order: dict[QualifiedProtocol, ExtensionOrder] = Field(default_factory=dict)
@@ -280,6 +288,13 @@ class ExtensionPoints(_Section):
         """An order names a point the module implements: one it does not is a typo, not a setting."""
         if not set(self.order) <= set(self.implements):
             raise _OrderWithoutImplementationError
+        return self
+
+    @model_validator(mode="after")
+    def require_only_what_is_declared(self) -> Self:
+        """A required point is one the module declares: another is a typo, not a requirement."""
+        if not set(self.required) <= set(self.declares):
+            raise _RequiredUndeclaredError
         return self
 
     def order_of(self, point: str) -> int:

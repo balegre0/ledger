@@ -291,6 +291,19 @@ def test_extension_points_name_protocols_and_qualified_implementations() -> None
         assert caught.value.problems[0].startswith(f"{location}: ")
 
 
+def test_a_declared_extension_point_is_optional_unless_the_module_requires_it() -> None:
+    points = load_manifest(
+        MODULE + '[extension_points]\ndeclares = ["IssuePolicy", "Pricing"]\nrequired = ["Pricing"]\n'
+    ).extension_points
+    assert (points.declares, points.required) == (("IssuePolicy", "Pricing"), ("Pricing",))
+    assert load_manifest(MODULE).extension_points.required == ()
+    with pytest.raises(InvalidManifestError) as caught:
+        load_manifest(MODULE + '[extension_points]\ndeclares = ["IssuePolicy"]\nrequired = ["Pricing"]\n')
+    assert caught.value.problems == (
+        "extension_points: a required extension point is one the module declares",
+    )
+
+
 def test_an_implementation_may_say_where_it_goes_in_the_chain_and_defaults_to_one_hundred() -> None:
     declared = MODULE + (
         '[extension_points]\nimplements = ["fiscal.IssuePolicy", "stock.IssuePolicy"]\n'

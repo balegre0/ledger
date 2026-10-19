@@ -570,11 +570,13 @@ it and nothing else.
 
 Assembly fails the start, never a later call, when: two packages claim one schema (or a module claims
 `platform`); a module or channel has no schema or no migrations, or hands over migrations of another schema;
-a consumer or job kind is declared without a handler or handed over undeclared; a declared extension point
-has no implementation or a declared port no provider after every module assembled (a channel reads its ports
+a consumer or job kind is declared without a handler or handed over undeclared; a **required** extension
+point has no implementation or a declared port no provider after every module assembled (a channel reads its ports
 while it assembles, so a missing one fails there); an API, extension point implementation or port has a public
-coroutine that is not a `@facade`. A name is bound once: one provider per port, and an extension point's implementations are **chained** in `(order, module name)` order (ADR 0011, which replaces the former one-implementation rule); one
-provider per port; a point that needs several (a chain of policies) gets a directory of its own when one does.
+coroutine that is not a `@facade`. A port or an API is bound once (one provider each); an extension point
+is **chained** instead (ADR 0011, which replaces the former one-implementation rule): every module that
+implements it is in its chain, in `(order, module name)` order, and the declaring module reads the ordered
+tuple (`extensions.all(KEY)`), empty when nobody implements an optional point.
 
 ---
 
@@ -702,6 +704,8 @@ enqueues = "invoicing.purge_drafts"
 
 [extension_points]
 declares = ["IssuePolicy"]          # Protocols in this module's api.py that other modules may implement
+required = []                       # optional: those of them that must have an implementation (default: none);
+                                    # an optional point nobody implements is an empty chain (ADR 0011)
 implements = []                     # "<module>.<Protocol>" this module implements (bound by apps)
 # [extension_points.order]          # optional: where each implementation goes in the point's chain, lowest first
 # "invoicing.IssuePolicy" = 10      # 0-1000, default 100, ties by module name (ADR 0011)

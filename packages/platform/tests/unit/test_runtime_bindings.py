@@ -16,7 +16,6 @@ from ledger_platform.runtime.facade import (
     require_facades,
 )
 from ledger_platform.runtime.keys import (
-    BindingMissingError,
     ChainDirectory,
     Directory,
     Key,
@@ -188,8 +187,7 @@ def test_two_modules_declaring_one_protocol_name_never_collide() -> None:
     invoicing = extension_view(manifest("invoicing", declares=["Policy"]), bench.extensions)
     payments = extension_view(manifest("payments", declares=["Policy"]), bench.extensions)
     assert [type(policy) for policy in invoicing.all(INVOICING_POLICY)] == [Approving]
-    with pytest.raises(BindingMissingError, match=r"payments\.Policy"):
-        payments.all(PAYMENTS_POLICY)
+    assert payments.all(PAYMENTS_POLICY) == ()  # nobody implements it: an empty chain
     with pytest.raises(UndeclaredDependencyError):
         payments.all(INVOICING_POLICY)
 

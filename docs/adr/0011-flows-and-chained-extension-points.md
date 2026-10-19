@@ -28,8 +28,11 @@ an invoice); a single implementation per point makes them fight over it.
 - **Extension points are chained.** A module may declare `implements` for a point several modules implement;
   implementations run in `(order, module name)` order, `order` an integer declared per implementation in the
   manifest (default 100). The module that declares the point defines how results combine in its Protocol
-  documentation (objections are concatenated; a pipeline passes its result on). The directory returns the
-  ordered tuple; a point with no implementation still fails the start when declared as required.
+  documentation (objections are concatenated; a pipeline passes its result on), and what an empty chain
+  means. The directory returns the ordered tuple, empty when no module implements the point. A point is
+  optional by default: its manifest lists the points that must have an implementation
+  (`[extension_points] required = ["IssuePolicy"]`, a subset of `declares`), and only a required point with no
+  implementation fails the start.
 - The generated import-linter contracts add: modules never import flows; flows import modules only through
   `api`, `events` and declared edges; apps may import `ledger_flow_<name>.assembly` only.
 

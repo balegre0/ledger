@@ -3,7 +3,7 @@
 Every package's settings section is read first (``runtime.sections``). What every package hands back is
 checked against its manifest before anything starts: a schema of its own with its own migrations, a handler
 for every consumer and job kind it declares and none it does not, an implementation for every extension point
-declared and a provider for every port declared, facades on what other packages call. Every failure is a
+required and a provider for every port declared, facades on what other packages call. Every failure is a
 defect of a package or of the deployment, found at the start (internal errors, never a client's). The
 standings a module provides (``StandingsPort``, identity's) are bound to the app's request authentication,
 so every route's caller applies them.
@@ -444,11 +444,14 @@ class _Assembly:
         )
 
     def require_bindings(self, modules: Sequence[Module]) -> None:
-        """Every extension point and port a module declares is bound (``BindingMissingError``)."""
+        """Every extension point a module requires, and port it provides, is bound (``BindingMissingError``).
+
+        A point it declares without requiring it may have no implementation: its chain is empty.
+        """
         for module in modules:
             points = module.manifest.extension_points
-            for point in points.declares:
-                _ = self._extensions.chain_of(f"{module.manifest.package.name}.{point}")
+            for point in points.required:
+                self._extensions.require(f"{module.manifest.package.name}.{point}")
             for port in points.provides:
                 self._ports.value_of(port)
 

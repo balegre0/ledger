@@ -119,10 +119,12 @@ def test_a_chain_is_bound_only_by_those_declaring_it_and_read_only_by_those_decl
         chain.view(frozenset()).all(GREETER)
 
 
-def test_a_chain_with_no_implementation_is_a_defect_and_a_wrong_type_in_it_is_too() -> None:
+def test_a_chain_with_no_implementation_is_empty_unless_required_and_a_wrong_type_in_it_is_a_defect() -> None:
     chain = ChainDirectory("extensions")
+    assert chain.view(GREETERS).all(GREETER) == ()
     with pytest.raises(BindingMissingError, match="extensions 'greeter'"):
-        chain.view(GREETERS).all(GREETER)
+        chain.require("greeter")
     chain.add(Key[object]("greeter", anything).bind(42), by="fiscal", declared=GREETERS, order=100)
     with pytest.raises(BindingTypeError, match="greeter"):
         chain.view(GREETERS).all(GREETER)
+    chain.require("greeter")  # implemented, though wrongly: the start reads its type later

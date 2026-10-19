@@ -153,7 +153,11 @@ class ChainView:
         self._allowed = allowed
 
     def all[T](self, key: Key[T]) -> tuple[T, ...]:
-        """Every implementation bound under ``key``, in chain order, if the reader declared the name."""
+        """Every implementation bound under ``key``, in chain order, if the reader declared the name.
+
+        Empty when no module implements it: the declaring module says what an empty chain means (a point that
+        cannot do without one is declared ``required``, and the start fails without it).
+        """
         if key.name not in self._allowed:
             raise UndeclaredDependencyError(self._directory.label, key.name)
         return tuple(key.take(value) for value in self._directory.chain_of(key.name))
@@ -179,12 +183,14 @@ class ChainDirectory:
         chain[by] = (order, binding.value)
 
     def chain_of(self, name: str) -> tuple[object, ...]:
-        """The implementations under ``name``, by order then implementer (``BindingMissingError`` if none)."""
-        chain = self._chains.get(name)
-        if not chain:
-            raise BindingMissingError(self.label, name)
-        ordered = sorted(chain.items(), key=lambda item: (item[1][0], item[0]))
+        """The implementations under ``name``, by order then implementer; empty when nobody implements it."""
+        ordered = sorted(self._chains.get(name, {}).items(), key=lambda item: (item[1][0], item[0]))
         return tuple(value for _, (_, value) in ordered)
+
+    def require(self, name: str) -> None:
+        """Refuse a required point nobody implements (``BindingMissingError``)."""
+        if not self._chains.get(name):
+            raise BindingMissingError(self.label, name)
 
     def view(self, allowed: frozenset[str]) -> ChainView:
         """What a package that declared ``allowed`` may read."""
