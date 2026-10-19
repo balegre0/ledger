@@ -21,17 +21,30 @@ lazy from uuid import UUID
 
 lazy from ledger_identity.api import CompanyInfo
 lazy from ledger_invoicing.domain.ids import InvoiceId
-lazy from ledger_invoicing.domain.invoice import Invoice
+lazy from ledger_invoicing.domain.invoice import Invoice, InvoiceStatus
 lazy from ledger_invoicing.domain.pricing import EstablishmentRef
+lazy from ledger_invoicing.domain.text import ExternalReference
 lazy from ledger_invoicing.events import InvoicingEvent
 lazy from ledger_kernel.ids import CompanyId
 lazy from ledger_kernel.jurisdiction import Jurisdiction
-lazy from ledger_kernel.regimes import RegimeDef
+lazy from ledger_kernel.pagination import Page, PageRequest
+lazy from ledger_kernel.regimes import Direction, DocumentKind, RegimeDef
 lazy from ledger_kernel.tenancy import Tenant
 lazy from ledger_platform.runtime.calls import Call
 
 type RegimeOf = Callable[[Jurisdiction], RegimeDef | None]
 """The installed regime that governs a jurisdiction, if any (its subdivision's, else its country's)."""
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InvoiceFilters:
+    """Which of a tenant's documents a list holds: those of every condition given (``None``: any)."""
+
+    kind: DocumentKind | None = None
+    direction: Direction | None = None
+    status: InvoiceStatus | None = None
+    external_reference: ExternalReference | None = None
 
 
 class Invoices(Protocol, metaclass=ABCMeta):
@@ -59,6 +72,10 @@ class Invoices(Protocol, metaclass=ABCMeta):
     @abstractmethod
     async def corrected_by(self, invoice: InvoiceId) -> bool:
         """Whether a draft or issued note of the tenant corrects ``invoice`` (a voided one does not)."""
+
+    @abstractmethod
+    async def page(self, request: PageRequest, filters: InvoiceFilters) -> Page[Invoice]:
+        """The page ``request`` asks for of the documents ``filters`` names, in id (creation) order."""
 
 
 class Events(Protocol, metaclass=ABCMeta):

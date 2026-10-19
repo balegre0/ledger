@@ -27,6 +27,8 @@ MANIFEST: Final = PackageManifest.model_validate(
             ],
             "python": [
                 "alembic>=1.20.0",
+                "pydantic>=2.14.1",
+                "sqlalchemy>=2.1.4",
             ],
         },
         "data": {

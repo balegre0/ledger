@@ -34,7 +34,7 @@ from ledger_kernel.money import Currency
 from ledger_kernel.regimes import Direction, DocumentKind
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Mode, Tenant
-from ledger_platform.data.codec import payload_of
+from ledger_platform.data.codec import encode, payload_of
 lazy from ledger_invoicing.domain.pricing import Pricing
 lazy from ledger_kernel.regimes import RegimeDef
 
@@ -98,6 +98,18 @@ def issued_invoice(pricing: Pricing) -> Invoice:
 # ── Creating ────────────────────────────────────────────────────────────────────
 
 
+def test_a_document_has_the_json_form_its_audit_hashes(pricing: Pricing) -> None:
+    """A unit's audit hashes a changed document as the platform's codec writes it: every part has a form."""
+    accepted = replace(issued_invoice(pricing), accepted_by=("do-ecf-v1",))
+    encoded = encode(accepted)
+    assert isinstance(encoded, dict)
+    assert (encoded["accepted_by"], encoded["status"], encoded["kind"]) == (
+        ["do-ecf-v1"],
+        "issued",
+        "invoice",
+    )
+
+
 def test_a_draft_is_kept_without_its_seller_and_announces_nothing(pricing: Pricing) -> None:
     invoice, issued = new(pricing, reference="ORD-1")
     assert issued is None
@@ -121,7 +133,7 @@ def test_a_draft_is_kept_without_its_seller_and_announces_nothing(pricing: Prici
     )
     assert (invoice.corrects, invoice.accepted_by, invoice.voided_at, invoice.void_reason) == (
         None,
-        frozenset(),
+        (),
         None,
         None,
     )
@@ -203,7 +215,7 @@ def test_voiding_an_issued_document_keeps_its_reason_and_announces_it(pricing: P
 def test_a_draft_a_voided_document_and_one_a_channel_accepted_are_not_voided(pricing: Pricing) -> None:
     issued = issued_invoice(pricing)
     voided, _ = issued.void(reason=None, corrected_by_a_note=False, now=LATER)
-    accepted = replace(issued, accepted_by=frozenset({"do-ecf-v1"}))
+    accepted = replace(issued, accepted_by=("do-ecf-v1",))
     for invoice, corrected in ((draft(pricing), False), (voided, False), (accepted, False), (issued, True)):
         with pytest.raises(InvoiceNotVoidableError) as caught:
             invoice.void(reason=None, corrected_by_a_note=corrected, now=LATER)

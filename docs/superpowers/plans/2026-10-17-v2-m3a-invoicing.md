@@ -76,6 +76,21 @@ profile and its establishments come through `IdentityApi`.
   the company is then; a draft issued by another call meanwhile answers 409 `invoice_not_issuable`, one
   changed otherwise 409 `invoice_changed`.
 
+## Rules decided in Task 4 (persistence; the owner reviews them)
+
+- **One revision**: schema `invoicing` is made by one revision `0001` (the chassis's versions 1 and 2, then the
+  four tables of a document and their `tenant` policies): Task 1's two chassis revisions are squashed into it,
+  as identity's were, since nothing was released (§6.5). A database migrated from Task 1's `0002` is recreated.
+- **Tables**: `invoices` (terms as sent, pricing, parties, totals, functional totals), `invoice_lines`,
+  `invoice_line_taxes` (the rate resolved at the tax point) and `invoice_taxes` (the totals' categories, with
+  the functional amounts). Every key leads with `(organization_id, company_id, mode)` and every foreign key
+  carries it; rows keep their place (`position`, `place`), never a collation's order; amounts are `numeric`
+  with their own scale. A change rewrites the lines and totals with the row (issuing a draft prices it again).
+- **`accepted_by` is a tuple** of channel keys, not a set: the audit hashes a document as JSON
+  (`ledger_platform.data.codec`), which has no sets (the in-memory fake never encoded one). Until the fiscal
+  mirror exists (M3b) the repository refuses to keep a document a channel accepted
+  (`invoice_acceptance_unmirrored`, a defect) rather than drop it silently.
+
 ## Tasks (each ends with `uv run poe check` green, one commit)
 
 1. Plan and skeleton: this file; `modules/invoicing` (manifest, README, layers), `uv sync`, devtools sync.

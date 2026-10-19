@@ -48,14 +48,16 @@ from ledger_kernel.errors import ErrorKind, InvalidValueError
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.jurisdiction import parse_jurisdiction
 from ledger_kernel.money import Currency, Money
+from ledger_kernel.pagination import page_of
 from ledger_kernel.regimes import Direction, DocumentKind
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Mode, OrganizationScope, Tenant
 from ledger_platform.runtime.calls import Call
-lazy from ledger_invoicing.application.ports import AuditAction
+lazy from ledger_invoicing.application.ports import AuditAction, InvoiceFilters
 lazy from ledger_invoicing.domain.invoice import Invoice
 lazy from ledger_invoicing.events import InvoicingEvent
 lazy from ledger_kernel.jurisdiction import Jurisdiction
+lazy from ledger_kernel.pagination import Page, PageRequest
 lazy from ledger_kernel.regimes import RegimeDef
 
 NOON: Final = datetime(2026, 10, 12, 16, 0, tzinfo=UTC)
@@ -145,6 +147,19 @@ class Staged:
         self.state.audited.extend(self.audited)
 
 
+def matches(invoice: Invoice, filters: InvoiceFilters) -> bool:
+    """Whether ``invoice`` meets every condition ``filters`` gives."""
+    return all(
+        wanted is None or wanted == held
+        for wanted, held in (
+            (filters.kind, invoice.kind),
+            (filters.direction, invoice.direction),
+            (filters.status, invoice.status),
+            (filters.external_reference, invoice.external_reference),
+        )
+    )
+
+
 @final
 class MemoryInvoices(Invoices):
     def __init__(self, staged: Staged, tenant: Tenant) -> None:
@@ -188,6 +203,24 @@ class MemoryInvoices(Invoices):
             and other.status is not InvoiceStatus.VOIDED
             for other in self._staged.invoices.values()
         )
+
+    @override
+    async def page(self, request: PageRequest, filters: InvoiceFilters) -> Page[Invoice]:
+        mine = sorted(
+            (
+                invoice
+                for invoice in self._staged.invoices.values()
+                if invoice.tenant == self._tenant and matches(invoice, filters)
+            ),
+            key=lambda invoice: invoice.id,
+        )
+        before, after = request.before, request.after
+        rows = (
+            [invoice for invoice in reversed(mine) if invoice.id < before]
+            if before is not None
+            else [invoice for invoice in mine if after is None or invoice.id > after]
+        )
+        return page_of(rows[: request.size + 1], request, key=lambda invoice: invoice.id)
 
 
 @final

@@ -81,8 +81,11 @@ class Invoice:
     pricing: Pricing
     seller: Seller | None
     """The company as it was when the document was issued; ``None`` while a draft."""
-    accepted_by: frozenset[str]
-    """The channels that accepted the document (the fiscal mirror, M3b): empty until then."""
+    accepted_by: tuple[str, ...]
+    """The channels that accepted the document, by key (the fiscal mirror, M3b): empty until then.
+
+    A tuple, not a set: the audit hashes a document as JSON (``ledger_platform.data.codec``), which has arrays
+    and no sets."""
     void_reason: Reason | None
     version: int
     created_at: datetime
@@ -144,7 +147,7 @@ class Invoice:
             terms=opening.terms,
             pricing=pricing,
             seller=None,
-            accepted_by=frozenset(),
+            accepted_by=(),
             void_reason=None,
             version=1,
             created_at=now,
