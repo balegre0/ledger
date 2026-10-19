@@ -27,12 +27,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.schema import SchemaItem
 
 from ledger_platform.data import ModuleTable
-from ledger_signer.domain.certificates import BackendKind, CertificateStatus
+from ledger_signer.domain.certificates import FINGERPRINT_BYTES, BackendKind, CertificateStatus
 
 SCHEMA: Final = "signer"
 """signer's schema: its tables and the chassis's (``chassis_schema_v1`` and ``_v2``), under its roles."""
-FINGERPRINT_BYTES: Final = 32
-"""A SHA-256 digest."""
 
 
 def _one_of(column: str, words: type[StrEnum], *, name: str) -> CheckConstraint:
