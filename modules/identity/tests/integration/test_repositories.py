@@ -261,7 +261,7 @@ async def test_a_tax_id_is_unique_by_its_scheme_and_its_value(module_database: B
     cedula = await create(
         module_database, founder=STRANGER, tax_id=TaxId(TaxIdScheme("do.cedula"), RNC.value)
     )
-    assert (rnc.profile.primary_tax_id, cedula.profile.primary_tax_id) == (
+    assert (rnc.profile.tax_ids[0], cedula.profile.tax_ids[0]) == (
         RNC,
         TaxId(TaxIdScheme("do.cedula"), "101850043"),
     )
@@ -340,7 +340,7 @@ async def test_deactivating_a_company_releases_all_its_tax_ids(module_database: 
     await deactivate(module_database, company)
     assert await registered_ids(module_database) == []
     again = await create(module_database, STRANGER, CEDULA)
-    assert again.profile.primary_tax_id == CEDULA
+    assert again.profile.tax_ids[0] == CEDULA
 
 
 async def test_a_locked_fiscal_profile_is_kept_at_its_new_version(module_database: BoundDatabase) -> None:

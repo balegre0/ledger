@@ -308,19 +308,12 @@
       },
       "CountryBody": {
         "additionalProperties": false,
-        "description": "A country in full: every regime installed for it and every channel that serves it.",
+        "description": "A country in full: every regime installed for it and every channel that serves it, each once.",
         "properties": {
-          "channel_details": {
+          "channels": {
+            "description": "The channels that serve it.",
             "items": {
               "$ref": "#/components/schemas/ChannelBody"
-            },
-            "title": "Channel Details",
-            "type": "array"
-          },
-          "channels": {
-            "description": "The keys of the channels that serve it.",
-            "items": {
-              "type": "string"
             },
             "title": "Channels",
             "type": "array"
@@ -336,17 +329,10 @@
           "labels": {
             "$ref": "#/components/schemas/Labels"
           },
-          "regime_details": {
+          "regimes": {
+            "description": "Its regimes: the national one first.",
             "items": {
               "$ref": "#/components/schemas/RegimeBody"
-            },
-            "title": "Regime Details",
-            "type": "array"
-          },
-          "regimes": {
-            "description": "Its regimes' keys: the national one first.",
-            "items": {
-              "type": "string"
             },
             "title": "Regimes",
             "type": "array"
@@ -356,9 +342,7 @@
           "country",
           "labels",
           "regimes",
-          "channels",
-          "regime_details",
-          "channel_details"
+          "channels"
         ],
         "title": "CountryBody",
         "type": "object"

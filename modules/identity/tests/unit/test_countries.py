@@ -119,8 +119,10 @@ def test_no_regime_means_no_country() -> None:
 
 def test_a_country_is_given_in_full() -> None:
     body = country("US", [FR, US_CA, US], [channel("us-probe-v1", until=date(2030, 1, 1))])
-    assert (body.country, body.regimes, body.channels) == ("US", ["us", "us-ca"], ["us-probe-v1"])
-    national, california = body.regime_details
+    assert (body.country, [regime.key for regime in body.regimes]) == ("US", ["us", "us-ca"])
+    assert [channel.key for channel in body.channels] == ["us-probe-v1"]
+    assert "regime_details" not in type(body).model_fields  # each regime once, in full
+    national, california = body.regimes
     assert (national.key, national.currency, national.time_zone, california.key) == (
         "us",
         "USD",
@@ -159,7 +161,7 @@ def test_a_country_is_given_in_full() -> None:
         "days",
         "limit",
     ]  # by name, so the document does not change by itself
-    (published,) = body.channel_details
+    (published,) = body.channels
     assert (
         published.key,
         published.valid_until,

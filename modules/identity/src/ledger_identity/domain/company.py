@@ -59,11 +59,6 @@ class FiscalProfile:
                 field="fiscal_profile.tax_ids", requirement="one or more distinct tax ids"
             )
 
-    @property
-    def primary_tax_id(self) -> TaxId:
-        """The first of its tax ids: the one the taxpayer is known by."""
-        return self.tax_ids[0]
-
 
 def require_fits(profile: FiscalProfile, regime: RegimeDef | None) -> RegimeDef:
     """The regime of the profile's jurisdiction (``regime``, if installed), once it allows the profile.

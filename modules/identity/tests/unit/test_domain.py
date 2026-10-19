@@ -266,7 +266,7 @@ def test_a_registered_company_is_active_at_its_first_version_and_says_so() -> No
         NOW,
     )
     assert (company.profile.jurisdiction, company.profile.functional_currency) == (DOMINICAN, PESO)
-    assert (company.profile.tax_ids, company.profile.primary_tax_id) == ((RNC, CEDULA), RNC)
+    assert (company.profile.tax_ids, company.profile.tax_ids[0]) == ((RNC, CEDULA), RNC)
     assert company.fiscal_profile_locked_at is None
     assert company.tenant == Tenant(ORGANIZATION, company.id, None)
     assert company.id.version == 7

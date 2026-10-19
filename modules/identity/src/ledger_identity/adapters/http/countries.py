@@ -15,6 +15,7 @@ from ledger_identity.adapters.http.country_models import (
     CountryList,
     CountrySummary,
     RegimeBody,
+    labelled,
 )
 from ledger_identity.domain.errors import CountryNotFoundError
 from ledger_kernel.jurisdiction import InvalidCountryError, parse_country
@@ -58,15 +59,11 @@ def country(code: str, regimes: Sequence[RegimeDef], channels: Sequence[ChannelE
     found = _regimes_of(wanted, regimes)
     if not found:
         raise CountryNotFoundError
-    serving = _channels_of(wanted, channels)
-    summary = CountrySummary.of(wanted, found, serving)
     return CountryBody(
-        country=summary.country,
-        labels=summary.labels,
-        regimes=summary.regimes,
-        channels=summary.channels,
-        regime_details=[RegimeBody.of(regime) for regime in found],
-        channel_details=[ChannelBody.of(entry) for entry in serving],
+        country=wanted,
+        labels=labelled(found[0].labels),
+        regimes=[RegimeBody.of(regime) for regime in found],
+        channels=[ChannelBody.of(entry) for entry in _channels_of(wanted, channels)],
     )
 
 

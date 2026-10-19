@@ -272,11 +272,13 @@ class CountrySummary(_Shape):
         )
 
 
-class CountryBody(CountrySummary):
-    """A country in full: every regime installed for it and every channel that serves it."""
+class CountryBody(_Shape):
+    """A country in full: every regime installed for it and every channel that serves it, each once."""
 
-    regime_details: list[RegimeBody]
-    channel_details: list[ChannelBody]
+    country: str = Field(description="ISO 3166-1 alpha-2, upper case.", examples=["DO"])
+    labels: Labels
+    regimes: list[RegimeBody] = Field(description="Its regimes: the national one first.")
+    channels: list[ChannelBody] = Field(description="The channels that serve it.")
 
 
 class CountryList(_Shape):

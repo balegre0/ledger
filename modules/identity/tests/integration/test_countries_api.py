@@ -32,8 +32,8 @@ async def test_a_country_is_published_with_its_law_as_data(
     response = await client.get("/v1/countries/DO", headers=owner.bearer())
     assert response.status_code == 200
     body = CountryBody.model_validate_json(response.content)
-    assert (body.country, body.regimes, body.channels, body.channel_details) == ("DO", ["do"], [], [])
-    (regime,) = body.regime_details
+    assert (body.country, [regime.key for regime in body.regimes], body.channels) == ("DO", ["do"], [])
+    (regime,) = body.regimes
     assert (regime.key, regime.currency, regime.time_zone) == ("do", "DOP", "America/Santo_Domingo")
     assert (regime.jurisdiction.country, regime.jurisdiction.subdivision) == ("DO", None)
     assert {scheme.key for scheme in regime.tax_id_schemes} == {"do.rnc", "do.cedula"}
