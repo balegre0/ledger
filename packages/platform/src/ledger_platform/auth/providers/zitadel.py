@@ -46,15 +46,30 @@ def granted_roles(claims: Mapping[str, object], name: str, organization: str) ->
     yield from (role for role, organizations in roles.items() if organization in organizations)
 
 
-def kind_of(client_id: str, audiences: Collection[str]) -> PrincipalKind:
+PRINCIPAL_KIND_CLAIM: Final = "urn:ledger:principal_kind"
+"""The signed claim that says whether a person or a machine calls: ``human`` or ``machine``.
+
+Zitadel puts no user type in an access token; an Action of the organization's pre-access-token flow adds this
+claim from the user's type (``deploy/local/zitadel/bootstrap.sh``, a deployment step everywhere else). Where
+it is there it decides, and a token it contradicts is refused; ``token_kind_claim_required`` makes it
+mandatory (staging and production)."""
+KINDS: Final = {kind.value: kind for kind in PrincipalKind}
+
+
+def kind_of(client_id: str, audiences: Collection[str], project: str) -> PrincipalKind:
     """Whether the token of ``client_id`` for ``audiences`` was issued to a person or to a machine.
 
     Checked against Zitadel v4.19.2. A person signs in through an application of the provider: the token's
     ``client_id`` is that application's id, and Zitadel adds the application to the audiences. A machine user
     authenticates with its own credentials (client credentials or the JWT profile grant) and no application:
-    ``client_id`` is its user name, and the audiences are only the projects asked for. Zitadel puts no claim
-    that names the user's type in an access token, so this is the one signal its verified claims give. A
-    machine user named exactly like an audience would pass for a person, so a machine is never more than an
-    API client its organization registered, and a person never stands as one.
+    ``client_id`` is its user name, and the audiences are only the projects asked for. The project itself
+    (``project``, the tokens' audience) is no application a person signs in through: a ``client_id`` equal to
+    it (a machine user named after the project, a token exchange) is a machine's. Zitadel puts no claim that
+    names the user's type in an access token, so this is the one signal its own claims give; the signed
+    ``PRINCIPAL_KIND_CLAIM`` decides where a token carries it. Whatever it says, a subject an API client names
+    is bound to that client's mode and revocation (identity's standings), so a machine passing for a person
+    gains nothing.
     """
-    return PrincipalKind.HUMAN if client_id in audiences else PrincipalKind.MACHINE
+    if client_id != project and client_id in audiences:
+        return PrincipalKind.HUMAN
+    return PrincipalKind.MACHINE

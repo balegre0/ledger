@@ -5,8 +5,10 @@ of the API; its organization is pinned too. The chassis asks identity for all of
 the token is proven, and the answer settles what the request is: the version it speaks (``resolve``), the
 mode it acts in (an API client's credential carries it: ``Ledger-Mode`` is then optional, and may only
 repeat it), whether a credential that was revoked still counts (it does not), and whether a machine may act at
-all: a machine acts only as an API client, one that is none is refused (403 ``api_client_unregistered``), and
-a person never stands as one.
+all: a machine acts only as an API client, one that is none is refused (403 ``api_client_unregistered``).
+Whoever an API client names is bound to its mode and its revocation, even a caller whose token reads as a
+person's: a person registered by mistake is held to that client (acceptable, and stated in the spec), and a
+machine that passes for a person gains nothing.
 """
 
 from abc import ABCMeta, abstractmethod

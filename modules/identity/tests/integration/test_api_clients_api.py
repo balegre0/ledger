@@ -267,14 +267,19 @@ async def test_a_machine_user_that_is_no_client_is_refused_whatever_it_names(
         assert (response.status_code, document(response)["code"]) == (403, "api_client_unregistered")
 
 
-async def test_a_person_s_credential_never_carries_a_client_s_mode(
-    client: httpx.AsyncClient, admin: psycopg.AsyncConnection, owner: TestPrincipal
+async def test_whoever_an_api_client_names_is_bound_to_its_mode_even_when_it_looks_like_a_person(
+    client: httpx.AsyncClient, local_issuer: LocalIssuer, owner: TestPrincipal
 ) -> None:
-    """A person whose subject an API client names anyway still names its mode: only a machine is a client."""
+    """A machine whose token passes for a person's (its user name is one of the audiences) is still bound to
+    its client's mode and revocation: a client's binding never depends on the heuristic (fail closed)."""
     await register_in(client, owner, "live")
-    await admin.execute("UPDATE identity.api_clients SET subject = %s", (owner.subject,))
-    response = await client.get("/v1/api_clients", headers=owner.bearer())
-    assert (response.status_code, document(response)["code"]) == (400, "mode_required")
+    disguised = {"client_id": "other-app", "aud": [local_issuer.audience, "other-app"]}
+    token = local_issuer.token(subject="4001", roles=(ORGANIZATION_ADMIN,), claims=disguised)
+    headers = {"Authorization": f"Bearer {token}"}
+    bare = await client.get("/v1/api_clients", headers=headers)
+    other = await client.get("/v1/api_clients", headers=headers | {"Ledger-Mode": "test"})
+    assert (bare.status_code, page(bare)["items"][0]["mode"]) == (200, "live")  # its client's mode
+    assert (other.status_code, document(other)["code"]) == (403, "mode_mismatch")
 
 
 async def test_a_person_does_not_register_itself_as_an_api_client(

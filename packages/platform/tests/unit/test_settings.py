@@ -226,6 +226,7 @@ def test_keys_fetched_in_clear_are_refused_beyond_a_laptop(
             **REQUIRED,
             "LEDGER_ENVIRONMENT": environment_name,
             "LEDGER_TOKEN_JWKS_URL": "http://zitadel:8080/oauth/v2/keys",
+            "LEDGER_TOKEN_KIND_CLAIM_REQUIRED": "true",
         },
     )
     if outcome == "refused":
@@ -235,8 +236,28 @@ def test_keys_fetched_in_clear_are_refused_beyond_a_laptop(
         assert Settings().token_jwks_url == "http://zitadel:8080/oauth/v2/keys"
 
 
+@pytest.mark.parametrize("environment_name", ["staging", "production"])
+def test_beyond_a_laptop_every_token_must_say_who_calls(
+    monkeypatch: pytest.MonkeyPatch, environment_name: str
+) -> None:
+    """The signed kind claim (``urn:ledger:principal_kind``) is mandatory where no heuristic may decide."""
+    environment(monkeypatch, {**REQUIRED, "LEDGER_ENVIRONMENT": environment_name})
+    with pytest.raises(ValidationError, match="token_kind_claim_required"):
+        Settings()
+    monkeypatch.setenv("LEDGER_TOKEN_KIND_CLAIM_REQUIRED", "true")
+    assert Settings().token_kind_claim_required
+
+
+def test_a_laptop_may_do_without_the_kind_claim(monkeypatch: pytest.MonkeyPatch) -> None:
+    environment(monkeypatch, {**REQUIRED, "LEDGER_ENVIRONMENT": "local"})
+    assert not Settings().token_kind_claim_required
+
+
 def test_https_keys_and_no_keys_are_fine_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
-    environment(monkeypatch, {**REQUIRED, "LEDGER_ENVIRONMENT": "production"})
+    environment(
+        monkeypatch,
+        {**REQUIRED, "LEDGER_ENVIRONMENT": "production", "LEDGER_TOKEN_KIND_CLAIM_REQUIRED": "true"},
+    )
     assert Settings().token_jwks_url is None
     monkeypatch.setenv("LEDGER_TOKEN_JWKS_URL", "https://auth.example.com/oauth/v2/keys")
     assert Settings().token_jwks_url == "https://auth.example.com/oauth/v2/keys"

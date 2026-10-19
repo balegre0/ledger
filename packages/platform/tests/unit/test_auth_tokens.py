@@ -15,7 +15,7 @@ from pydantic import SecretStr, TypeAdapter
 from ledger_kernel.access import PrincipalKind
 from ledger_kernel.errors import ErrorKind
 from ledger_platform.auth.keys import PublishedKeys
-from ledger_platform.auth.providers.zitadel import organization_of, project_roles_claim
+from ledger_platform.auth.providers.zitadel import PRINCIPAL_KIND_CLAIM, organization_of, project_roles_claim
 from ledger_platform.auth.tokens import (
     MAX_TOKEN_LENGTH,
     InvalidTokenError,
@@ -187,6 +187,57 @@ async def test_a_machine_user_with_its_own_credentials_is_a_machine(
         local_issuer.token(claims={"client_id": "ledger-dev", "aud": audiences})
     )
     assert principal.kind is PrincipalKind.MACHINE
+
+
+async def test_a_machine_named_like_the_project_is_still_a_machine(
+    local_issuer: LocalIssuer, verifier: TokenVerifier
+) -> None:
+    """The project is no application a person signs in through: a ``client_id`` equal to it is a machine's,
+    though it is among the audiences (a machine user renamed to the project's id, a token exchange)."""
+    token = local_issuer.token(claims={"client_id": AUDIENCE, "aud": [AUDIENCE]})
+    assert (await verifier.verify(token)).kind is PrincipalKind.MACHINE
+
+
+@pytest.mark.parametrize(
+    ("claimed", "client", "kind"),
+    [("human", "app", PrincipalKind.HUMAN), ("machine", "ledger-dev", PrincipalKind.MACHINE)],
+)
+async def test_the_signed_kind_claim_says_who_calls_when_it_agrees(
+    local_issuer: LocalIssuer, verifier: TokenVerifier, claimed: str, client: str, kind: PrincipalKind
+) -> None:
+    audiences = [AUDIENCE, "app"] if client == "app" else [AUDIENCE]
+    token = local_issuer.token(claims={PRINCIPAL_KIND_CLAIM: claimed, "client_id": client, "aud": audiences})
+    assert (await verifier.verify(token)).kind is kind
+
+
+@pytest.mark.parametrize(
+    ("claimed", "client", "audiences"),
+    [
+        ("machine", "app", [AUDIENCE, "app"]),  # an application's token claimed by a machine
+        ("human", "ledger-dev", [AUDIENCE]),  # a machine's own credential claimed by a person
+        ("robot", "app", [AUDIENCE, "app"]),
+        (["human"], "app", [AUDIENCE, "app"]),
+    ],
+    ids=["machine-through-an-application", "person-without-one", "no-such-kind", "not-text"],
+)
+async def test_a_kind_claim_that_contradicts_the_token_or_is_no_kind_is_refused(
+    local_issuer: LocalIssuer, verifier: TokenVerifier, claimed: object, client: str, audiences: list[str]
+) -> None:
+    token = local_issuer.token(claims={PRINCIPAL_KIND_CLAIM: claimed, "client_id": client, "aud": audiences})
+    assert await refused(verifier, token) is TokenProblem.KIND
+
+
+async def test_a_policy_that_requires_the_kind_claim_refuses_a_token_without_it(
+    local_issuer: LocalIssuer,
+) -> None:
+    strict = TokenVerifier(
+        TokenPolicy(
+            issuer=ISSUER, audience=AUDIENCE, keys_url=local_issuer.keys_url, kind_claim_required=True
+        )
+    )
+    assert await refused(strict, local_issuer.token()) is TokenProblem.KIND
+    claimed = local_issuer.token(claims={PRINCIPAL_KIND_CLAIM: "human"})
+    assert (await strict.verify(claimed)).kind is PrincipalKind.HUMAN
 
 
 async def test_the_roles_of_this_project_granted_in_the_callers_organization_are_read(

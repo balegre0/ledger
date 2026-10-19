@@ -1,14 +1,15 @@
 #!/bin/sh
 # Makes the local Zitadel hold what a developer needs to call ledger with real tokens: a project (its id is the
 # audience of the tokens) with the role ledger.organization.admin, an API application for the platform, a person
-# (ledger-admin) and a machine user (ledger-dev) both granted that role, and the web application the person signs
-# in through. A machine acts only as an API client its organization registered, so the person registers the
-# machine user first (README.md). Zitadel's bootstrap service account is made a login client too: token.sh signs
-# the person in through Zitadel's session API, with no browser.
+# (ledger-admin) and a machine user (ledger-dev) both granted that role, the web application the person signs in
+# through, and the Action that writes who calls into every access token (urn:ledger:principal_kind). A machine
+# acts only as an API client its organization registered, so the person registers the machine user first
+# (README.md). Zitadel's bootstrap service account is made a login client too: token.sh signs the person in
+# through Zitadel's session API, with no browser.
 # Run after `docker compose -f deploy/local/compose.yaml --profile zitadel up -d --wait`. It can run again: what
 # exists is found by name and kept; the machine user gets a new client secret, the person a new password and the
-# web application a new client secret (the previous ones stop working). Needs curl, grep, sed and od. Every step that fails, or answers without what it should, stops the script
-# with a message.
+# web application a new client secret (the previous ones stop working). Needs curl, grep, sed and od. Every step
+# that fails, or answers without what it should, stops the script with a message.
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -184,6 +185,28 @@ answer=$(call PUT "/admin/v1/members/$service" --data '{"roles":["IAM_OWNER","IA
   printf '%s' "$answer" | grep -qi 'no changes' ||
   fail "making the service account a login client failed: $answer"
 
+# The Action that says in every access token whether a person or a machine calls (urn:ledger:principal_kind):
+# Zitadel puts no user type in one. A v1 Action (JavaScript) on the organization's "Complement Token" flow,
+# trigger "Pre access token creation" (flow 2, trigger 5); the platform refuses a token whose claim
+# contradicts it, and requires it where LEDGER_TOKEN_KIND_CLAIM_REQUIRED is true (always beyond a laptop).
+KIND_SCRIPT="function ledgerPrincipalKind(ctx, api) { api.v1.claims.setClaim('urn:ledger:principal_kind', ctx.v1.getUser().human ? 'human' : 'machine'); }"
+kind_action="\"name\":\"ledgerPrincipalKind\",\"script\":\"$KIND_SCRIPT\",\"timeout\":\"10s\",\"allowedToFail\":false"
+answer=$(call POST /management/v1/actions/_search \
+  --data '{"queries":[{"actionNameQuery":{"name":"ledgerPrincipalKind","method":"TEXT_QUERY_METHOD_EQUALS"}}]}') ||
+  fail "looking for the principal kind Action failed: $answer"
+action=$(printf '%s' "$answer" | field id)
+if [ -z "$action" ]; then
+  answer=$(call POST /management/v1/actions --data "{$kind_action}") ||
+    fail "creating the principal kind Action failed: $answer"
+  action=$(printf '%s' "$answer" | field id)
+  require "the Action's id" "$action"
+else
+  answer=$(call PUT "/management/v1/actions/$action" --data "{$kind_action}") ||
+    printf '%s' "$answer" | grep -qi 'no changes' || fail "updating the principal kind Action failed: $answer"
+fi
+answer=$(call POST /management/v1/flows/2/trigger/5 --data "{\"actionIds\":[\"$action\"]}") ||
+  printf '%s' "$answer" | grep -qi 'no changes' || fail "setting the pre access token trigger failed: $answer"
+
 cat > "$OUT/person.env" << ENV
 PERSON_ID=$person
 PERSON_LOGIN=ledger-admin
@@ -202,6 +225,7 @@ CLIENT_SECRET=$client_secret
 ENV
 cat > "$OUT/ledger.env" << ENV
 LEDGER_TOKEN_AUDIENCE=$project
+LEDGER_TOKEN_KIND_CLAIM_REQUIRED=true
 ENV
 
 echo "project $project in organization $organization: the machine user in $OUT/client.env, the person in $OUT/person.env"

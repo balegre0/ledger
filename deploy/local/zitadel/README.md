@@ -64,6 +64,14 @@ with its `...:name` and `...:primary_domain`. Project roles, once granted, come 
 `urn:zitadel:iam:org:project:<project id>:roles` (`{"ledger.organization.admin": {"<organization id>": "<domain>"}}`
 for `ledger-dev`).
 
+`bootstrap.sh` also installs the Action `ledgerPrincipalKind` (a v1 Action, JavaScript, on the organization's
+Complement Token flow, trigger Pre access token creation): every access token then carries
+`urn:ledger:principal_kind`, `human` or `machine`, from the user's type, and `ledger.env` sets
+`LEDGER_TOKEN_KIND_CLAIM_REQUIRED=true`, as staging and production must (`Settings` refuses them otherwise).
+Checked against v4.19.2: `machine` for `ledger-dev` (client credentials and JWT profile), `human` for
+`ledger-admin`. In any other environment installing the same Action is a deployment step (v2 Actions need an
+HTTP target and serve as well). Without the claim the platform falls back on the token's shape:
+
 A person's access token (`token.sh person`) differs in what tells a person from a machine: its `client_id` is the
 web application's id, and the application is among its audiences (Zitadel adds it), where a machine user's
 `client_id` is its user name and its audiences are only the projects asked for (client credentials and the JWT

@@ -1,19 +1,20 @@
 """How a caller stands, as identity keeps it (§9.2, §9.7): its API client, its organization's API version.
 
 A machine user registered as an API client carries its mode and its version pin; its revocation counts. A
-person is never one: its API clients are not looked for. The organization is pinned when identity first keeps
-it (its first company, or its first API client), to the version current then (``Organization.api_version``);
-until then nothing is known of it, and its requests speak what they name, else the current version. The
-chassis remembers the answer per replica (``CachedStandings``: 30 s, an answer that knows nothing 5 s, one
-question at a time per caller): this reads it in one transaction of the caller's organization, where API
-clients are seen whatever their mode (revision 0003); a machine user is an active client in one mode at most.
+subject an API client names is bound to it whatever its token's kind: the client is looked for every time, so
+a machine passing for a person is held to its mode and revocation. The organization is pinned when identity
+first keeps it (its first company, or its first API client), to the version current then
+(``Organization.api_version``); until then nothing is known of it, and its requests speak what they name, else
+the current version. The chassis remembers the answer per replica (``CachedStandings``: 30 s, an answer that
+knows nothing 5 s, one question at a time per caller): this reads it in one transaction of the caller's
+organization, where API clients are seen whatever their mode (revision 0003); a machine user is an active
+client in one mode at most.
 """
 
 from time import monotonic
 from typing import Final, final, override
 
 from ledger_identity.adapters.postgres.repositories import PgOrganizations, client_of_subject
-from ledger_kernel.access import PrincipalKind
 from ledger_kernel.tenancy import OrganizationScope
 from ledger_platform.http import ApiVersion, Standing, StandingsPort
 from ledger_platform.runtime.standings import CachedStandings
@@ -41,11 +42,7 @@ class IdentityStandings(StandingsPort):
         organization = principal.organization
         async with self._database.unit(OrganizationScope(organization, None)) as unit:
             kept = await PgOrganizations(unit.connection, organization).get(organization)
-            client = (
-                None
-                if principal.kind is PrincipalKind.HUMAN
-                else await client_of_subject(unit.connection, organization, principal.subject)
-            )
+            client = await client_of_subject(unit.connection, organization, principal.subject)
         return Standing(
             mode=None if client is None else client.mode,
             client=None if client is None else ApiVersion(client.api_version),

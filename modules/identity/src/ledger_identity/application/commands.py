@@ -234,8 +234,8 @@ async def register_api_client(
 
     An API client is a machine user: a subject identity knows to be a person, the registering person
     itself, is refused (``ApiClientHumanError``). identity learns no other subject's kind before it calls,
-    so a person registered by mistake is not refused here; a person's credential never stands as an API
-    client, so such a client changes nothing for that person until it is revoked.
+    so a person registered by mistake is not refused here: that person is then held to the client's mode
+    and revocation until it is revoked (its standing is the client's, whatever the token's kind).
     """
     require_organization_admin(admin)
     if admin.kind is PrincipalKind.HUMAN and registration.spec.subject == admin.subject:

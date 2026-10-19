@@ -109,6 +109,13 @@ class _InsecureKeysUrlError(ValueError):
         super().__init__("token_jwks_url must be https:// outside the local and test environments")
 
 
+class _KindClaimOptionalError(ValueError):
+    """Beyond a laptop, who calls is said by a signed claim, never left to the token's shape alone."""
+
+    def __init__(self) -> None:
+        super().__init__("token_kind_claim_required must be true outside the local and test environments")
+
+
 class _ClosedSettings(BaseSettings):
     """Settings read by a source that refuses the undeclared variables under their prefix (see the module)."""
 
@@ -205,6 +212,9 @@ class Settings(_ClosedSettings):
     """Requests a second one credential may make in this replica: the backstop behind the ingress's limit."""
     rate_limit_burst: Annotated[int, Field(ge=1, le=100_000)] = 100
     """How many requests one credential may make at once before it is held to ``rate_limit_per_second``."""
+    token_kind_claim_required: bool = False
+    """Whether every token must carry the signed ``urn:ledger:principal_kind`` (an Action of the identity
+    provider adds it): required in staging and production, optional on a laptop and in tests."""
 
     @field_validator("database_url", "database_direct_url")
     @classmethod
@@ -220,6 +230,13 @@ class Settings(_ClosedSettings):
         keys = self.token_jwks_url
         if self.environment in _HTTPS_ENVIRONMENTS and keys is not None and not keys.startswith("https://"):
             raise _InsecureKeysUrlError
+        return self
+
+    @model_validator(mode="after")
+    def require_the_kind_claim_beyond_a_laptop(self) -> Self:
+        """Refuse settings that let staging or production tell a person from a machine by heuristic alone."""
+        if self.environment in _HTTPS_ENVIRONMENTS and not self.token_kind_claim_required:
+            raise _KindClaimOptionalError
         return self
 
     @property

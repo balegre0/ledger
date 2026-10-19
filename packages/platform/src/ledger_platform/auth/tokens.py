@@ -26,7 +26,10 @@ A token is accepted only when all of this holds:
   tokens too;
 * ``sub`` and the organization claim are there and well formed.
 
-Whether the caller is a person or a machine is read from ``client_id`` and ``aud`` (``kind_of``).
+Whether the caller is a person or a machine is read from ``client_id`` and ``aud`` (``kind_of``), and from
+the signed ``urn:ledger:principal_kind`` where the token carries it: then it decides, and a token whose claim
+contradicts its ``client_id`` and ``aud``, or names no kind, is refused (``principal_kind``). A policy may
+require the claim (``kind_claim_required``): a token without it is refused.
 
 The claims named above are Zitadel's (``auth.providers.zitadel``); the keys are held by ``PublishedKeys``
 (``auth.keys``), which fetches, keeps and refreshes them.
@@ -59,7 +62,9 @@ from ledger_platform.auth.providers.zitadel import (
     ACCESS_TOKEN_CLAIMS,
     ACCESS_TOKEN_TYPES,
     ID_TOKEN_CLAIMS,
+    KINDS,
     ORGANIZATION_CLAIM,
+    PRINCIPAL_KIND_CLAIM,
     granted_roles,
     kind_of,
     organization_of,
@@ -99,6 +104,8 @@ class TokenProblem(StrEnum):
     ISSUER = "issuer"
     AUDIENCE = "audience"
     WRONG_KIND = "not_access_token"
+    KIND = "principal_kind"
+    """The token says it is a person's and a machine's at once, or not what it is where that is required."""
     CLAIMS = "claims"
 
 
@@ -171,6 +178,8 @@ class TokenPolicy:
     refresh failed since the last success (at least ``keys_ttl``; by default twice its default)."""
     refresh_floor: float = 10.0
     fetch_timeout: float = 5.0
+    kind_claim_required: bool = False
+    """Whether a token must carry ``urn:ledger:principal_kind`` (staging and production require it)."""
 
     def __post_init__(self) -> None:
         for option, value in (
@@ -217,6 +226,7 @@ class TokenPolicy:
             keys_url=keys_url,
             algorithms=frozenset(settings.token_algorithms),
             leeway=settings.token_leeway_seconds,
+            kind_claim_required=settings.token_kind_claim_required,
         )
 
 
@@ -340,7 +350,18 @@ class TokenVerifier:
             _refuse(TokenProblem.EXPIRED)
         if any(moment is not None and moment > now + leeway for moment in (not_before, issued)):
             _refuse(TokenProblem.NOT_YET_VALID)
-        return kind_of(client, audiences)
+        return self._kind(claims, kind_of(client, audiences, self._policy.audience))
+
+    def _kind(self, claims: Mapping[str, object], read: PrincipalKind) -> PrincipalKind:
+        """The kind the signed claim says, where there is one; it must agree with what the token reads as."""
+        claimed = claims.get(PRINCIPAL_KIND_CLAIM)
+        if claimed is None:
+            if self._policy.kind_claim_required:
+                _refuse(TokenProblem.KIND)
+            return read
+        if not isinstance(claimed, str) or KINDS.get(claimed) is not read:
+            _refuse(TokenProblem.KIND)
+        return read
 
     def _principal(self, claims: Mapping[str, object], kind: PrincipalKind) -> Principal:
         with contextlib.suppress(ValidationError, InvalidSubjectError):

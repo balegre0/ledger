@@ -346,12 +346,14 @@ async def test_a_machine_user_that_is_no_api_client_is_refused_and_a_person_is_n
 # ── Remembering a standing ──────────────────────────────────────────────────────
 
 
-def principal_of(subject: str, organization: str = "1001") -> Principal:
+def principal_of(
+    subject: str, organization: str = "1001", kind: PrincipalKind = PrincipalKind.HUMAN
+) -> Principal:
     return Principal(
         subject=SubjectId(subject),
         organization=organization_of(organization),
         provider_organization=organization,
-        kind=PrincipalKind.HUMAN,
+        kind=kind,
     )
 
 
@@ -370,7 +372,7 @@ async def test_a_standing_is_asked_once_for_a_while_and_for_each_caller() -> Non
     knowing, time = Knowing(), Time()
     cached = CachedStandings(knowing, ttl=30.0, size=10, clock=time)
     ana, bob, other = principal_of("ana"), principal_of("bob"), principal_of("ana", "1002")
-    knowing.standing = Standing(client=OLDER, organization=NEWER)
+    knowing.standing = Standing(mode=Mode.TEST, client=OLDER, organization=NEWER)
     assert await cached.of(ana) == knowing.standing
     assert await cached.of(ana) == knowing.standing
     assert knowing.asked == 1
@@ -381,7 +383,7 @@ async def test_a_standing_is_asked_once_for_a_while_and_for_each_caller() -> Non
     await cached.of(ana)
     assert knowing.asked == 3
     time.now += 0.2  # past the ttl: asked again, and a change shows
-    knowing.standing = Standing(organization=NEWER, revoked=True)
+    knowing.standing = Standing(mode=Mode.TEST, organization=NEWER, revoked=True)
     assert await cached.of(ana) == knowing.standing
     assert knowing.asked == 4
 
@@ -431,6 +433,31 @@ class Slow(StandingsPort):
         self.asked += 1
         await self.answer.wait()
         return Standing(organization=NEWER)
+
+
+async def test_a_client_registered_right_after_a_refusal_counts_within_seconds() -> None:
+    """A standing without an active client (a person's, a machine's still to be registered) is kept briefly:
+    the organization is known, the client is not yet, and the machine's next request must find it soon."""
+    knowing, time = Knowing(), Time()
+    cached = CachedStandings(knowing, ttl=30.0, size=10, clock=time)
+    robot = principal_of("4001", kind=PrincipalKind.MACHINE)
+    knowing.standing = Standing(organization=NEWER)  # refused: no client yet
+    assert await cached.of(robot) == Standing(organization=NEWER)
+    knowing.standing = Standing(mode=Mode.TEST, organization=NEWER)  # registered just after
+    time.now += NEGATIVE_TTL + 0.1
+    assert await cached.of(robot) == knowing.standing
+    time.now += 29.0
+    assert await cached.of(robot) == knowing.standing  # a client's standing is kept the whole ttl
+    assert knowing.asked == 2
+
+
+async def test_a_person_and_a_machine_of_one_subject_are_two_callers() -> None:
+    knowing = Knowing()
+    cached = CachedStandings(knowing, ttl=30.0, size=10, clock=Time())
+    knowing.standing = Standing(mode=Mode.LIVE)
+    await cached.of(principal_of("4001", kind=PrincipalKind.MACHINE))
+    await cached.of(principal_of("4001"))
+    assert knowing.asked == 2
 
 
 async def test_callers_that_ask_at_once_share_one_question() -> None:
