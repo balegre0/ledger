@@ -506,3 +506,24 @@ def test_roles_that_exist_with_other_options_are_normalized(chassis: WorkerDatab
         ("stale_purge", "ledger_app"),
         ("stale_rw", "ledger_app"),
     ]
+
+
+def test_roles_made_without_an_isolated_schema_keep_the_signer_in_the_platform_role(
+    chassis: WorkerDatabase,
+) -> None:
+    """A package's template made after the signer's (no isolated schema in it) keeps its schedule leases."""
+    isolated = SchemaRoles(schema="lockbox", signer=True)
+    platform = SchemaRoles(schema="platform")
+    with psycopg.connect(chassis.admin_url(), autocommit=True) as connection:
+        try:
+            for statement in cluster_statements((platform, isolated), TEST_LOGINS):
+                connection.execute(statement.encode())
+            for statement in cluster_statements((platform,), TEST_LOGINS):
+                connection.execute(statement.encode())
+            kept = connection.execute(
+                """SELECT count(*) FROM pg_auth_members
+                   WHERE roleid = 'platform_rw'::regrole AND member = 'ledger_signer'::regrole"""
+            ).fetchone()
+        finally:
+            connection.execute("DROP ROLE IF EXISTS lockbox_owner, lockbox_rw, lockbox_purge")
+    assert _COUNT.validate_python(kept) == (1,)

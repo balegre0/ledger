@@ -409,3 +409,48 @@ def test_a_country_s_code_is_its_directory_and_its_regimes_are_its_own(tree: Pat
             "its key starts with the country's code"
         ),
     ]
+
+
+VAULT: Final = """
+[package]
+name = "vault"
+kind = "module"
+summary = "Keys, isolated in the signer's role."
+owners = ["@o"]
+
+[dependencies]
+packages = ["kernel", "platform"]
+
+[data]
+schema = "vault"
+isolated_in = "signer"
+"""
+CUSTODY_IMPORTS: Final = (
+    "import ledger_vault.adapters.custody\n",
+    "from ledger_vault.adapters.custody import sealing\n",
+    "from ledger_vault.adapters import custody\n",
+    "from .adapters.custody import sealing\n",
+    "from .adapters import custody\n",
+    "lazy from .adapters.custody.sealing import Key\n",
+)
+
+
+def test_what_loads_with_an_isolated_module_never_imports_its_custody(tree: Path, write: Writer) -> None:
+    """Importing any of the module loads its root (and ``adapters`` its package): neither may load custody."""
+    source = write("modules/vault", VAULT, ("adapters",))
+    root, adapters = source / "__init__.py", source / "adapters" / "__init__.py"
+    root.write_text(
+        '"""Vault."""\n\nfrom ledger_vault.api import Keys\nfrom . import api\n', encoding="utf-8"
+    )
+    adapters.write_text('"""Adapters."""\n\nfrom .postgres import tables\n', encoding="utf-8")
+    assert messages(tree) == []
+    rule = "loads ledger_vault.adapters.custody into every process that imports any of ledger_vault"
+    for line in CUSTODY_IMPORTS:
+        root.write_text(f'"""Vault."""\n\n{line}', encoding="utf-8")
+        assert messages(tree) == [f"modules/vault/manifest.toml: ledger_vault/__init__.py {rule}"], line
+    root.write_text('"""Vault."""\n', encoding="utf-8")
+    adapters.write_text('"""Adapters."""\n\nfrom . import custody\n', encoding="utf-8")
+    assert messages(tree) == [f"modules/vault/manifest.toml: ledger_vault/adapters/__init__.py {rule}"]
+    adapters.unlink()
+    root.unlink()
+    assert messages(tree) == []  # namespace packages: nothing to load

@@ -7,7 +7,10 @@ import pytest
 from psycopg import sql
 from pydantic import TypeAdapter
 
+from ledger_platform.config.manifest import load_manifest
 from ledger_platform.data.migrations import platform_migrations
+from ledger_platform.runtime.contexts import Module, ModuleParts
+from ledger_platform.runtime.registries import MODULES, Discovered
 from ledger_testing.database import (
     TEST_LOGINS,
     app_url,
@@ -19,7 +22,9 @@ from ledger_testing.database import (
     migrator_url,
     signer_url,
 )
+from ledger_testing.modules import installed_schemas
 from ledger_testing.postgres import PostgresServer, Template, WorkerDatabase
+lazy from ledger_platform.runtime.contexts import ModuleContext
 
 NAMES: Final = TypeAdapter(list[tuple[str]])
 WORKER = WorkerDatabase(PostgresServer(host="db", port=5433, user="admin", password="secret"), "ledger_gw1")
@@ -68,7 +73,7 @@ def tables_in(url: str, schema: str) -> set[str]:
 def test_a_template_is_bootstrapped_given_the_chassis_and_migrated_as_production_is(
     template: Template, postgres: PostgresServer
 ) -> None:
-    bootstrap(template, ("platform", "books"))
+    bootstrap(template, ("platform", "books"), isolated=())
     admin = postgres.libpq(template.name)
     assert schemas_of(admin) == {"platform", "books"}
     create_chassis(template, "books")
@@ -80,8 +85,8 @@ def test_a_template_is_bootstrapped_given_the_chassis_and_migrated_as_production
 def test_a_fresh_database_has_the_schemas_and_nothing_in_them(
     template: Template, postgres: PostgresServer
 ) -> None:
-    bootstrap(template, ("platform", "books"))
-    name = fresh_database(postgres, ("platform", "books"))
+    bootstrap(template, ("platform", "books"), isolated=())
+    name = fresh_database(postgres, ("platform", "books"), isolated=())
     try:
         fresh = postgres.libpq(name)
         assert schemas_of(fresh) == {"platform", "books"}
@@ -89,6 +94,26 @@ def test_a_fresh_database_has_the_schemas_and_nothing_in_them(
     finally:
         with psycopg.connect(postgres.libpq(), autocommit=True) as admin:
             admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+
+
+VAULT_MANIFEST: Final = (
+    '[package]\nname = "vault"\nkind = "module"\nsummary = "Keys."\nowners = ["@o"]\n'
+    '[data]\nschema = "vault"\nisolated_in = "signer"\n'
+)
+
+
+def assembled_by_no_test(context: ModuleContext) -> ModuleParts:
+    """Never called: the schemas come from the manifest alone."""
+    del context
+    return ModuleParts()
+
+
+VAULT: Final = Module(manifest=load_manifest(VAULT_MANIFEST), assemble=assembled_by_no_test)
+
+
+def only_a_vault(group: str) -> tuple[Discovered, ...]:
+    """The entry points of a server with one module installed, isolated in the signer's role."""
+    return (Discovered("vault", lambda: VAULT),) if group == MODULES else ()
 
 
 MEMBERSHIPS: Final = """
@@ -105,7 +130,9 @@ PAIRS: Final = TypeAdapter(set[tuple[str, str]])
 def test_the_template_grants_an_isolated_schema_to_the_signer_login(
     template: Template, postgres: PostgresServer
 ) -> None:
-    bootstrap(template, ("platform", "vault"), isolated=("vault",))
+    """``ledger-migrate``'s tests with a module isolated in the signer's role installed, as ``init.sql``."""
+    installed = installed_schemas(only_a_vault)
+    bootstrap(template, installed.schemas, isolated=installed.isolated)
     with psycopg.connect(postgres.libpq(template.name)) as connection:
         pairs = PAIRS.validate_python(connection.execute(MEMBERSHIPS).fetchall())
     assert pairs == {
@@ -114,7 +141,7 @@ def test_the_template_grants_an_isolated_schema_to_the_signer_login(
         ("vault_rw", "ledger_signer"),
         ("vault_purge", "ledger_signer"),
     }
-    name = fresh_database(postgres, ("platform", "vault"), isolated=("vault",))
+    name = fresh_database(postgres, installed.schemas, isolated=installed.isolated)
     try:
         with psycopg.connect(postgres.libpq(name)) as connection:
             row = connection.execute("SELECT has_database_privilege('ledger_signer', %s, 'CONNECT')", (name,))

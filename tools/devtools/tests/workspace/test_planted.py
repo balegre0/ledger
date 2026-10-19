@@ -6,9 +6,13 @@ reads (the packages, the deploy files, the root's configuration); ``sync`` then 
 generates, and of the root ``pyproject.toml`` only its generated block changed.
 """
 
+import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Final
+lazy from collections.abc import Mapping
 
 import pytest
 
@@ -191,3 +195,93 @@ def test_a_planted_isolated_module_gets_the_signer_login_and_a_custody_contract(
     contracts = (repository / ".importlinter").read_text(encoding="utf-8")
     assert "[importlinter:contract:vault-custody]\n" in contracts
     assert "forbidden_modules =\n    ledger_vault.adapters.custody\n" in contracts
+
+
+SIGNER_APP: Final = """[package]
+name = "signer"
+kind = "app"
+summary = "An app planted by a test: the signer's role."
+owners = ["@o"]
+
+[dependencies]
+packages = ["platform"]
+modules = ["vault"]
+
+[app]
+script = "ledger-signer"
+role = "signer"
+"""
+PLANTED_DOCSTRING: Final = '"""Planted."""\n'
+CUSTODY_KEY: Final = f"{PLANTED_DOCSTRING}\nfrom ledger_vault.adapters.custody import KEY\n"
+"""A planted module importing the custody's key."""
+PLANTED_FILES: Final = {
+    "modules/vault/manifest.toml": VAULT,
+    "modules/vault/src/ledger_vault/__init__.py": PLANTED_DOCSTRING,
+    "modules/vault/src/ledger_vault/assembly.py": CUSTODY_KEY,
+    "modules/vault/src/ledger_vault/adapters/__init__.py": PLANTED_DOCSTRING,
+    "modules/vault/src/ledger_vault/adapters/custody.py": f'{PLANTED_DOCSTRING}\nKEY = "k"\n',
+    "apps/signer/manifest.toml": SIGNER_APP,
+    "apps/signer/src/ledger_app_signer/__init__.py": PLANTED_DOCSTRING,
+    "apps/signer/src/ledger_app_signer/main.py": f"{PLANTED_DOCSTRING}\nimport ledger_vault.assembly\n",
+}
+"""An isolated module whose assembly imports its custody, and the app of its role importing the assembly."""
+LEAKS: Final = {
+    "apps/api/src/ledger_app_api/leak.py": "import ledger_vault.adapters.custody\n",
+    "packages/testing/src/ledger_testing/leak.py": "from ledger_vault.adapters import custody\n",
+    "modules/identity/src/ledger_identity/adapters/leak.py": CUSTODY_KEY,
+    "modules/vault/src/ledger_vault/__init__.py": CUSTODY_KEY,
+    "modules/invoicing/src/ledger_invoicing/adapters/reexported.py": "from ledger_vault import KEY\n",
+}
+"""An app of another role, a test kit and a module importing the custody; its re-export, imported."""
+
+
+def write_files(root: Path, files: Mapping[str, str]) -> None:
+    for relative, text in files.items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text, encoding="utf-8", newline="\n")
+
+
+CUSTODY_CONTRACT: Final = (
+    "Nothing but vault and the apps of the signer role reaches vault's custody, even indirectly"
+)
+APPS_CONTRACT: Final = "The apps of the signer role reach vault's custody through its assembly only"
+
+
+def lint_imports(root: Path) -> tuple[int, str]:
+    """import-linter over ``root`` (its packages found before the installed ones): exit status, words."""
+    sources = [*sorted(str(path) for path in root.glob("*/*/src")), str(root / "countries/do/testing/src")]
+    process = subprocess.run(
+        [sys.executable, "-c", "from importlinter.cli import lint_imports_command; lint_imports_command()"],
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(sources)},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    return process.returncode, " ".join((process.stdout + process.stderr).split())  # it wraps long names
+
+
+def test_import_linter_breaks_on_anything_but_the_role_s_apps_reaching_the_custody(
+    repository: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_files(repository, PLANTED_FILES)
+    assert main(["sync", "--root", str(repository)]) == 0
+    capsys.readouterr()
+    assert main(["check", "--root", str(repository)]) == 0, capsys.readouterr().out
+    status, report = lint_imports(repository)
+    assert status == 0, report
+    assert f"{CUSTODY_CONTRACT} KEPT" in report
+    assert f"{APPS_CONTRACT} KEPT" in report
+    write_files(repository, LEAKS)
+    status, report = lint_imports(repository)
+    assert status != 0
+    assert f"{CUSTODY_CONTRACT} BROKEN" in report
+    assert f"{APPS_CONTRACT} KEPT" in report
+    broken = report.split("Broken contracts", 1)[1].split(CUSTODY_CONTRACT, 1)[1].lstrip(" -")
+    section = broken.split(" ---", 1)[0]
+    for importer in ("ledger_app_api.leak", "ledger_testing.leak", "ledger_identity.adapters.leak"):
+        assert f"{importer} -> ledger_vault.adapters.custody" in section, section
+    assert "ledger_invoicing.adapters.reexported -> ledger_vault " in section, section
+    assert main(["check", "--root", str(repository)]) == 1
+    assert "ledger_vault/__init__.py loads ledger_vault.adapters.custody" in capsys.readouterr().out

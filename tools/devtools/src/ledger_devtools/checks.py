@@ -3,18 +3,20 @@
 A single manifest is validated by the platform's model when the workspace is loaded; what is checked here is
 how manifests agree: names and directories, unique values, dependencies that exist, an acyclic module graph,
 consumers with a producer, schedules with a job kind, modules made of layers only, countries named by their
-directories, settings sections apart.
+directories, settings sections apart, an isolated module's custody out of what loads with any of it.
 """
 
+import ast
 from dataclasses import dataclass
 from enum import StrEnum
 from graphlib import CycleError, TopologicalSorter
+from pathlib import Path
 from typing import Final, final
 lazy from collections.abc import Callable, Iterator, Mapping
 
 from pydantic import TypeAdapter
 
-from ledger_devtools.workspace import MODULE_LAYERS
+from ledger_devtools.workspace import CUSTODY, MODULE_LAYERS
 from ledger_kernel.access import Role
 from ledger_platform.config.manifest import PackageKind
 from ledger_platform.config.settings import Settings, section_prefix
@@ -320,6 +322,42 @@ def _the_owner_holds_every_permission(workspace: Workspace) -> Iterator[Problem]
                 )
 
 
+def _imported(tree: ast.Module, package: str) -> Iterator[str]:
+    """Every module an ``__init__`` of ``package`` may import: each named, and each ``from`` name under it."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            yield from (alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            parts = package.split(".")
+            base = ".".join(parts[: len(parts) - node.level + 1]) if node.level else ""
+            module = ".".join(part for part in (base, node.module or "") if part)
+            yield module
+            yield from (f"{module}.{alias.name}" for alias in node.names)
+
+
+def _custody_stays_out_of_what_loads_first(workspace: Workspace) -> Iterator[Problem]:
+    """An isolated module's root and ``adapters`` packages import nothing of its custody (ADR 0010).
+
+    Python runs a package's ``__init__`` before any of its submodules: a client importing the module's
+    ``api`` runs its root ``__init__``, an adapter's import runs ``adapters/__init__``. import-linter's graph
+    has no such edge, so its custody contract cannot see a key loaded that way; this rule does.
+    """
+    visible = frozenset(workspace.seen.files)
+    for package in workspace.modules:
+        if package.manifest.isolated_in is None:
+            continue
+        custody = f"{package.import_name}.{CUSTODY}"
+        rule = f"loads {custody} into every process that imports any of {package.import_name}"
+        for dotted in (package.import_name, f"{package.import_name}.adapters"):
+            relative = Path(*dotted.split("."), "__init__.py")
+            path = package.source.parent / relative
+            if path not in visible:
+                continue
+            tree = ast.parse((workspace.root / path).read_text(encoding="utf-8"))
+            if any(name == custody or name.startswith(f"{custody}.") for name in _imported(tree, dotted)):
+                yield Problem(package.manifest_path, f"{relative.as_posix()} {rule}")
+
+
 _RULES: Final[tuple[Callable[[Workspace], Iterator[Problem]], ...]] = (
     _names_are_directories,
     _values_are_unique,
@@ -333,6 +371,7 @@ _RULES: Final[tuple[Callable[[Workspace], Iterator[Problem]], ...]] = (
     _modules_are_layers,
     _countries_are_their_directories,
     _settings_sections_are_apart,
+    _custody_stays_out_of_what_loads_first,
 )
 
 

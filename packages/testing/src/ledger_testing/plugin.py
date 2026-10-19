@@ -182,8 +182,8 @@ async def database(migrated: WorkerDatabase, module_under_test: ModuleUnderTest)
     ``ledger_signer`` for a module isolated in the signer's role, whose schema no other login reaches; else
     ``ledger_app``.
     """
-    isolated = module_under_test.manifest.isolated_in == "signer"
-    opened = Database.create(signer_url(migrated) if isolated else app_url(migrated), pool_size=4)
+    url = signer_url(migrated) if module_under_test.is_isolated else app_url(migrated)
+    opened = Database.create(url, pool_size=4)
     try:
         yield opened
     finally:

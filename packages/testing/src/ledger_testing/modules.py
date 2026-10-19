@@ -29,7 +29,7 @@ from ledger_platform.config.manifest import PackageKind
 from ledger_platform.config.names import PLATFORM
 from ledger_platform.config.settings import Settings
 from ledger_platform.data.migrations import platform_migrations
-from ledger_platform.runtime.packs import installed_modules
+from ledger_platform.runtime.packs import installed_modules, load_modules
 from ledger_platform.runtime.registries import MODULES, installed
 from ledger_testing.database import bootstrap, migrate
 lazy from ledger_platform.config.manifest import PackageManifest
@@ -96,7 +96,12 @@ class ModuleUnderTest:
         needed = tuple(
             _revisions(module).schema for module in self._needed() if _is_isolated(module.manifest)
         )
-        return (*needed, self.schema) if _is_isolated(self.manifest) else needed
+        return (*needed, self.schema) if self.is_isolated else needed
+
+    @property
+    def is_isolated(self) -> bool:
+        """Whether the package is a module isolated in the signer's role: its units log in as the signer."""
+        return _is_isolated(self.manifest)
 
     def _needed(self) -> tuple[Module, ...]:
         """The modules it depends on, transitively, each after those it depends on itself."""
@@ -167,6 +172,32 @@ class ModuleUnderTest:
             else (platform_migrations(), *self.needs, self.migrations)
         )
         migrate(template, *revisions)
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InstalledSchemas:
+    """The schemas of a server as ``init.sql`` has them: the platform's, then each installed module's."""
+
+    schemas: tuple[str, ...]
+    isolated: tuple[str, ...]
+    """Those of modules isolated in the signer's role: ``ledger_signer``'s."""
+
+
+def installed_schemas(discover: Discover = installed) -> InstalledSchemas:
+    """The schemas of the platform and of every module ``ledger-migrate`` migrates, from their manifests."""
+    manifests = tuple(module.manifest for module in load_modules(discover))
+    return InstalledSchemas(
+        schemas=(
+            PLATFORM,
+            *(manifest.schema_name for manifest in manifests if manifest.schema_name is not None),
+        ),
+        isolated=tuple(
+            manifest.schema_name
+            for manifest in manifests
+            if manifest.schema_name is not None and _is_isolated(manifest)
+        ),
+    )
 
 
 def _is_isolated(manifest: PackageManifest) -> bool:
