@@ -108,6 +108,8 @@ def claim_statement(
     )
 
 
+_WOKEN: Final = "woken_at"
+"""The jobs' column a wake marks a running job in (``chassis_schema_v2``): no other queue has it."""
 RELEASE_TIMEOUT: Final = 2.0
 """Seconds a stopping worker gives the statement that releases its rows."""
 
@@ -117,13 +119,21 @@ def release_statement(
 ) -> Update:
     """Make ``claimed`` (each row's keys, then its lease token) ``ready`` again while this worker holds them.
 
-    ``refund`` gives back the attempt the claim counted (the handler never started).
+    ``refund`` gives back the attempt the claim counted (the handler never started). A job's wake mark
+    (``woken_at``) goes with the run it was left on.
     """
     held = tuple_(*(table.c[key] for key in keys), table.c.lease_token)
+    unmarked = {_WOKEN: None} if _WOKEN in table.c else {}
     return (
         update(table)
         .where(held.in_(claimed), table.c.status == "running")
-        .values(status="ready", lease_until=None, lease_token=None, attempts=table.c.attempts - int(refund))
+        .values(
+            status="ready",
+            lease_until=None,
+            lease_token=None,
+            attempts=table.c.attempts - int(refund),
+            **unmarked,
+        )
     )
 
 

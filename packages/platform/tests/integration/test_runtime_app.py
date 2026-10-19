@@ -60,7 +60,7 @@ PATHS: Final = TypeAdapter(dict[str, object])
 ENV: Final = "from ledger_platform.data.migrations import run_schema_migrations\n\nrun_schema_migrations()\n"
 REVISION: Final = """from alembic import op
 
-from ledger_platform.data.chassis_schema import chassis_schema_v1
+from ledger_platform.data.chassis_schema import chassis_schema_v1, chassis_schema_v2
 
 revision = "r0001"
 down_revision = None
@@ -70,6 +70,7 @@ depends_on = None
 
 def upgrade():
     chassis_schema_v1(op, "{schema}")
+    chassis_schema_v2(op, "{schema}")
 """
 MANIFEST: Final = """[package]
 name = "probe"

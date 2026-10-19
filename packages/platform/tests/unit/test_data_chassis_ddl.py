@@ -67,7 +67,7 @@ def test_the_platform_keeps_one_routing_row_and_the_schedule_leases() -> None:
     ]
 
 
-def test_version_two_adds_the_two_housekeeping_indexes_and_nothing_else() -> None:
+def test_version_two_adds_the_two_housekeeping_indexes_and_the_wake_mark_and_nothing_else() -> None:
     recorder = Recorder()
     chassis_schema_v2(recorder, "probe")
     assert recorder.statements == [
@@ -76,6 +76,7 @@ def test_version_two_adds_the_two_housekeeping_indexes_and_nothing_else() -> Non
             " WHERE status IN ('ready','running') AND deadline_at IS NOT NULL"
         ),
         "CREATE INDEX jobs_done ON \"probe\".jobs (updated_at) WHERE status = 'done'",
+        'ALTER TABLE "probe".jobs ADD COLUMN woken_at timestamptz',
     ]
     assert not set(recorder.statements) & set(recorded())  # version 1's statements are never run again
 

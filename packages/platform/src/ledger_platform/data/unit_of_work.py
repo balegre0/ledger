@@ -44,7 +44,6 @@ type Step = Callable[[AsyncConnection], Awaitable[None]]
 _logger = structlog.stdlib.get_logger(__name__)
 
 
-WOKEN_WHILE_RUNNING: Final = "woken_while_running"
 """What a wake leaves on a running job: the ``Park`` it records next becomes ``ready``."""
 
 
@@ -272,6 +271,7 @@ class UnitJobs:
                 "lease_until": None,
                 "lease_token": None,
                 "parked_reason": None,
+                "woken_at": None,
                 "last_error_code": None,
                 "traceparent": fresh.excluded.traceparent,
                 "updated_at": fresh.excluded.updated_at,
@@ -337,12 +337,11 @@ class UnitJobs:
 
 
 def _mark_woken(jobs: AnyTable, *where: ColumnElement[bool], now: datetime) -> Executable:
-    """Mark the running jobs matching ``where``: a ``Park`` they record next is a wake that came first."""
-    return (
-        update(jobs)
-        .where(jobs.c.status == "running", *where)
-        .values(parked_reason=WOKEN_WHILE_RUNNING, updated_at=now)
-    )
+    """Mark the running jobs matching ``where`` (``woken_at``): a ``Park`` they record next is ready at once.
+
+    Whatever reason the job parks for: the mark says a wake came, not for what (a spurious one costs a run).
+    """
+    return update(jobs).where(jobs.c.status == "running", *where).values(woken_at=now, updated_at=now)
 
 
 @final

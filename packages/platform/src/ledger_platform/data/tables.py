@@ -160,6 +160,7 @@ def chassis_tables(schema: str) -> ChassisTables:
         Column("traceparent", Text),
         _moment("created_at", nullable=False),
         _moment("updated_at", nullable=False),
+        _moment("woken_at"),
         Index("jobs_due", "kind", "run_at", postgresql_where=text("status = 'ready'")),
         Index("jobs_expired", "kind", "lease_until", postgresql_where=text("status = 'running'")),
         Index(

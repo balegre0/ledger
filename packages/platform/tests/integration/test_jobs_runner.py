@@ -265,6 +265,39 @@ async def test_a_wake_while_the_handler_runs_is_not_lost(
     assert (await state(admin, "k1"))[:6] == ("done", 2, None, None, *UNLEASED)
 
 
+async def test_a_wake_while_the_handler_runs_is_kept_in_a_column_of_its_own(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry
+) -> None:
+    """The mark a wake leaves on a running job is ``woken_at``: ``parked_reason`` holds reasons only."""
+    seen: list[tuple[object, ...]] = []
+
+    async def woken_while_running(job: Job) -> JobOutcome:
+        async with probe.unit(TENANT) as uow:
+            uow.jobs.wake(job.kind, job.key)
+        cursor = await admin.execute("SELECT parked_reason, woken_at IS NOT NULL FROM probe.jobs")
+        seen.extend(tuple(row) for row in await cursor.fetchall())
+        return Done()
+
+    runner = runner_of(probe, woken_while_running, registry)
+    await enqueue(probe, "k1")
+    assert await runner.run_due() == 1
+    assert seen == [(None, True)]
+    cursor = await admin.execute("SELECT status, woken_at FROM probe.jobs")
+    assert await cursor.fetchall() == [("done", None)]  # the mark goes with the run it was left on
+
+
+async def test_a_mark_left_from_another_run_is_cleared_when_the_job_is_claimed(
+    runner: JobRunner, probe: BoundDatabase, handler: Scripted, admin: psycopg.AsyncConnection
+) -> None:
+    """Only a wake of this run readies its ``Park``: one left before its claim (a lost outcome) does not."""
+    await enqueue(probe, "k1")
+    await run(admin, "UPDATE probe.jobs SET woken_at = now()")
+    handler.will("k1", Park("certificate_missing"))
+    assert await runner.run_due() == 1
+    cursor = await admin.execute("SELECT status, parked_reason, woken_at FROM probe.jobs")
+    assert await cursor.fetchall() == [("parked", "certificate_missing", None)]
+
+
 async def test_a_wake_for_one_job_while_it_runs_does_not_outlive_it(
     probe: BoundDatabase, admin: psycopg.AsyncConnection, registry: CollectorRegistry
 ) -> None:

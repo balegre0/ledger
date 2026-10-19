@@ -54,7 +54,6 @@ from ledger_platform.data.audit import Actor, acting_as
 from ledger_platform.data.codec import JsonValue
 from ledger_platform.data.queue import DEFAULT_BACKOFF, RELEASE_TIMEOUT, claim, parked, recover, release
 from ledger_platform.data.scopes import scope_of
-from ledger_platform.data.unit_of_work import WOKEN_WHILE_RUNNING
 from ledger_platform.jobs.outcomes import Done, Job, Park, RunAgain
 from ledger_platform.observability.metrics import counter
 lazy from ledger_platform.config.manifest import JobDecl
@@ -463,7 +462,7 @@ class JobRunner:
                 due_column="run_at",
                 max_attempts=jobs.c.max_attempts,
                 backoff=self._backoff,
-                extra={"updated_at": func.now()},
+                extra={"updated_at": func.now(), "woken_at": None},
             )
             rows = await claim(
                 unit.connection,
@@ -473,7 +472,7 @@ class JobRunner:
                 order_by=(jobs.c.run_at,),
                 limit=limit,
                 lease=decl.lease,
-                extra={"updated_at": func.now()},
+                extra={"updated_at": func.now(), "woken_at": None},
             )
         for count, event in ((recovered.dead, "job_worker_lost"), (passed, "job_deadline_passed")):
             if count:
@@ -536,15 +535,16 @@ def _settled(jobs: AnyTable, values: _Values, now: datetime) -> _Values:
     """``values`` as written: a ``Park`` after a wake that arrived while the handler ran is ``ready`` at once.
 
     Nothing parked yet could have been woken, so without this the job would wait for a wake that has passed.
-    Any other outcome clears the mark a wake left.
+    Every outcome clears the mark (``woken_at``).
     """
     if values["status"] != "parked":
-        return {"parked_reason": None, **values}
-    woken = jobs.c.parked_reason == WOKEN_WHILE_RUNNING
+        return {"parked_reason": None, **values, "woken_at": None}
+    woken = jobs.c.woken_at.is_not(None)
     return {
         "status": case((woken, "ready"), else_="parked"),
         "parked_reason": case((woken, None), else_=values["parked_reason"]),
         "run_at": case((woken, now), else_=jobs.c.run_at),
+        "woken_at": None,
     }
 
 
@@ -570,6 +570,7 @@ def bury_statement(jobs: AnyTable, kind: str) -> Update:
             last_error_code=_DEADLINE_PASSED,
             lease_until=None,
             lease_token=None,
+            woken_at=None,
             updated_at=func.now(),
         )
         .returning(jobs.c.last_error_code)

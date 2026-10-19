@@ -3,7 +3,8 @@
 Called by each schema's first revision, as the schema's owner. Versioned and immutable: a change ships
 ``chassis_schema_v2`` and every schema adds a revision that calls it (audit D20). Version 1's DDL is the
 spec's, statement for statement; version 2 adds the two indexes the job queue's housekeeping reads
-(``jobs_deadline``, ``jobs_done``). ``{s}`` is the schema, checked before it is substituted.
+(``jobs_deadline``, ``jobs_done``) and the mark a wake leaves on a running job (``jobs.woken_at``). ``{s}`` is
+the schema, checked before it is substituted.
 """
 
 from abc import ABCMeta, abstractmethod
@@ -90,9 +91,12 @@ _V2: Final = (
         " WHERE status IN ('ready','running') AND deadline_at IS NOT NULL"
     ),
     "CREATE INDEX jobs_done ON {s}.jobs (updated_at) WHERE status = 'done'",
+    "ALTER TABLE {s}.jobs ADD COLUMN woken_at timestamptz",
 )
 """What version 2 adds: the deadline sweep reads only jobs that have a deadline and are not finished, and the
-done-job purge reads the finished ones oldest first; neither scans the table."""
+done-job purge reads the finished ones oldest first, so neither scans the table; and ``woken_at``, when a wake
+arrived while the job ran (its ``Park`` is then ready at once), cleared whenever the job is claimed,
+recovered, released or settled."""
 
 
 class Executes(Protocol, metaclass=ABCMeta):
@@ -125,7 +129,7 @@ def chassis_schema_v1(op: Executes, schema: str) -> None:
 
 
 def chassis_schema_v2(op: Executes, schema: str) -> None:
-    """Add to ``schema``'s chassis tables the indexes of the deadline sweep and the done-job purge.
+    """Add to ``schema``'s chassis tables the indexes of the housekeeping and the jobs' ``woken_at``.
 
     After ``chassis_schema_v1``, as the schema's owner; version 1's statements are never run again.
     """

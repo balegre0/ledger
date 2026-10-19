@@ -1064,6 +1064,9 @@ CREATE INDEX jobs_parked  ON {s}.jobs (kind, company_id, parked_reason) WHERE st
 CREATE INDEX jobs_deadline ON {s}.jobs (kind, deadline_at)
   WHERE status IN ('ready','running') AND deadline_at IS NOT NULL;  -- the deadline sweep
 CREATE INDEX jobs_done ON {s}.jobs (updated_at) WHERE status = 'done'; -- the done-job purge, oldest first
+-- and the mark a wake (wake, wake_all) leaves on a running job: its next Park is ready at once. Cleared when
+-- the job is claimed, recovered, released or settled; parked_reason holds reasons only
+ALTER TABLE {s}.jobs ADD COLUMN woken_at timestamptz;
 -- done jobs are deleted by the purge after 7 days unless the kind keeps them; dead jobs are kept
 
 CREATE TABLE {s}.subscriptions (
