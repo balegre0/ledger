@@ -11,6 +11,7 @@ from ledger_country_do_testing.local_signer import BundleIncompleteError, KeyPai
 from ledger_country_do_testing.pki import person
 from ledger_country_do_testing.signatures import SHAPES
 from ledger_fiscal_kit.xml.dsig import NotAnRsaKeyError, SigningPairError
+from ledger_kernel.errors import InvalidValueError
 from ledger_testing.pki import OPENING_PHRASE, Authority, bundle, ec_key, rsa_key
 
 SIGNED_AT: Final = datetime(2026, 10, 13, 13, 30, tzinfo=UTC)
@@ -102,3 +103,14 @@ async def test_a_document_the_profile_refuses_is_refused_as_the_signer_refuses_i
     with pytest.raises(DocumentUnsignableError) as caught:
         await signer.sign_document(document, signed_at=SIGNED_AT, reference="E310000000001")
     assert caught.value.reason == reason
+
+
+async def test_the_test_signer_holds_requests_to_the_port_s_limits() -> None:
+    # It builds the port's requests, so what the signer would refuse the test signer refuses too.
+    signer = KeyPairSigner.from_issued(Authority.root().issue(person()))
+    with pytest.raises(InvalidValueError, match=r"xml_to_sign.signed_at must be an aware datetime"):
+        await signer.sign_document(SHAPES["ecf"], signed_at=SIGNED_AT.replace(tzinfo=None), reference="E31")
+    with pytest.raises(InvalidValueError, match=r"xml_to_sign.reference must be"):
+        await signer.sign_document(SHAPES["ecf"], signed_at=SIGNED_AT, reference="juan@example.com")
+    with pytest.raises(InvalidValueError, match=r"seed_to_sign.audience must be"):
+        await signer.sign_seed(SHAPES["seed"], audience="https://ecf.dgii.gov.do/x")

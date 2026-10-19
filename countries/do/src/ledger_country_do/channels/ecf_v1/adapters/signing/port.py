@@ -13,10 +13,20 @@ seed. The port's errors become the channel's, each chained to the port's:
 - ``SignerUnavailableError`` → ``SignerUnavailableError`` (unavailable);
 - ``SignatureRefusedError`` → ``DocumentUnsignableError`` (invalid, the signer's reason kept).
 
-Any other error is the port's defect and passes unchanged. The certificate that signed
-(``Signed.certificate``) is dropped: the channel's archive takes it once it has one (v2-M3b).
+A port client that cannot reach the signer may surface its transport's failure instead: the platform's
+``RemoteUnavailableError`` (down, too slow, failing; the gRPC client's mapping) or a ``TimeoutError``. Both
+are the signer being unavailable (``SignerUnavailableError``), so the emitter parks rather than fails. Any
+other error (a ``RemoteDefectError`` or ``RemoteForbiddenError``: a request or a token of ours the signer
+refuses) is a defect and passes unchanged; whoever sends a document treats such an error escaping
+``Emitter.send`` as an unknown outcome and never sends the document again (the emission module's rule).
+
+``reason`` names every call (the audit's actor is ``system:<reason>``), so it is code-shaped: never personal
+data. Each call carries the current span's ``traceparent``, so the signer's spans join the caller's trace.
+The certificate that signed (``Signed.certificate``) is dropped: the channel's archive takes it once it has
+one (v2-M3b).
 """
 
+import re
 from typing import Final, final, override
 lazy from collections.abc import Awaitable
 lazy from datetime import datetime
@@ -41,12 +51,16 @@ from ledger_fiscal_kit.ports import (
 )
 from ledger_fiscal_kit.ports import SignerUnavailableError as PortUnavailableError
 from ledger_kernel.errors import InvalidValueError
+from ledger_platform.grpc.client import RemoteUnavailableError
+from ledger_platform.observability.tracing import current_traceparent
 from ledger_platform.runtime.calls import SystemCall
 lazy from ledger_fiscal_kit.ports import Signed, SignerPort
 lazy from ledger_kernel.tenancy import Tenant
 
 PROFILE: Final = SignatureProfile.XMLDSIG_ENVELOPED_RSA_SHA256
 """DGII's profile (*Firmado de e-CF*), the one the channel's verifier checks (``verifier.STRICT``)."""
+_REASON: Final = re.compile(r"[a-z][a-z0-9._:-]{0,63}", re.ASCII)
+_REASON_RULE: Final = "1 to 64 characters of a-z 0-9 . _ : -, a letter first"
 
 
 @final
@@ -58,6 +72,8 @@ class PortSigner(XmlSigner):
     def __init__(self, port: SignerPort, *, tenant: Tenant, reason: str) -> None:
         if tenant.mode is None:
             raise InvalidValueError(field="port_signer.tenant", requirement="a tenant in a mode")
+        if _REASON.fullmatch(reason) is None:
+            raise InvalidValueError(field="port_signer.reason", requirement=_REASON_RULE)
         self._port = port
         self._tenant = tenant
         self._reason = reason
@@ -76,7 +92,7 @@ class PortSigner(XmlSigner):
         return await _signed(self._port.sign_seed(self._call(), request))
 
     def _call(self) -> SystemCall:
-        return SystemCall(reason=self._reason, scope=self._tenant)
+        return SystemCall(reason=self._reason, scope=self._tenant, traceparent=current_traceparent())
 
 
 async def _signed(signing: Awaitable[Signed]) -> bytes:
@@ -89,7 +105,7 @@ async def _signed(signing: Awaitable[Signed]) -> bytes:
         raise CertificateNotValidError from error
     except SigningClockSkewError as error:
         raise SigningSkewError from error
-    except PortUnavailableError as error:
+    except (PortUnavailableError, RemoteUnavailableError, TimeoutError) as error:
         raise SignerUnavailableError from error
     except SignatureRefusedError as error:
         raise DocumentUnsignableError(error.reason) from error

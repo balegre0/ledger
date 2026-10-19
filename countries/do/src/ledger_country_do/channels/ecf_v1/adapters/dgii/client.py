@@ -42,7 +42,6 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Final, TypedDict, Unpack, final, override
-from urllib.parse import urlsplit
 lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 
 import httpx
@@ -181,7 +180,6 @@ class DgiiClient(Authority):
     """``Authority`` over HTTPS (see the module); ``opened`` holds its connections."""
 
     __slots__ = (
-        "_audience",
         "_clock",
         "_hosts",
         "_http",
@@ -196,7 +194,6 @@ class DgiiClient(Authority):
     def __init__(self, signer: XmlSigner, **options: Unpack[ClientOptions]) -> None:
         self._signer = signer
         self._hosts = options.get("hosts", OFFICIAL_HOSTS)
-        self._audience = urlsplit(self._hosts.ecf).netloc
         self._timeouts = options.get("timeouts", DEFAULT_TIMEOUTS)
         self._clock = options.get("clock", _now)
         self._sleep = options.get("sleep", asyncio.sleep)
@@ -327,7 +324,7 @@ class DgiiClient(Authority):
         The signer's other errors (no certificate, one not valid, the signer unreachable) pass as they are.
         """
         try:
-            return await self._signer.sign_seed(seed, audience=self._audience)
+            return await self._signer.sign_seed(seed, audience=self._hosts.audience)
         except EcfInvalidError as error:
             raise AuthorityUnavailableError(Failure.UNREADABLE, Service.SEED.value) from error
 

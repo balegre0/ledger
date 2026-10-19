@@ -488,6 +488,13 @@ async def test_a_type_whose_numbers_do_not_expire_is_signed_whenever(signer: Key
     assert signed.signed_at == moment
 
 
+def test_the_channel_s_skew_is_the_signer_s_default() -> None:
+    # Pinned: the signer refuses unless the certificate covers [signed_at, signed_at + its skew] and its clock
+    # is within that skew (LEDGER_SIGNER_SIGNING_SKEW_SECONDS, default 300). The channel accepts a signature
+    # back within MAX_SIGNING_SKEW: the signer's skew must never be configured below it.
+    assert timedelta(seconds=300) == MAX_SIGNING_SKEW
+
+
 async def test_a_signature_far_from_its_moment_of_signing_is_never_sent(signer: KeyPairSigner) -> None:
     late = MAX_SIGNING_SKEW + timedelta(seconds=1)
     for draft, late_from in ((credit_invoice(), 1), (consumer_invoice(), 1), (consumer_invoice(), 2)):

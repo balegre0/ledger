@@ -11,6 +11,7 @@ from typing import ClassVar, Final
 from lxml import etree
 
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError
+from ledger_fiscal_kit.ports import MAX_SEED_BYTES
 from ledger_fiscal_kit.xml.hardened import (
     MalformedDocumentError,
     XmlDocumentError,
@@ -47,8 +48,12 @@ def require_seed(seed: bytes) -> None:
 
 
 def _read(seed: bytes) -> tuple[object, ...]:
-    """``seed``'s root tag then its child elements' tags, read hardened (``XmlDocumentError`` otherwise)."""
-    require_readable(seed)
+    """``seed``'s root tag then its child elements' tags, read hardened (``XmlDocumentError`` otherwise).
+
+    Bounded by the port's ``MAX_SEED_BYTES``, not the reader's document limit: a seed the port would refuse is
+    no seed here, so it never reaches the port as an internal error.
+    """
+    require_readable(seed, limit=MAX_SEED_BYTES)
     try:
         root = etree.fromstring(seed, parser())
     except etree.XMLSyntaxError as error:

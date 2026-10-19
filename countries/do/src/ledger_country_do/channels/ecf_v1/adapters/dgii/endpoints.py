@@ -7,7 +7,9 @@ environment is reached on DGII's own hosts only (``LiveHostRefusedError``), comp
 in for TesteCF and CerteCF, never for production. Every host is an origin and nothing more
 (``HostRefusedError``): no path, user, query or fragment, and ``https``, except a fake on this machine
 (``LOOPBACK``: 127.0.0.1, ::1, localhost), which may be plain ``http`` and, not being DGII's, never serves the
-live environment. DGII's paths ignore case; DT-DGII's lower-case spelling is used.
+live environment. The ``ecf`` host is also the audience of DGII's seeds (``DgiiHosts.audience``), so it must
+be one the signer can audit (fiscal-kit's ``is_audience``). DGII's paths ignore case; DT-DGII's lower-case
+spelling is used.
 """
 
 from dataclasses import dataclass
@@ -24,6 +26,7 @@ from ledger_country_do.channels.ecf_v1.domain.environments import (
 )
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfConflictError, EcfError
 from ledger_country_do.channels.ecf_v1.domain.printed import QrHosts
+from ledger_fiscal_kit.ports import is_audience
 
 
 class Service(StrEnum):
@@ -115,8 +118,13 @@ class DgiiHosts:
     fc: str = OFFICIAL_FC_HOST
 
     def __post_init__(self) -> None:
-        if not (_origin(self.ecf) and _origin(self.fc)):
+        if not (_origin(self.ecf) and _origin(self.fc) and is_audience(self.audience)):
             raise HostRefusedError
+
+    @property
+    def audience(self) -> str:
+        """DGII's seeds' audience: the ``ecf`` host, with its port if it names one (checked when built)."""
+        return urlsplit(self.ecf).netloc
 
     @property
     def official(self) -> bool:

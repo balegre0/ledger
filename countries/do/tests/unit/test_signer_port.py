@@ -5,7 +5,10 @@ from datetime import UTC, datetime
 from typing import Final, final, override
 from uuid import UUID
 
+import grpc
 import pytest
+from opentelemetry import trace
+from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 
 from ledger_country_do.channels.ecf_v1.adapters.signing.port import PortSigner
 from ledger_country_do.channels.ecf_v1.adapters.signing.seeds import SeedMalformedError
@@ -18,6 +21,7 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
 )
 from ledger_country_do_testing.signatures import SHAPES
 from ledger_fiscal_kit.ports import (
+    MAX_SEED_BYTES,
     SeedToSign,
     SignatureProfile,
     SignatureRefusedError,
@@ -32,6 +36,7 @@ from ledger_fiscal_kit.ports import SignerUnavailableError as PortUnavailableErr
 from ledger_kernel.errors import ConflictError, InvalidValueError
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tenancy import Mode, Tenant
+from ledger_platform.grpc.client import RemoteDefectError, RemoteForbiddenError, RemoteUnavailableError
 lazy from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 lazy from ledger_fiscal_kit.ports import CertificateValidity
 lazy from ledger_kernel.errors import LedgerError
@@ -47,6 +52,11 @@ SIGNED_AT: Final = datetime(2026, 10, 13, 13, 30, tzinfo=UTC)
 REASON: Final = "do-ecf-v1.emission"
 DOCUMENT: Final = SHAPES["ecf"]
 SEED: Final = SHAPES["seed"]
+OVERSIZED_SEED: Final = (
+    b"<SemillaModel><valor>" + b"v" * MAX_SEED_BYTES + b"</valor><fecha>f</fecha></SemillaModel>"
+)
+"""DGII's shape, over the port's limit: refused as no seed, never as the port's internal error."""
+SIGN_XML: Final = "/ledger.signer.v1.Signer/SignXml"
 
 
 @final
@@ -54,7 +64,7 @@ SEED: Final = SHAPES["seed"]
 class RecordingPort(SignerPort):
     """A ``SignerPort`` that records what reaches it and answers ``answer``, or raises ``refusal``."""
 
-    refusal: LedgerError | None = None
+    refusal: Exception | None = None
     answer: bytes = b"<signed/>"
     calls: list[tuple[SystemCall, XmlToSign | SeedToSign]] = field(default_factory=list)
 
@@ -120,8 +130,8 @@ async def test_a_seed_goes_as_a_seed() -> None:
 
 @pytest.mark.parametrize(
     "seed",
-    [DOCUMENT, b"<a>", b'<!DOCTYPE a [<!ENTITY b "c">]><SemillaModel>&b;</SemillaModel>'],
-    ids=["an-e-cf", "unreadable", "entity"],
+    [DOCUMENT, b"<a>", b'<!DOCTYPE a [<!ENTITY b "c">]><SemillaModel>&b;</SemillaModel>', OVERSIZED_SEED],
+    ids=["an-e-cf", "unreadable", "entity", "over-the-port-s-limit"],
 )
 async def test_what_is_not_dgii_s_seed_never_reaches_the_port(seed: bytes) -> None:
     # A hostile receiver must not get an arbitrary document signed as if it were a seed.
@@ -197,3 +207,68 @@ def test_the_channel_s_signer_errors_have_stable_kinds_and_codes() -> None:
     ):
         assert (error.kind, error.code) == (kind, code)
         assert str(error)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RemoteUnavailableError(SIGN_XML, grpc.StatusCode.UNAVAILABLE, None),
+        RemoteUnavailableError(SIGN_XML, grpc.StatusCode.DEADLINE_EXCEEDED, None),
+        RemoteUnavailableError(SIGN_XML, grpc.StatusCode.INTERNAL, "signer_internal"),
+        TimeoutError(),
+    ],
+    ids=["unavailable", "deadline", "remote-internal", "timeout"],
+)
+async def test_a_signer_that_cannot_answer_is_the_channel_s_signer_unavailable(failure: Exception) -> None:
+    # A port client's transport failure is the port's unavailable: the emitter parks, never a defect.
+    channel = signer(RecordingPort(refusal=failure))
+    with pytest.raises(SignerUnavailableError) as document:
+        await channel.sign_document(DOCUMENT, signed_at=SIGNED_AT, reference="E310000000001")
+    with pytest.raises(SignerUnavailableError) as seed:
+        await channel.sign_seed(SEED, audience="ecf.dgii.gov.do")
+    assert document.value.__cause__ is failure
+    assert seed.value.__cause__ is failure
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        RemoteDefectError(SIGN_XML, grpc.StatusCode.INVALID_ARGUMENT, None),
+        RemoteForbiddenError(SIGN_XML, grpc.StatusCode.PERMISSION_DENIED, "signer_method_not_allowed"),
+    ],
+    ids=["defect", "forbidden"],
+)
+async def test_a_call_the_signer_refuses_as_ours_is_a_defect_not_disguised(defect: Exception) -> None:
+    with pytest.raises(type(defect)) as caught:
+        await signer(RecordingPort(refusal=defect)).sign_document(
+            DOCUMENT, signed_at=SIGNED_AT, reference="E310000000001"
+        )
+    assert caught.value is defect
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["", "Do ECF", "emission for 131098193@x", "a" * 65],
+    ids=["empty", "spaces", "at-sign", "long"],
+)
+def test_a_reason_is_code_shaped(reason: str) -> None:
+    # It becomes the audit's actor (system:<reason>): never personal data.
+    with pytest.raises(InvalidValueError, match=r"port_signer.reason must be"):
+        PortSigner(RecordingPort(), tenant=TENANT, reason=reason)
+
+
+async def test_a_call_continues_the_current_trace() -> None:
+    port = RecordingPort()
+    channel = signer(port)
+    await channel.sign_seed(SEED, audience="ecf.dgii.gov.do")
+    context = SpanContext(
+        trace_id=0x0AF7651916CD43DD8448EB211C80319C,
+        span_id=0xB7AD6B7169203331,
+        is_remote=False,
+        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+    )
+    with trace.use_span(NonRecordingSpan(context)):
+        await channel.sign_seed(SEED, audience="ecf.dgii.gov.do")
+    outside, inside = (call.traceparent for call, _ in port.calls)
+    assert outside is None
+    assert inside == "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"

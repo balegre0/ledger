@@ -16,6 +16,9 @@ Emission is two steps, so a caller can keep what was signed before anything leav
   the error's code, DGII's failure where there is one, and whether the document left: ``False`` certainly
   not, ``True`` DGII answered about it, ``None`` it may be at DGII). A parked document is never sent again
   here: whoever resumes it asks DGII first (track ids for an e-CF, ``consultarfce`` for an RFCE: v2-M3).
+  **Binding rule:** any other exception escaping ``send`` (a defect: not a pack error) means the outcome is
+  unknown: the document may be at DGII, and the caller must never send it again; it resumes it as a parked
+  one, asking DGII first.
 
   - RFCE route: sent once to the ``fc`` host and decided at once; the full signed e-CF is kept by the caller
     (IT §9.1).
@@ -84,7 +87,10 @@ lazy from ledger_kernel.regimes import RegimeDef
 
 POLL_SCHEDULE: Final = (1.0, 2.0, 5.0, 10.0, 30.0, 60.0)
 MAX_SIGNING_SKEW: Final = timedelta(minutes=5)
-"""How far a signature may come back from its ``FechaHoraFirma``, either way."""
+"""How far a signature may come back from its ``FechaHoraFirma``, either way.
+
+Coupled to the signer: its ``LEDGER_SIGNER_SIGNING_SKEW_SECONDS`` defaults to the same 300 s and must never be
+configured below it (a test pins the value)."""
 SETTLE_DELAY: Final = 30.0
 """Seconds waited after an unknown outcome before DGII is asked: at least ``Authority.attempt_limit`` (20 s by
 default, ``DgiiTimeouts.total``), which ``Emitter`` checks when it is built."""

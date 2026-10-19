@@ -30,6 +30,7 @@ from ledger_country_do_testing.signatures import (
     sign_with_signxml,
     verify_with_signxml,
 )
+from ledger_fiscal_kit.ports import MAX_SEED_BYTES
 from ledger_fiscal_kit.xml.dsig import (
     C14N,
     CERTIFICATION_AUTHORITY,
@@ -367,8 +368,9 @@ def test_a_seed_is_dgii_s_semilla_model() -> None:
         (b"<SemillaModel><fecha/><valor/></SemillaModel>", False),
         (b"<Semilla><valor/><fecha/></Semilla>", False),
         (ECF, False),
+        (b"<SemillaModel><valor>" + b"v" * MAX_SEED_BYTES + b"</valor><fecha>f</fecha></SemillaModel>", True),
     ],
-    ids=["unclosed", "entity", "latin-1", "seed-order", "seed-root", "ecf-as-seed"],
+    ids=["unclosed", "entity", "latin-1", "seed-order", "seed-root", "ecf-as-seed", "over-the-port-s-limit"],
 )
 def test_what_is_not_a_seed_is_refused_before_it_is_signed(seed: bytes, *, unreadable: bool) -> None:
     with pytest.raises(SeedMalformedError) as caught:

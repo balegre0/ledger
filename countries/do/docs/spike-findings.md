@@ -37,7 +37,12 @@ e-CF v1.0*), **FMT** (*Formato e-CF V1.0*).
 - **Revocation.** A buyer's certificate is never checked against CRL or OCSP; production delivery is blocked
   until it is (v2-M4).
 - **Buyer authentication** (signing a buyer's seed) is a per-company switch, off unless a buyer requires it
-  (v2-M4), because of F14.
+  (v2-M4), because of F14. Since the channel signs through `SignerPort` (v2-M2b), each seed's audience (the
+  host it came from) is audited by the signer, but it is not bound into the signature: DGII's `SemillaModel`
+  has no audience field, so a hostile receiver can still relay a real DGII seed for us to sign.
+- **An exception escaping `Emitter.send`** that is not a pack error is a defect with an **unknown outcome**:
+  the document may be at DGII; it is never sent again, only resumed as a parked document (binding on v2-M3's
+  callers).
 - **Duplicate receipts.** An ARECF "not received, duplicate" (reason 3) means "already received" only when the
   same e-CF had an earlier delivery whose outcome is unknown; otherwise it is a conflict (v2-M4).
 
