@@ -6,15 +6,20 @@ version = "0.1.0"
 description = "Commercial documents: invoices, credit and debit notes, their lines and totals."
 requires-python = ">=3.15"
 dependencies = [
+    "ledger-kernel",
     "ledger-platform",
     "ledger-identity",
     "alembic>=1.20.0",
+    "fastapi>=0.143.0",
+    "pydantic>=2.14.1",
+    "sqlalchemy>=2.1.4",
 ]
 
 [project.entry-points."ledger.modules"]
 invoicing = "ledger_invoicing.assembly:MODULE"
 
 [tool.uv.sources]
+ledger-kernel = { workspace = true }
 ledger-platform = { workspace = true }
 ledger-identity = { workspace = true }
 

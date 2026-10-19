@@ -3,10 +3,12 @@
 from ledger_identity.domain.errors import (
     ApiClientNotFoundError,
     EstablishmentNotFoundError,
+    InvalidCodeError,
     OrganizationNotFoundError,
 )
 from ledger_identity.domain.establishments import MAIN_CODE
 from ledger_identity.domain.membership import permissions_in
+from ledger_identity.domain.text import parse_code
 from ledger_kernel.access import CompanyNotFoundError
 lazy from ledger_identity.application.ports import IdentityUnit
 lazy from ledger_identity.domain.api_clients import ApiClient
@@ -49,6 +51,21 @@ async def establishment(
     if found is None:
         raise EstablishmentNotFoundError(establishment_id)
     return found
+
+
+async def establishment_by_code(
+    unit: IdentityUnit, company_id: CompanyId, code: str | None
+) -> Establishment | None:
+    """The company's establishment of ``code`` (``MAIN`` when ``None``), or ``None``.
+
+    ``CompanyNotFoundError`` when the organization has no such company; text that is no code finds nothing.
+    """
+    await company(unit, company_id)
+    try:
+        wanted = MAIN_CODE if code is None else parse_code(code)
+    except InvalidCodeError:
+        return None
+    return await unit.establishments.by_code(company_id, wanted)
 
 
 async def establishments(

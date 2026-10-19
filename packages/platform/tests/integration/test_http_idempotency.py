@@ -25,11 +25,12 @@ from ledger_platform.data.bound import BoundDatabase
 from ledger_platform.data.database import Database
 from ledger_platform.data.unit_of_work import JobPolicy
 from ledger_platform.http.idempotency import (
-    MAX_STORED_BODY,
+    DEFAULT_STORED_BODY,
     Attempt,
     Idempotency,
     IdempotencyKeyInUseError,
     IdempotencyKeyReusedError,
+    Outcome,
     OversizedStoredResponseError,
     ServerFailureResponseError,
     StoredResponse,
@@ -86,6 +87,8 @@ class Runs:
     answer: StoredResponse | None = None
     """What each run answers; by default a 201 naming the run."""
     fails: bool = False
+    idempotency: Idempotency | None = None
+    """Whose keys the runs claim: by default ``Idempotency()``."""
 
 
 @pytest.fixture
@@ -166,7 +169,7 @@ async def run_once(
             made = Thing(id=runs.count, name="made")
             return runs.answer or json_response(201, made, {"Location": f"/v1/things/{runs.count}"})
 
-        outcome = await Idempotency().once(unit, tried, work)
+        outcome = await (runs.idempotency or Idempotency()).once(unit, tried, work)
     return outcome.response, outcome.replayed
 
 
@@ -256,6 +259,33 @@ async def test_a_twin_that_waits_too_long_is_told_the_key_is_in_use(probe: Bound
         await first
 
 
+async def peek(probe: BoundDatabase, tried: Attempt, scope: Scope | None = None) -> Outcome | None:
+    """What ``replayed`` answers for ``tried`` in a unit of its own (by default test mode)."""
+    async with probe.unit(moded() if scope is None else scope) as unit:
+        return await Idempotency().replayed(unit, tried)
+
+
+async def test_a_retry_is_replayed_before_its_work_is_prepared_and_nothing_else_is(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection
+) -> None:
+    """For a route that asks other modules before its unit (rule 13): a retry is answered before it asks."""
+    assert await peek(probe, attempt()) is None
+    assert await count(admin, KEYS) == 0  # a look claims nothing
+    stored, _ = await run_once(probe, attempt(), Runs())
+    assert await peek(probe, attempt()) == Outcome(stored, replayed=True)
+    with pytest.raises(IdempotencyKeyReusedError):
+        await peek(probe, attempt(name="another body"))
+    assert await peek(probe, attempt(key="key-2")) is None
+    assert await peek(probe, attempt(), moded(Mode.LIVE)) is None
+    await admin.execute("UPDATE probe.idempotency_keys SET expires_at = now() - interval '1 second'")
+    assert await peek(probe, attempt()) is None  # an expired key is as good as unused
+
+
+async def test_a_unit_without_a_mode_cannot_look_for_a_key(probe: BoundDatabase) -> None:
+    with pytest.raises(UnmodedIdempotencyScopeError):
+        await peek(probe, attempt(), OrganizationScope(ORGANIZATION, None))
+
+
 async def test_an_expired_key_runs_again(probe: BoundDatabase, admin: psycopg.AsyncConnection) -> None:
     runs = Runs()
     await run_once(probe, attempt(), runs)
@@ -290,7 +320,7 @@ async def test_a_unit_without_a_mode_cannot_hold_keys(
     ("answer", "error"),
     [
         (StoredResponse(500, b"{}", {}), ServerFailureResponseError),
-        (StoredResponse(201, b"x" * (MAX_STORED_BODY + 1), {}), OversizedStoredResponseError),
+        (StoredResponse(201, b"x" * (DEFAULT_STORED_BODY + 1), {}), OversizedStoredResponseError),
     ],
     ids=["server-failure", "huge"],
 )
@@ -332,6 +362,27 @@ async def test_a_committed_key_without_an_answer_is_a_defect(
     )
     with pytest.raises(UnansweredIdempotencyKeyError):
         await run_once(probe, tried, Runs())
+
+
+async def test_a_module_may_keep_larger_answers_than_the_default(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection
+) -> None:
+    """A document priced line by line answers more than its request sent: its module keeps more of it."""
+    large = StoredResponse(201, b"x" * (DEFAULT_STORED_BODY + 1), {})
+    with pytest.raises(OversizedStoredResponseError, match=f"over the {DEFAULT_STORED_BODY} bytes"):
+        await run_once(probe, attempt(), Runs(answer=large))
+    roomy = Idempotency(max_stored_body=2 * DEFAULT_STORED_BODY)
+    stored, replayed = await run_once(probe, attempt(), Runs(answer=large, idempotency=roomy))
+    assert (stored, replayed) == (large, False)
+    replay, replayed = await run_once(probe, attempt(), Runs(idempotency=roomy))
+    assert (replay.body, replayed) == (large.body, True)
+    assert await count(admin, KEYS) == 1
+
+
+def test_a_stored_answer_of_nothing_is_refused() -> None:
+    with pytest.raises(InvalidOptionError, match="max_stored_body must be 1 byte or more") as caught:
+        Idempotency(max_stored_body=0)
+    assert caught.value.component == "idempotency"
 
 
 def test_a_retention_of_nothing_is_refused() -> None:

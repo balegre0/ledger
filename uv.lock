@@ -806,15 +806,23 @@ version = "0.1.0"
 source = { editable = "modules/invoicing" }
 dependencies = [
     { name = "alembic" },
+    { name = "fastapi" },
     { name = "ledger-identity" },
+    { name = "ledger-kernel" },
     { name = "ledger-platform" },
+    { name = "pydantic" },
+    { name = "sqlalchemy" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.20.0" },
+    { name = "fastapi", specifier = ">=0.143.0" },
     { name = "ledger-identity", editable = "modules/identity" },
+    { name = "ledger-kernel", editable = "packages/kernel" },
     { name = "ledger-platform", editable = "packages/platform" },
+    { name = "pydantic", specifier = ">=2.14.1" },
+    { name = "sqlalchemy", specifier = ">=2.1.4" },
 ]
 
 [[package]]
