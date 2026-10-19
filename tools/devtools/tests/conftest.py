@@ -1,11 +1,46 @@
-"""A small workspace written into a temporary directory: the fixture every devtools test reads."""
+"""The ground devtools' tests grow on, each in a temporary directory.
 
+``tree``: a small, coherent workspace written from scratch (the unit tests). ``repository``: a copy of what
+devtools reads of this repository (the workspace tests, which plant packages and contracts in it).
+"""
+
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 from textwrap import dedent
 from typing import Final
 
 import pytest
+
+from ledger_devtools.tree import visible_files
+
+ROOT: Final = Path(__file__).resolve().parents[3]
+COPIED: Final = ("packages", "modules", "countries", "apps", "tools", "deploy", "contracts")
+ROOT_FILES: Final = ("pyproject.toml", ".importlinter", ".dockerignore", ".gitignore")
+UNREADABLE: Final = b"TZif2\x00\x00\xff\xfe\x80 not UTF-8"
+IGNORED: Final = {
+    "deploy/local/.venv/lib/python3.15/site-packages/tzdata/zoneinfo/UTC": UNREADABLE,
+    "libs/platform/build/lib/__pycache__/x.cpython-315.pyc": UNREADABLE,
+    "tools/build/manifest.toml": UNREADABLE,
+    "packages/.venv/manifest.toml": UNREADABLE,
+}
+"""What a working copy holds besides the repository (a virtual environment, build leftovers), all ignored."""
+
+
+@pytest.fixture
+def repository(tmp_path: Path) -> Path:
+    """What devtools reads of the repository (no test, nothing ignored), then what git would ignore."""
+    for relative in visible_files(ROOT):
+        if (
+            relative.parts[0] in COPIED and "tests" not in relative.parts
+        ) or relative.as_posix() in ROOT_FILES:
+            (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / relative, tmp_path / relative)
+    for ignored, content in IGNORED.items():
+        (tmp_path / ignored).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / ignored).write_bytes(content)
+    return tmp_path
+
 
 KERNEL: Final = """
 [package]

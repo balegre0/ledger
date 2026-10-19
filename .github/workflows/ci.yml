@@ -27,19 +27,15 @@ jobs:
           enable-cache: true
       - name: Install (locked)
         run: uv sync --locked --all-packages
-      - name: Protobuf breaking changes against main
-        # Only once contracts/proto holds a .proto (the signer milestone adds the first). Runs as the owner of the
-        # checkout, not as root: nothing root-owned lands in the workspace and git never has to trust a
-        # repository owned by someone else. HOME must be writable for buf's cache directory. The image is the
-        # one deploy/local/images.toml pins.
-        if: github.event_name == 'pull_request' && hashFiles('contracts/proto/**/*.proto') != ''
-        run: |
-          buf_image="$(uv run python -c 'import tomllib; print(tomllib.load(open("deploy/local/images.toml", "rb"))["images"]["buf"])')"
-          if git cat-file -e origin/main:contracts/buf.yaml 2>/dev/null; then
-            docker run --rm --user "$(id -u):$(id -g)" --env HOME=/tmp \
-              --volume "$PWD:/repo" --workdir /repo/contracts "$buf_image" \
-              breaking --against '/repo/.git#branch=origin/main,subdir=contracts'
-          fi
+      - name: Protobuf breaking changes against the pull request's base
+        # The gate's own task, against the base branch as fetched (a pull request's checkout has no local branch
+        # of it, so `poe check`'s run against `main` finds nothing to compare and passes). It extracts the base's
+        # contracts/ with `git archive` and runs buf breaking in the image deploy/local/images.toml pins, both
+        # trees mounted read-only; it passes while the base holds no .proto.
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: uv run poe proto-breaking --base "origin/$BASE_REF"
       - name: Format, lint, types x2, architecture, deps, spelling, devtools, dead code, tests
         # The packages' test runs share the runner: LEDGER_TEST_JOBS caps how many run at once (two on a 4-core
         # runner keeps memory in bounds); each line of a run is prefixed with its package, and pytest-timeout ends

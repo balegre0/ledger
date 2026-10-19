@@ -37,14 +37,17 @@ forbidden_modules =
     alembic
     cryptography
     fastapi
+    google
     granian
     grpc
+    grpc_tools
     httpx
     hypothesis
     joserfc
     ledger_testing
     lxml
     multipart
+    mypy_protobuf
     opentelemetry
     pathspec
     prometheus_client
@@ -295,8 +298,10 @@ forbidden_modules =
     alembic
     cryptography
     fastapi
+    google
     granian
     grpc
+    grpc_tools
     httpx
     joserfc
     ledger_app_api
@@ -312,6 +317,7 @@ forbidden_modules =
     ledger_testing
     lxml
     multipart
+    mypy_protobuf
     opentelemetry
     pathspec
     prometheus_client
@@ -350,8 +356,10 @@ forbidden_modules =
     alembic
     cryptography
     fastapi
+    google
     granian
     grpc
+    grpc_tools
     httpx
     joserfc
     ledger_app_api
@@ -365,6 +373,7 @@ forbidden_modules =
     ledger_testing
     lxml
     multipart
+    mypy_protobuf
     opentelemetry
     pathspec
     prometheus_client
@@ -442,8 +451,10 @@ forbidden_modules =
     alembic
     cryptography
     fastapi
+    google
     granian
     grpc
+    grpc_tools
     httpx
     joserfc
     ledger_app_api
@@ -458,6 +469,7 @@ forbidden_modules =
     ledger_testing
     lxml
     multipart
+    mypy_protobuf
     opentelemetry
     pathspec
     prometheus_client
@@ -484,14 +496,17 @@ forbidden_modules =
     alembic
     cryptography
     fastapi
+    google
     granian
     grpc
+    grpc_tools
     httpx
     joserfc
     ledger_country_do
     ledger_identity.adapters
     lxml
     multipart
+    mypy_protobuf
     opentelemetry
     pathspec
     prometheus_client
@@ -549,8 +564,10 @@ forbidden_modules =
     alembic
     cryptography
     fastapi
+    google
     granian
     grpc
+    grpc_tools
     httpx
     joserfc
     ledger_app_api
@@ -565,6 +582,7 @@ forbidden_modules =
     ledger_testing
     lxml
     multipart
+    mypy_protobuf
     opentelemetry
     pathspec
     prometheus_client
@@ -591,14 +609,17 @@ forbidden_modules =
     alembic
     cryptography
     fastapi
+    google
     granian
     grpc
+    grpc_tools
     httpx
     joserfc
     ledger_country_do
     ledger_invoicing.adapters
     lxml
     multipart
+    mypy_protobuf
     opentelemetry
     pathspec
     prometheus_client
@@ -631,11 +652,14 @@ source_modules =
     ledger_kernel
     ledger_platform
 forbidden_modules =
+    google
+    grpc_tools
     hypothesis
     ledger_country_do_testing
     ledger_devtools
     ledger_testing
     multipart
+    mypy_protobuf
     pathspec
     py
     pytest

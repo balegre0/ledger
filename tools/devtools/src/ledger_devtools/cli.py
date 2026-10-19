@@ -18,13 +18,16 @@ lazy from collections.abc import Mapping, Sequence
 from ledger_devtools.checks import check
 from ledger_devtools.generate import mounted, openapi_targets, orphans, static_targets
 from ledger_devtools.openapi import NotInstalledError, api_document, require_installed
+from ledger_devtools.protos import proto_problems
 from ledger_devtools.repository import repository_problems
 from ledger_devtools.workspace import Workspace, WorkspaceError
 from ledger_kernel.errors import LedgerError
 
 _PROBLEMS: Final = 1
 _UNREADABLE: Final = 2
-_ORPHAN: Final = "generated, but no manifest implies it any more: run `uv run ledger-devtools sync`"
+_ORPHAN: Final = (
+    "generated, but no manifest or contract implies it any more: run `uv run ledger-devtools sync`"
+)
 
 
 class SnapshotsUnavailableError(RuntimeError):
@@ -87,10 +90,11 @@ def _write(root: Path, generated: Mapping[Path, str], stale: Sequence[Path]) -> 
 def main(arguments: Sequence[str] | None = None) -> int:
     """Run ``sync`` or ``check`` on ``--root`` (the current directory by default); the exit status.
 
-    ``check`` exits 1 when a manifest breaks a rule, a generated file is stale, a generated file is one no
-    manifest implies any more, or the repository around the manifests disagrees with them (the root's lists,
-    the image pins); ``sync`` writes the stale files and deletes those, but writes nothing while
-    a manifest breaks a rule (what it writes follows from the manifests) and exits 1. Both exit 2 when the
+    ``check`` exits 1 when a manifest breaks a rule, a ``.proto`` is not the contract of a module (layout,
+    module, package), a generated file is stale, a generated file is one no manifest or contract implies any
+    more, or the repository around the manifests disagrees with them (the root's lists, the image pins);
+    ``sync`` writes the stale files and deletes those, but writes nothing while a manifest or a contract
+    breaks a rule (what it writes follows from them) and exits 1. Both exit 2 when the
     tree has no readable manifest, a module the ``api`` app mounts is not installed, or the snapshots could
     not be made.
     """
@@ -104,7 +108,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except WorkspaceError as error:
         sys.stderr.write(f"{error}\n")
         return _UNREADABLE
-    problems = [f"{problem.where}: {problem.message}" for problem in check(workspace)]
+    problems = [
+        f"{problem.where}: {problem.message}" for problem in (*check(workspace), *proto_problems(workspace))
+    ]
     if problems:
         return _report(problems)
     try:

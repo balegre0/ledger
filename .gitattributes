@@ -1,7 +1,7 @@
 * text=auto eol=lf
 *.png binary
 countries/do/src/ledger_country_do/channels/ecf_v1/adapters/xsd/*.xsd -text
-# Written by `ledger-devtools sync` from the manifests: never edited by hand, folded in diffs.
+# Written by `ledger-devtools sync` from the manifests and the contracts: never edited by hand, folded in diffs.
 packages/*/pyproject.toml linguist-generated=true
 modules/*/pyproject.toml linguist-generated=true
 countries/*/pyproject.toml linguist-generated=true
@@ -13,3 +13,4 @@ modules/identity/src/ledger_identity/domain/_role_grants.py linguist-generated=t
 modules/*/openapi.json linguist-generated=true
 .importlinter linguist-generated=true
 deploy/local/postgres/init.sql linguist-generated=true
+modules/*/src/*/adapters/grpc/_generated/** linguist-generated=true
