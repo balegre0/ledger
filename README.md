@@ -70,8 +70,9 @@ An app run on the host takes `LEDGER_*` variables (see `deploy/local/compose.yam
 
 The api holds every credential to a rate of its own, per replica, behind the ingress's limit (spec §10):
 `LEDGER_RATE_LIMIT_PER_SECOND` (default 50) and `LEDGER_RATE_LIMIT_BURST` (default 100, the requests it may make
-at once). Over it a request is answered 429 with `Retry-After`. Each replica remembers 10 000 credentials at
-most; while all of them are active a new one waits for the oldest to go idle, so no allowance is ever reset.
+at once). Over it a request is answered 429 with `Retry-After`. Each replica remembers 10 000 credentials; when
+all are active the oldest is set aside with what it used (1 000 more at most), so a new caller never waits for
+room and no allowance is reset short of 11 000 credentials active at once.
 
 ## Decisions and operations
 

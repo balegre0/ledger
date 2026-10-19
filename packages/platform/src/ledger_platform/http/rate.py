@@ -7,11 +7,12 @@ asking again earns no further delay. The limiter is per replica: a credential ma
 replica it reaches, which is what a backstop for a runaway caller needs.
 
 It remembers a bounded number of credentials (``max_keys``), in the order they were last allowed. Room for a
-new one is made by forgetting the least recently allowed while it is idle (it would have its whole burst back
-anyway), one at a time from the front: constant time per request. When every credential it remembers is active
-(each was allowed within its last burst), the new one is refused until the oldest goes idle: forgetting an
-active one would hand it a fresh burst, so a flood of credentials can neither grow it nor reset an allowance.
-The settings are ``LEDGER_RATE_LIMIT_PER_SECOND`` and ``LEDGER_RATE_LIMIT_BURST``.
+new one is made from the front, one at a time (constant time per request): the least recently allowed is
+forgotten when it is idle (it would have its whole burst back anyway), and set aside with its arrival time
+when it is still active, in a second bounded map (``max_set_aside``) it is taken back from when it asks again.
+So a new credential never waits for room, and an active one keeps the allowance it used. Only past
+``max_keys + max_set_aside`` credentials active at once is the oldest set aside forgotten: the bound a flood
+that large meets. The settings are ``LEDGER_RATE_LIMIT_PER_SECOND`` and ``LEDGER_RATE_LIMIT_BURST``.
 """
 
 from collections import OrderedDict
@@ -25,6 +26,7 @@ from ledger_platform.config.options import InvalidOptionError, is_positive_and_f
 
 _COMPONENT: Final = "rate limit"
 DEFAULT_KEYS: Final = 10_000
+DEFAULT_SET_ASIDE: Final = 1_000
 
 
 class RateLimitedError(UnavailableError):
@@ -42,7 +44,7 @@ class RateLimitedError(UnavailableError):
 class RateLimiter:
     """GCRA per key (see the module). Not thread-safe: it belongs to one event loop."""
 
-    __slots__ = ("_clock", "_interval", "_max_keys", "_tats", "_tolerance")
+    __slots__ = ("_aside", "_clock", "_interval", "_max_aside", "_max_keys", "_tats", "_tolerance")
 
     def __init__(
         self,
@@ -51,6 +53,7 @@ class RateLimiter:
         burst: int,
         clock: Callable[[], float] = monotonic,
         max_keys: int = DEFAULT_KEYS,
+        max_set_aside: int = DEFAULT_SET_ASIDE,
     ) -> None:
         if not is_positive_and_finite(rate):
             raise InvalidOptionError(
@@ -61,19 +64,25 @@ class RateLimiter:
             )
         require_at_least(_COMPONENT, "burst", burst)
         require_at_least(_COMPONENT, "max_keys", max_keys)
+        require_at_least(_COMPONENT, "max_set_aside", max_set_aside)
         self._clock = clock
         self._interval = 1.0 / rate
         self._tolerance = burst * self._interval
         self._max_keys = max_keys
         self._tats: OrderedDict[str, float] = OrderedDict()
+        self._max_aside = max_set_aside
+        self._aside: OrderedDict[str, float] = OrderedDict()
+        """Active credentials made room for, with their arrival times, oldest first."""
 
     def wait(self, key: str) -> float:
         """Seconds ``key`` must wait before this request is allowed: ``0.0`` when it is, and it is counted."""
         now, tats = self._clock(), self._tats
         held = tats.get(key)
-        if held is None and (full := self._room(now)) > 0:
-            return full  # every credential remembered is active: this one waits for room
-        ahead = max((now if held is None else held) - now, 0.0)  # exactly zero for a credential at rest
+        if held is None:
+            held = self._aside.pop(key, now)  # set aside while active: its arrival time comes back with it
+            self._make_room(now)
+            tats[key] = held
+        ahead = max(held - now, 0.0)  # exactly zero for a credential at rest
         late = ahead + self._interval - self._tolerance
         if late > 0:
             return late  # a refusal changes nothing
@@ -85,16 +94,17 @@ class RateLimiter:
         """How many credentials it remembers."""
         return len(self._tats)
 
-    def _room(self, now: float) -> float:
-        """Make room for one more credential: ``0.0`` once there is, else seconds until the oldest is idle.
+    def set_aside(self) -> int:
+        """How many active credentials it set aside to make room."""
+        return len(self._aside)
 
-        The least recently allowed are forgotten from the front while they are idle (their theoretical arrival
-        is past); an active one is never forgotten.
-        """
-        tats = self._tats
-        while len(tats) >= self._max_keys:
-            oldest, tat = next(iter(tats.items()))
-            if tat > now:
-                return tat - now
-            del tats[oldest]
-        return 0.0
+    def _make_room(self, now: float) -> None:
+        """Room for one more: the least recently allowed, forgotten if idle, else set aside."""
+        tats, aside = self._tats, self._aside
+        if len(tats) < self._max_keys:
+            return
+        oldest, tat = tats.popitem(last=False)
+        if tat > now:
+            aside[oldest] = tat
+            if len(aside) > self._max_aside:
+                _ = aside.popitem(last=False)

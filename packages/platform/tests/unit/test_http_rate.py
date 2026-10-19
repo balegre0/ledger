@@ -90,18 +90,26 @@ def test_the_credentials_it_remembers_are_bounded_and_idle_ones_make_room_one_at
         assert limiter.remembered() == 3
 
 
-def test_when_every_credential_is_active_a_new_one_waits_and_no_allowance_is_reset() -> None:
-    """Forgetting an active credential would give it a fresh burst: a flood of new ones cannot buy that."""
+def test_when_every_credential_is_active_a_new_one_is_allowed_and_no_allowance_is_reset() -> None:
+    """The oldest active credential is set aside with its arrival time, not forgotten: no new caller waits for
+    room, and the one set aside comes back held to the rate it had used."""
     clock = Clock()
     limiter = limiter_of(clock, rate=1.0, burst=1, keys=2)
     assert (limiter.wait("a"), limiter.wait("b")) == (0.0, 0.0)
     clock.now += 0.5
-    assert limiter.wait("c") == pytest.approx(0.5)  # until the oldest, a, is idle again
-    assert limiter.remembered() == 2
-    assert limiter.wait("a") == pytest.approx(0.5)  # still held: its allowance was not reset
-    clock.now += 0.5
-    assert limiter.wait("c") == 0.0  # a went idle and made room
-    assert limiter.remembered() == 2
+    assert limiter.wait("c") == 0.0  # a is set aside: no lockout
+    assert (limiter.remembered(), limiter.set_aside()) == (2, 1)
+    assert limiter.wait("a") == pytest.approx(0.5)  # back, still held: its allowance was not reset
+
+
+def test_what_is_set_aside_is_bounded_too() -> None:
+    """Past ``max_keys`` plus ``max_set_aside`` active credentials, the oldest set aside is forgotten."""
+    clock = Clock()
+    limiter = RateLimiter(rate=1.0, burst=1, clock=clock, max_keys=1, max_set_aside=1)
+    for key in ("a", "b", "c"):
+        assert limiter.wait(key) == 0.0
+    assert (limiter.remembered(), limiter.set_aside()) == (1, 1)
+    assert limiter.wait("a") == 0.0  # forgotten: the bound is what a flood this large costs
 
 
 def test_the_credential_allowed_least_recently_goes_first() -> None:
@@ -125,6 +133,8 @@ def test_options_that_cannot_work_are_refused(rate: float, burst: int, keys: int
         RateLimiter(rate=rate, burst=burst, max_keys=keys)
     assert caught.value.component == "rate limit"
     assert option in str(caught.value)
+    with pytest.raises(InvalidOptionError, match="max_set_aside"):
+        RateLimiter(rate=1.0, burst=1, max_set_aside=0)
 
 
 def test_the_refusal_says_when_to_come_back_in_whole_seconds() -> None:
