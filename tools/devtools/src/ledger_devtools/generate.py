@@ -14,6 +14,8 @@ from typing import Final, TypeIs, final
 lazy from collections.abc import Callable, Iterator, Mapping, Sequence
 
 from ledger_devtools.names import LOADED_BY_OTHERS, TEST_TOOLING, distribution_of, import_names, renamed
+from ledger_devtools.protos import GENERATED_DIRECTORIES, GENERATED_FILES, contracts
+from ledger_devtools.protos import generated as grpc_code
 from ledger_devtools.roles import role_grants_path, role_grants_text
 from ledger_devtools.root import ROOT_PYPROJECT, root_text
 from ledger_devtools.sql import init_sql_text
@@ -187,20 +189,26 @@ def pyproject_text(package: Package, workspace: Workspace) -> str:
         if workspace_deps and package.nested_country is None
         else None,
         _BUILD,
-        _coverage(package),
+        _coverage(package, workspace),
         _COVERAGE_REPORT,
         _deptry(package),
     ]
     return "\n".join(section for section in sections if section is not None)
 
 
-def _coverage(package: Package) -> str:
+def _coverage(package: Package, workspace: Workspace) -> str:
+    """What coverage measures: the import package and its migrations, not the code of the contract."""
     text = (
         '[tool.coverage.run]\nbranch = true\ncore = "sysmon"\n'
         f"source_pkgs = [{_string(package.import_name)}]\n"
     )
     migrations = _migrations_directory(package)
-    return text if migrations is None else f"{text}source = [{_string(migrations)}]\n"
+    if migrations is not None:
+        text += f"source = [{_string(migrations)}]\n"
+    served = package.kind is PackageKind.MODULE and any(
+        contract.module == package.name for contract in contracts(workspace.seen.files)
+    )
+    return f"{text}omit = [{_string(GENERATED_FILES)}]\n" if served else text
 
 
 def _deptry(package: Package) -> str | None:
@@ -677,6 +685,8 @@ def static_targets(workspace: Workspace) -> dict[Path, str]:
         generated[package.directory / "pyproject.toml"] = pyproject_text(package, workspace)
         if has_manifest_module(package):
             generated[package.source / "_manifest.py"] = manifest_module_text(package)
+    # protoc's output is ASCII but for a contract's comments, which are UTF-8 as every source here
+    generated.update((path, code.decode("utf-8")) for path, code in grpc_code(workspace.root).items())
     return generated
 
 
@@ -706,11 +716,13 @@ def targets(
 
 
 def orphans(workspace: Workspace, generated: Mapping[Path, str]) -> list[Path]:
-    """Files ``sync`` once wrote that no manifest implies any more (any ``_manifest.py`` counts).
+    """Files ``sync`` once wrote that no manifest or contract implies any more.
 
-    A ``pyproject.toml`` is one when it carries the generated header; one written by hand is never touched.
+    Any ``_manifest.py`` counts, and any file of a module's generated gRPC package; a ``pyproject.toml`` does
+    when it carries the generated header (one written by hand is never touched).
     """
     places = (pattern.removesuffix("/manifest.toml") for pattern in MANIFEST_GLOBS)
+    code_of_contracts = f"{GENERATED_DIRECTORIES}/**"
     found = sorted(
         {
             path
@@ -718,13 +730,14 @@ def orphans(workspace: Workspace, generated: Mapping[Path, str]) -> list[Path]:
             for pattern in (f"{place}/pyproject.toml", f"{place}/src/*/_manifest.py")
             for path in workspace.matching(pattern)
         }
+        | set(workspace.matching(code_of_contracts))
     )
     return [
         path
         for path in found
         if path not in generated
         and (
-            path.name == "_manifest.py"
+            path.name != "pyproject.toml"
             or (workspace.root / path).read_text(encoding="utf-8").startswith(GENERATED_HEADER)
         )
     ]

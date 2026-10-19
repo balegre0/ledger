@@ -818,7 +818,7 @@ enqueues = "do_ecf.range_watch"
 | Country field (wire) | `fiscal.<regime>.<field>` (regime law-level fields and channel format fields share the regime namespace) | `fiscal.do.income_type` |
 | Error code | `<thing>_<problem>`, snake_case, unique across the repo | `range_exhausted` |
 | Env var | `LEDGER_<SETTING>`; module or channel settings `LEDGER_<MODULE>_<SETTING>` | `LEDGER_DO_ECF_DGII_TIMEOUT_SECONDS` |
-| Proto package | `ledger.<module>.v<N>` | `ledger.signer.v1` |
+| Proto package | `ledger.<module>.v<N>`, in `contracts/proto/ledger/<module>/v<N>/`; its Python code generated into `ledger_<module>.adapters.grpc._generated.v<N>` | `ledger.signer.v1`, `ledger_signer.adapters.grpc._generated.v1` |
 | Python modules | nouns, `lower_with_under`; never `utils`, `helpers`, `common`, `misc`, `shared` | `numbering.py` |
 | Tests | `tests/unit|integration|contract/test_<subject>.py`; support modules prefixed by package (`invoicing_samples.py`) | |
 | ADR | `docs/adr/NNNN-kebab-title.md` | `0005-regime-channel-split.md` |
@@ -1962,7 +1962,7 @@ brackets.
 | empty `*_pb2_grpc.py(i)` | D | stubs generated only for protos with services |
 | `buf.yaml` | Mv | `contracts/buf.yaml` |
 | tests | D | envelope tests rewritten in platform; proto round trips are `buf breaking`'s job [05 §3.3] |
-| — | new | `contracts/proto/ledger/signer/v1/signer.proto`, generated into `ledger_signer.adapters.grpc._generated` |
+| — | new | `contracts/proto/ledger/signer/v1/signer.proto`, generated into `ledger_signer.adapters.grpc._generated.v1` |
 
 **`libs/platform` → `packages/platform`** (target subpackage per §5.2)
 

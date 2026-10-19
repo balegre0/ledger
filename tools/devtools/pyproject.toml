@@ -8,7 +8,10 @@ requires-python = ">=3.15"
 dependencies = [
     "ledger-kernel",
     "ledger-platform",
+    "grpcio-tools>=1.84.0",
+    "mypy-protobuf>=5.1.0",
     "pathspec>=1.1.1",
+    "protobuf>=7.36.2",
     "pydantic>=2.14.1",
     "pydantic-settings>=2.15.0",
 ]
@@ -35,3 +38,13 @@ show_missing = true
 skip_covered = true
 exclude_lines = []  # no "pragma: no cover": every line counts
 partial_branches = []  # no "pragma: no branch": every branch counts
+
+[tool.deptry.package_module_name_map]
+"grpcio-tools" = "grpc_tools"
+"protobuf" = "google"
+
+[tool.deptry.per_rule_ignores]
+DEP002 = [
+    "grpcio-tools",
+    "mypy-protobuf",
+]

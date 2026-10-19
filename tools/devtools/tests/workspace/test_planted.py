@@ -7,14 +7,13 @@ generates, and of the root ``pyproject.toml`` only its generated block changed.
 """
 
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Final
 lazy from collections.abc import Mapping
 
-import pytest
+lazy import pytest
 
 from ledger_devtools.cli import main
 from ledger_devtools.generate import targets
@@ -22,17 +21,6 @@ from ledger_devtools.root import BEGIN, END
 from ledger_devtools.tree import visible_files
 from ledger_devtools.workspace import Workspace
 
-ROOT: Final = Path(__file__).resolve().parents[4]
-COPIED: Final = ("packages", "modules", "countries", "apps", "tools", "deploy")
-ROOT_FILES: Final = ("pyproject.toml", ".importlinter", ".dockerignore", ".gitignore")
-UNREADABLE: Final = b"TZif2\x00\x00\xff\xfe\x80 not UTF-8"
-IGNORED: Final = {
-    "deploy/local/.venv/lib/python3.15/site-packages/tzdata/zoneinfo/UTC": UNREADABLE,
-    "libs/platform/build/lib/__pycache__/x.cpython-315.pyc": UNREADABLE,
-    "tools/build/manifest.toml": UNREADABLE,
-    "packages/.venv/manifest.toml": UNREADABLE,
-}
-"""What a working copy holds besides the repository (a virtual environment, build leftovers), all ignored."""
 PLANTED: Final = ("modules/books", "countries/zz")
 BOOKS: Final = """[package]
 name = "books"
@@ -94,21 +82,6 @@ SOURCES: Final = {
     "countries/zz/src/ledger_country_zz": ("regime",),
     "countries/zz/testing/src/ledger_country_zz_testing": (),
 }
-
-
-@pytest.fixture
-def repository(tmp_path: Path) -> Path:
-    """What devtools reads of the repository (no test, nothing ignored), then what git would ignore."""
-    for relative in visible_files(ROOT):
-        if (
-            relative.parts[0] in COPIED and "tests" not in relative.parts
-        ) or relative.as_posix() in ROOT_FILES:
-            (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(ROOT / relative, tmp_path / relative)
-    for ignored, content in IGNORED.items():
-        (tmp_path / ignored).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / ignored).write_bytes(content)
-    return tmp_path
 
 
 def snapshot(root: Path) -> dict[Path, str]:

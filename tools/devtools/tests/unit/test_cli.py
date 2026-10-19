@@ -4,8 +4,9 @@ lazy from pathlib import Path
 
 lazy import pytest
 
-from ledger_devtools import cli
+from ledger_devtools import cli, generate, protos
 from ledger_devtools.cli import main
+from ledger_devtools.protos import ProtocFailedError
 
 type Editor = Callable[[str, str, str], None]
 type Writer = Callable[[str, str, tuple[str, ...]], Path]
@@ -76,7 +77,9 @@ def test_the_root_defaults_to_the_current_directory(
     assert run(capsys, "check")[0] == 1
 
 
-ORPHAN: Final = "generated, but no manifest implies it any more: run `uv run ledger-devtools sync`"
+ORPHAN: Final = (
+    "generated, but no manifest or contract implies it any more: run `uv run ledger-devtools sync`"
+)
 
 
 def test_a_package_that_drops_its_schema_loses_its_manifest_module(
@@ -130,6 +133,114 @@ def test_check_names_repository_problems_that_sync_leaves_alone(
         1,
         ["deploy/local/compose.yaml: image 'postgres:18.7' is not pinned in deploy/local/images.toml"],
         "",
+    )
+
+
+VAULT: Final = """
+[package]
+name = "vault"
+kind = "module"
+summary = "Keys."
+owners = ["@o"]
+
+[dependencies]
+packages = ["kernel", "platform"]
+"""
+PING: Final = 'syntax = "proto3";\n\npackage ledger.vault.v1;\n\nmessage Ping {\n  string id = 1;\n}\n'
+CODE: Final = "modules/vault/src/ledger_vault/adapters/grpc/_generated"
+
+
+def test_a_proto_of_no_module_stops_sync(tree: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    proto = tree / "contracts/proto/ledger/vault/v1/vault.proto"
+    proto.parent.mkdir(parents=True)
+    proto.write_text(PING, encoding="utf-8")
+    assert run(capsys, "sync", "--root", str(tree)) == (
+        1,
+        [
+            (
+                "contracts/proto/ledger/vault/v1/vault.proto: "
+                "no module 'vault' (modules/vault/manifest.toml) to generate its gRPC code into"
+            )
+        ],
+        "",
+    )
+    assert not (tree / ".importlinter").exists()
+
+
+def test_grpc_code_follows_its_contract(
+    tree: Path, capsys: pytest.CaptureFixture[str], write: Writer
+) -> None:
+    write("modules/vault", VAULT, ("adapters",))
+    proto = tree / "contracts/proto/ledger/vault/v1/vault.proto"
+    proto.parent.mkdir(parents=True)
+    proto.write_text(PING, encoding="utf-8")
+    code, written, _ = run(capsys, "sync", "--root", str(tree))
+    assert code == 0
+    assert f"wrote {CODE}/v1/vault_pb2.pyi" in written
+    assert run(capsys, "sync", "--root", str(tree)) == (0, [], "")
+    proto.write_text(PING.replace("string id = 1;", "string id = 1;\n  string at = 2;"), encoding="utf-8")
+    code, lines, _ = run(capsys, "check", "--root", str(tree))
+    assert (code, lines) == (
+        1,
+        [
+            f"{CODE}/v1/{name}: stale, run `uv run ledger-devtools sync`"
+            for name in ("vault_pb2.py", "vault_pb2.pyi")
+        ],
+    )
+    proto.unlink()
+    code, lines, _ = run(capsys, "check", "--root", str(tree))
+    names = ("__init__.py", "v1/__init__.py", "v1/vault_pb2.py", "v1/vault_pb2.pyi")
+    no_omit = "modules/vault/pyproject.toml: stale, run `uv run ledger-devtools sync`"  # nothing to omit
+    assert (code, lines) == (1, [no_omit, *(f"{CODE}/{name}: {ORPHAN}" for name in names)])
+    run(capsys, "sync", "--root", str(tree))
+    assert [path for path in (tree / CODE).rglob("*") if path.is_file()] == []
+    assert run(capsys, "check", "--root", str(tree)) == (0, [], "")
+
+
+def test_a_generated_file_out_of_its_sync_is_an_orphan(
+    tree: Path, capsys: pytest.CaptureFixture[str], write: Writer
+) -> None:
+    write("modules/vault", VAULT, ("adapters",))
+    proto = tree / "contracts/proto/ledger/vault/v1/vault.proto"
+    proto.parent.mkdir(parents=True)
+    proto.write_text(PING, encoding="utf-8")
+    run(capsys, "sync", "--root", str(tree))
+    nested = tree / CODE / "v1/deeper/stray.py"
+    nested.parent.mkdir()
+    nested.write_text((tree / CODE / "v1/vault_pb2.py").read_text(encoding="utf-8"), encoding="utf-8")
+    assert run(capsys, "check", "--root", str(tree)) == (1, [f"{CODE}/v1/deeper/stray.py: {ORPHAN}"], "")
+
+
+REFUSAL: Final = "ledger/vault/v1/vault.proto:1:1: refused"
+
+
+def test_protoc_refusing_what_check_found_sound_ends_the_command(
+    tree: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refused(root: Path) -> dict[Path, bytes]:
+        del root
+        raise ProtocFailedError(REFUSAL)
+
+    monkeypatch.setattr(generate, "grpc_code", refused)
+    assert run(capsys, "sync", "--root", str(tree)) == (
+        1,
+        [f"contracts/proto: protoc could not generate the gRPC code: {REFUSAL}"],
+        "",
+    )
+
+
+def test_without_protoc_s_plugins_the_contracts_cannot_be_checked(
+    tree: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, write: Writer
+) -> None:
+    write("modules/vault", VAULT, ("adapters",))
+    proto = tree / "contracts/proto/ledger/vault/v1/vault.proto"
+    proto.parent.mkdir(parents=True)
+    proto.write_text(PING, encoding="utf-8")
+    monkeypatch.setattr(protos, "_PLUGINS", ("absent",))
+    assert run(capsys, "check", "--root", str(tree)) == (
+        2,
+        [],
+        "protoc-gen-absent is not installed beside this interpreter: run `uv sync --all-packages`\n",
     )
 
 
