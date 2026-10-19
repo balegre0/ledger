@@ -2059,6 +2059,8 @@ items in the header note are **not** on this list.
 
 | Deferred | Until | What remains now |
 |---|---|---|
+| Compounding taxes in the kernel's `TaxLine` (ISC, then ITBIS on a base that includes it) | v2-M3, the first ISC line | stacked categories each on the line's base; a golden-file test holds the kernel's totals equal to `do-ecf-v1`'s |
+| Import-linter contract 9b (flows are leaves) and the `flow` package kind | the first flow (ADR 0011, Proposed) | the rule in ADR 0011 and §4.6; nothing generates the contract yet |
 | devtools `gate`, `affected`, CI matrix, `scaffold` (copier templates), CODEOWNERS, generated reference docs | > 8 packages or a second contributor | `sync`, `check`; `poe check` as the gate; one CI job |
 | `countries/zz` synthetic country | second country work | review rule on country diffs |
 | Quality-tier rule catalogue and its automated check | second channel | tier claim in the manifest, checked in review |

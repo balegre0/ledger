@@ -380,7 +380,9 @@ class TaxLine:
 
     A line taxed twice (a sales tax and a selective consumption tax, a tip) lists both categories; its base is
     counted once in the net. Taxes stacked this way do not compound: a tax charged on a base that already
-    includes another is not expressible yet.
+    includes another (DGII's ITBIS on a price that includes the selective consumption tax, ISC) is not
+    expressible yet; it is v2-M3's, with the first such line. Regime ``do``'s pack holds the kernel's totals
+    equal to its channel's for every golden document.
     """
 
     base: Money
