@@ -609,13 +609,19 @@ def importlinter_text(workspace: Workspace) -> str:
     return GENERATED_HEADER + "\n" + "\n".join(contract for contract in contracts if contract is not None)
 
 
-def targets(
-    workspace: Workspace, *, document: Callable[[], Mapping[str, object]] | None = None
-) -> dict[Path, str]:
-    """Every generated file (relative to the root) and its content; the root ``pyproject.toml``, its block.
+def mounted(workspace: Workspace) -> list[Package]:
+    """The modules whose routes the ``api`` app mounts: each has an OpenAPI snapshot."""
+    return [
+        module
+        for module in workspace.modules
+        if module.manifest.http is not None and "api" in module.manifest.http.mounted_in
+    ]
 
-    ``document`` makes the ``api`` app's OpenAPI document (``api_document`` by default: the installed app's);
-    it is called once, and only when a module mounts routes in the ``api`` app.
+
+def static_targets(workspace: Workspace) -> dict[Path, str]:
+    """Every generated file but the OpenAPI snapshots: what the manifests imply without importing any package.
+
+    ``sync`` writes these first, so that the app the snapshots are made from imports them as they now are.
     """
     generated: dict[Path, str] = {
         Path(".importlinter"): importlinter_text(workspace),
@@ -631,17 +637,32 @@ def targets(
         generated[package.directory / "pyproject.toml"] = pyproject_text(package, workspace)
         if has_manifest_module(package):
             generated[package.source / "_manifest.py"] = manifest_module_text(package)
-    mounted = [
-        module
-        for module in workspace.modules
-        if module.manifest.http is not None and "api" in module.manifest.http.mounted_in
-    ]
-    if mounted:
-        require_installed(mounted)
-        whole = (api_document if document is None else document)()
-        for module in mounted:
-            generated[module.directory / "openapi.json"] = openapi_text(module, whole)
     return generated
+
+
+def openapi_targets(workspace: Workspace, document: Callable[[], Mapping[str, object]]) -> dict[Path, str]:
+    """Each mounted module's ``openapi.json``, from ``document`` (the ``api`` app's), called if one is."""
+    modules = mounted(workspace)
+    if not modules:
+        return {}
+    whole = document()
+    return {module.directory / "openapi.json": openapi_text(module, whole) for module in modules}
+
+
+def targets(
+    workspace: Workspace, *, document: Callable[[], Mapping[str, object]] | None = None
+) -> dict[Path, str]:
+    """Every generated file (relative to the root) and its content; the root ``pyproject.toml``, its block.
+
+    ``document`` makes the ``api`` app's OpenAPI document (``api_document`` by default: the installed app's);
+    it is called once, and only when a module mounts routes in the ``api`` app. In one process this sees the
+    packages as they were imported: ``sync`` and ``check`` make the snapshots in a process of their own, once
+    the rest is written (``cli``).
+    """
+    require_installed(mounted(workspace))
+    return static_targets(workspace) | openapi_targets(
+        workspace, api_document if document is None else document
+    )
 
 
 def orphans(workspace: Workspace, generated: Mapping[Path, str]) -> list[Path]:

@@ -4,6 +4,7 @@ lazy from pathlib import Path
 
 lazy import pytest
 
+from ledger_devtools import cli
 from ledger_devtools.cli import main
 
 type Editor = Callable[[str, str, str], None]
@@ -159,3 +160,66 @@ def test_a_module_the_api_mounts_must_be_installed(
             "modules/zzbilling/manifest.toml: ledger-zzbilling is not installed, so its OpenAPI document "
             "cannot be made: run `uv sync --all-packages`\n"
         )
+
+
+def test_sync_writes_every_other_file_before_it_makes_the_snapshots(
+    tree: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The app the snapshots come from imports what sync writes: a stale ``_manifest.py`` would break it."""
+    manifest = tree / "modules/identity/src/ledger_identity/_manifest.py"
+    seen: list[bool] = []
+
+    def snapshots(root: Path) -> dict[Path, str]:
+        seen.append((root / "modules/identity/src/ledger_identity/_manifest.py").is_file())
+        return {}
+
+    monkeypatch.setattr(cli, "openapi_documents", snapshots)
+    assert not manifest.exists()
+    assert run(capsys, "sync", "--root", str(tree))[0] == 0
+    assert seen == [True]
+
+
+def test_check_makes_no_snapshot_while_another_file_is_stale(
+    tree: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def snapshots(root: Path) -> dict[Path, str]:
+        raise AssertionError(root)
+
+    monkeypatch.setattr(cli, "openapi_documents", snapshots)
+    code, lines, _ = run(capsys, "check", "--root", str(tree))
+    assert code == 1
+    assert ".importlinter: stale, run `uv run ledger-devtools sync`" in lines
+
+
+def test_snapshots_that_cannot_be_made_end_the_command(
+    tree: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def snapshots(root: Path) -> dict[Path, str]:
+        del root
+        failure = "InvalidPackError: identity could not be loaded"
+        raise cli.SnapshotsUnavailableError(failure)
+
+    monkeypatch.setattr(cli, "openapi_documents", snapshots)
+    code, _, error = run(capsys, "sync", "--root", str(tree))
+    assert code == 2
+    assert (
+        error == "the OpenAPI snapshots could not be made: InvalidPackError: identity could not be loaded\n"
+    )
+
+
+def test_the_snapshots_are_made_in_a_fresh_interpreter_or_say_why_not(
+    tree: Path, capsys: pytest.CaptureFixture[str], tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    run(capsys, "sync", "--root", str(tree))
+    made = cli.openapi_documents(tree)
+    assert made == {
+        Path("modules/identity/openapi.json"): (tree / "modules/identity/openapi.json").read_text(
+            encoding="utf-8"
+        )
+    }
+    documents, failure = cli.snapshots_in(str(tree))
+    assert (set(documents), failure) == ({"modules/identity/openapi.json"}, None)
+    empty = tmp_path_factory.mktemp("empty")
+    assert cli.snapshots_in(str(empty)) == ({}, f"WorkspaceError: no manifest.toml under {empty}")
+    with pytest.raises(cli.SnapshotsUnavailableError, match="WorkspaceError"):
+        cli.openapi_documents(empty)
