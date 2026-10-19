@@ -52,7 +52,15 @@ lazy from sqlalchemy import RowMapping, Update
 from ledger_kernel.errors import ErrorKind, LedgerError, UnavailableError
 from ledger_platform.data.audit import Actor, acting_as
 from ledger_platform.data.codec import JsonValue
-from ledger_platform.data.queue import DEFAULT_BACKOFF, RELEASE_TIMEOUT, claim, parked, recover, release
+from ledger_platform.data.queue import (
+    DEFAULT_BACKOFF,
+    RELEASE_TIMEOUT,
+    claim,
+    parked,
+    recover,
+    release,
+    renewing,
+)
 from ledger_platform.data.scopes import scope_of
 from ledger_platform.jobs.outcomes import Done, Job, Park, RunAgain
 from ledger_platform.observability.metrics import counter
@@ -173,12 +181,6 @@ class LeaseLostError(LedgerError):
 
     def __init__(self, kind: str) -> None:
         super().__init__(f"a {kind} job lost its lease while its handler ran")
-
-
-def _cancelled_from_outside() -> bool:
-    """Whether the current task itself is being cancelled (not only something it awaited)."""
-    task = asyncio.current_task()
-    return task is not None and task.cancelling() > 0
 
 
 def _outcome(job: Job, outcome: JobOutcome, now: datetime) -> tuple[_Values, str]:
@@ -413,29 +415,12 @@ class JobRunner:
         holding = self._holding.get(job.lease_token)
         if holding is not None:  # claimed by ``run`` (``run_due`` holds nothing to give back)
             holding.started = True
-        work = asyncio.ensure_future(_bounded(job, decl, handler))
-        lost = asyncio.Event()
-        keeper = asyncio.create_task(self._keep(job, decl, work, lost))
-        try:
-            return await work
-        except asyncio.CancelledError:
-            if lost.is_set() and not _cancelled_from_outside():
-                raise LeaseLostError(job.kind) from None
-            raise
-        finally:
-            keeper.cancel()
-            await asyncio.gather(keeper, return_exceptions=True)
-
-    async def _keep(
-        self, job: Job, decl: JobDecl, work: asyncio.Future[JobOutcome], lost: asyncio.Event
-    ) -> None:
-        interval = decl.lease.total_seconds() / 3
-        while True:
-            await asyncio.sleep(interval)
-            if not await self._renewed(job):
-                lost.set()
-                work.cancel()
-                return
+        return await renewing(
+            _bounded(job, decl, handler),
+            renew=partial(self._renewed, job),
+            every=decl.lease.total_seconds() / 3,
+            lost=partial(LeaseLostError, job.kind),
+        )
 
     async def _renewed(self, job: Job) -> bool:
         """``renew``; a failure counts as a lost lease (unrenewed, another worker may take it)."""

@@ -36,6 +36,8 @@ from ledger_platform.config.names import is_schema_name
 type AppRole = Literal["api", "worker", "signer", "receiver", "migrate"]
 """What an app process runs (§3.3)."""
 type Tier = Literal["bronze", "silver", "gold"]
+type ConsumerStyle = Literal["inside", "outside"]
+"""Where a consumer's handler runs: in the unit its inbox row is deleted in, or with no unit open (§3.5)."""
 
 _FROZEN: Final = ConfigDict(extra="forbid", frozen=True)
 _VALUE_ERROR: Final = "Value error, "
@@ -213,12 +215,35 @@ class PublishedEvent(_Section):
 
 
 class ConsumerDecl(_Section):
-    """``[[events.consumes]]``: a consumer and the event types it handles."""
+    """``[[events.consumes]]``: a consumer and the event types it handles.
+
+    ``style``: ``inside``, the handler runs in the unit its inbox row is deleted in; ``outside``, it runs with
+    no unit open, so it may call other modules' facades, and its row is deleted afterwards under its lease
+    (§3.5). An ordered consumer runs inside: a long outside handler would hold its subject's head.
+    """
 
     consumer: Dotted
     types: tuple[EventType, ...] = Field(min_length=1)
     max_attempts: int = Field(default=10, ge=1)
     ordered: bool = False
+    style: ConsumerStyle = "inside"
+
+    @model_validator(mode="after")
+    def unordered_when_outside(self) -> Self:
+        """An outside consumer is not ordered (see the class): the error is located at its ``style``."""
+        if self.ordered and self.style == "outside":
+            raise ValidationError.from_exception_data(
+                type(self).__name__,
+                [
+                    {
+                        "type": "value_error",
+                        "loc": ("style",),
+                        "input": self.style,
+                        "ctx": {"error": _OrderedOutsideError()},
+                    }
+                ],
+            )
+        return self
 
 
 class EventsSection(_Section):
@@ -254,6 +279,11 @@ class ScheduleDecl(_Section):
         if (self.every is None) == (self.cron is None):
             raise _CadenceError
         return self
+
+
+class _OrderedOutsideError(ValueError):
+    def __init__(self) -> None:
+        super().__init__("an ordered consumer runs inside its unit: it cannot be outside")
 
 
 class _OrderWithoutImplementationError(ValueError):

@@ -14,6 +14,16 @@ together. If it fails, the savepoint is undone (its writes and what it recorded)
 in the same unit, still under the row's lock, with the error's own code: retried with backoff, or ``dead``
 (kept, replayable) when the error is ``INVALID`` or the attempts are spent.
 
+An *outside* consumer's handler runs with no unit open (it may call other modules' facades, rule 13) and so
+cannot hold the row's lock: it holds the row by its lease instead. Its runner first extends the lease, fenced
+by the token, in a short unit (finding nothing, the handler does not run: ``inbox_lease_lost``); renews it
+every third of its length while the handler runs (``data.queue.renewing``: a renewal that finds the row taken
+over, or fails, stops the handler, ``inbox_lease_lost``); then deletes the row, or records its failure by the
+same rule as above, in one more unit whose statement names the token. A runner whose lease was taken over
+meanwhile deletes and records nothing (``inbox_lease_lost``): the row is its new holder's. Its effects are
+therefore at least once (a crash after the handler runs it again), never recorded twice; what it calls is
+idempotent by the event or a version (rule 4). It is never ordered (the manifest refuses it).
+
 An ordered consumer claims only the first row of each subject that is not dead, in the order
 (``aggregate_version``, event id), a producer that gave no version having stored 0. The heads are read once
 per claim from ``inbox_head`` (``DISTINCT ON (subject)``), never with a look back per row. Known limit: that
@@ -42,8 +52,9 @@ import asyncio
 import contextlib
 from dataclasses import dataclass
 from datetime import timedelta
+from functools import partial
 from typing import ClassVar, Final, Never, NotRequired, TypedDict, Unpack, final
-lazy from collections.abc import Sequence
+lazy from collections.abc import Awaitable, Callable, Sequence
 lazy from contextlib import AbstractContextManager
 lazy from datetime import datetime
 lazy from uuid import UUID
@@ -60,15 +71,23 @@ lazy from sqlalchemy import ColumnElement, RowMapping, Update
 from ledger_kernel.errors import ConflictError, ErrorKind, LedgerError, error_type
 from ledger_platform.data.audit import Actor, acting_as
 from ledger_platform.data.notifier import INBOX
-from ledger_platform.data.queue import DEFAULT_BACKOFF, RELEASE_TIMEOUT, claim, parked, recover, release
-from ledger_platform.events.consumers import raw_event_of
+from ledger_platform.data.queue import (
+    DEFAULT_BACKOFF,
+    RELEASE_TIMEOUT,
+    claim,
+    parked,
+    recover,
+    release,
+    renewing,
+)
+from ledger_platform.events.consumers import Outside, raw_event_of
 from ledger_platform.events.dispatcher import POLL, reraise_when_stopping
 from ledger_platform.observability.metrics import counter, gauge
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.database import AnyTable
 lazy from ledger_platform.data.queue import Backoff
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
-lazy from ledger_platform.events.consumers import Consumer, RawEvent
+lazy from ledger_platform.events.consumers import Consumer, Handler, OutsideHandler, RawEvent
 lazy from ledger_platform.events.wakeups import Waker
 lazy from ledger_platform.observability.tracing import Tracing
 
@@ -208,6 +227,18 @@ def _fence(deleted: object) -> None:
         raise _LeaseLostError
 
 
+def _actor(consumer: str, event: RawEvent) -> Actor:
+    """Who acts while ``consumer`` handles ``event``: what ``SystemCall(reason="consumer:<name>")`` names."""
+    return Actor(f"system:consumer:{consumer}", str(event.id))
+
+
+def _failed(span: Span | None, failure: _Failure) -> None:
+    """Mark ``span`` failed with the error's type only: a message can hold data, and spans leave."""
+    if span is not None:
+        span.set_status(Status(StatusCode.ERROR))
+        span.add_event("exception", {"exception.type": failure.error})
+
+
 @final
 class InboxRunner:
     """See the module."""
@@ -315,43 +346,73 @@ class InboxRunner:
         return _Failure(code, invalid or row.attempts >= self._consumer.max_attempts, error_type(error))
 
     async def handle(self, row: ClaimedEvent) -> None:
-        """Handle one claimed row in its own unit (see the module); a handler's failure is recorded.
+        """Handle one claimed row (see the module); a handler's failure is recorded.
 
+        An inside handler runs in the row's own unit; an outside one with no unit open, under the row's lease.
         A cancellation is raised, also when a clean-up turned it into another error: the row stays ``running``
         until its lease runs out, and the attempt it used is counted.
         """
+        handler = self._consumer.handler
+        if isinstance(handler, Outside):
+            await self._handle_outside(row, handler.handler)
+            return
         name, event = self._consumer.name, row.event
-        inbox = self._database.tables.inbox
         failure: _Failure | None = None
         try:
-            with self._span(event) as span, acting_as(Actor(f"system:consumer:{name}", str(event.id))):
+            with self._span(event) as span, acting_as(_actor(name, event)):
                 async with self._database.unit(event.scope) as unit:
-                    extended = (
-                        update(inbox)
-                        .where(*self._fenced(row))
-                        .values(lease_until=func.statement_timestamp() + self._lease)
-                        .returning(inbox.c.event_id)
-                    )
-                    _fence((await unit.connection.execute(extended)).first())
-                    failure = await self._attempt(row, unit)
+                    _fence((await unit.connection.execute(self._extended(row))).first())
+                    failure = await self._attempt(row, partial(self._inside, row, unit, handler))
                     if failure is not None:
-                        if span is not None:  # the type only: a message can hold data, and spans leave
-                            span.set_status(Status(StatusCode.ERROR))
-                            span.add_event("exception", {"exception.type": failure.error})
+                        _failed(span, failure)
                         (await unit.connection.execute(self._recorded(row, failure))).one()  # still ours
         except _LeaseLostError:
             self._lost(row)
             return
-        outcome = "done" if failure is None else "dead" if failure.dead else "retry"
-        self._handled.labels(consumer=name, outcome=outcome).inc()
+        self._count(failure)
 
-    async def _attempt(self, row: ClaimedEvent, unit: UnitOfWork) -> _Failure | None:
-        """The handler, then the row's deletion, in a savepoint; if it failed, undone and how to record it."""
+    async def _inside(self, row: ClaimedEvent, unit: UnitOfWork, handler: Handler) -> None:
+        """The handler, then the row's deletion, in a savepoint of ``unit``: undone together if it fails."""
+        async with unit.savepoint():
+            await handler(row.event, unit)
+            inbox = self._database.tables.inbox
+            await unit.connection.execute(delete(inbox).where(*self._fenced(row)))
+
+    async def _handle_outside(self, row: ClaimedEvent, handler: OutsideHandler) -> None:
+        """Run ``handler`` with no unit open under the row's lease, then settle the row (see the module)."""
+        name, event = self._consumer.name, row.event
         try:
-            async with unit.savepoint():
-                await self._consumer.handler(row.event, unit)
-                inbox = self._database.tables.inbox
-                await unit.connection.execute(delete(inbox).where(*self._fenced(row)))
+            with self._span(event) as span, acting_as(_actor(name, event)):
+                failure = await self._attempt(row, partial(self._outside, row, handler))
+                if failure is not None:
+                    _failed(span, failure)
+                await self._settle(row, failure)
+        except _LeaseLostError:
+            self._lost(row)
+            return
+        self._count(failure)
+
+    async def _outside(self, row: ClaimedEvent, handler: OutsideHandler) -> None:
+        """``handler``, its lease extended first and renewed every third of its length while it runs.
+
+        ``_LeaseLostError`` when the row was taken over since the claim (the handler never starts), or while
+        it ran (it is stopped), or when a renewal failed.
+        """
+        if not await self._renewed(row):
+            raise _LeaseLostError
+        await renewing(
+            handler(row.event),
+            renew=partial(self._renewed, row),
+            every=self._lease.total_seconds() / 3,
+            lost=_LeaseLostError,
+        )
+
+    async def _attempt(self, row: ClaimedEvent, run: Callable[[], Awaitable[None]]) -> _Failure | None:
+        """``run`` the handler; how its failure is recorded if it failed (a lost lease is raised)."""
+        try:
+            await run()
+        except _LeaseLostError:
+            raise
         except Exception as error:  # a handler may raise anything; a cancellation is no Exception
             reraise_when_stopping(error)
             failure = self._failure(row, error)
@@ -365,6 +426,40 @@ class InboxRunner:
             )
             return failure
         return None
+
+    def _extended(self, row: ClaimedEvent) -> Update:
+        """The row's lease, extended by the runner's length from now while the row's token is ``row``'s."""
+        inbox = self._database.tables.inbox
+        return (
+            update(inbox)
+            .where(*self._fenced(row))
+            .values(lease_until=func.statement_timestamp() + self._lease)
+            .returning(inbox.c.event_id)
+        )
+
+    async def _renewed(self, row: ClaimedEvent) -> bool:
+        """Whether the row's lease was extended in a unit of its own; a failure counts as a lost lease."""
+        try:
+            async with self._database.unit(None) as unit:
+                return (await unit.connection.execute(self._extended(row))).first() is not None
+        except Exception:  # the database: the lease cannot be vouched for, another worker may take the row
+            _logger.exception("inbox_lease_renewal_failed", consumer=self._consumer.name)
+            return False
+
+    async def _settle(self, row: ClaimedEvent, failure: _Failure | None) -> None:
+        """Delete the handled row or record its failure, while it is ours (else ``_LeaseLostError``)."""
+        inbox = self._database.tables.inbox
+        settled = (
+            delete(inbox).where(*self._fenced(row)).returning(inbox.c.event_id)
+            if failure is None
+            else self._recorded(row, failure)
+        )
+        async with self._database.unit(None) as unit:
+            _fence((await unit.connection.execute(settled)).first())
+
+    def _count(self, failure: _Failure | None) -> None:
+        outcome = "done" if failure is None else "dead" if failure.dead else "retry"
+        self._handled.labels(consumer=self._consumer.name, outcome=outcome).inc()
 
     def _lost(self, row: ClaimedEvent) -> None:
         _logger.warning("inbox_lease_lost", consumer=self._consumer.name, event_id=str(row.event.id))

@@ -2,10 +2,12 @@
 
 import uuid
 from datetime import UTC, datetime
-from typing import Final
+from typing import Final, Literal
+lazy from collections.abc import Callable
 
 import pytest
 
+from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.config.manifest import ConsumerDecl
@@ -13,6 +15,7 @@ from ledger_platform.events.consumers import (
     Consumer,
     ConsumerMismatchError,
     ConsumerSpec,
+    Outside,
     RawEvent,
     raw_event_of,
 )
@@ -82,3 +85,55 @@ def test_an_inbox_row_is_read_as_the_event_it_holds() -> None:
         traceparent=None,
         payload={"name": "x", "tags": ["a"], "count": 2, "gone": None},
     )
+
+
+async def notice(event: RawEvent) -> None:
+    del event
+
+
+def test_an_outside_consumer_takes_its_handler_with_no_unit() -> None:
+    declared = ConsumerDecl(consumer="other.renames", types=("probe.thing.renamed",), style="outside")
+    consumer = Consumer.of(ConsumerSpec(name="other.renames", outside=notice), declared)
+    assert consumer.handler == Outside(notice)
+    assert consumer.outside
+    assert not Consumer.of(
+        ConsumerSpec(name="other.renames", handler=ignore),
+        ConsumerDecl(consumer="other.renames", types=("probe.thing.renamed",)),
+    ).outside
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        lambda: ConsumerSpec(name="other.renames"),
+        lambda: ConsumerSpec(name="other.renames", handler=ignore, outside=notice),
+    ],
+    ids=["neither", "both"],
+)
+def test_a_consumer_spec_has_exactly_one_handler(spec: Callable[[], ConsumerSpec]) -> None:
+    with pytest.raises(InvalidValueError, match="exactly one of handler and outside") as raised:
+        spec()
+    assert raised.value.code == "invalid_value"
+
+
+@pytest.mark.parametrize(
+    ("spec", "style", "message"),
+    [
+        (
+            ConsumerSpec(name="other.renames", outside=notice),
+            "inside",
+            r"other\.renames \(outside\) is not the declared other\.renames \(inside\)",
+        ),
+        (
+            ConsumerSpec(name="other.renames", handler=ignore),
+            "outside",
+            r"other\.renames \(inside\) is not the declared other\.renames \(outside\)",
+        ),
+    ],
+)
+def test_a_consumer_of_another_style_than_declared_is_refused(
+    spec: ConsumerSpec, style: Literal["inside", "outside"], message: str
+) -> None:
+    declared = ConsumerDecl(consumer="other.renames", types=("probe.thing.renamed",), style=style)
+    with pytest.raises(ConsumerMismatchError, match=message):
+        Consumer.of(spec, declared)
