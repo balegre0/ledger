@@ -210,7 +210,7 @@ async def test_a_call_its_guard_refuses_is_forbidden_with_the_guard_s_code(
         await call_unary(call, b"hello", rpc=RPC)
     assert (caught.value.status, caught.value.remote_code) == (
         grpc.StatusCode.UNAUTHENTICATED,
-        "signer_caller_unknown",
+        "grpc_caller_unknown",
     )
 
 

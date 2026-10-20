@@ -8,14 +8,15 @@ shorter than ``MIN_TOKEN_LENGTH`` or of other than visible ASCII characters, and
 previous one. The tokens are kept as SHA-256 digests only, and a presented token is compared with every one of
 them by ``hmac.compare_digest``: neither what is stored nor how long a comparison takes tells a token.
 
-``CallerGuard`` checks every call of a registered method before the method runs: a call that names no known
-caller ends ``UNAUTHENTICATED`` (``signer_caller_unknown``), one outside its caller's allowlist
-``PERMISSION_DENIED`` (``signer_method_not_allowed``); both are logged as ``grpc.caller_refused`` (the method
-and the code, the caller when known, never what was presented). A synchronous method is never served: grpc
-would run it on a thread, where the caller cannot be bound; a call to one fails as a defect of the service.
-The method runs with its caller bound (``current_caller``) and named in the logs with the method and the call
-id it was sent, inside a server span named after the method that continues the caller's trace (attributes:
-the method and the caller, nothing else).
+``CallerGuard`` checks every call of a registered method before the method runs and before its request is
+read (``_handlers``: the request is parsed only once the call is admitted): a call that names no known caller
+ends ``UNAUTHENTICATED`` (``grpc_caller_unknown``), one outside its caller's allowlist ``PERMISSION_DENIED``
+(``grpc_method_not_allowed``); both are logged as ``grpc.caller_refused`` (the method, the code, the peer's
+address, the caller when known, never what was presented; not rate limited) and traced in a trace of their
+own. A synchronous method is never served: grpc would run it on a thread, where the caller cannot be bound; a
+call to one fails as a defect of the service. An admitted method runs with its caller bound
+(``current_caller``) and named in the logs with the method and the call id it was sent, inside a server span
+named after the method that continues the caller's trace (attributes: the method and the caller only).
 """
 
 import hashlib
@@ -29,6 +30,7 @@ lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Generator,
 
 import grpc
 import structlog
+from opentelemetry.context import Context as TraceContext
 from opentelemetry.trace import SpanKind, Status, StatusCode
 lazy from opentelemetry.trace import Tracer
 lazy from pydantic import SecretStr
@@ -43,7 +45,7 @@ from ledger_platform.grpc.metadata import (
     metadata_value,
     trace_context_of,
 )
-lazy from ledger_platform.grpc._handlers import Context, CoroutineMethod, GeneratorMethod, SynchronousMethod
+lazy from ledger_platform.grpc._handlers import Context, CoroutineMethod, GeneratorMethod
 lazy from ledger_platform.grpc.metadata import Metadata
 
 MIN_TOKEN_LENGTH: Final = 32
@@ -61,7 +63,7 @@ _logger = structlog.stdlib.get_logger(__name__)
 class CallerUnknownError(UnauthenticatedError):
     """A call named no known caller: no token, a malformed one, or one no caller holds."""
 
-    code: ClassVar[str] = "signer_caller_unknown"
+    code: ClassVar[str] = "grpc_caller_unknown"
 
     def __init__(self) -> None:
         super().__init__("the caller is not known")
@@ -70,7 +72,7 @@ class CallerUnknownError(UnauthenticatedError):
 class MethodNotAllowedError(ForbiddenError):
     """A known caller called a method outside its allowlist."""
 
-    code: ClassVar[str] = "signer_method_not_allowed"
+    code: ClassVar[str] = "grpc_method_not_allowed"
 
     def __init__(self) -> None:
         super().__init__("the caller may not call this method")
@@ -242,18 +244,19 @@ class _Admission:
         self._parent = trace_context_of(metadata)
         self._tracer = tracer
 
-    def _admit(self) -> str:
-        """The caller, when it may make this call; otherwise the refusal, logged."""
-        if self._caller is not None and self._allowed:
-            return self._caller
+    def _refusal(self, context: Context) -> LedgerError:
+        """Why this call is refused, logged with who sent it (the peer's address), never what it presented.
+
+        Every refusal is a line, not rate limited: the port is reachable from the callers' pods only.
+        """
         refusal = CallerUnknownError() if self._caller is None else MethodNotAllowedError()
         known = {} if self._caller is None else {"caller": self._caller}
-        _logger.warning("grpc.caller_refused", rpc=self._rpc, code=refusal.code, **known)
-        raise refusal
+        _logger.warning("grpc.caller_refused", rpc=self._rpc, code=refusal.code, peer=context.peer(), **known)
+        return refusal
 
     @contextmanager
-    def _admitted(self) -> Generator[None]:
-        """The call's span, its caller admitted and bound, and its log fields, around the method.
+    def _traced(self, parent: TraceContext) -> Generator[None]:
+        """A server span of the call under ``parent``.
 
         An ``Exception`` marks the span failed with the error's type only (``tracing.Tracing.consuming``'s
         rule: spans leave the process, messages can quote data) and propagates unchanged.
@@ -263,46 +266,66 @@ class _Admission:
             attributes["ledger.caller"] = self._caller
         with self._tracer.start_as_current_span(
             self._rpc,
-            context=self._parent,
+            context=parent,
             kind=SpanKind.SERVER,
             attributes=attributes,
             record_exception=False,
             set_status_on_exception=False,
         ) as span:
             try:
-                caller = self._admit()
-                fields = {"rpc": self._rpc, "caller": caller}
-                if self._call_id is not None:
-                    fields["call_id"] = self._call_id
-                with calling_as(caller), structlog.contextvars.bound_contextvars(**fields):
-                    yield
+                yield
             except Exception as error:
                 span.set_status(Status(StatusCode.ERROR))
                 span.add_event(_EXCEPTION, {_EXCEPTION_TYPE: error_type(error)})
                 raise
 
-    def coroutine[Input](self, behavior: CoroutineMethod[Input]) -> CoroutineMethod[Input]:
-        async def admitted(request: Input, context: Context) -> object:
-            with self._admitted():
-                return await behavior(request, context)
+    @contextmanager
+    def _admitted(self, context: Context) -> Generator[None]:
+        """The call admitted, in its span, its caller bound and named in the logs; else its refusal, raised.
+
+        Only an admitted call continues its caller's trace: a refused one starts a trace of its own, so that
+        a caller nobody knows cannot attach spans to a trace it names.
+        """
+        caller = self._caller if self._allowed else None
+        if caller is None:
+            refusal = self._refusal(context)
+            with self._traced(TraceContext()):
+                raise refusal
+        else:
+            fields = {"rpc": self._rpc, "caller": caller}
+            if self._call_id is not None:
+                fields["call_id"] = self._call_id
+            with (
+                self._traced(self._parent),
+                calling_as(caller),
+                structlog.contextvars.bound_contextvars(**fields),
+            ):
+                yield
+
+    def coroutine[Raw, Input](
+        self, behavior: CoroutineMethod[Input], parse: Callable[[Raw], Input]
+    ) -> CoroutineMethod[Raw]:
+        async def admitted(request: Raw, context: Context) -> object:
+            with self._admitted(context):
+                return await behavior(parse(request), context)
 
         return admitted
 
-    def generator[Input](self, behavior: GeneratorMethod[Input]) -> GeneratorMethod[Input]:
-        async def admitted(request: Input, context: Context) -> AsyncGenerator[object]:
-            with self._admitted():
-                async with aclosing(behavior(request, context)) as responses:
+    def generator[Raw, Input](
+        self, behavior: GeneratorMethod[Input], parse: Callable[[Raw], Input]
+    ) -> GeneratorMethod[Raw]:
+        async def admitted(request: Raw, context: Context) -> AsyncGenerator[object]:
+            with self._admitted(context):
+                async with aclosing(behavior(parse(request), context)) as responses:
                     async for response in responses:
                         yield response
 
         return admitted
 
-    def synchronous[Input](self, behavior: SynchronousMethod[Input]) -> CoroutineMethod[Input]:
-        del behavior
-
-        async def refused(request: Input, context: Context) -> object:
-            del request, context
-            with self._admitted():
+    def synchronous(self) -> CoroutineMethod[object]:
+        async def refused(request: object, context: Context) -> object:
+            del request
+            with self._admitted(context):
                 raise SynchronousMethodError(self._rpc)
 
         return refused

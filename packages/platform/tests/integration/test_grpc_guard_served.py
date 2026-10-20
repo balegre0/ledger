@@ -1,7 +1,7 @@
 """The guard on a real server: a tiny generic service on port 0, no protos needed."""
 
 from typing import Final, final
-lazy from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
+lazy from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping
 
 import grpc
 import pytest
@@ -29,13 +29,18 @@ WATCH: Final = f"/{SERVICE}/Watch"
 UPLOAD: Final = f"/{SERVICE}/Upload"
 RELAY: Final = f"/{SERVICE}/Relay"
 BLOCKING: Final = f"/{SERVICE}/Blocking"
+BLOCKING_UPLOAD: Final = f"/{SERVICE}/BlockingUpload"
 LIMIT: Final = 1024
-"""The largest message the test server takes or sends."""
+"""The largest message the small server of ``test_messages_over_the_limit_are_refused`` takes or sends."""
+LARGE: Final = 4 * 1024 * 1024
+"""A body a caller nobody knows may send: received, never parsed."""
+BAD: Final = b"bad 4111111111111111"
+"""A body the test deserializer cannot read; what it raises quotes it, and must never reach the caller."""
 
 type Metadata = tuple[tuple[str, str], ...]
 type Context = grpc.aio.ServicerContext[bytes, bytes]
-type Call = Callable[[grpc.aio.Channel, Metadata], Awaitable[list[bytes]]]
-"""Calls one of the test methods with ``metadata``; what came back."""
+type Call = Callable[[grpc.aio.Channel, Metadata, bytes], Awaitable[list[bytes]]]
+"""Calls one of the test methods with ``metadata`` and a body; what came back."""
 
 
 @final
@@ -46,8 +51,23 @@ class Ran:
         self.count = 0
 
 
-def register_with(ran: Ran) -> Callable[[grpc.aio.Server], None]:
-    """Methods of every kind; each counts its run and answers with its caller's name."""
+@final
+class Parsed:
+    """How many request messages the test deserializer read: none, for a call that is refused."""
+
+    def __init__(self) -> None:
+        self.count = 0
+
+    def __call__(self, raw: bytes) -> bytes:
+        self.count += 1
+        if raw.startswith(b"bad"):
+            raise ValueError(raw.decode())
+        return raw
+
+
+def register_with(ran: Ran, parsed: Parsed) -> Callable[[grpc.aio.Server], None]:
+    """Methods of every kind, their requests read by ``parsed``; each counts its run and answers with its
+    caller's name."""
 
     async def sign(request: bytes, context: Context) -> bytes:
         del request, context
@@ -76,25 +96,33 @@ def register_with(ran: Ran) -> Callable[[grpc.aio.Server], None]:
         ran.count += 1
         return request
 
+    def blocking_upload(requests: Iterator[bytes], context: grpc.ServicerContext) -> bytes:
+        del context
+        ran.count += 1
+        return b"".join(requests)
+
     def register(server: grpc.aio.Server) -> None:
         handlers: dict[str, grpc.RpcMethodHandler[bytes, bytes]] = {
             "Sign": grpc.unary_unary_rpc_method_handler(
-                sign, request_deserializer=bytes, response_serializer=bytes
+                sign, request_deserializer=parsed, response_serializer=bytes
             ),
             "Import": grpc.unary_unary_rpc_method_handler(
-                sign, request_deserializer=bytes, response_serializer=bytes
+                sign, request_deserializer=parsed, response_serializer=bytes
             ),
             "Watch": grpc.unary_stream_rpc_method_handler(
-                watch, request_deserializer=bytes, response_serializer=bytes
+                watch, request_deserializer=parsed, response_serializer=bytes
             ),
             "Upload": grpc.stream_unary_rpc_method_handler(
-                upload, request_deserializer=bytes, response_serializer=bytes
+                upload, request_deserializer=parsed, response_serializer=bytes
             ),
             "Relay": grpc.stream_stream_rpc_method_handler(
-                relay, request_deserializer=bytes, response_serializer=bytes
+                relay, request_deserializer=parsed, response_serializer=bytes
             ),
             "Blocking": grpc.unary_unary_rpc_method_handler(
-                blocking, request_deserializer=bytes, response_serializer=bytes
+                blocking, request_deserializer=parsed, response_serializer=bytes
+            ),
+            "BlockingUpload": grpc.stream_unary_rpc_method_handler(
+                blocking_upload, request_deserializer=parsed, response_serializer=bytes
             ),
         }
         server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(SERVICE, handlers),))
@@ -109,7 +137,7 @@ def callers() -> CallerTokens:
             CallerPolicy(
                 name="worker",
                 tokens=(SecretStr(WORKER_TOKEN),),
-                methods=frozenset({SIGN, WATCH, UPLOAD, RELAY, BLOCKING}),
+                methods=frozenset({SIGN, WATCH, UPLOAD, RELAY, BLOCKING, BLOCKING_UPLOAD}),
             ),
         ]
     )
@@ -121,16 +149,21 @@ def ran() -> Ran:
 
 
 @pytest.fixture
+def parsed() -> Parsed:
+    return Parsed()
+
+
+@pytest.fixture
 async def channel(
-    ran: Ran, registry: CollectorRegistry, tracing: Tracing
+    ran: Ran, parsed: Parsed, registry: CollectorRegistry, tracing: Tracing
 ) -> AsyncGenerator[grpc.aio.Channel]:
     async with (
         serve_grpc(
             port=0,
-            register=register_with(ran),
+            register=register_with(ran, parsed),
             registry=registry,
             callers=callers(),
-            options=ServerOptions(tracer=tracing.tracer, max_message_bytes=LIMIT),
+            options=ServerOptions(tracer=tracing.tracer),
         ) as port,
         grpc.aio.insecure_channel(f"127.0.0.1:{port}") as opened,
     ):
@@ -145,24 +178,24 @@ def as_api() -> Metadata:
     return call_metadata(SecretStr(API_TOKEN), call_id="req_1")
 
 
-async def call_sign(channel: grpc.aio.Channel, metadata: Metadata) -> list[bytes]:
+async def call_sign(channel: grpc.aio.Channel, metadata: Metadata, body: bytes = b"doc") -> list[bytes]:
     method = channel.unary_unary(SIGN, request_serializer=bytes, response_deserializer=bytes)
-    return [await method(b"doc", metadata=metadata, timeout=TIMEOUT)]
+    return [await method(body, metadata=metadata, timeout=TIMEOUT)]
 
 
-async def call_watch(channel: grpc.aio.Channel, metadata: Metadata) -> list[bytes]:
+async def call_watch(channel: grpc.aio.Channel, metadata: Metadata, body: bytes = b"doc") -> list[bytes]:
     method = channel.unary_stream(WATCH, request_serializer=bytes, response_deserializer=bytes)
-    return [item async for item in method(b"doc", metadata=metadata, timeout=TIMEOUT)]
+    return [item async for item in method(body, metadata=metadata, timeout=TIMEOUT)]
 
 
-async def call_upload(channel: grpc.aio.Channel, metadata: Metadata) -> list[bytes]:
+async def call_upload(channel: grpc.aio.Channel, metadata: Metadata, body: bytes = b"doc") -> list[bytes]:
     method = channel.stream_unary(UPLOAD, request_serializer=bytes, response_deserializer=bytes)
-    return [await method(iter([b"a", b"b"]), metadata=metadata, timeout=TIMEOUT)]
+    return [await method(iter([body, b"b"]), metadata=metadata, timeout=TIMEOUT)]
 
 
-async def call_relay(channel: grpc.aio.Channel, metadata: Metadata) -> list[bytes]:
+async def call_relay(channel: grpc.aio.Channel, metadata: Metadata, body: bytes = b"doc") -> list[bytes]:
     method = channel.stream_stream(RELAY, request_serializer=bytes, response_deserializer=bytes)
-    return [item async for item in method(iter([b"a"]), metadata=metadata, timeout=TIMEOUT)]
+    return [item async for item in method(iter([body]), metadata=metadata, timeout=TIMEOUT)]
 
 
 CALLS: Final[Mapping[str, Call]] = {
@@ -174,9 +207,11 @@ CALLS: Final[Mapping[str, Call]] = {
 EVERY_KIND = pytest.mark.parametrize("call", CALLS.values(), ids=CALLS.keys())
 
 
-async def failure(call: Call, channel: grpc.aio.Channel, metadata: Metadata) -> grpc.aio.AioRpcError:
+async def failure(
+    call: Call, channel: grpc.aio.Channel, metadata: Metadata, body: bytes = b"doc"
+) -> grpc.aio.AioRpcError:
     with pytest.raises(grpc.aio.AioRpcError) as caught:
-        await call(channel, metadata)
+        await call(channel, metadata, body)
     return caught.value
 
 
@@ -199,31 +234,75 @@ NOBODY: Final[Mapping[str, Metadata]] = {
 
 @EVERY_KIND
 @pytest.mark.parametrize("metadata", NOBODY.values(), ids=NOBODY.keys())
-async def test_no_token_is_unauthenticated_before_the_method_runs(
-    call: Call, metadata: Metadata, channel: grpc.aio.Channel, ran: Ran
+async def test_no_token_is_unauthenticated_before_the_request_is_read(
+    call: Call, metadata: Metadata, channel: grpc.aio.Channel, ran: Ran, parsed: Parsed
 ) -> None:
     with capture_logs():
         error = await failure(call, channel, metadata)
     assert (error.code(), error.details(), code_of(error)) == (
         grpc.StatusCode.UNAUTHENTICATED,
         "the caller is not known",
-        "signer_caller_unknown",
+        "grpc_caller_unknown",
     )
-    assert ran.count == 0
+    assert (ran.count, parsed.count) == (0, 0)
 
 
+def timed(registry: CollectorRegistry, code: str) -> list[str]:
+    """The test methods with a call timed under ``code``."""
+    return [rpc for rpc in (SIGN, WATCH, UPLOAD, RELAY) if duration_count(registry, rpc, code)]
+
+
+@pytest.mark.parametrize("call", [call_sign, call_watch], ids=["unary-unary", "unary-stream"])
+async def test_a_large_body_of_nobody_is_never_parsed(
+    call: Call, channel: grpc.aio.Channel, parsed: Parsed, registry: CollectorRegistry
+) -> None:
+    """Received whole, never read. (A streaming request is refused before its first message is read, as the
+    other refusals show; a client still sending 4 MB then sees its own send fail, a race of no interest.)"""
+    with capture_logs():
+        error = await failure(call, channel, (), b"x" * LARGE)
+    assert error.code() == grpc.StatusCode.UNAUTHENTICATED
+    assert parsed.count == 0
+    assert len(timed(registry, "UNAUTHENTICATED")) == 1
+
+
+@EVERY_KIND
 async def test_a_method_outside_the_allowlist_is_permission_denied(
-    channel: grpc.aio.Channel, ran: Ran, registry: CollectorRegistry
+    call: Call, channel: grpc.aio.Channel, ran: Ran, parsed: Parsed, registry: CollectorRegistry
 ) -> None:
     with capture_logs():
-        error = await failure(call_sign, channel, as_api())
+        error = await failure(call, channel, as_api())
     assert (error.code(), error.details(), code_of(error)) == (
         grpc.StatusCode.PERMISSION_DENIED,
         "the caller may not call this method",
-        "signer_method_not_allowed",
+        "grpc_method_not_allowed",
     )
-    assert ran.count == 0
-    assert duration_count(registry, SIGN, "PERMISSION_DENIED") == 1
+    assert (ran.count, parsed.count) == (0, 0)
+    assert len(timed(registry, "PERMISSION_DENIED")) == 1
+
+
+@EVERY_KIND
+async def test_a_body_its_caller_sent_that_cannot_be_read_is_invalid(
+    call: Call, channel: grpc.aio.Channel, parsed: Parsed, registry: CollectorRegistry
+) -> None:
+    """grpc's own answer is ``UNKNOWN`` with the deserializer's exception, which can quote the body."""
+    with capture_logs() as logs:
+        error = await failure(call, channel, as_worker(), BAD)
+    assert (error.code(), error.details(), code_of(error)) == (
+        grpc.StatusCode.INVALID_ARGUMENT,
+        "the request could not be read",
+        "grpc_request_malformed",
+    )
+    assert BAD.decode() not in str(error)
+    assert (parsed.count, logs) == (1, [])
+    assert len(timed(registry, "INVALID_ARGUMENT")) == 1
+
+
+@EVERY_KIND
+async def test_an_admitted_request_is_read_once_per_message(
+    call: Call, channel: grpc.aio.Channel, parsed: Parsed
+) -> None:
+    await call(channel, as_worker(), b"doc")
+    assert parsed.count == (2 if call is call_upload else 1)
 
 
 async def test_refusals_are_timed_like_any_call(
@@ -234,22 +313,26 @@ async def test_refusals_are_timed_like_any_call(
     assert duration_count(registry, SIGN, "UNAUTHENTICATED") == 1
 
 
-async def test_refusals_are_logged_by_rpc_and_code_never_with_the_token(channel: grpc.aio.Channel) -> None:
+async def test_refusals_are_logged_by_rpc_code_and_peer_never_with_the_token(
+    channel: grpc.aio.Channel,
+) -> None:
+    """Not rate limited: every refusal is a line (the port is reachable only from the callers' pods)."""
     with capture_logs() as logs:
         await failure(call_sign, channel, (("authorization", f"Bearer {UNKNOWN_TOKEN}"),))
         await failure(call_sign, channel, as_api())
+    assert all(isinstance(entry.pop("peer"), str) for entry in logs)  # the client's address, as grpc names it
     assert logs == [
         {
             "event": "grpc.caller_refused",
             "log_level": "warning",
             "rpc": SIGN,
-            "code": "signer_caller_unknown",
+            "code": "grpc_caller_unknown",
         },
         {
             "event": "grpc.caller_refused",
             "log_level": "warning",
             "rpc": SIGN,
-            "code": "signer_method_not_allowed",
+            "code": "grpc_method_not_allowed",
             "caller": "api",
         },
     ]
@@ -259,7 +342,7 @@ async def test_refusals_are_logged_by_rpc_and_code_never_with_the_token(channel:
 
 @EVERY_KIND
 async def test_the_caller_is_bound_inside_the_method(call: Call, channel: grpc.aio.Channel, ran: Ran) -> None:
-    replies = await call(channel, as_worker())
+    replies = await call(channel, as_worker(), b"doc")
     assert replies[-1].endswith(b"worker")
     assert ran.count == 1
 
@@ -295,6 +378,17 @@ async def test_a_synchronous_method_is_refused_even_to_its_caller(
     assert duration_count(registry, BLOCKING, "INTERNAL") == 1
 
 
+async def test_a_synchronous_method_that_streams_its_requests_is_refused_too(
+    channel: grpc.aio.Channel, ran: Ran, parsed: Parsed
+) -> None:
+    method = channel.stream_unary(BLOCKING_UPLOAD, request_serializer=bytes, response_deserializer=bytes)
+    with capture_logs() as logs, pytest.raises(grpc.aio.AioRpcError) as caught:
+        await method(iter([b"doc"]), metadata=as_worker(), timeout=TIMEOUT)
+    assert (caught.value.code(), code_of(caught.value)) == (grpc.StatusCode.INTERNAL, "internal")
+    assert (ran.count, parsed.count) == (0, 0)
+    assert [entry["code"] for entry in logs] == ["grpc_method_synchronous"]
+
+
 async def test_a_synchronous_method_still_refuses_an_unknown_caller_first(channel: grpc.aio.Channel) -> None:
     method = channel.unary_unary(BLOCKING, request_serializer=bytes, response_deserializer=bytes)
     with capture_logs(), pytest.raises(grpc.aio.AioRpcError) as caught:
@@ -311,15 +405,26 @@ async def test_an_unregistered_method_is_unimplemented_and_untimed(
     with pytest.raises(grpc.aio.AioRpcError) as caught:
         await missing(b"", timeout=TIMEOUT)
     assert caught.value.code() == grpc.StatusCode.UNIMPLEMENTED
-    assert duration_count(registry, f"/{SERVICE}/Nothing", "UNAUTHENTICATED") is None
+    rpcs = {sample.labels.get("rpc") for metric in registry.collect() for sample in metric.samples}
+    assert f"/{SERVICE}/Nothing" not in rpcs
 
 
-async def test_messages_over_the_limit_are_refused(channel: grpc.aio.Channel, ran: Ran) -> None:
-    method = channel.unary_unary(SIGN, request_serializer=bytes, response_deserializer=bytes)
-    with pytest.raises(grpc.aio.AioRpcError) as caught:
-        await method(b"x" * (LIMIT + 1), metadata=as_worker(), timeout=TIMEOUT)
+async def test_messages_over_the_limit_are_refused(ran: Ran, parsed: Parsed) -> None:
+    async with (
+        serve_grpc(
+            port=0,
+            register=register_with(ran, parsed),
+            registry=CollectorRegistry(),
+            callers=callers(),
+            options=ServerOptions(max_message_bytes=LIMIT),
+        ) as port,
+        grpc.aio.insecure_channel(f"127.0.0.1:{port}") as small,
+    ):
+        method = small.unary_unary(SIGN, request_serializer=bytes, response_deserializer=bytes)
+        with pytest.raises(grpc.aio.AioRpcError) as caught:
+            await method(b"x" * (LIMIT + 1), metadata=as_worker(), timeout=TIMEOUT)
     assert caught.value.code() == grpc.StatusCode.RESOURCE_EXHAUSTED
-    assert ran.count == 0
+    assert (ran.count, parsed.count) == (0, 0)
 
 
 async def test_the_trace_continues_from_the_caller(
@@ -349,14 +454,30 @@ async def test_a_call_without_a_trace_starts_one(
     assert all(span.parent is None for span in spans)
 
 
-async def test_a_refused_call_is_traced_as_failed_without_a_caller(
-    channel: grpc.aio.Channel, exporter: InMemorySpanExporter
+async def test_a_refused_call_starts_a_trace_of_its_own_traced_as_failed_without_a_caller(
+    channel: grpc.aio.Channel, tracing: Tracing, exporter: InMemorySpanExporter
 ) -> None:
+    """A caller nobody knows does not get to join a trace: it could name any."""
+    with tracing.tracer.start_as_current_span("caller"):
+        sent = call_metadata(SecretStr(UNKNOWN_TOKEN), call_id="req_1")
     with capture_logs():
-        await failure(call_sign, channel, ())
+        await failure(call_sign, channel, sent)
     (served,) = [span for span in exporter.get_finished_spans() if span.name == SIGN]
+    assert served.parent is None
     assert dict(served.attributes or {}) == {"ledger.rpc": SIGN}
     assert served.status.status_code is StatusCode.ERROR
     assert [(event.name, dict(event.attributes or {})) for event in served.events] == [
         ("exception", {"exception.type": "ledger_platform.grpc.guard.CallerUnknownError"})
     ]
+
+
+async def test_a_caller_refused_its_method_does_not_join_the_trace_either(
+    channel: grpc.aio.Channel, tracing: Tracing, exporter: InMemorySpanExporter
+) -> None:
+    with tracing.tracer.start_as_current_span("caller"):
+        sent = as_api()
+    with capture_logs():
+        await failure(call_sign, channel, sent)
+    (served,) = [span for span in exporter.get_finished_spans() if span.name == SIGN]
+    assert served.parent is None
+    assert dict(served.attributes or {}) == {"ledger.rpc": SIGN, "ledger.caller": "api"}

@@ -19,7 +19,9 @@ the stream hanging until its deadline, grpc 1.84); ``serve_grpc`` serves none, i
 (``grpc.guard``) refuses them.
 
 ``serve_grpc`` places the caller guard inside ``GuardInterceptor``: a call its caller may not make is answered
-and timed like any other failed call, before its method runs.
+and timed like any other failed call, before its method runs and before its request is read. A request is
+read inside the guard (``_handlers``), so one that cannot be read is ``INVALID_ARGUMENT``
+(``grpc_request_malformed``), answered and timed like any error, never grpc's ``UNKNOWN`` with the text.
 """
 
 import asyncio
@@ -43,7 +45,7 @@ from ledger_platform.config.options import InvalidOptionError, require_seconds
 from ledger_platform.grpc._handlers import rewrapped
 from ledger_platform.grpc.client import ERROR_CODE_KEY
 from ledger_platform.grpc.guard import CallerGuard
-lazy from ledger_platform.grpc._handlers import Context, CoroutineMethod, GeneratorMethod, SynchronousMethod
+lazy from ledger_platform.grpc._handlers import Context, CoroutineMethod, GeneratorMethod
 lazy from ledger_platform.grpc.guard import CallerTokens
 
 _COMPONENT: Final = "gRPC"
@@ -161,7 +163,10 @@ class _Call:
 
 @final
 class _Guarded:
-    """Wraps the asynchronous methods of a call to ``rpc`` in a ``_Call``; leaves a synchronous one alone."""
+    """Wraps the asynchronous methods of a call to ``rpc`` in a ``_Call``; leaves a synchronous one alone.
+
+    The request is read inside the ``_Call``: one that cannot be read is answered and timed like any error.
+    """
 
     __slots__ = ("_duration", "_rpc")
 
@@ -169,29 +174,35 @@ class _Guarded:
         self._rpc = rpc
         self._duration = duration
 
-    def coroutine[Input](self, behavior: CoroutineMethod[Input]) -> CoroutineMethod[Input]:
+    def coroutine[Raw, Input](
+        self, behavior: CoroutineMethod[Input], parse: Callable[[Raw], Input]
+    ) -> CoroutineMethod[Raw]:
         rpc, duration = self._rpc, self._duration
 
-        async def guarded(request: Input, context: Context) -> object:
+        async def guarded(request: Raw, context: Context) -> object:
             async with _Call(context, rpc, duration):
-                return await behavior(request, context)
+                return await behavior(parse(request), context)
 
         return guarded
 
-    def generator[Input](self, behavior: GeneratorMethod[Input]) -> GeneratorMethod[Input]:
+    def generator[Raw, Input](
+        self, behavior: GeneratorMethod[Input], parse: Callable[[Raw], Input]
+    ) -> GeneratorMethod[Raw]:
         rpc, duration = self._rpc, self._duration
 
-        async def guarded(request: Input, context: Context) -> AsyncGenerator[object]:
+        async def guarded(request: Raw, context: Context) -> AsyncGenerator[object]:
             # When the call ends or fails, the method's generator is closed with this one, not left to the
             # garbage collector. A call abandoned by a client that left is finalized by asyncio.
-            async with _Call(context, rpc, duration), aclosing(behavior(request, context)) as responses:
+            async with (
+                _Call(context, rpc, duration),
+                aclosing(behavior(parse(request), context)) as responses,
+            ):
                 async for response in responses:
                     yield response
 
         return guarded
 
-    def synchronous[Input](self, behavior: SynchronousMethod[Input]) -> CoroutineMethod[Input] | None:
-        del behavior
+    def synchronous(self) -> CoroutineMethod[object] | None:
         return None
 
 

@@ -221,12 +221,12 @@ def test_the_refusals_have_stable_codes_and_kinds() -> None:
     unknown, denied = CallerUnknownError(), MethodNotAllowedError()
     assert (unknown.kind, unknown.code, str(unknown)) == (
         ErrorKind.UNAUTHENTICATED,
-        "signer_caller_unknown",
+        "grpc_caller_unknown",
         "the caller is not known",
     )
     assert (denied.kind, denied.code, str(denied)) == (
         ErrorKind.FORBIDDEN,
-        "signer_method_not_allowed",
+        "grpc_method_not_allowed",
         "the caller may not call this method",
     )
 

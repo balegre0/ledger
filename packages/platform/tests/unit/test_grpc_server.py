@@ -695,3 +695,57 @@ def test_a_message_limit_outside_its_range_is_refused_at_once(limit: int) -> Non
 @pytest.mark.parametrize("limit", [1, MAX_MESSAGE_BYTES], ids=["least", "most"])
 def test_a_message_limit_within_its_range_is_accepted(limit: int) -> None:
     assert ServerOptions(max_message_bytes=limit).max_message_bytes == limit
+
+
+def refuse_to_read(raw: bytes) -> bytes:
+    """A deserializer that cannot read what it is given, and says so quoting it."""
+    raise ValueError(raw.decode())
+
+
+@pytest.fixture
+async def unguarded_port(registry: CollectorRegistry) -> AsyncGenerator[int]:
+    """A server with ``GuardInterceptor`` alone, whose methods cannot read their requests."""
+    server = grpc.aio.server(interceptors=(GuardInterceptor(registry),))
+    serve_methods(
+        server,
+        "test.Echo",
+        Say=grpc.unary_unary_rpc_method_handler(
+            say, request_deserializer=refuse_to_read, response_serializer=bytes
+        ),
+    )
+    serve_methods(
+        server,
+        "test.Collect",
+        Join=grpc.stream_unary_rpc_method_handler(
+            join, request_deserializer=refuse_to_read, response_serializer=bytes
+        ),
+    )
+    bound = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    try:
+        yield bound
+    finally:
+        await server.stop(None)
+
+
+@pytest.mark.parametrize("call", [call_unary, call_stream_unary], ids=["unary-unary", "stream-unary"])
+async def test_a_body_that_cannot_be_read_is_invalid_even_without_the_caller_guard(
+    call: Call, unguarded_port: int, registry: CollectorRegistry
+) -> None:
+    """``GuardInterceptor`` reads the request itself: grpc would answer ``UNKNOWN`` with the exception."""
+    with capture_logs() as logs:
+        error = await failure_of(call, unguarded_port, SECRET.encode())
+    assert (error.code(), error.details(), trailers(error)[ERROR_CODE_KEY]) == (
+        grpc.StatusCode.INVALID_ARGUMENT,
+        "the request could not be read",
+        "grpc_request_malformed",
+    )
+    assert SECRET not in str(error)
+    assert logs == []
+    measured = [
+        sample.labels["code"]
+        for metric in registry.collect()
+        for sample in metric.samples
+        if sample.name == "ledger_grpc_request_duration_seconds_count"
+    ]
+    assert measured == ["INVALID_ARGUMENT"]
