@@ -20,6 +20,7 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     IncomeType,
     Line,
     PaymentType,
+    WithholdingRole,
 )
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.samples import (
@@ -373,3 +374,14 @@ def test_the_summary_writes_what_its_format_holds_of_a_richer_consumer_invoice()
     assert DO_SCHEMAS.violations(Format.RFCE, summary, unsigned=True) == ()
     assert texts(summary, "Encabezado/Comprador/IdentificadorExtranjero") == ("P1234",)
     assert b"1 MAIN ST" not in summary
+
+
+def test_a_perceiving_purchase_writes_its_totals_as_perceived() -> None:
+    document = _written(replace(purchase(withholdings=True), withholding_role=WithholdingRole.PERCEPTION))
+    assert texts(
+        document,
+        f"{_ITEM}[1]/Retencion/IndicadorAgenteRetencionoPercepcion",
+        "Encabezado/Totales/TotalITBISPercepcion",
+        "Encabezado/Totales/TotalISRPercepcion",
+        "Encabezado/Totales/TotalITBISRetenido",
+    ) == ("2", "900.00", "500.00", None)

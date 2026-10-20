@@ -200,6 +200,10 @@ self-billing a purchase or a payment abroad withholds. The other types declare t
 never written with it: a seller does not state what its buyer withholds."""
 ITBIS_WITHHOLDING_TYPES: Final = frozenset({EcfType.PURCHASES})
 """The withholding types that state ITBIS withheld (``MontoITBISRetenido``): a 47 has no ITBIS."""
+PERCEPTION_TYPES: Final = frozenset({EcfType.PURCHASES})
+"""The withholding types whose totals can say what was perceived (``TotalITBISPercepcion``,
+``TotalISRPercepcion``). A 47's schema lists ``2`` (percepción) for the indicator but has no perception total,
+so a payment abroad is withheld only."""
 ISR_REQUIRED_TYPES: Final = frozenset({EcfType.FOREIGN_PAYMENTS})
 """The types whose every line states the ISR withheld (``MontoISRRetenido``, which the 47 requires)."""
 FOREIGN_CURRENCIES: Final = frozenset(
@@ -227,6 +231,7 @@ class Rule(StrEnum):
     DISCOUNT_PRECISION = "discount_precision"
     DISCOUNT_TOO_LARGE = "discount_too_large"
     WITHHELD_TOO_LARGE = "withheld_too_large"
+    WITHHELD_PRECISION = "withheld_precision"
 
 
 @final
@@ -258,7 +263,7 @@ _TOO_LARGE_AMOUNT: Final = Violation(
 )
 _DISCOUNT_ABOVE_GROSS: Final = Violation(Rule.DISCOUNT_TOO_LARGE, "is at most quantity x unit price")
 ISR_ABOVE_AMOUNT: Final = Violation(
-    Rule.WITHHELD_TOO_LARGE, "is at most the line's amount (quantity x unit price less its discount)"
+    Rule.WITHHELD_TOO_LARGE, "is at most the line's amount (quantity x unit price less its discount, rounded)"
 )
 ITBIS_ABOVE_TAX: Final = Violation(Rule.WITHHELD_TOO_LARGE, "is at most the line's ITBIS")
 
@@ -346,6 +351,11 @@ class _ItbisWithheldNotAllowedError(DraftInvalidError):
 class _IsrWithheldRequiredError(DraftInvalidError):
     def __init__(self) -> None:
         super().__init__("line.isr_withheld", "is given on every line of a payment abroad (47)")
+
+
+class _PerceptionNotAllowedError(DraftInvalidError):
+    def __init__(self) -> None:
+        super().__init__("withholding_role", "is retention (1) on every type but a purchase (41)")
 
 
 class _IsrAboveAmountError(DraftInvalidError):
@@ -451,7 +461,7 @@ def line_violations(
 
 def withheld_violation(value: Decimal) -> Violation | None:
     """The rule ``value`` breaks as an amount withheld; ``None`` if none."""
-    return number_violation(value, places=WITHHELD_PLACES, precision=Rule.NUMBER_INVALID, positive=False)
+    return number_violation(value, places=WITHHELD_PLACES, precision=Rule.WITHHELD_PRECISION, positive=False)
 
 
 def _text(field_name: str, value: str, limit: int) -> None:
@@ -558,7 +568,7 @@ class Line:
             broken = None if amount is None else withheld_violation(amount)
             if broken is not None:
                 raise DraftInvalidError(field_name, broken.requirement)
-        if self.isr_withheld is not None and self.isr_withheld > self.amount:
+        if self.isr_withheld is not None and self.isr_withheld > round_amount(self.amount):
             raise _IsrAboveAmountError
 
     @property
@@ -636,6 +646,8 @@ class EcfDraft:
             raise _WithholdingNotAllowedError
         if ecf_type in ISR_REQUIRED_TYPES and any(line.isr_withheld is None for line in self.lines):
             raise _IsrWithheldRequiredError
+        if self.withholding_role is WithholdingRole.PERCEPTION and ecf_type not in PERCEPTION_TYPES:
+            raise _PerceptionNotAllowedError
         if ecf_type not in ITBIS_WITHHOLDING_TYPES and any(
             line.itbis_withheld is not None for line in self.lines
         ):

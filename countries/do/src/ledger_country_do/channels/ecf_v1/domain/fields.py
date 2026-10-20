@@ -10,10 +10,14 @@ amounts per line (``withholdings``). Codes are text, as every ``CODE`` field.
 
 Where a line's withholdings live (v2-M3b Task 8's decision): in the document's ``fiscal.do.withholdings``, an
 object keyed by the line's index (``"0"`` for ``lines.0``, as every path a client reads), each value
-``{"itbis": "<amount>", "isr": "<amount>"}`` (either optional, amounts as decimal text of at most two places,
-in the document's currency like every amount of it). Not a line-level field: the kit's ``FiscalLine`` and
-invoicing's lines carry no country fields, and adding them would change two contracts for one channel's
-need; a document-level object needs neither and is validated here like every channel field.
+``{"itbis": "<amount>", "isr": "<amount>"}`` (either optional, amounts as decimal text, in the document's
+currency like every amount of it; their size and precision are objected to by the mapping, at
+``fiscal.do.withholdings.<index>.itbis`` or ``.isr``). Keyed by index, it is replaced together with the
+lines: a client that reorders or removes lines sends the withholdings again. The kernel's ``FieldDef`` has
+no room for a shape, so this docstring and the field's requirement text are where it is told. Not a
+line-level field: the kit's ``FiscalLine`` and invoicing's lines carry no country fields, and adding them
+would change two contracts for one channel's need; a document-level object needs neither and is validated
+here like every channel field.
 
 ``read_fields`` reads them with the regime's own (``ecf_type``, ``replaces_ncf``): each value it cannot
 take is ``do_ecf_field_invalid``, each key neither declares ``do_ecf_field_unknown``; an objection names
@@ -33,7 +37,6 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     ModificationCode,
     PaymentType,
     WithholdingRole,
-    withheld_violation,
 )
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
 from ledger_country_do.regime import REGIME
@@ -48,7 +51,8 @@ _ENGLISH: Final = Locale("en")
 _DATE: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
 _KEY: Final = re.compile(r"[a-z][a-z0-9_]{0,63}", re.ASCII)
 _INDEX: Final = re.compile(r"0|[1-9][0-9]{0,4}", re.ASCII)
-_AMOUNT: Final = re.compile(r"[0-9]{1,16}(\.[0-9]{1,2})?", re.ASCII)
+_AMOUNT: Final = re.compile(r"[0-9]{1,32}(\.[0-9]{1,32})?", re.ASCII)
+"""An amount as decimal text; its size and precision are DGII's rules, objected to by the mapping."""
 
 INCOME_TYPE: Final = FieldDef(
     name="income_type",
@@ -128,8 +132,7 @@ def _code[T](value: object, choices: Mapping[str, T]) -> T | None:
 def _amount(value: object) -> Decimal | None:
     if not isinstance(value, str) or _AMOUNT.fullmatch(value) is None:
         return None
-    amount = Decimal(value)
-    return None if withheld_violation(amount) is not None else amount
+    return Decimal(value)
 
 
 def _withholding(value: FieldValue) -> Withholding | None:
@@ -180,7 +183,7 @@ _REQUIREMENTS: Final[Mapping[str, str]] = {
     WITHHOLDING_ROLE.name: "is a withholding role, 1 (retention) or 2 (perception), as text",
     WITHHOLDINGS.name: (
         "is an object keyed by line index (0, 1, ...), each value an object of itbis and isr, "
-        "each an amount as text of at most 16 integer digits and 2 decimals"
+        "each an amount as decimal text"
     ),
 }
 """What each field the regime or the channel declares must be."""

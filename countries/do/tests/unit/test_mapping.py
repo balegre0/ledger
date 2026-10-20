@@ -685,14 +685,19 @@ def test_a_purchase_s_withholdings_reach_its_e_cf_lines() -> None:
     ("withholdings", "expected"),
     [
         ({"2": {"isr": "1.00"}}, [("do_ecf_field_invalid", "fiscal.do.withholdings.2")]),
-        ({"0": {"itbis": "900.01"}}, [("do_ecf_field_invalid", "fiscal.do.withholdings.0.itbis")]),
-        ({"1": {"itbis": "0.01"}}, [("do_ecf_field_invalid", "fiscal.do.withholdings.1.itbis")]),
-        ({"0": {"isr": "5000.01"}}, [("do_ecf_field_invalid", "fiscal.do.withholdings.0.isr")]),
+        ({"0": {"itbis": "900.01"}}, [("do_ecf_withheld_too_large", "fiscal.do.withholdings.0.itbis")]),
+        ({"1": {"itbis": "0.01"}}, [("do_ecf_withheld_too_large", "fiscal.do.withholdings.1.itbis")]),
+        ({"0": {"isr": "5000.01"}}, [("do_ecf_withheld_too_large", "fiscal.do.withholdings.0.isr")]),
+        ({"0": {"isr": "1.001"}}, [("do_ecf_withheld_precision", "fiscal.do.withholdings.0.isr")]),
+        (
+            {"0": {"itbis": "10000000000000000"}},
+            [("do_ecf_amount_too_large", "fiscal.do.withholdings.0.itbis")],
+        ),
         (
             {"1": {"isr": "340.01"}, "0": {"itbis": "1000"}},
             [
-                ("do_ecf_field_invalid", "fiscal.do.withholdings.0.itbis"),
-                ("do_ecf_field_invalid", "fiscal.do.withholdings.1.isr"),
+                ("do_ecf_withheld_too_large", "fiscal.do.withholdings.0.itbis"),
+                ("do_ecf_withheld_too_large", "fiscal.do.withholdings.1.isr"),
             ],
         ),
     ],
@@ -709,6 +714,43 @@ def test_a_payment_abroad_withholds_isr_on_every_line_and_no_itbis() -> None:
     assert found(_abroad({"0": {"itbis": "1.00", "isr": "270.00"}})) == [
         ("do_ecf_field_invalid", "fiscal.do.withholdings.0.itbis")
     ]
+
+
+def test_a_payment_abroad_is_withheld_never_perceived() -> None:
+    perceived = fiscal_draft(
+        _CONSULTANCY,
+        direction=PURCHASE,
+        counterparty=PAYEE,
+        fields={"ecf_type": "47", "withholdings": {"0": {"isr": "270.00"}}, "withholding_role": "2"},
+    )
+    assert found(perceived) == [("do_ecf_field_invalid", "fiscal.do.withholding_role")]
+
+
+def test_isr_is_held_to_the_line_s_rounded_amount_by_the_objection_and_the_e_cf_alike() -> None:
+    odd = Priced(unit_price=D("10.005"), category=EXEMPT, description="CONSULTORIA")
+    draft = fiscal_draft(
+        odd,
+        direction=PURCHASE,
+        counterparty=PAYEE,
+        fields={"ecf_type": "47", "withholdings": {"0": {"isr": "10.01"}}},
+    )
+    assert found(draft) == []
+    drafted = ecf_draft(
+        draft, number=Encf(EcfType.FOREIGN_PAYMENTS, 1), accepted=NONE_ACCEPTED, expires_on=EXPIRES_ON
+    )
+    assert drafted.lines[0].isr_withheld == D("10.01")
+
+
+def test_a_foreign_line_whose_pesos_drift_beyond_dgii_s_tolerance_is_objected() -> None:
+    screws = Priced(unit_price=D("0.0001"), quantity=D(100000), category=EXEMPT, description="TORNILLO")
+    draft = fiscal_draft(screws, currency=USD, exchange_rate=D("58.7512"), counterparty=None)
+    assert found(draft) == [("do_ecf_conversion_inexact", "lines.0.unit_price")]
+    fine = Priced(unit_price=D("10.0050"), category=EXEMPT, description="TORNILLO")
+    assert found(fiscal_draft(fine, currency=USD, exchange_rate=D("58.7512"), counterparty=None)) == []
+    imprecise = Priced(unit_price=D("0.0001"), quantity=D("100000.001"), category=EXEMPT)
+    assert found(fiscal_draft(imprecise, currency=USD, exchange_rate=D("58.7512"), counterparty=None)) == [
+        ("do_ecf_quantity_precision", "lines.0.quantity")
+    ]  # a line objected to already is not converted
 
 
 @pytest.mark.parametrize("ecf_type", ["31", "43"])

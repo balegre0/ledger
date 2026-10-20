@@ -14,8 +14,9 @@ What is written:
   ``IndicadorMontoGravado``, with taxed lines), the income type (sales), the payment type and due date.
 - ``Emisor``; ``Comprador`` (written whenever the type requires it, empty for an anonymous buyer as F4
   says, otherwise only when the buyer gives something): RNC, foreign identifier, name, address.
-- ``Totales`` in pesos, with the withheld totals of a purchase; ``OtraMoneda`` for another currency: the
-  currency, the exchange rate and the same totals in it.
+- ``Totales`` in pesos, with what a purchase's lines withhold (as perceived when its company perceives:
+  only a 41's schema has perception totals); ``OtraMoneda`` for another currency: the currency, the exchange
+  rate and the document's totals in it.
 - ``Item`` per line: its billing, its ``Retencion`` (purchases and payments abroad: the company's role and
   what it withholds, in pesos), name, kind, quantity, unit price and discount in pesos, the line in its own
   currency (``OtraMonedaDetalle``), its amount in pesos.
@@ -35,6 +36,7 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     TAXED,
     WITHHOLDING_TYPES,
     BillingIndicator,
+    WithholdingRole,
 )
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
 from ledger_country_do.channels.ecf_v1.domain.notation import (
@@ -89,6 +91,7 @@ _RATE_TAGS: Final = {
 }
 _PRICES_EXCLUDE_ITBIS: Final = "0"
 _LATE: Final = {True: "1", False: "0"}
+_WITHHELD_TOTALS: Final = ("totalitbisretenido", "totalisrretencion")
 
 
 def _identification(header: Node, draft: EcfDraft) -> None:
@@ -127,8 +130,12 @@ def write_buyer(header: Node, buyer: Buyer, *, required: bool) -> None:
     buying.text("direccioncomprador", buyer.address)
 
 
-def write_totals(header: Node, totals: Totals, *, rates: bool) -> None:
-    """``Totales``: bases, (with ``rates``) the rates, ITBIS per rate, exempt amount, total, withheld."""
+def write_totals(header: Node, totals: Totals, *, rates: bool, perceived: bool = False) -> None:
+    """``Totales``: bases, (with ``rates``) the rates, ITBIS per rate, exempt amount, total, withheld.
+
+    What the lines withhold is written as withheld, or (``perceived``: a 41 whose company perceives) as
+    perceived.
+    """
     summed = header.child("totales")
     summed.amount("montogravadototal", totals.taxed_total)
     for indicator in TAXED:
@@ -146,8 +153,9 @@ def write_totals(header: Node, totals: Totals, *, rates: bool) -> None:
         group = totals.group(indicator)
         summed.amount(f"totalitbis{_RATE_TAGS[indicator]}", None if group is None else group.itbis)
     summed.amount("montototal", totals.total)
-    summed.amount("totalitbisretenido", totals.itbis_withheld)
-    summed.amount("totalisrretencion", totals.isr_withheld)
+    withheld = ("totalitbispercepcion", "totalisrpercepcion") if perceived else _WITHHELD_TOTALS
+    summed.amount(withheld[0], totals.itbis_withheld)
+    summed.amount(withheld[1], totals.isr_withheld)
 
 
 def _other_currency(header: Node, draft: EcfDraft, totals: Totals) -> None:
@@ -220,7 +228,7 @@ def render(draft: EcfDraft, totals: Totals, *, signed_at: datetime) -> bytes:
     _identification(header, draft)
     _issuer(header, draft)
     write_buyer(header, draft.buyer, required=ecf_type in BUYER_REQUIRED_TYPES)
-    write_totals(header, totals, rates=True)
+    write_totals(header, totals, rates=True, perceived=draft.withholding_role is WithholdingRole.PERCEPTION)
     _other_currency(header, draft, totals)
     items = root.child("detallesitems")
     for index in range(len(draft.lines)):

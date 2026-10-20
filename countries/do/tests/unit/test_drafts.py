@@ -24,8 +24,10 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     Issuer,
     ModificationCode,
     Rule,
+    Violation,
     WithholdingRole,
     line_violations,
+    withheld_violation,
 )
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
 from ledger_country_do_testing.samples import (
@@ -384,3 +386,22 @@ def test_a_credit_note_says_whether_it_comes_more_than_thirty_days_after_its_e_c
     corrected = replace(REFERENCE, issued_on=ISSUED_ON - timedelta(days=days))
     assert replace(drafted(EcfType.CREDIT_NOTE), references=(corrected,)).credit_note_late is late
     assert replace(drafted(EcfType.DEBIT_NOTE), references=(corrected,)).credit_note_late is False
+
+
+def test_isr_withheld_is_held_to_the_line_s_rounded_amount() -> None:
+    odd = replace(LINE, quantity=Decimal(1), unit_price=Decimal("10.005"), isr_withheld=Decimal("10.01"))
+    assert odd.isr_withheld == Decimal("10.01")
+    with refused("line.isr_withheld") as caught:
+        replace(odd, isr_withheld=Decimal("10.02"))
+    assert caught.value.field == "line.isr_withheld"
+
+
+def test_a_withheld_amount_s_precision_is_its_own_rule() -> None:
+    assert withheld_violation(Decimal("1.001")) == Violation(
+        Rule.WITHHELD_PRECISION, "has at most 2 decimals"
+    )
+
+
+def test_a_payment_abroad_is_withheld_never_perceived() -> None:
+    with refused("withholding_role"):
+        replace(drafted(EcfType.FOREIGN_PAYMENTS), withholding_role=WithholdingRole.PERCEPTION)

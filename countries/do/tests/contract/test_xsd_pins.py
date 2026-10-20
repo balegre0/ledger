@@ -33,6 +33,7 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     NO_DISCOUNT_TYPES,
     NOTE_TYPES,
     PAYMENT_DUE_TYPES,
+    PERCEPTION_TYPES,
     QUANTITY_PLACES,
     RNC_TYPES,
     TAXED,
@@ -164,6 +165,9 @@ def test_each_type_s_rules_are_its_schema_s(ecf_type: EcfType) -> None:
         ecf_type in WITHHOLDING_TYPES and _declared(format_, "MontoITBISRetenido")
     )
     assert (ecf_type in ISR_REQUIRED_TYPES) is _required(format_, "MontoISRRetenido")
+    assert (ecf_type in PERCEPTION_TYPES) is (
+        ecf_type in WITHHOLDING_TYPES and _declared(format_, "TotalITBISPercepcion")
+    )
     assert (ecf_type in PRICE_INDICATOR_TYPES) is _declared(format_, "IndicadorMontoGravado")
     assert (ecf_type in BUYER_REQUIRED_TYPES) is _required(format_, "Comprador")
     assert (ecf_type is EcfType.CREDIT_NOTE) is _required(format_, "IndicadorNotaCredito")

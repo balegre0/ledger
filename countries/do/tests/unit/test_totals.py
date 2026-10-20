@@ -19,7 +19,14 @@ from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do.regime import REGIME
 from ledger_country_do.regime.rounding import ROUNDING
 from ledger_country_do.regime.taxes import STANDARD
-from ledger_country_do_testing.samples import consumer_invoice, credit_invoice, payment_abroad, purchase
+from ledger_country_do_testing.samples import (
+    consumer_invoice,
+    credit_invoice,
+    credit_note,
+    export_sale,
+    payment_abroad,
+    purchase,
+)
 from ledger_kernel.money import Currency, Money, RoundingMode
 from ledger_kernel.regimes import TaxCalculator, TaxCategoryKey, TaxLine
 
@@ -287,3 +294,60 @@ def test_a_unit_price_in_pesos_of_seventeen_integer_digits_is_refused() -> None:
     with pytest.raises(DraftInvalidError, match=r"^line\.unit_price ") as caught:
         compute_totals(draft)
     assert caught.value.field == "line.unit_price"
+
+
+def test_pesos_follow_dgii_s_arithmetic_from_each_line_s_unit_price_in_pesos() -> None:
+    totals = compute_totals(credit_note(foreign=True))  # 25.53 USD at 18 %, 58.7512 pesos the dollar
+    (line,) = totals.lines
+    assert (line.unit_price, line.amount) == (D("1499.9181"), D("1499.92"))
+    (group,) = totals.groups
+    assert (group.base, group.itbis, totals.total) == (D("1499.92"), D("269.99"), D("1769.91"))
+    assert totals.foreign is not None
+    assert (totals.foreign.total, totals.foreign.groups[0].itbis) == (D("30.13"), D("4.60"))
+
+
+def test_a_line_s_amount_in_pesos_is_its_quantity_times_its_price_in_pesos() -> None:
+    line = Line(name="X", quantity=D(1), unit_price=D("10.0050"), billing=BillingIndicator.ITBIS_3)
+    totals = compute_totals(replace(export_sale(), lines=(line,)))
+    (figures,) = totals.lines
+    assert (figures.unit_price, figures.amount) == (D("587.8058"), D("587.81"))
+
+
+def test_a_line_whose_pesos_drift_beyond_dgii_s_tolerance_is_refused() -> None:
+    screws = Line(
+        name="TORNILLO", quantity=D(100000), unit_price=D("0.0001"), billing=BillingIndicator.ITBIS_3
+    )
+    with pytest.raises(DraftInvalidError, match=r"^line\.unit_price ") as caught:
+        compute_totals(replace(export_sale(), lines=(screws,)))
+    assert caught.value.field == "line.unit_price"
+
+
+def test_withheld_itbis_in_pesos_is_at_most_the_line_s_itbis_in_pesos() -> None:
+    draft = purchase(withholdings=True)
+    service, _ = draft.lines
+    whole = replace(service, unit_price=D("25.53"), itbis_withheld=D("4.60"), isr_withheld=D("2.55"))
+    part = replace(whole, itbis_withheld=D("4.59"))
+    for line, expected in ((whole, D("269.99")), (part, D("269.67"))):
+        totals = compute_totals(replace(draft, lines=(line,), currency=_USD, exchange_rate=D("58.7512")))
+        (figures,) = totals.lines
+        assert (totals.groups[0].itbis, figures.itbis_withheld) == (D("269.99"), expected)
+        assert figures.isr_withheld == D("149.82")
+    whole_isr = replace(whole, isr_withheld=D("25.53"))
+    totals = compute_totals(replace(draft, lines=(whole_isr,), currency=_USD, exchange_rate=D("58.7512")))
+    assert totals.lines[0].isr_withheld == totals.lines[0].amount
+
+
+def test_a_wholly_discounted_line_in_pesos_is_zero_never_negative() -> None:
+    line = Line(
+        name="ITEM",
+        quantity=D("3.05"),
+        unit_price=D("0.3056"),
+        discount=D("0.93"),
+        billing=BillingIndicator.EXEMPT,
+    )
+    totals = compute_totals(
+        replace(consumer_invoice(), lines=(line,), currency=_USD, exchange_rate=D("0.0054"))
+    )
+    (figures,) = totals.lines
+    assert figures.amount == 0
+    assert not figures.amount.is_signed()

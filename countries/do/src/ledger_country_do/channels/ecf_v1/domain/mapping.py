@@ -30,13 +30,16 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     FOREIGN_ID,
     INCOME_TYPES,
     INDICATOR_OF,
+    ISR_ABOVE_AMOUNT,
     ISR_REQUIRED_TYPES,
+    ITBIS_ABOVE_TAX,
     ITBIS_WITHHOLDING_TYPES,
     LEGAL_NAME,
     NAMED_TYPES,
     NO_DISCOUNT_TYPES,
     NOTE_TYPES,
     PAYMENT_DUE_TYPES,
+    PERCEPTION_TYPES,
     PESO,
     WITHHOLDING_TYPES,
     BillingIndicator,
@@ -47,10 +50,13 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     Issuer,
     Line,
     LinePart,
+    Rule,
+    WithholdingRole,
     exchange_rate_valid,
     line_violations,
     max_lines,
     text_violation,
+    withheld_violation,
 )
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError, EcfInvalidError, from_regime
@@ -65,7 +71,12 @@ from ledger_country_do.channels.ecf_v1.domain.fields import (
 from ledger_country_do.channels.ecf_v1.domain.references import FIELD as CORRECTS
 from ledger_country_do.channels.ecf_v1.domain.references import resolve
 from ledger_country_do.channels.ecf_v1.domain.routing import rfce_threshold
-from ledger_country_do.channels.ecf_v1.domain.totals import peso_price
+from ledger_country_do.channels.ecf_v1.domain.totals import (
+    CONVERSION_REQUIREMENT,
+    CONVERSION_TOLERANCE,
+    peso_line,
+    peso_price,
+)
 from ledger_country_do.regime import REGIME
 from ledger_country_do.regime.entries import document_type
 from ledger_country_do.regime.fields import ECF_TYPE
@@ -78,7 +89,7 @@ lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
 lazy from ledger_country_do.channels.ecf_v1.domain.fields import EcfFields
 lazy from ledger_country_do.channels.ecf_v1.domain.references import AcceptedEcf
 lazy from ledger_country_do.channels.ecf_v1.domain.totals import Totals
-lazy from ledger_fiscal_kit.drafts import DocumentRef, FiscalDraft, FiscalLineTax, FiscalParty
+lazy from ledger_fiscal_kit.drafts import DocumentRef, FiscalDraft, FiscalLine, FiscalLineTax, FiscalParty
 lazy from ledger_kernel.regimes import DocumentTypeDef, RegimeDef
 lazy from ledger_kernel.regimes import Totals as KernelTotals
 lazy from ledger_kernel.tax_ids import TaxId
@@ -228,7 +239,7 @@ class _Checker:
         references: tuple[EcfReference, ...] = ()
         if ecf_type is not None:
             self.buyer_rules(ecf_type)
-            self.typed_fields(ecf_type)
+            self.typed_fields(ecf_type, fields)
             self.typed_lines(ecf_type, billings)
             if ecf_type in WITHHOLDING_TYPES:
                 self.withholdings(ecf_type, fields)
@@ -300,12 +311,24 @@ class _Checker:
             self.add("exchange_rate_invalid", "exchange_rate", "has at most 3 integer digits and 4 decimals")
         elif not too_large:  # a unit price in pesos is too large only on a line that is not
             for index, line in enumerate(draft.lines):
-                converted = line.unit_price * rate  # unrounded first: rounding a huge one would overflow
-                if converted >= AMOUNT_LIMIT or peso_price(line.unit_price, rate) >= AMOUNT_LIMIT:
-                    path = f"lines.{index}.unit_price"
-                    self.add(
-                        "amount_too_large", path, "has at most 16 integer digits in pesos", line=index + 1
-                    )
+                self.in_pesos(index, line, rate)
+
+    def in_pesos(self, index: int, line: FiscalLine, rate: Decimal) -> None:
+        """Whether a line of another currency can be written in pesos as DGII checks them (``totals``)."""
+        if line_violations(
+            name=line.description, quantity=line.quantity, unit_price=line.unit_price, discount=line.discount
+        ):
+            return  # objected to already
+        path = f"lines.{index}.unit_price"
+        converted = line.unit_price * rate  # unrounded first: rounding a huge one would overflow
+        if converted >= AMOUNT_LIMIT or peso_price(line.unit_price, rate) >= AMOUNT_LIMIT:
+            self.add("amount_too_large", path, "has at most 16 integer digits in pesos", line=index + 1)
+            return
+        pesos = peso_line(
+            quantity=line.quantity, unit_price=line.unit_price, discount=line.discount, exchange_rate=rate
+        )
+        if pesos.gap > CONVERSION_TOLERANCE:
+            self.add("conversion_inexact", path, CONVERSION_REQUIREMENT, line=index + 1)
 
     def chosen_type(self, fields: EcfFields) -> EcfType | None:
         draft = self.draft
@@ -351,8 +374,11 @@ class _Checker:
                 "buyer_tax_id_not_allowed", "buyer.tax_id", "is no RNC or cédula on a payment abroad (47)"
             )
 
-    def typed_fields(self, ecf_type: EcfType) -> None:
+    def typed_fields(self, ecf_type: EcfType, fields: EcfFields) -> None:
         sent = self.draft.fields
+        perceived = fields.withholding_role is WithholdingRole.PERCEPTION
+        if perceived and ecf_type in WITHHOLDING_TYPES and ecf_type not in PERCEPTION_TYPES:
+            self.add("field_invalid", _WITHHOLDING_ROLE_FIELD, "is retention (1) on a payment abroad (47)")
         if INCOME_TYPE.name in sent and ecf_type not in INCOME_TYPES:
             self.add("field_invalid", _INCOME_FIELD, "is not given on a purchase (41, 43 or 47)")
         if PAYMENT_DUE.name in sent and ecf_type not in PAYMENT_DUE_TYPES:
@@ -378,10 +404,11 @@ class _Checker:
                 self.add(
                     "field_invalid", f"{path}.itbis", "is not given on a payment abroad (47)", line=index + 1
                 )
-            elif withholding.itbis is not None and withholding.itbis > tax:
-                self.add("field_invalid", f"{path}.itbis", "is at most the line's ITBIS", line=index + 1)
-            if withholding.isr is not None and withholding.isr > line.base.amount:
-                self.add("field_invalid", f"{path}.isr", "is at most the line's amount", line=index + 1)
+            else:
+                self.withheld(f"{path}.itbis", withholding.itbis, tax, ITBIS_ABOVE_TAX.requirement, index)
+            self.withheld(
+                f"{path}.isr", withholding.isr, line.base.amount, ISR_ABOVE_AMOUNT.requirement, index
+            )
         if ecf_type in ISR_REQUIRED_TYPES:
             for index in range(len(lines)):
                 given = fields.withholdings.get(index)
@@ -393,6 +420,18 @@ class _Checker:
                         "is given on every line of a payment abroad (47)",
                         line=index + 1,
                     )
+
+    def withheld(
+        self, path: str, amount: Decimal | None, most: Decimal, requirement: str, index: int
+    ) -> None:
+        """An amount a line withholds: a number DGII writes, at most ``most``."""
+        if amount is None:
+            return
+        violation = withheld_violation(amount)
+        if violation is not None:
+            self.add(violation.rule.value, path, violation.requirement, line=index + 1)
+        elif amount > most:
+            self.add(Rule.WITHHELD_TOO_LARGE.value, path, requirement, line=index + 1)
 
     def typed_lines(self, ecf_type: EcfType, billings: tuple[BillingIndicator | None, ...]) -> None:
         draft = self.draft

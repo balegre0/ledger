@@ -125,7 +125,6 @@ def test_every_modification_code_but_a_contingency_replacement_is_read(
         ("withholdings", {"0": {}}),
         ("withholdings", {"0": {"vat": "1.00"}}),
         ("withholdings", {"0": {"isr": 1}}),
-        ("withholdings", {"0": {"isr": "1.001"}}),
         ("withholdings", {"0": {"isr": "-1.00"}}),
         ("withholdings", {"0": {"itbis": "1E3"}}),
     ],
@@ -152,14 +151,14 @@ def test_a_key_neither_the_regime_nor_the_channel_declares_is_unknown() -> None:
 def test_withholdings_are_read_per_line_index_in_the_document_s_currency() -> None:
     sent: dict[str, FieldValue] = {
         "withholding_role": "2",
-        "withholdings": {"0": {"itbis": "900.00", "isr": "500"}, "12": {"isr": "0.5"}},
+        "withholdings": {"0": {"itbis": "900.00", "isr": "500"}, "12": {"isr": "0.505"}},
     }
     assert read_fields(sent) == (
         EcfFields(
             withholding_role=WithholdingRole.PERCEPTION,
             withholdings={
                 0: Withholding(itbis=Decimal("900.00"), isr=Decimal(500)),
-                12: Withholding(itbis=None, isr=Decimal("0.5")),
+                12: Withholding(itbis=None, isr=Decimal("0.505")),  # its precision is the mapping's
             },
         ),
         (),
