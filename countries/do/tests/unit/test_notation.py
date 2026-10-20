@@ -13,6 +13,7 @@ from ledger_country_do.channels.ecf_v1.domain.notation import (
     dgii_number,
     dgii_percent,
     local_date,
+    parse_dgii_date,
     parse_dgii_moment,
     require_aware,
 )
@@ -85,3 +86,13 @@ def test_a_dgii_moment_reads_back_in_the_dominican_republic_s_time() -> None:
 @pytest.mark.parametrize("text", ["31-02-2026 10:00:00", "2026-10-13T09:30:05", "13-10-2026", "", "ayer"])
 def test_what_is_no_dgii_moment_reads_as_none(text: str) -> None:
     assert parse_dgii_moment(text) is None
+
+
+def test_a_dgii_date_reads_back() -> None:
+    assert parse_dgii_date(dgii_date(date(2026, 1, 5))) == date(2026, 1, 5)
+    assert parse_dgii_date(" 5-1-2026 ") == date(2026, 1, 5)
+
+
+@pytest.mark.parametrize("text", ["31-02-2026", "2026-10-13", "13-10-2026 09:30:05", "", "hoy"])
+def test_what_is_no_dgii_date_reads_as_none(text: str) -> None:
+    assert parse_dgii_date(text) is None

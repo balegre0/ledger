@@ -5,9 +5,8 @@ keeps -04:00 since 2000-12-03). A fixed offset keeps the domain free of a time-z
 lacks without ``tzdata``.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import ClassVar, Final
-lazy from datetime import date
 lazy from decimal import Decimal
 
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
@@ -47,6 +46,17 @@ def dgii_date(value: date) -> str:
 def dgii_moment(value: datetime) -> str:
     """``dd-MM-yyyy HH:mm:ss`` in the Dominican Republic's time; ``NaiveMomentError`` without a UTC offset."""
     return _in_santo_domingo(value).strftime(DGII_MOMENT)
+
+
+def parse_dgii_date(text: str) -> date | None:
+    """``text`` read as ``dd-MM-yyyy`` (days and months of one digit too), whitespace around ignored.
+
+    ``None`` if it writes no such date: another format, or no real day (a 31 February).
+    """
+    try:
+        return date.strptime(text.strip(), _DATE)
+    except ValueError:
+        return None
 
 
 def parse_dgii_moment(text: str) -> datetime | None:

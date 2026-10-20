@@ -15,7 +15,9 @@ from typing import Final
 from hypothesis import HealthCheck, given, reject, settings
 from hypothesis import strategies as st
 
+from ledger_country_do.channels.ecf_v1.adapters.signing.stamp import signature_value
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf
+from ledger_country_do.channels.ecf_v1.adapters.xml.inbound import read_inbound_ecf
 from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS
 from ledger_country_do.channels.ecf_v1.domain.drafts import (
     BILLINGS,
@@ -42,9 +44,12 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     WithholdingRole,
 )
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
+from ledger_country_do.channels.ecf_v1.domain.exchanges import InboundEcf
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.samples import ISSUED_ON, ISSUER, SEQUENCE_EXPIRES_ON, SIGNED_AT, USD
+from ledger_fiscal_kit.xml.dsig import sign_enveloped
 from ledger_fiscal_kit.xml.hardened import texts
+lazy from ledger_testing.pki import Issued
 
 D = Decimal
 CENT: Final = D("0.01")
@@ -220,3 +225,25 @@ def test_every_drafted_e_cf_is_valid_and_adds_up_as_dgii_checks_it(draft: EcfDra
     _adds_up(document, draft, other=False)
     if draft.exchange_rate is not None:
         _adds_up(document, draft, other=True)
+
+
+@settings(
+    max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow, HealthCheck.filter_too_much]
+)
+@given(draft=_drafts())
+def test_every_e_cf_written_and_signed_reads_back_as_received(draft: EcfDraft, issued: Issued) -> None:
+    """What reception reads of an e-CF is what its issuer drafted (``read_inbound_ecf``)."""
+    totals = compute_totals(draft)
+    signed = sign_enveloped(ecf.render(draft, totals, signed_at=SIGNED_AT), issued.key, issued.certificate)
+    assert read_inbound_ecf(signed) == InboundEcf(
+        ecf_type=draft.ecf_type,
+        encf=draft.encf,
+        issuer_rnc=draft.issuer.rnc,
+        issuer_name=draft.issuer.legal_name,
+        buyer_rnc=draft.buyer.rnc,
+        issued_on=draft.issued_on,
+        total=totals.total,
+        itbis=totals.itbis_total,
+        signed_at=SIGNED_AT,
+        security_code=signature_value(signed)[:6],
+    )

@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import MappingProxyType
@@ -9,13 +10,24 @@ import pytest
 import xmlschema
 
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf, rfce
+from ledger_country_do.channels.ecf_v1.adapters.xml.acecf import render_acecf
+from ledger_country_do.channels.ecf_v1.adapters.xml.anecf import render_anecf
+from ledger_country_do.channels.ecf_v1.adapters.xml.arecf import render_arecf
 from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS
-from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
+from ledger_country_do.channels.ecf_v1.adapters.xsd.published import PUBLISHED, Format
 from ledger_country_do.channels.ecf_v1.domain.drafts import CATEGORY_OF, BillingIndicator, Line
-from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
+from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
+from ledger_country_do.channels.ecf_v1.domain.exchanges import (
+    CommercialApproval,
+    NotReceivedReason,
+    Receipt,
+    VoidedRange,
+)
+from ledger_country_do.channels.ecf_v1.domain.notation import SANTO_DOMINGO
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do.regime import REGIME
 from ledger_country_do_testing.samples import (
+    ISSUER,
     SIGNED_AT,
     consumer_invoice,
     credit_invoice,
@@ -81,11 +93,64 @@ DRAFTS: Final[Mapping[str, Callable[[], EcfDraft]]] = MappingProxyType(
 """The draft each golden document is written from."""
 
 
+VOIDED_AT: Final = datetime(2026, 10, 13, 10, 0, tzinfo=SANTO_DOMINGO)
+VOIDED: Final = (
+    VoidedRange(EcfType.CONSUMER_INVOICE, 1001, 1500),
+    VoidedRange(EcfType.CREDIT_INVOICE, 51, 100),
+    VoidedRange(EcfType.CREDIT_INVOICE, 200, 200),
+)
+"""The golden ANECF's ranges: two of type 31, one of type 32 (551 numbers)."""
+RECEIVED_AT: Final = datetime(2026, 10, 13, 9, 31, 2, tzinfo=SANTO_DOMINGO)
+APPROVED_AT: Final = datetime(2026, 10, 14, 8, 15, tzinfo=SANTO_DOMINGO)
+BUYER_RNC: Final = "131098193"
+"""The sample buyer's RNC (``samples.BUYER``)."""
+INVOICED: Final = Encf(EcfType.CREDIT_INVOICE, 1)
+"""The sample credit invoice (total 4,887.58), which the golden receipts and approvals answer."""
+
+
+def _approval(*, approved: bool, reason: str | None) -> bytes:
+    return render_acecf(
+        CommercialApproval(
+            issuer_rnc=ISSUER.rnc,
+            buyer_rnc=BUYER_RNC,
+            encf=INVOICED,
+            issued_on=date(2026, 10, 13),
+            total=Decimal("4887.58"),
+            approved=approved,
+            reason=reason,
+            at=APPROVED_AT,
+        )
+    )
+
+
+def _receipt(reason: NotReceivedReason | None) -> bytes:
+    return render_arecf(
+        Receipt(issuer_rnc=ISSUER.rnc, buyer_rnc=BUYER_RNC, encf=INVOICED, reason=reason, at=RECEIVED_AT)
+    )
+
+
+ANSWERS: Final[Mapping[str, tuple[Format, Callable[[], bytes]]]] = MappingProxyType(
+    {
+        "anecf": (Format.ANECF, lambda: render_anecf(issuer_rnc=ISSUER.rnc, ranges=VOIDED, at=VOIDED_AT)),
+        "acecf-approved": (Format.ACECF, lambda: _approval(approved=True, reason=None)),
+        "acecf-rejected": (
+            Format.ACECF,
+            lambda: _approval(approved=False, reason="MERCANCIA RECIBIDA INCOMPLETA"),
+        ),
+        "arecf-received": (Format.ARECF, lambda: _receipt(None)),
+        "arecf-not-received-3": (Format.ARECF, lambda: _receipt(NotReceivedReason.DUPLICATE)),
+    }
+)
+"""The other documents DGII defines, each golden written by its builder."""
+
+
 def draft_of(name: str) -> EcfDraft:
     return DRAFTS[name]()
 
 
 def written(name: str) -> bytes:
+    if name in ANSWERS:
+        return ANSWERS[name][1]()
     draft = draft_of(name)
     if name == "rfce-32":
         return rfce.render(draft, compute_totals(draft), security_code="dcp79q")
@@ -94,11 +159,12 @@ def written(name: str) -> bytes:
 
 CASES: Final = {
     name: Format.RFCE if name == "rfce-32" else ecf.FORMAT_OF[draft_of(name).ecf_type] for name in DRAFTS
-}
+} | {name: format_ for name, (format_, _) in ANSWERS.items()}
 
 
 def test_every_e_cf_type_has_a_golden_document() -> None:
     assert {draft_of(name).ecf_type for name in DRAFTS} == set(EcfType)
+    assert set(CASES.values()) == set(Format) - {Format.SEED}
 
 
 @pytest.mark.parametrize("name", list(CASES))
@@ -113,7 +179,7 @@ def test_the_builders_write_the_golden_documents_byte_for_byte(name: str) -> Non
 @pytest.mark.parametrize("name", list(CASES))
 def test_every_golden_document_is_valid_for_both_validators(name: str) -> None:
     document = (GOLDEN / f"{name}.xml").read_bytes()
-    root = b"</RFCE>" if CASES[name] is Format.RFCE else b"</ECF>"
+    root = f"</{PUBLISHED[CASES[name]].root}>".encode()
     assert DO_SCHEMAS.violations(CASES[name], document, unsigned=True) == ()
     signed_shape = document.replace(root, SIGNATURE + root)
     xmlschema.XMLSchema10(DO_SCHEMAS.corrected(CASES[name]).decode("utf-8")).validate(
@@ -134,7 +200,7 @@ def test_the_zero_rate_and_exempt_golden_s_totals() -> None:
     )
 
 
-@pytest.mark.parametrize("name", list(CASES))
+@pytest.mark.parametrize("name", list(DRAFTS))
 def test_the_kernel_totals_every_golden_document_as_the_channel_does(name: str) -> None:
     """Invoicing totals with the kernel's calculator over regime ``do``; the channel with DGII's rules.
 

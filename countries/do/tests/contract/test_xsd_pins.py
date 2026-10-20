@@ -6,6 +6,7 @@ import pytest
 import xmlschema
 from lxml import etree
 
+from ledger_country_do.channels.ecf_v1.adapters.xml import acecf, arecf
 from ledger_country_do.channels.ecf_v1.adapters.xml.ecf import BUYER_REQUIRED_TYPES, PRICE_INDICATOR_TYPES
 from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS, published_bytes
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import (
@@ -50,6 +51,15 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     max_lines,
 )
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
+from ledger_country_do.channels.ecf_v1.domain.exchanges import (
+    ANNULMENT_COUNT,
+    ANNULMENT_RANGES,
+    ANNULMENT_TYPES,
+    APPROVAL_TOTAL_DIGITS,
+    APPROVAL_TOTAL_PLACES,
+    REJECTION_REASON,
+    NotReceivedReason,
+)
 from ledger_country_do.regime import REGIME
 from ledger_fiscal_kit.xml.schemas import PinnedSchema, SchemaDriftError, SchemaSet
 from ledger_kernel.money import CURRENCIES
@@ -248,3 +258,36 @@ def test_the_modification_codes_are_dgii_s() -> None:
     referring = [each for each in EcfType if _declared(_ecf(each), "CodigoModificacion")]
     assert set(NOTE_TYPES) <= set(referring)
     assert all(_enumeration(_ecf(each), "CodigoModificacionType") == expected for each in referring)
+
+
+def _max_occurs(format_: Format, name: str) -> int:
+    (declared,) = (
+        found
+        for found in etree.fromstring(DO_SCHEMAS.corrected(format_)).iter(f"{XS}element")
+        if found.get("name") == name
+    )
+    return int(declared.get("maxOccurs", "1"))
+
+
+def test_the_annulment_s_limits_are_its_schema_s() -> None:
+    assert _max_occurs(Format.ANECF, "Anulacion") == ANNULMENT_TYPES == len(EcfType)
+    assert _max_occurs(Format.ANECF, "Secuencias") == ANNULMENT_RANGES
+    assert _enumeration(Format.ANECF, "CFType") == {each.value for each in EcfType}
+    counted = {facet["pattern"] for facet in _facets(Format.ANECF, "CantidadeNCFAnulados")}
+    assert counted == {r"(\d{1,10})"}
+    assert str(ANNULMENT_COUNT) == "9" * 10  # the largest number of ten digits
+
+
+def test_the_approval_s_states_and_limits_are_its_schema_s() -> None:
+    assert _enumeration(Format.ACECF, "EstadoType") == {acecf.APPROVED, acecf.REJECTED}
+    (reason,) = _facets(Format.ACECF, "DetalleMotivoRechazo")
+    assert int(reason["maxLength"]) == REJECTION_REASON
+    (total,) = _facets(Format.ACECF, "MontoTotal")
+    assert int(total["fractionDigits"]) == APPROVAL_TOTAL_PLACES
+    assert int(total["totalDigits"]) - APPROVAL_TOTAL_PLACES == APPROVAL_TOTAL_DIGITS
+
+
+def test_the_receipt_s_states_and_reasons_are_its_schema_s() -> None:
+    assert _enumeration(Format.ARECF, "EstadoType") == {arecf.RECEIVED, arecf.NOT_RECEIVED}
+    reasons = _enumeration(Format.ARECF, "CodigoMotivoNoRecibidoType")
+    assert reasons == {str(reason.value) for reason in NotReceivedReason}
