@@ -12,6 +12,8 @@ ROLE_GRANTS: Final = MappingProxyType(
     {
         Role.OWNER: frozenset(
             {
+                Permission("fiscal.enrollments.manage"),
+                Permission("fiscal.enrollments.read"),
                 Permission("identity.companies.manage"),
                 Permission("identity.companies.read"),
                 Permission("identity.memberships.manage"),
@@ -27,6 +29,8 @@ ROLE_GRANTS: Final = MappingProxyType(
         ),
         Role.ADMIN: frozenset(
             {
+                Permission("fiscal.enrollments.manage"),
+                Permission("fiscal.enrollments.read"),
                 Permission("identity.companies.manage"),
                 Permission("identity.companies.read"),
                 Permission("identity.memberships.manage"),
@@ -41,6 +45,7 @@ ROLE_GRANTS: Final = MappingProxyType(
         ),
         Role.ACCOUNTANT: frozenset(
             {
+                Permission("fiscal.enrollments.read"),
                 Permission("identity.companies.read"),
                 Permission("identity.memberships.read"),
                 Permission("invoicing.invoices.create"),
@@ -52,6 +57,7 @@ ROLE_GRANTS: Final = MappingProxyType(
         ),
         Role.ISSUER: frozenset(
             {
+                Permission("fiscal.enrollments.read"),
                 Permission("identity.companies.read"),
                 Permission("invoicing.invoices.create"),
                 Permission("invoicing.invoices.issue"),
@@ -61,6 +67,7 @@ ROLE_GRANTS: Final = MappingProxyType(
         ),
         Role.VIEWER: frozenset(
             {
+                Permission("fiscal.enrollments.read"),
                 Permission("identity.companies.read"),
                 Permission("invoicing.invoices.read"),
                 Permission("signer.certificates.read"),

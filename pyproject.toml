@@ -51,6 +51,7 @@ ledger-app-worker = { workspace = true }
 ledger-country-do = { workspace = true }
 ledger-country-do-testing = { workspace = true }
 ledger-devtools = { workspace = true }
+ledger-fiscal = { workspace = true }
 ledger-fiscal-kit = { workspace = true }
 ledger-identity = { workspace = true }
 ledger-invoicing = { workspace = true }
@@ -67,6 +68,7 @@ known-first-party = [
     "ledger_country_do",
     "ledger_country_do_testing",
     "ledger_devtools",
+    "ledger_fiscal",
     "ledger_fiscal_kit",
     "ledger_identity",
     "ledger_invoicing",

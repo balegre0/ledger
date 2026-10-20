@@ -193,8 +193,10 @@ def test_every_operation_is_for_bearers_of_a_token() -> None:
 def test_every_route_needs_a_bearer_token_and_declares_what_it_requires() -> None:
     """The route inventory: a permission in the company, a role in the organization, or the organization."""
     routes = app().routes
-    v1 = [context.path for context in iter_route_contexts(routes) if (context.path or "").startswith("/v1")]
-    assert len(v1) == len(operations())  # every operation the document lists is a route looked at
+    mine = [
+        context.path for context in iter_route_contexts(routes) if (context.path or "").startswith(PREFIXES)
+    ]
+    assert len(mine) == len(operations())  # every operation the document lists is a route looked at
     assert unguarded_routes(routes) == ()
 
 
