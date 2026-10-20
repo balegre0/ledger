@@ -1117,6 +1117,19 @@ async def test_every_app_says_whether_it_serves_each_isolated_module_it_installs
     assert 'module="beta"' not in text
 
 
+async def test_every_readiness_check_s_last_verdict_is_on_the_metrics_page() -> None:
+    """A check failing for minutes is an alert of its own (``docs/runbooks/signer/signer-unavailable.md``)."""
+    app = App("signer", settings=SETTINGS, discover=discovering(Vault().module()))
+    transport = httpx.ASGITransport(app=app.asgi())
+    async with httpx.AsyncClient(transport=transport, base_url="http://ledger.test") as client:
+        ready = await client.get("/readyz")
+        text = (await client.get("/metrics")).text
+    await app.aclose()
+    assert ready.status_code == httpx.codes.SERVICE_UNAVAILABLE  # nothing listens on the database's port
+    assert 'ledger_readiness_check{check="database"} 0.0\n' in text
+    assert 'ledger_readiness_check{check="vault:ready"} 1.0\n' in text
+
+
 async def test_an_app_without_an_isolated_module_reports_none() -> None:
     text = await scraped(App("worker", settings=SETTINGS, discover=discovering(module("beta", beta))))
     assert "ledger_isolated_module_served{" not in text

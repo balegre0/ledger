@@ -6,6 +6,7 @@ from math import inf, nan
 lazy from collections.abc import Callable
 
 import pytest
+from prometheus_client import CollectorRegistry
 from structlog.testing import capture_logs
 
 from ledger_kernel.errors import ErrorKind
@@ -34,6 +35,27 @@ async def test_every_check_is_reported() -> None:
     health.add("broker", broken)
     health.add("slow", stuck)
     assert await health.run() == {"database": True, "broker": False, "slow": False}
+
+
+async def test_each_check_s_last_verdict_is_a_gauge() -> None:
+    """``ledger_readiness_check{check}``: 1 or 0 as the last probe found it, for an alert outliving probes."""
+    registry = CollectorRegistry()
+    health = Health(timeout=0.05, registry=registry)
+    outcome = {"fine": True}
+
+    async def flapping() -> None:
+        if not outcome["fine"]:
+            raise ConnectionError
+
+    health.add("database", healthy)
+    health.add("broker", flapping)
+    assert registry.get_sample_value("ledger_readiness_check", {"check": "broker"}) is None  # never probed
+    await health.run()
+    assert registry.get_sample_value("ledger_readiness_check", {"check": "database"}) == 1.0
+    assert registry.get_sample_value("ledger_readiness_check", {"check": "broker"}) == 1.0
+    outcome["fine"] = False
+    await health.run()
+    assert registry.get_sample_value("ledger_readiness_check", {"check": "broker"}) == 0.0
 
 
 async def test_checks_run_concurrently() -> None:

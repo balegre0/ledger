@@ -298,8 +298,9 @@ class Assembled:
 def _served(registry: CollectorRegistry) -> Gauge:
     """Whether this app serves an isolated module it installs (1: its role's app) or only relays it (0).
 
-    Installed and served by no live app (``max by (module) (...) == 0``): the module's role is absent, and the
-    fan-out keeps filling its inbox with no unrouted flag (``docs/runbooks/signer/signer-unavailable.md``).
+    Installed and served by no live app (``max by (module, isolated_in) (...) == 0``): the module's role is
+    absent, and the fan-out keeps filling its inbox with no unrouted flag
+    (``docs/runbooks/signer/signer-unavailable.md``).
     """
     return gauge(
         registry,

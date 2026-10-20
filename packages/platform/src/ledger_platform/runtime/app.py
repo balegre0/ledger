@@ -468,7 +468,7 @@ class App:
         )
 
     def _health(self) -> Health:
-        health = Health()
+        health = Health(registry=self._registry)
         health.add("database", self._database.ping)
         for member in self._assembled.members:
             if not member.relay_only:  # a schema its login cannot enter
