@@ -16,10 +16,11 @@ that large meets. The settings are ``LEDGER_RATE_LIMIT_PER_SECOND`` and ``LEDGER
 """
 
 from collections import OrderedDict
+from http import HTTPStatus
 from math import ceil
 from time import monotonic
 from typing import ClassVar, Final, final
-lazy from collections.abc import Callable
+lazy from collections.abc import Callable, Mapping
 
 from ledger_kernel.errors import UnavailableError
 from ledger_platform.config.options import InvalidOptionError, is_positive_and_finite, require_at_least
@@ -38,6 +39,14 @@ class RateLimitedError(UnavailableError):
         self.retry_after: Final = max(1, ceil(wait))
         """Whole seconds to wait before asking again."""
         super().__init__(f"Too many requests: try again in {self.retry_after} s.")
+
+    def problem_status(self) -> HTTPStatus:
+        """429 (``problems.ProblemAnswer``): its kind's 503 would blame the app, not the caller's pace."""
+        return HTTPStatus.TOO_MANY_REQUESTS
+
+    def problem_headers(self) -> Mapping[str, str]:
+        """``Retry-After``: the whole seconds to wait."""
+        return {"Retry-After": str(self.retry_after)}
 
 
 @final

@@ -5,6 +5,7 @@ The problem documents of a composed app are pinned in ``test_http_app``; these p
 
 from http import HTTPStatus
 from typing import ClassVar
+lazy from collections.abc import Mapping
 
 import httpx
 import pytest
@@ -124,3 +125,66 @@ async def test_a_request_outside_any_trace_has_no_request_id() -> None:
         response = await client.get("/refused")
     assert "request_id" not in response.json()
     assert "Request-Id" not in response.headers
+
+
+class SlowBodyError(InvalidInputError):
+    """A refusal answered with a status and a header of its own: its kind's 422 would mislead a client."""
+
+    code: ClassVar[str] = "slow_body"
+
+    def __init__(self) -> None:
+        super().__init__("the body did not arrive in time")
+
+    def problem_status(self) -> HTTPStatus:
+        return HTTPStatus.REQUEST_TIMEOUT
+
+    def problem_headers(self) -> Mapping[str, str]:
+        return {"Retry-After": "5", "Content-Type": "text/plain"}
+
+
+class AnsweredDefectError(LedgerError):
+    """A defect that names a status of its own: a defect is a 500 ``internal`` whatever it names."""
+
+    code: ClassVar[str] = "answered_defect"
+
+    def __init__(self) -> None:
+        super().__init__("a defect")
+
+    def problem_status(self) -> HTTPStatus:
+        return HTTPStatus.REQUEST_TIMEOUT
+
+    def problem_headers(self) -> Mapping[str, str]:
+        return {"Retry-After": "5"}
+
+
+async def test_an_error_that_names_its_answer_is_answered_with_its_status_and_headers() -> None:
+    router = APIRouter()
+
+    @router.get("/slow")
+    async def slow() -> None:
+        raise SlowBodyError
+
+    @router.get("/defect")
+    async def defect() -> None:
+        raise AnsweredDefectError
+
+    async with client_of(bare(router)) as client:
+        response = await client.get("/slow")
+        with capture_logs() as logs:
+            broken = await client.get("/defect")
+    assert (response.status_code, response.headers["retry-after"]) == (408, "5")
+    assert response.headers["content-type"] == PROBLEM_JSON  # a header of its own never replaces the type
+    assert response.json() == {
+        "type": "urn:ledger:error:slow_body",
+        "title": "Request Timeout",
+        "status": 408,
+        "code": "slow_body",
+        "detail": "the body did not arrive in time",
+    }
+    assert (status_of(SlowBodyError()), status_of(AnsweredDefectError())) == (408, 500)
+    assert (broken.status_code, broken.json()["code"], "retry-after" in broken.headers) == (
+        500,
+        "internal",
+        False,
+    )
+    assert [entry["code"] for entry in logs] == ["answered_defect"]
