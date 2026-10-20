@@ -202,7 +202,7 @@ def test_a_voided_note_names_the_invoice_it_corrects_and_why_it_was_voided(regim
     note = issued(regime, terms, corrects=invoice)
     later = NOW + timedelta(hours=1)
     voided, _ = note.void(
-        reason=parse_reason("Wrong customer"), corrected_by_a_note=False, accepted=False, now=later
+        reason=parse_reason("Wrong customer"), corrected_by_a_note=False, held=False, now=later
     )
     view = info_of(voided)
     assert (view.kind, view.corrects, view.status, view.version) == (

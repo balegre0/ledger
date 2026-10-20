@@ -8,7 +8,10 @@ regime's key. A newer version replaces an older one; an older or equal one chang
 (``Applied.STALE``), so updates may arrive in any order and more than once.
 
 The mirror is not the document's state: applying a status leaves the document's version (its ``ETag``) as it
-is. It decides one rule of the document: one a channel accepted is never voided (a credit note corrects it).
+is. It decides one rule of the document: one a channel holds (any status but rejected or voided: numbered,
+submitted, accepted) is never voided; a credit note corrects it. A status for a document voided already is
+not kept (``Applied.DOCUMENT_VOIDED``): fiscal applies ``pending`` before it numbers one, so a voided
+document is never numbered.
 
 Everything here comes from our own code (a channel, through ``fiscal``), already bounded by the kit: a value
 out of these bounds is a defect of its caller (``InvalidValueError``), never a client's input. The
@@ -17,6 +20,7 @@ status and version only.
 """
 
 import copy
+import json
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -36,6 +40,10 @@ MAX_MESSAGES: Final = 20
 MAX_MESSAGE_CODE: Final = 64
 MAX_MESSAGE_TEXT: Final = 500
 MAX_LANGUAGE: Final = 35
+MAX_DETAIL_DEPTH: Final = 5
+"""How deep a channel's details nest below their top level (an object of lists of objects...)."""
+MAX_DETAILS: Final = 16384
+"""The longest a channel's details may be, as JSON."""
 """A BCP 47 language tag, as long as the RFC's longest recommended one."""
 _CHANNEL: Final = re.compile(r"[a-z]{2}-[a-z0-9]+-v[0-9]+", re.ASCII)
 """A channel's key, as manifests name it (``do-ecf-v1``)."""
@@ -54,8 +62,8 @@ class FiscalStatusName(StrEnum):
     VOIDED = "voided"
 
 
-ACCEPTANCES: Final = frozenset({FiscalStatusName.ACCEPTED, FiscalStatusName.ACCEPTED_WITH_OBSERVATIONS})
-"""The statuses that mean the authority accepted the document: it can no longer be voided."""
+RELEASING: Final = frozenset({FiscalStatusName.REJECTED, FiscalStatusName.VOIDED})
+"""The statuses that leave the document to invoicing: any other means a channel holds it (the module)."""
 
 
 class Applied(StrEnum):
@@ -65,6 +73,8 @@ class Applied(StrEnum):
     """It was newer than the one kept (or the first): it is kept now, and announced."""
     STALE = "stale"
     """It was not newer than the one kept for the channel: nothing changed."""
+    DOCUMENT_VOIDED = "document_voided"
+    """The document is voided: nothing is kept, and the channel must not number or submit it."""
 
 
 def _bounded(text: str, limit: int) -> bool:
@@ -136,7 +146,14 @@ class FiscalStatus:
             raise _invalid(name="regime", requirement="a regime's key")
         if self.updated_at.utcoffset() is None:
             raise _invalid(name="updated_at", requirement="an aware datetime")
-        object.__setattr__(self, "details", MappingProxyType(copy.deepcopy(dict(self.details))))
+        details = dict(self.details)
+        deepest = max((_depth(value) for value in details.values()), default=0)
+        if deepest > MAX_DETAIL_DEPTH or len(json.dumps(details)) > MAX_DETAILS:
+            raise _invalid(
+                name="details",
+                requirement=f"JSON at most {MAX_DETAIL_DEPTH} levels deep and {MAX_DETAILS} characters long",
+            )
+        object.__setattr__(self, "details", MappingProxyType(copy.deepcopy(details)))
 
     @override
     def __repr__(self) -> str:
@@ -144,6 +161,15 @@ class FiscalStatus:
         return f"FiscalStatus(channel={self.channel!r}, {shown})"
 
 
-def accepted(statuses: Iterable[FiscalStatus]) -> bool:
-    """Whether a channel accepted the document, as its mirror ``statuses`` say."""
-    return any(status.status in ACCEPTANCES for status in statuses)
+def held(statuses: Iterable[FiscalStatus]) -> bool:
+    """Whether a channel holds the document, as its mirror ``statuses`` say: one is not rejected or voided."""
+    return any(status.status not in RELEASING for status in statuses)
+
+
+def _depth(value: Detail) -> int:
+    """How deep ``value`` nests: 0 for a scalar, one more than its deepest member for a list or an object."""
+    if isinstance(value, list):
+        return 1 + max((_depth(item) for item in value), default=0)
+    if isinstance(value, dict):
+        return 1 + max((_depth(item) for item in value.values()), default=0)
+    return 0

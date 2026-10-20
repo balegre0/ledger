@@ -29,7 +29,9 @@ Commercial documents: invoices, credit and debit notes, their lines and totals (
   `apply_fiscal_status(SystemCall, invoice, FiscalStatusInfo, version) -> Applied` keeps a channel's status in
   the fiscal mirror when newer than the one kept for that channel (`STALE` otherwise: redeliveries are
   harmless), under a share of the document's lock, and announces it; the document's own version is untouched.
-  A document a channel accepted is not voided (409 `invoice_not_voidable`).
+  A status for a voided document is `DOCUMENT_VOIDED` (nothing kept: fiscal numbers nothing). A document a
+  channel holds (a status neither rejected nor voided) is not voided (409 `invoice_not_voidable`): a credit
+  note corrects it. `fiscal_updated` has no aggregate version: consume it unordered.
 - Extension points (ADR 0011), declared, none required, read at call time, implemented by `fiscal` (M3b Task
   20): `IssuePolicy` (`check` before the unit, objections concatenated in chain order, 422 `invalid_document`
   with `errors[]`; `after_issue` after the commit, in chain order within `ISSUE_BUDGET` = 1.5 s, a timeout or

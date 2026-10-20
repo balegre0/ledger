@@ -38,7 +38,7 @@ from ledger_invoicing.adapters.postgres.tables import (
     InvoiceTaxRecord,
 )
 from ledger_invoicing.application.ports import FiscalMirror, ForeignTenantError, Invoices, StaleWriteError
-from ledger_invoicing.domain.fiscal import ACCEPTANCES, Applied, AuthorityMessage, FiscalStatus
+from ledger_invoicing.domain.fiscal import RELEASING, Applied, AuthorityMessage, FiscalStatus
 from ledger_invoicing.domain.ids import InvoiceId
 from ledger_invoicing.domain.invoice import Invoice, InvoiceStatus
 from ledger_invoicing.domain.lines import LineTerms
@@ -671,7 +671,7 @@ class _StatusRow:
 
 
 _STATUSES: Final = TypeAdapter(list[_StatusRow])
-_ACCEPTANCES: Final = tuple(status.value for status in ACCEPTANCES)
+_RELEASING: Final = tuple(status.value for status in RELEASING)
 _STATUS_COLUMNS: Final = (
     FiscalStatusRecord.invoice_id,
     FiscalStatusRecord.channel,
@@ -709,7 +709,8 @@ class PgFiscalMirror(FiscalMirror):
 
     A status is written by one statement, ``INSERT ... ON CONFLICT (tenant, invoice, channel) DO UPDATE ...
     WHERE`` the kept version is older, which answers the row only when it wrote it. It first takes a share of
-    the document's row lock (``FOR SHARE``), which also tells a document the tenant does not have.
+    the document's row lock (``FOR SHARE``), which also tells a document the tenant does not have, and one
+    voided (``DOCUMENT_VOIDED``, nothing written).
     """
 
     __slots__ = ("_connection", "_mode", "_tenant")
@@ -735,12 +736,12 @@ class PgFiscalMirror(FiscalMirror):
         return {invoice: tuple(statuses) for invoice, statuses in found.items()}
 
     @override
-    async def accepted(self, invoice: InvoiceId) -> bool:
+    async def held(self, invoice: InvoiceId) -> bool:
         statement = select(
             exists().where(
                 *self._mine(),
                 FiscalStatusRecord.invoice_id == invoice,
-                FiscalStatusRecord.status.in_(_ACCEPTANCES),
+                FiscalStatusRecord.status.not_in(_RELEASING),
             )
         )
         return bool((await self._connection.execute(statement)).scalar_one())
@@ -748,7 +749,7 @@ class PgFiscalMirror(FiscalMirror):
     @override
     async def apply(self, invoice: InvoiceId, status: FiscalStatus) -> Applied | None:
         shared = (
-            select(InvoiceRecord.id)
+            select(InvoiceRecord.status)
             .where(
                 InvoiceRecord.organization_id == self._tenant.organization,
                 InvoiceRecord.company_id == self._tenant.company,
@@ -757,8 +758,11 @@ class PgFiscalMirror(FiscalMirror):
             )
             .with_for_update(read=True)
         )
-        if (await self._connection.execute(shared)).first() is None:
+        found = (await self._connection.execute(shared)).scalar_one_or_none()
+        if found is None:
             return None
+        if found == InvoiceStatus.VOIDED.value:
+            return Applied.DOCUMENT_VOIDED
         values: dict[str, object] = {
             "environment": status.environment,
             "status": status.status.value,

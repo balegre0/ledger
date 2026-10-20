@@ -46,6 +46,7 @@ from ledger_invoicing.adapters.http.context import call_of
 from ledger_invoicing.adapters.http.models import InvoiceView
 from ledger_invoicing.adapters.http.public import INVOICE_REF_PATTERN, invoice_ref, parse_invoice_ref
 from ledger_invoicing.adapters.postgres.unit import bind
+from ledger_invoicing.api import MAX_RENDERED, PDF
 from ledger_invoicing.application.infos import info_of
 from ledger_invoicing.application.ports import InvoiceFilters
 from ledger_invoicing.application.queries import Kept
@@ -132,12 +133,13 @@ CHANNEL_KEY: Final = r"^[a-z]{2}-[a-z0-9]+-v[0-9]+$"
 PRINTED: Final[dict[int | str, dict[str, object]]] = {
     HTTPStatus.OK.value: {
         "description": "The document's printed representation, to show or print as it is.",
-        "content": {"application/pdf": {"schema": {"type": "string", "format": "binary"}}},
+        "content": {PDF: {"schema": {"type": "string", "format": "binary", "maxLength": MAX_RENDERED}}},
         "headers": {
             "Content-Disposition": {
                 "description": "inline, with the file name to keep it under.",
                 "schema": {"type": "string"},
-            }
+            },
+            "Cache-Control": {"description": "private, no-store.", "schema": {"type": "string"}},
         },
     }
 }
@@ -327,15 +329,19 @@ def representations(context: ApiContext, renderers: Renderers) -> APIRouter:
     ) -> Response:
         """A document's printed representation for a fiscal channel (a PDF), as that channel renders it.
 
-        404 ``representation_unavailable`` when no installed channel renders it (not issued through it, say).
+        404 ``representation_unavailable`` when no installed channel renders it (not issued through it, or a
+        draft); 503 while the channel cannot render it.
         """
         found = await queries.document(caller.call, parse_invoice_ref(invoice_id))
         rendered = await renderers.render(caller.call, info_of(found), channel)
-        disposition = f'inline; filename="{rendered.filename}"'
         return Response(
             content=rendered.content,
             media_type=rendered.media_type,
-            headers={"Content-Disposition": disposition},
+            headers={
+                "Content-Disposition": f'inline; filename="{rendered.filename}"',
+                "Cache-Control": "private, no-store",  # a tenant's document: no shared cache keeps it
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     return printed

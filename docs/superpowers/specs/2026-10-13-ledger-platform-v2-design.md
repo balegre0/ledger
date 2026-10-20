@@ -1680,7 +1680,9 @@ cannot be probed by type. Internal UUIDs never appear in the API.
 
 `application/problem+json` with `type` (`urn:ledger:error:<code>`), `title`, `status`, `code`, `detail`,
 `request_id` (also the `Request-Id` header), and extension members per code (`errors[]` ≤ 20 for
-`invalid_request`, `authority_messages[]` (`{code, message, lang}`, verbatim) for fiscal rejections, `existing_id`
+`invalid_request`, each `{location, type, message}`; `errors[]` ≤ 20 for `invalid_document` (the
+`IssuePolicy` chain's objections, M3b), each `{code, field, message}`, `field` a path or `null`; both with
+`omitted_errors`, the count left out; `authority_messages[]` (`{code, message, lang}`, verbatim) for fiscal rejections, `existing_id`
 for business-key conflicts). Problems are English; clients translate by `code` (§7.10). One kind → status table
 shared by HTTP and gRPC:
 

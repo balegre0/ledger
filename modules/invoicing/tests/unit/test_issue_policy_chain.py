@@ -20,6 +20,7 @@ import pytest
 from ledger_invoicing.api import (
     ISSUE_BUDGET,
     ISSUE_POLICY,
+    MAX_RENDERED,
     RENDERER,
     EstablishmentOfIssue,
     InvoiceInfo,
@@ -29,7 +30,7 @@ from ledger_invoicing.api import (
     Renderer,
 )
 from ledger_invoicing.application.issuing import IssuePolicies, Renderers
-from ledger_invoicing.application.ports import Log
+from ledger_invoicing.application.ports import AfterIssueReport
 from ledger_invoicing.domain.errors import DocumentInvalidError, RepresentationUnavailableError
 from ledger_invoicing.domain.ids import InvoiceId
 from ledger_invoicing.domain.invoice import InvoiceStatus
@@ -102,16 +103,16 @@ class Clock:
 
 @final
 @dataclass
-class Logged(Log):
-    lines: list[tuple[str, str, dict[str, str]]] = field(default_factory=list)
+class Logged(AfterIssueReport):
+    lines: list[tuple[str, str, str | None]] = field(default_factory=list)
 
     @override
-    def warning(self, event: str, /, **fields: str) -> None:
-        self.lines.append(("warning", event, fields))
+    def timed_out(self, policy: str) -> None:
+        self.lines.append(("timed_out", policy, None))
 
     @override
-    def exception(self, event: str, /, **fields: str) -> None:
-        self.lines.append(("error", event, fields))
+    def exception(self, policy: str, error: str) -> None:
+        self.lines.append(("failed", policy, error))
 
 
 @final
@@ -150,7 +151,9 @@ class Policy(IssuePolicy):
                 raise
 
 
-def chained(*policies: IssuePolicy, clock: Clock | None = None, log: Log | None = None) -> IssuePolicies:
+def chained(
+    *policies: IssuePolicy, clock: Clock | None = None, log: AfterIssueReport | None = None
+) -> IssuePolicies:
     return IssuePolicies(
         chain=lambda: policies, log=log or Logged(), monotonic=clock or Clock(), budget=ISSUE_BUDGET
     )
@@ -238,8 +241,8 @@ async def test_a_policy_that_fails_or_runs_out_of_time_is_logged_by_type_and_pas
     assert [name for name, _, _ in seen] == ["failing", "blocked", "last"]
     assert blocked.cancelled
     assert log.lines == [
-        ("error", "invoicing.after_issue_failed", {"policy": "Policy", "error": "LookupError"}),
-        ("warning", "invoicing.after_issue_timed_out", {"policy": "Policy"}),
+        ("failed", "Policy", "LookupError"),
+        ("timed_out", "Policy", None),
     ]
 
 
@@ -252,7 +255,7 @@ async def test_a_policy_with_no_time_left_is_timed_out_at_once() -> None:
     assert await chained(slow, blocked, clock=clock, log=log).after_issue(CALL, DOCUMENT)
     assert seen[-1] == ("blocked", "after_issue", timedelta(0))
     assert blocked.cancelled
-    assert log.lines == [("warning", "invoicing.after_issue_timed_out", {"policy": "Policy"})]
+    assert log.lines == [("timed_out", "Policy", None)]
 
 
 @final
@@ -296,8 +299,19 @@ def test_an_objection_and_a_rendered_document_are_checked_when_made() -> None:
         Objection(code="rule", field="", message="x")
     with pytest.raises(InvalidValueError, match=r"^objection\.message must be"):
         Objection(code="rule", field=None, message="")
-    with pytest.raises(InvalidValueError, match=r"^rendered_document\.media_type must be"):
-        RenderedDocument(media_type="pdf", content=b"", filename="a.pdf")
+    for media_type in ("pdf", "text/html", "application/pdf; charset=utf-8"):
+        with pytest.raises(
+            InvalidValueError, match=r"^rendered_document\.media_type must be application/pdf$"
+        ):
+            RenderedDocument(media_type=media_type, content=b"", filename="a.pdf")
+    largest = b"%" * MAX_RENDERED
+    assert (
+        RenderedDocument(media_type="application/pdf", content=largest, filename="a.pdf").content == largest
+    )
+    with pytest.raises(
+        InvalidValueError, match=r"^rendered_document\.content must be at most 10485760 bytes$"
+    ):
+        RenderedDocument(media_type="application/pdf", content=largest + b"%", filename="a.pdf")
     for name in ("", "a b.pdf", 'a".pdf', "../a.pdf", "a" * 129):
         with pytest.raises(InvalidValueError, match=r"^rendered_document\.filename must be"):
             RenderedDocument(media_type="application/pdf", content=b"", filename=name)

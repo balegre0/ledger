@@ -6,7 +6,7 @@ names) that answers renders it; none that does is 404 ``representation_unavailab
 company's documents may fetch it, as it may read the document.
 """
 
-from typing import Final, final, override
+from typing import ClassVar, Final, final, override
 lazy from collections.abc import Sequence
 
 import pytest
@@ -14,6 +14,7 @@ lazy import httpx
 
 from ledger_invoicing.api import RenderedDocument, Renderer
 from ledger_invoicing.domain.ids import INVOICE_PREFIX
+from ledger_kernel.errors import UnavailableError
 from ledger_kernel.ids import format_id, new_id, parse_id
 from ledger_platform.runtime import facade
 from ledger_testing.api import TestPrincipal, document
@@ -38,13 +39,25 @@ class Rendering(Renderer):
 
     def __init__(self) -> None:
         self.answer: RenderedDocument | None = None
+        self.unavailable = False
         self.asked: list[tuple[InvoiceInfo, str]] = []
 
     @override
     @facade
     async def render(self, call: Call, document: InvoiceInfo, channel: str) -> RenderedDocument | None:
         self.asked.append((document, channel))
+        if self.unavailable:
+            raise ChannelUnavailableError
         return self.answer
+
+
+class ChannelUnavailableError(UnavailableError):
+    """What a channel answers while it cannot render (fiscal's ``ChannelNotReadyError``, say)."""
+
+    code: ClassVar[str] = "probe_channel_unavailable"
+
+    def __init__(self) -> None:
+        super().__init__("the channel cannot render now")
 
 
 @pytest.fixture
@@ -92,6 +105,10 @@ async def test_the_first_renderer_that_answers_renders_the_document(
     assert response.status_code == 200, response.text
     assert (response.content, response.headers["content-type"]) == (PDF.content, "application/pdf")
     assert response.headers["content-disposition"] == 'inline; filename="E310000000001.pdf"'
+    assert (response.headers["cache-control"], response.headers["x-content-type-options"]) == (
+        "private, no-store",
+        "nosniff",
+    )
     [(asked, channel)] = first.asked
     assert (asked.id, channel) == (parse_id(INVOICE_PREFIX, invoice), "do-ecf-v1")
     assert second.asked == first.asked
@@ -148,3 +165,29 @@ async def test_a_representation_is_of_the_caller_s_own_documents_and_names_a_cha
         response = await client.get(path, params=params, headers=headers)
         assert (response.status_code, document(response)["code"]) == (status, code), path
     assert first.asked == []  # nobody was asked to render what the caller may not read
+
+
+async def test_a_renderer_whose_channel_is_unavailable_answers_503(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str, first: Rendering
+) -> None:
+    invoice = await issued(client, owner, company)
+    first.unavailable = True
+    response = await client.get(
+        PATH.format(invoice), params={"channel": "do-ecf-v1"}, headers=reading(owner, company)
+    )
+    assert (response.status_code, document(response)["code"]) == (503, "probe_channel_unavailable")
+
+
+async def test_a_draft_has_no_representation_and_no_renderer_is_asked(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str, first: Rendering
+) -> None:
+    headers = owner.posting("d-1", "test") | {"Ledger-Company": company}
+    response = await client.post("/v1/invoices", json={**INVOICE, "draft": True}, headers=headers)
+    first.answer = PDF
+    printed = await client.get(
+        PATH.format(document(response)["id"]),
+        params={"channel": "do-ecf-v1"},
+        headers=reading(owner, company),
+    )
+    assert (printed.status_code, document(printed)["code"]) == (404, "representation_unavailable")
+    assert first.asked == []

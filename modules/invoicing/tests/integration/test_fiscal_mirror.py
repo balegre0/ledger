@@ -7,6 +7,7 @@ status's) and shown in ``fiscal[]``, ordered by channel, with the channel's deta
 The document's own version (its ``ETag``) is not the mirror's. One a channel accepted is never voided.
 """
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Final
 from uuid import UUID
@@ -47,7 +48,7 @@ UPDATES: Final = """
     SELECT subject, aggregate_version, payload FROM invoicing.outbox
     WHERE type = 'invoicing.invoice.fiscal_updated' ORDER BY id
 """
-ROWS: Final = TypeAdapter(list[tuple[UUID, int, dict[str, object]]])
+ROWS: Final = TypeAdapter(list[tuple[UUID, int | None, dict[str, object]]])
 ENTRIES: Final = TypeAdapter(list[dict[str, object]])
 
 
@@ -96,7 +97,7 @@ def system(company: str, mode: Mode = Mode.TEST) -> SystemCall:
     return SystemCall(reason="fiscal.channel_documents", scope=tenant, call_id=str(new_id()))
 
 
-async def updates(admin: psycopg.AsyncConnection) -> list[tuple[UUID, int, dict[str, object]]]:
+async def updates(admin: psycopg.AsyncConnection) -> list[tuple[UUID, int | None, dict[str, object]]]:
     cursor = await admin.execute(UPDATES)
     return ROWS.validate_python([tuple(row) for row in await cursor.fetchall()])
 
@@ -115,7 +116,7 @@ async def test_an_older_status_after_a_newer_one_is_stale_and_announced_once(
     assert await invoicing.apply_fiscal_status(call, invoice, status_of(), 2) is Applied.STALE
     assert await invoicing.apply_fiscal_status(call, invoice, accepted, 3) is Applied.STALE  # redelivered
     payload = {"channel": "do-ecf-v1", "status": "accepted", "version": 3}
-    assert await updates(admin) == [(invoice, 3, payload)]
+    assert await updates(admin) == [(invoice, 0, payload)]  # none (the outbox keeps 0): not the document's
     read = await client.get(f"/v1/invoices/{document_id(invoice)}", headers=reading(owner, company))
     assert [(entry["status"], entry["version"]) for entry in fiscal_of(read)] == [("accepted", 3)]
     assert read.headers["etag"] == '"1"'  # the mirror is not the document's state
@@ -134,7 +135,7 @@ async def test_statuses_applied_in_order_are_each_announced(
             await invoicing.apply_fiscal_status(system(company), invoice, status_of(), version)
             is Applied.APPLIED
         )
-    assert [(subject, version) for subject, version, _ in await updates(admin)] == [
+    assert [(subject, payload["version"]) for subject, _, payload in await updates(admin)] == [
         (invoice, 2),
         (invoice, 3),
     ]
@@ -160,23 +161,70 @@ async def test_the_mirror_is_on_the_wire_by_channel_with_the_details_under_the_r
     assert [item["fiscal"] for item in listed["items"]] == [fiscal_of(read)]
 
 
-async def test_a_document_a_channel_accepted_is_not_voided(
+async def test_a_document_a_channel_holds_is_not_voided(
     client: httpx.AsyncClient, owner: TestPrincipal, company: str, invoicing: InvoicingApi
 ) -> None:
-    accepted, rejected = await issued(client, owner, company), await issued(client, owner, company, "i-2")
+    pending, accepted = await issued(client, owner, company), await issued(client, owner, company, "i-2")
+    rejected = await issued(client, owner, company, "i-3")
+    await invoicing.apply_fiscal_status(system(company), pending, status_of(), 1)
     await invoicing.apply_fiscal_status(
         system(company), accepted, status_of(FiscalStatusName.ACCEPTED_WITH_OBSERVATIONS), 4
     )
     await invoicing.apply_fiscal_status(system(company), rejected, status_of(FiscalStatusName.REJECTED), 4)
-    refused = await client.post(
-        f"/v1/invoices/{document_id(accepted)}/void", json={}, headers=posting(owner, company, "v-1", 1)
-    )
-    assert (refused.status_code, document(refused)["code"]) == (409, "invoice_not_voidable")
+    for held, key in ((pending, "v-1"), (accepted, "v-2")):
+        refused = await client.post(
+            f"/v1/invoices/{document_id(held)}/void", json={}, headers=posting(owner, company, key, 1)
+        )
+        assert (refused.status_code, document(refused)["code"]) == (409, "invoice_not_voidable")
+        assert "credit note" in str(document(refused)["detail"])
     voided = await client.post(
-        f"/v1/invoices/{document_id(rejected)}/void", json={}, headers=posting(owner, company, "v-2", 1)
+        f"/v1/invoices/{document_id(rejected)}/void", json={}, headers=posting(owner, company, "v-3", 1)
     )
     assert (voided.status_code, document(voided)["status"]) == (200, "voided")
     assert [entry["status"] for entry in fiscal_of(voided)] == ["rejected"]
+    late = status_of(FiscalStatusName.PENDING, channel="do-zeta-v1")
+    assert await invoicing.apply_fiscal_status(system(company), rejected, late, 1) is Applied.DOCUMENT_VOIDED
+
+
+async def test_two_first_statuses_of_one_version_at_once_keep_one_and_announce_one(
+    client: httpx.AsyncClient,
+    owner: TestPrincipal,
+    company: str,
+    invoicing: InvoicingApi,
+    admin: psycopg.AsyncConnection,
+) -> None:
+    """The sync path and the consumer applying the same first status at once (review I3)."""
+    invoice = await issued(client, owner, company)
+    outcomes = await asyncio.gather(
+        *(invoicing.apply_fiscal_status(system(company), invoice, status_of(), 2) for _ in range(4))
+    )
+    assert sorted(outcomes) == sorted([Applied.APPLIED, Applied.STALE, Applied.STALE, Applied.STALE])
+    assert len(await updates(admin)) == 1
+
+
+async def test_a_newer_and_an_older_status_at_once_keep_the_newer_whatever_comes_first(
+    client: httpx.AsyncClient,
+    owner: TestPrincipal,
+    company: str,
+    invoicing: InvoicingApi,
+    admin: psycopg.AsyncConnection,
+) -> None:
+    statuses = {3: status_of(FiscalStatusName.ACCEPTED), 2: status_of()}
+    kept = 0
+    for key, order in (("i-1", (3, 2)), ("i-2", (2, 3))):
+        invoice = await issued(client, owner, company, key)
+        outcomes = await asyncio.gather(
+            *(
+                invoicing.apply_fiscal_status(system(company), invoice, statuses[version], version)
+                for version in order
+            )
+        )
+        read = await client.get(f"/v1/invoices/{document_id(invoice)}", headers=reading(owner, company))
+        assert [(entry["status"], entry["version"]) for entry in fiscal_of(read)] == [("accepted", 3)]
+        kept += outcomes.count(Applied.APPLIED)
+        mine = [payload["version"] for subject, _, payload in await updates(admin) if subject == invoice]
+        assert mine[-1] == 3
+    assert len(await updates(admin)) == kept  # one event per status kept
 
 
 async def test_a_retried_post_answers_the_document_as_it_is_now(

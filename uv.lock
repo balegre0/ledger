@@ -900,6 +900,7 @@ dependencies = [
     { name = "ledger-identity" },
     { name = "ledger-kernel" },
     { name = "ledger-platform" },
+    { name = "prometheus-client" },
     { name = "pydantic" },
     { name = "sqlalchemy" },
 ]
@@ -911,6 +912,7 @@ requires-dist = [
     { name = "ledger-identity", editable = "modules/identity" },
     { name = "ledger-kernel", editable = "packages/kernel" },
     { name = "ledger-platform", editable = "packages/platform" },
+    { name = "prometheus-client", specifier = ">=0.26.0" },
     { name = "pydantic", specifier = ">=2.14.1" },
     { name = "sqlalchemy", specifier = ">=2.1.4" },
 ]

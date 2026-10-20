@@ -20,6 +20,8 @@ platform's job (Decision 6).
   rolls back), nor a body over the module's limit (``max_stored_body``, by default ``DEFAULT_STORED_BODY``:
   a defect of the route).
 * Times are the database's (the unit's ``now``, its transaction's start).
+* A route may answer a replay by reading its resource again instead of repeating the stored body (invoicing's
+  ``POST``s do, M3b Decision 23): the stored status and headers still say what the first use did.
 * ``stored`` looks a key's answer up without claiming it, waiting for nothing and writing nothing: for work
   whose preparation must not run again for a replay (the signer's import opens a bundle and calls a KMS
   before its unit). A use still in flight is unseen by it; ``once`` then waits for it as a twin.

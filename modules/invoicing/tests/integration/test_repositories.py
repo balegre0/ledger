@@ -29,12 +29,12 @@ from ledger_invoicing.adapters.postgres.unit import PgUnits, UnscopedUnitError, 
 from ledger_invoicing.application.commands import Creation, InvoicingCommands
 from ledger_invoicing.application.issuing import IssuePolicies
 from ledger_invoicing.application.ports import (
+    AfterIssueReport,
     ForeignTenantError,
     IdentityLookup,
     InvoiceFilters,
     Invoices,
     InvoicingUnits,
-    Log,
     StaleWriteError,
 )
 from ledger_invoicing.domain.errors import CorrectionInvalidError, InvoiceNotVoidableError
@@ -324,8 +324,8 @@ async def test_the_mirror_keeps_the_newest_status_per_channel_in_channel_order(
     async def look(unit: InvoicingUnit) -> tuple[object, ...]:
         return (
             await unit.fiscal.of([invoice.id, other.id]),
-            await unit.fiscal.accepted(invoice.id),
-            await unit.fiscal.accepted(other.id),
+            await unit.fiscal.held(invoice.id),
+            await unit.fiscal.held(other.id),
             await unit.fiscal.of([]),
         )
 
@@ -350,7 +350,7 @@ async def test_the_mirror_of_another_tenant_s_document_is_neither_read_nor_writt
             return (
                 await unit.fiscal.apply(invoice.id, status_of(2, FiscalStatusName.ACCEPTED)),
                 await unit.fiscal.of([invoice.id]),
-                await unit.fiscal.accepted(invoice.id),
+                await unit.fiscal.held(invoice.id),
             )
 
         assert await in_unit(module_database, other, look) == (None, {invoice.id: ()}, False)
@@ -378,7 +378,7 @@ async def test_a_status_waits_for_a_void_that_locked_the_invoice_and_is_kept_aft
     assert not applying.done()
     units.release.set()
     assert (await void).status is InvoiceStatus.VOIDED
-    assert await applying is Applied.APPLIED  # what the channel says is kept, whatever the document's state
+    assert await applying is Applied.DOCUMENT_VOIDED  # read after the void: fiscal numbers nothing
 
 
 # ── Changing ────────────────────────────────────────────────────────────────────
@@ -408,7 +408,7 @@ async def test_an_issued_draft_is_kept_at_its_next_version_priced_anew(
     assert await read(module_database, tenant, draft.id) == issued
     assert (await rows(module_database, tenant))["invoice_lines"] == 1
     voided, _ = issued.void(
-        reason=parse_reason("Wrong buyer"), corrected_by_a_note=False, accepted=False, now=NOW
+        reason=parse_reason("Wrong buyer"), corrected_by_a_note=False, held=False, now=NOW
     )
     await in_unit(module_database, tenant, lambda unit: unit.invoices.update(voided))
     assert await read(module_database, tenant, draft.id) == voided
@@ -420,7 +420,7 @@ async def test_a_change_that_skips_a_version_is_a_defect_and_changes_nothing(
     tenant = tenant_of()
     invoice = made(regime, tenant)
     await kept(module_database, invoice)
-    voided, _ = invoice.void(reason=None, corrected_by_a_note=False, accepted=False, now=NOW)
+    voided, _ = invoice.void(reason=None, corrected_by_a_note=False, held=False, now=NOW)
     for wrong in (replace(voided, version=3), replace(voided, id=InvoiceId(new_id()))):
 
         async def change(unit: InvoicingUnit, document: Invoice = wrong) -> None:
@@ -452,7 +452,7 @@ async def test_an_invoice_is_corrected_by_its_draft_and_issued_notes_not_by_a_vo
     issued, _ = credit.issue(seller=SELLER, pricing=credit.pricing, corrected=original, now=NOW)
     await in_unit(module_database, tenant, lambda unit: unit.invoices.update(issued))
     assert await corrected(original)
-    voided, _ = issued.void(reason=None, corrected_by_a_note=False, accepted=False, now=NOW)
+    voided, _ = issued.void(reason=None, corrected_by_a_note=False, held=False, now=NOW)
     await in_unit(module_database, tenant, lambda unit: unit.invoices.update(voided))
     assert not await corrected(original)
 
@@ -623,14 +623,14 @@ class HoldingUnits(InvoicingUnits):
 
 
 @final
-class Unlogged(Log):
+class Unlogged(AfterIssueReport):
     @override
-    def warning(self, event: str, /, **fields: str) -> None:
-        raise AssertionError(event)
+    def timed_out(self, policy: str) -> None:
+        raise AssertionError(policy)
 
     @override
-    def exception(self, event: str, /, **fields: str) -> None:
-        raise AssertionError(event)
+    def exception(self, policy: str, error: str) -> None:
+        raise AssertionError(policy)
 
 
 @final

@@ -4,6 +4,7 @@
 the channels' ``fiscal_channel.document.updated``, which may deliver an update twice or out of order: a
 version not newer than the one kept for the channel is ``STALE`` and changes nothing; a newer one is kept and
 announced (``invoicing.invoice.fiscal_updated``) in the same unit, so the two commit together or not at all.
+A status for a voided document is not kept (``DOCUMENT_VOIDED``): the channel must not number it.
 The unit is of the call's tenant: another tenant's document is as missing as one never made.
 
 No audit record is written: the mirror repeats what the channel recorded (and audited) in its own schema; the
@@ -45,7 +46,7 @@ class FiscalMirroring:
                     InvoiceFiscalUpdated(
                         scope=tenant,
                         subject=document,
-                        aggregate_version=status.version,
+                        aggregate_version=None,
                         channel=status.channel,
                         status=status.status.value,
                         version=status.version,

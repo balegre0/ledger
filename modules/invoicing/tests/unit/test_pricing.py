@@ -13,6 +13,7 @@ from ledger_invoicing.domain.errors import (
     ExchangeRateUnusedError,
     FieldInvalidError,
     FieldRequiredError,
+    FieldUndeclaredInvalidError,
     FieldUnknownError,
     InvalidExchangeRateError,
     InvalidIssueDateError,
@@ -493,3 +494,46 @@ def test_fields_the_regime_does_not_declare_are_kept_for_the_issue_policy_chain_
     refuse_undeclared(priced(regime_with_fields, with_fields({"do": {"ecf_type": "31"}})), regime_with_fields)
     with pytest.raises(FieldInvalidError, match=r"^fiscal\.do\.ecf_type must be"):
         priced(regime_with_fields, with_fields({"do": {**fields, "ecf_type": {"x": "1"}}}))
+
+
+UNDECLARED: Final = (
+    "fiscal.do holds a field the regime does not declare whose name or value is not text of 1 to 500 "
+    "characters, none of them invisible, or an object of at most 1000 such fields (each text, or an object "
+    "of at most 20 text fields)"
+)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "a\x00b",
+        "a\N{ZERO WIDTH SPACE}b",
+        "",
+        "x" * 501,
+        {"0": {"itbis": "1\x07"}},
+        {"0": {"itbis": {"deeper": "1"}}},
+        {"0": {f"f{index}": "1" for index in range(21)}},
+        {str(index): "1" for index in range(1001)},
+        {"a\N{ZERO WIDTH SPACE}": "1"},
+    ],
+)
+def test_an_undeclared_field_holds_plain_text_whatever_judges_it(
+    regime: RegimeDef, value: FieldValue
+) -> None:
+    """Chain or not, draft or not: what a document keeps is text a person can read (review I2)."""
+    with pytest.raises(FieldUndeclaredInvalidError) as caught:
+        priced(regime, with_fields({"do": {"withholdings": value}}))
+    assert str(caught.value) == UNDECLARED
+    assert (caught.value.kind, caught.value.code) == (ErrorKind.INVALID, "field_undeclared_invalid")
+    with pytest.raises(FieldUndeclaredInvalidError):
+        priced(regime, with_fields({"do": {"a\x00": "1"}}))
+
+
+def test_an_undeclared_object_holds_a_field_per_line_of_the_largest_document(regime: RegimeDef) -> None:
+    """DO's ``withholdings`` keys a line's amounts by its index: as many as a document has lines."""
+    withholdings: dict[str, FieldValue] = {
+        str(index): {"itbis": "18.00", "isr": "10.00"} for index in range(MAX_LINES)
+    }
+    assert priced(regime, with_fields({"do": {"withholdings": withholdings}})).fiscal == {
+        "withholdings": withholdings
+    }

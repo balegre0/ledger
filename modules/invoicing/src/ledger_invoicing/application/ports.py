@@ -115,12 +115,14 @@ class FiscalMirror(Protocol, metaclass=ABCMeta):
         """Each of ``invoices`` with its statuses, by channel key (none for one of another tenant)."""
 
     @abstractmethod
-    async def accepted(self, invoice: InvoiceId) -> bool:
-        """Whether a channel accepted ``invoice``: read under its lock by the unit that voids it."""
+    async def held(self, invoice: InvoiceId) -> bool:
+        """Whether a channel holds ``invoice`` (a status neither rejected nor voided), read to void it."""
 
     @abstractmethod
     async def apply(self, invoice: InvoiceId, status: FiscalStatus) -> Applied | None:
         """Keep ``status`` if newer than the one kept for its channel; ``None`` for no such ``invoice``.
+
+        ``DOCUMENT_VOIDED`` (nothing kept) when the document is voided.
 
         Takes a share of the document's lock first: it waits for a unit that holds the document locked.
         """
@@ -202,16 +204,17 @@ class IdentityLookup(Protocol, metaclass=ABCMeta):
         """The company's establishment of ``code`` (``MAIN`` when ``None``), or ``None`` when it has none."""
 
 
-class Log(Protocol, metaclass=ABCMeta):
-    """Where invoicing tells whoever runs it what went wrong outside a request's answer (the module's logger).
+class AfterIssueReport(Protocol, metaclass=ABCMeta):
+    """Where invoicing reports a policy's ``after_issue`` that did not finish: to whoever runs it.
 
-    Fields are codes and type names only: never a document, a party or what a client sent.
+    Each is logged and counted by the policy's type name (and the error's): never a document, a party or what
+    a client sent. The document is issued all the same, and fiscal's recovery consumer finishes the work.
     """
 
     @abstractmethod
-    def warning(self, event: str, /, **fields: str) -> None:
-        """Log ``event`` at warning level with ``fields``."""
+    def timed_out(self, policy: str) -> None:
+        """``policy``'s ``after_issue`` ran out of the budget."""
 
     @abstractmethod
-    def exception(self, event: str, /, **fields: str) -> None:
-        """Log ``event`` at error level with ``fields``, handling an exception (its type one of them)."""
+    def exception(self, policy: str, error: str) -> None:
+        """``policy``'s ``after_issue`` raised ``error`` (its type's name): called from the handler."""

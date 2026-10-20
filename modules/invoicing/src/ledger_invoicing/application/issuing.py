@@ -11,7 +11,8 @@ empty when none is installed.
   (``asyncio.timeout``). Running out of time is logged as a warning, anything else it raises as an error,
   both by the policy's (and the error's) type name, and passed over: the document is issued, and fiscal's
   recovery consumer finishes what the policy did not (§8.5). A cancellation of the request is not caught.
-- ``Renderers.render`` answers the first representation a renderer answers, asking them in order.
+- ``Renderers.render`` answers the first representation a renderer answers, asking them in order; a draft
+  has none.
 """
 
 import asyncio
@@ -23,8 +24,9 @@ lazy from collections.abc import Callable, Sequence
 
 from ledger_invoicing.api import ISSUE_BUDGET
 from ledger_invoicing.domain.errors import DocumentInvalidError, RepresentationUnavailableError
+from ledger_invoicing.domain.invoice import InvoiceStatus
 lazy from ledger_invoicing.api import InvoiceInfo, IssuePolicy, RenderedDocument, Renderer
-lazy from ledger_invoicing.application.ports import Log
+lazy from ledger_invoicing.application.ports import AfterIssueReport
 lazy from ledger_platform.runtime.calls import Call
 
 _NOTHING_LEFT: Final = timedelta(0)
@@ -37,7 +39,7 @@ class IssuePolicies:
 
     chain: Callable[[], Sequence[IssuePolicy]]
     """The implementations, in chain order, read at each run."""
-    log: Log
+    log: AfterIssueReport
     budget: timedelta = ISSUE_BUDGET
     """What the whole chain's ``after_issue`` may take."""
     monotonic: Callable[[], float] = time.monotonic
@@ -67,9 +69,9 @@ class IssuePolicies:
                 async with asyncio.timeout(left.total_seconds()):
                     await policy.after_issue(call, document, budget=left)
             except TimeoutError:
-                self.log.warning("invoicing.after_issue_timed_out", policy=name)
+                self.log.timed_out(name)
             except Exception as error:  # a policy may fail with anything; a cancellation is no Exception
-                self.log.exception("invoicing.after_issue_failed", policy=name, error=type(error).__name__)
+                self.log.exception(name, type(error).__name__)
         return bool(policies)
 
 
@@ -83,8 +85,11 @@ class Renderers:
     async def render(self, call: Call, document: InvoiceInfo, channel: str) -> RenderedDocument:
         """The first representation of ``document`` for ``channel`` a renderer answers.
 
-        ``RepresentationUnavailableError`` when none answers one (or none is installed).
+        ``RepresentationUnavailableError`` when none answers one (or none is installed), and for a draft,
+        which no renderer is asked about: a draft is no fiscal document of any channel.
         """
+        if document.status is InvoiceStatus.DRAFT:
+            raise RepresentationUnavailableError
         for renderer in self.chain():
             rendered = await renderer.render(call, document, channel)
             if rendered is not None:

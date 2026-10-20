@@ -19,17 +19,17 @@ and directions travel as their words, ids as UUID strings (the platform's codec)
 - ``invoicing.invoice.voided`` v1: ``{"kind": ..., "direction": ...}``;
 - ``invoicing.invoice.fiscal_updated`` v1 (public ``invoice.fiscal_updated``): ``{"channel": "do-ecf-v1",
   "status": "pending" | "accepted" | "accepted_with_observations" | "rejected" | "voided", "version": 3}``,
-  announced by the unit that keeps a channel's newer status in the fiscal mirror. Its ``aggregate_version`` is
-  that status's version in its channel (the mirror is not the document's state: the document's own version is
-  unchanged), so a consumer keeps the newest per channel; the payload repeats it for webhooks, which show no
-  envelope.
+  announced by the unit that keeps a channel's newer status in the fiscal mirror. Its ``aggregate_version``
+  is ``None``: the subject is the document, whose version the mirror does not change, and ordered consumers
+  sort a subject's events by it, so a channel's own version there would interleave with the document's. The
+  status's version in its channel is the payload's ``version``: a consumer keeps the newest per channel by it
+  (and consumes this event unordered).
 """
 
 from dataclasses import dataclass
 from typing import ClassVar, final
 lazy from uuid import UUID
 
-from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.events import Event
 lazy from ledger_kernel.regimes import Direction, DocumentKind
 
@@ -69,13 +69,7 @@ class InvoiceFiscalUpdated(Event):
     status: str
     """The platform's word for it (``FiscalStatusName``'s value)."""
     version: int
-    """The status's version in its channel: the envelope's ``aggregate_version``, repeated."""
-
-    def __post_init__(self) -> None:
-        if self.aggregate_version != self.version:
-            raise InvalidValueError(
-                field="invoice_fiscal_updated.aggregate_version", requirement="the version"
-            )
+    """The status's version in its channel (the envelope's ``aggregate_version`` is ``None``)."""
 
 
 type InvoicingEvent = InvoiceIssued | InvoiceVoided | InvoiceFiscalUpdated

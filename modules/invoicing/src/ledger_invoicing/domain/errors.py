@@ -152,6 +152,18 @@ class FieldUnknownError(InvalidInputError):
         )
 
 
+class FieldUndeclaredInvalidError(InvalidInputError):
+    """A country field the regime does not declare (a channel's) that is not plain text, or objects of it.
+
+    Its name is the client's, so the message names the regime's namespace only.
+    """
+
+    code: ClassVar[str] = "field_undeclared_invalid"
+
+    def __init__(self, regime: str, requirement: str) -> None:
+        super().__init__(f"fiscal.{regime} holds a field the regime does not declare whose {requirement}")
+
+
 class FieldRequiredError(InvalidInputError):
     """A country field the company's regime requires is missing."""
 
@@ -252,17 +264,17 @@ class InvoiceNotIssuableError(ConflictError):
 
 
 class InvoiceNotVoidableError(ConflictError):
-    """Only an issued document that no channel accepted and no standing note corrects is voided.
+    """Only an issued document that no channel holds and no standing note corrects is voided.
 
-    An accepted one is corrected by a note; one a draft or issued note corrects keeps standing for it.
+    One a channel holds (numbered, submitted, accepted) is corrected by a credit note; one a draft or issued
+    note corrects keeps standing for it.
     """
 
     code: ClassVar[str] = "invoice_not_voidable"
 
     def __init__(self, invoice: UUID) -> None:
-        super().__init__(
-            f"invoice {_public(invoice)} is not issued, a channel accepted it, or a note corrects it"
-        )
+        held = "a fiscal channel holds it (correct it with a credit note)"
+        super().__init__(f"invoice {_public(invoice)} is not issued, {held}, or a note corrects it")
 
 
 class InvoiceVersionStaleError(ConflictError):

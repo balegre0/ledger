@@ -27,7 +27,10 @@ Both are optional chains, read at call time, in ``(order, module)`` order:
 
 - ``IssuePolicy``: ``check`` runs on the document as it will be issued (its id minted, its seller set, its
   times the clock's: the unit's replace them), with no unit open; the objections of every policy are
-  concatenated in chain order and any refuses it (422 ``invalid_document``, nothing stored). With a chain, the
+  concatenated in chain order and any refuses it (422 ``invalid_document``, nothing stored). ``check`` is
+  not time-bounded by invoicing: it runs before anything is stored, so a slow one delays the answer and
+  never leaves a document half done; an implementation keeps it to local reads (fiscal: enrollments and the
+  channels' own checks, no authority call). With a chain, the
   keys of ``fiscal.<regime>`` the regime does not declare are the chain's to judge (Decision 24); without one
   they are refused. Once the document is issued and committed, each ``after_issue`` runs in chain order with
   what is left of ``ISSUE_BUDGET``, cancelled when that runs out; whatever it raises is logged by its type and
@@ -75,6 +78,8 @@ __all__ = [
     "INVOICING_API",
     "ISSUE_BUDGET",
     "ISSUE_POLICY",
+    "MAX_RENDERED",
+    "PDF",
     "RENDERER",
     "Applied",
     "AuthorityMessageInfo",
@@ -100,7 +105,10 @@ __all__ = [
 
 ISSUE_BUDGET: Final = timedelta(milliseconds=1500)
 """What every ``after_issue`` of the chain may take together, once a document is issued (§12, §8.5 step 4)."""
-_MEDIA_TYPE: Final = re.compile(r"[a-z]+/[a-z0-9][a-z0-9.+-]{0,126}", re.ASCII)
+PDF: Final = "application/pdf"
+"""The one representation invoicing answers (what DGII's printed form is): the route's OpenAPI says so."""
+MAX_RENDERED: Final = 10 * 1024 * 1024
+"""The largest representation answered: 10 MiB."""
 _FILENAME: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", re.ASCII)
 """A file name a ``Content-Disposition`` header carries as it is: no quote, space or slash, no dot first."""
 
@@ -288,8 +296,12 @@ class RenderedDocument:
     filename: str
 
     def __post_init__(self) -> None:
-        if _MEDIA_TYPE.fullmatch(self.media_type) is None:
-            raise InvalidValueError(field="rendered_document.media_type", requirement="a media type")
+        if self.media_type != PDF:
+            raise InvalidValueError(field="rendered_document.media_type", requirement=PDF)
+        if len(self.content) > MAX_RENDERED:
+            raise InvalidValueError(
+                field="rendered_document.content", requirement=f"at most {MAX_RENDERED} bytes"
+            )
         if _FILENAME.fullmatch(self.filename) is None:
             raise InvalidValueError(
                 field="rendered_document.filename",
@@ -319,7 +331,9 @@ class InvoicingApi(Protocol, metaclass=ABCMeta):
         """Keep ``status`` at ``version`` in ``document``'s fiscal mirror, if newer than the one kept.
 
         ``APPLIED`` (kept and announced) when the channel has no status kept at ``version`` or later, else
-        ``STALE`` (nothing changes). One unit of its own, which takes a share of the document's lock first.
+        ``STALE`` (nothing changes); ``DOCUMENT_VOIDED`` (nothing kept) when the document is voided: the
+        channel must not number it, so fiscal applies ``pending`` before it numbers a document. One unit of
+        its own, which takes a share of the document's lock first.
         ``InvoiceNotFoundError`` when the call's tenant has no such document; ``InvalidValueError`` for a
         version below 1, a status out of its bounds, or a call whose scope is not a company in a mode.
         """

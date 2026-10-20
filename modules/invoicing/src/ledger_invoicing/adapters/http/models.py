@@ -72,11 +72,11 @@ type FieldText = Annotated[str, StringConstraints(min_length=1, max_length=MAX_F
 type FieldName = Annotated[str, StringConstraints(min_length=1, max_length=MAX_FIELD_NAME)]
 type FieldObject = Annotated[dict[FieldName, FieldText], Field(max_length=MAX_FIELD_OBJECT)]
 type CountryField = (
-    FieldText | Annotated[dict[FieldName, FieldText | FieldObject], Field(max_length=MAX_FIELD_OBJECT)]
+    FieldText | Annotated[dict[FieldName, FieldText | FieldObject], Field(max_length=MAX_LINES)]
 )
 """A country field: text, or an object of text fields or of such objects. The regime says which of its own
-fields is what (``replaces_ncf``, an object of text); a channel's (Decision 24) may nest one level deeper
-(DO's ``withholdings``: an object per line of ``{"itbis", "isr"}``)."""
+fields is what (``replaces_ncf``, an object of at most 20 text fields); a channel's (Decision 24) may hold a
+field per line and nest one level deeper (DO's ``withholdings``: per line, ``{"itbis", "isr"}``)."""
 
 
 def _text(amount: Decimal) -> str:

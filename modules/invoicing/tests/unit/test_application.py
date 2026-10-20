@@ -21,6 +21,7 @@ from ledger_invoicing.application.infos import info_of
 from ledger_invoicing.application.issuing import IssuePolicies
 from ledger_invoicing.application.mirror import FiscalMirroring
 from ledger_invoicing.application.ports import (
+    AfterIssueReport,
     Audit,
     Events,
     FiscalMirror,
@@ -30,7 +31,6 @@ from ledger_invoicing.application.ports import (
     Invoices,
     InvoicingUnit,
     InvoicingUnits,
-    Log,
     StaleWriteError,
 )
 from ledger_invoicing.application.queries import InvoicingQueries, Kept
@@ -49,7 +49,7 @@ from ledger_invoicing.domain.errors import (
     InvoiceVersionStaleError,
     RegimeMissingError,
 )
-from ledger_invoicing.domain.fiscal import ACCEPTANCES, Applied, FiscalStatus, FiscalStatusName
+from ledger_invoicing.domain.fiscal import RELEASING, Applied, FiscalStatus, FiscalStatusName
 from ledger_invoicing.domain.ids import INVOICE_PREFIX, InvoiceId
 from ledger_invoicing.domain.invoice import InvoiceStatus
 from ledger_invoicing.domain.lines import LineTerms
@@ -278,14 +278,16 @@ class MemoryMirror(FiscalMirror):
         }
 
     @override
-    async def accepted(self, invoice: InvoiceId) -> bool:
+    async def held(self, invoice: InvoiceId) -> bool:
         statuses = (await self.of([invoice]))[invoice]
-        return any(status.status in ACCEPTANCES for status in statuses)
+        return any(status.status not in RELEASING for status in statuses)
 
     @override
     async def apply(self, invoice: InvoiceId, status: FiscalStatus) -> Applied | None:
         if not self._mine(invoice):
             return None
+        if self._staged.invoices[invoice].status is InvoiceStatus.VOIDED:
+            return Applied.DOCUMENT_VOIDED
         kept = self._staged.fiscal.get((invoice, status.channel))
         if kept is not None and kept.version >= status.version:
             return Applied.STALE
@@ -369,14 +371,14 @@ class Lookup(IdentityLookup):
 
 
 @final
-class Quiet(Log):
+class Quiet(AfterIssueReport):
     @override
-    def warning(self, event: str, /, **fields: str) -> None:
-        raise AssertionError(event)
+    def timed_out(self, policy: str) -> None:
+        raise AssertionError(policy)
 
     @override
-    def exception(self, event: str, /, **fields: str) -> None:
-        raise AssertionError(event)
+    def exception(self, policy: str, error: str) -> None:
+        raise AssertionError(policy)
 
 
 @final
@@ -760,7 +762,7 @@ async def test_issuing_a_draft_needs_its_company_active(world: World) -> None:
 async def test_a_note_whose_invoice_was_voided_while_it_was_priced_is_not_issued(world: World) -> None:
     original = await issued_one(world)
     note = await world.create(CALL, replace(DRAFT, kind=DocumentKind.CREDIT_NOTE, corrects=original.id))
-    voided, _ = original.void(reason=None, corrected_by_a_note=False, accepted=False, now=NOON)
+    voided, _ = original.void(reason=None, corrected_by_a_note=False, held=False, now=NOON)
 
     def voided_meanwhile() -> None:
         world.state.invoices[original.id] = voided
@@ -1024,7 +1026,7 @@ async def test_a_newer_status_is_kept_and_announced_an_older_one_changes_nothing
         InvoiceFiscalUpdated(
             scope=TENANT,
             subject=invoice.id,
-            aggregate_version=3,
+            aggregate_version=None,  # not the document's version: ordered consumers sort by it
             channel="do-ecf-v1",
             status="accepted",
             version=3,
@@ -1038,7 +1040,9 @@ async def test_statuses_applied_in_order_are_each_announced(world: World) -> Non
     announced = len(world.state.events)
     for version in (2, 3):
         assert await world.mirroring.apply(SYSTEM, invoice.id, status_of(version)) is Applied.APPLIED
-    versions = [event.aggregate_version for event in world.state.events[announced:]]
+    versions = [
+        event.version for event in world.state.events[announced:] if isinstance(event, InvoiceFiscalUpdated)
+    ]
     assert versions == [2, 3]
 
 
@@ -1052,15 +1056,34 @@ async def test_a_status_for_a_document_the_tenant_does_not_have_is_not_found(wor
         await world.mirroring.apply(SystemCall(reason="test", scope=None), invoice.id, status_of(1))
 
 
-async def test_a_document_a_channel_accepted_is_not_voided(world: World) -> None:
-    for status in (FiscalStatusName.ACCEPTED, FiscalStatusName.ACCEPTED_WITH_OBSERVATIONS):
+async def test_a_document_a_channel_holds_is_not_voided(world: World) -> None:
+    """Pending, accepted or accepted with observations: the channel has the document (a number, a
+    submission), so a credit note corrects it. Rejected or voided in every channel, it may be voided."""
+    for status in (
+        FiscalStatusName.PENDING,
+        FiscalStatusName.ACCEPTED,
+        FiscalStatusName.ACCEPTED_WITH_OBSERVATIONS,
+    ):
         invoice = await issued_one(world)
         await world.mirroring.apply(SYSTEM, invoice.id, status_of(4, status))
         with pytest.raises(InvoiceNotVoidableError):
             await world.void(CALL, invoice.id, None)
-    rejected = await issued_one(world)
-    await world.mirroring.apply(SYSTEM, rejected.id, status_of(4, FiscalStatusName.REJECTED))
-    assert (await world.void(CALL, rejected.id, None)).status is InvoiceStatus.VOIDED
+    released = await issued_one(world)
+    await world.mirroring.apply(SYSTEM, released.id, status_of(4, FiscalStatusName.REJECTED))
+    await world.mirroring.apply(
+        SYSTEM, released.id, replace(status_of(1), channel="do-other-v1", status=FiscalStatusName.VOIDED)
+    )
+    assert (await world.void(CALL, released.id, None)).status is InvoiceStatus.VOIDED
+
+
+async def test_a_status_for_a_voided_document_is_refused_as_such_and_kept_nowhere(world: World) -> None:
+    """fiscal applies ``pending`` before it numbers a document: a voided one is not numbered."""
+    invoice = await issued_one(world)
+    await world.void(CALL, invoice.id, None)
+    announced = len(world.state.events)
+    assert await world.mirroring.apply(SYSTEM, invoice.id, status_of(1)) is Applied.DOCUMENT_VOIDED
+    assert (await world.queries.kept(CALL, invoice.id)).fiscal == ()
+    assert len(world.state.events) == announced
 
 
 async def test_a_status_is_applied_in_a_unit_of_its_own(world: World) -> None:

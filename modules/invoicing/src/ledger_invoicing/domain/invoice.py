@@ -8,10 +8,11 @@ and returns the event that announces it, if any.
 A credit or debit note names the invoice it corrects: an issued invoice of the same company, mode and
 direction, in its currency, dated on or before the note (Decision 10, review I1; credit-note balances are a
 later slice). An issued document is voided
-only while no channel accepted it and no draft or issued note corrects it (Decision 11): an accepted one is
-corrected by a note, and a corrected one stands for its notes. Which channels accepted it is the fiscal
-mirror's (``fiscal``), not the document's own state: the unit that voids reads it once it holds the
-document's lock (``FiscalMirror.accepted``), and a status is applied only under a share of that lock.
+only while no channel holds it and no draft or issued note corrects it (Decision 11): a held one is
+corrected by a credit note, and a corrected one stands for its notes. Whether a channel holds it (any status
+but rejected or voided) is the fiscal mirror's (``fiscal``), not the document's own state: the unit that
+voids reads it once it holds the document's lock (``FiscalMirror.held``), and a status is applied only
+under a share of that lock.
 """
 
 from dataclasses import dataclass, replace
@@ -171,15 +172,15 @@ class Invoice:
         return issued, _announced(issued)
 
     def void(
-        self, *, reason: Reason | None, corrected_by_a_note: bool, accepted: bool, now: datetime
+        self, *, reason: Reason | None, corrected_by_a_note: bool, held: bool, now: datetime
     ) -> tuple[Invoice, InvoiceVoided]:
         """The issued document voided, for ``reason`` if given, at its next version.
 
-        Refused once a channel accepted it (``accepted``, as the unit that locked it reads the fiscal mirror),
+        Refused while a channel holds it (``held``, as the unit that locked it reads the fiscal mirror),
         or while a draft or issued note corrects it (``corrected_by_a_note``, as that unit reads its notes):
         the note stands on it.
         """
-        if self.status is not InvoiceStatus.ISSUED or accepted or corrected_by_a_note:
+        if self.status is not InvoiceStatus.ISSUED or held or corrected_by_a_note:
             raise InvoiceNotVoidableError(self.id)
         voided = replace(
             self,

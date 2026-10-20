@@ -13,13 +13,15 @@ lazy from collections.abc import Callable
 import pytest
 
 from ledger_invoicing.domain.fiscal import (
-    ACCEPTANCES,
+    MAX_DETAIL_DEPTH,
+    MAX_DETAILS,
     MAX_MESSAGES,
+    RELEASING,
     Applied,
     AuthorityMessage,
     FiscalStatus,
     FiscalStatusName,
-    accepted,
+    held,
 )
 from ledger_kernel.errors import InvalidValueError
 lazy from ledger_invoicing.domain.fiscal import Detail
@@ -39,7 +41,7 @@ PENDING: Final = FiscalStatus(
 )
 
 
-def test_the_statuses_are_the_kit_s_words_and_two_of_them_are_acceptances() -> None:
+def test_the_statuses_are_the_kit_s_words_and_two_of_them_release_the_document() -> None:
     assert [status.value for status in FiscalStatusName] == [
         "pending",
         "accepted",
@@ -47,15 +49,33 @@ def test_the_statuses_are_the_kit_s_words_and_two_of_them_are_acceptances() -> N
         "rejected",
         "voided",
     ]
-    assert {FiscalStatusName.ACCEPTED, FiscalStatusName.ACCEPTED_WITH_OBSERVATIONS} == ACCEPTANCES
-    assert [outcome.value for outcome in Applied] == ["applied", "stale"]
+    assert {FiscalStatusName.REJECTED, FiscalStatusName.VOIDED} == RELEASING
+    assert [outcome.value for outcome in Applied] == ["applied", "stale", "document_voided"]
 
 
-def test_a_document_is_accepted_once_any_channel_says_so() -> None:
-    assert not accepted(())
-    assert not accepted([PENDING, replace(PENDING, channel="do-other-v1", status=FiscalStatusName.REJECTED)])
-    for status in ACCEPTANCES:
-        assert accepted([PENDING, replace(PENDING, channel="do-other-v2", status=status)])
+def test_a_document_is_held_while_any_channel_s_status_does_not_release_it() -> None:
+    rejected = replace(PENDING, channel="do-other-v1", status=FiscalStatusName.REJECTED)
+    voided = replace(PENDING, channel="do-other-v2", status=FiscalStatusName.VOIDED)
+    assert not held(())
+    assert not held([rejected, voided])
+    for status in FiscalStatusName:
+        if status not in RELEASING:
+            assert held([rejected, replace(PENDING, status=status)])
+
+
+def test_details_are_bounded_in_depth_and_size() -> None:
+    deep: Detail = "x"
+    for _ in range(MAX_DETAIL_DEPTH):
+        deep = [deep]
+    assert replace(PENDING, details={"deep": deep}).details == {"deep": deep}
+    with pytest.raises(
+        InvalidValueError, match=r"^fiscal_status\.details must be JSON at most 5 levels deep"
+    ):
+        replace(PENDING, details={"deep": [deep]})
+    with pytest.raises(InvalidValueError, match=r"^fiscal_status\.details must be JSON .* 16384 characters"):
+        replace(PENDING, details={"long": "x" * MAX_DETAILS})
+    nested: Detail = {"a": {"b": "c"}}
+    assert replace(PENDING, details={"nested": nested}).details == {"nested": nested}
 
 
 def test_details_are_a_read_only_copy_of_what_the_channel_said() -> None:

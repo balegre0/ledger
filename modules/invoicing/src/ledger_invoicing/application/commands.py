@@ -245,8 +245,8 @@ class InvoicingCommands:
 
         ``InvoiceNotFoundError`` for no document of the tenant by that id; ``InvoiceVersionStaleError`` for
         one at a version ``admits`` refuses, once locked; ``InvoiceNotVoidableError`` for one not issued, one
-        a channel accepted, or one a draft or issued note corrects (both read once it is locked, so a note
-        made or an acceptance applied meanwhile is seen).
+        a channel holds (any status but rejected or voided), or one a draft or issued note corrects (both read
+        once it is locked, so a note made or a status applied meanwhile is seen).
         """
 
         async def apply(unit: InvoicingUnit) -> Invoice:
@@ -256,10 +256,8 @@ class InvoicingCommands:
             if not admits(current.version):
                 raise InvoiceVersionStaleError(invoice)
             noted = await unit.invoices.corrected_by(current.id)
-            accepted = await unit.fiscal.accepted(current.id)
-            voided, event = current.void(
-                reason=reason, corrected_by_a_note=noted, accepted=accepted, now=unit.now
-            )
+            held = await unit.fiscal.held(current.id)
+            voided, event = current.void(reason=reason, corrected_by_a_note=noted, held=held, now=unit.now)
             await unit.invoices.update(voided)
             unit.events.publish(event)
             detail = {"kind": voided.kind.value}
