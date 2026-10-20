@@ -461,9 +461,9 @@ def _channel_contracts(facts: _Facts, country: Package) -> Iterator[str | None]:
     """Each channel of ``country`` is layered, and its domain and use cases know no third party."""
     root = facts.workspace.root / country.source / "channels"
     allowed = {country.import_name, "ledger_kernel", _KIT}
-    # The kit is the contract a channel implements; what it imports itself (the platform's call and codec,
-    # the validation of its JSON form) its own declared edges govern. Its edges are left out of this contract
-    # only: a channel's domain importing the platform or a third party directly is still refused.
+    # The kit is the contract a channel implements; what it imports itself (the platform's call and codec, the
+    # validation of its JSON form) its own declared edges govern. Its edges are left out of this contract only:
+    # a channel's domain importing the platform or a third party directly is still refused.
     through_kit = [("ignore_imports", [f"{_KIT}.** -> **"])] if _KIT in facts.roots else []
     for channel in _channels(facts, country):
         container = f"{country.import_name}.channels.{channel}"
