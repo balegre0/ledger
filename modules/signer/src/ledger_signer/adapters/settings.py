@@ -31,8 +31,12 @@ MAX_SIGNING_SKEW_SECONDS: Final = 900
 """The most skew the signer may allow: past it a document's moment says too little of when it was signed."""
 MAX_DEADLINE_SECONDS: Final = 10.0
 """The longest a client waits for the signer (spec §3.7: deadlines set by the caller, at most 10 s)."""
-MAX_IMPORT_DEADLINE_SECONDS: Final = MAX_DEADLINE
-"""The longest an import may take: a bundle streams, so it gets the most any call between services may."""
+IMPORT_DEADLINE_MARGIN_SECONDS: Final = 2.0
+"""How much longer the api waits for an import than the signer waits for its stream: time to hear the signer
+say the stream was too slow (``signer_import_too_slow``) rather than give up on it first."""
+MAX_IMPORT_DEADLINE_SECONDS: Final = MAX_DEADLINE - IMPORT_DEADLINE_MARGIN_SECONDS
+"""The longest an import may take: a bundle streams, so it gets the most any call between services may, less
+the api's margin (28 s)."""
 
 
 class _RepeatedDaysError(ValueError):
@@ -55,7 +59,8 @@ class SignerSettings(PackageSettings):
     import_deadline_seconds: Annotated[float, Field(gt=0, le=MAX_IMPORT_DEADLINE_SECONDS)] = (
         MAX_IMPORT_DEADLINE_SECONDS
     )
-    """How long the api waits for an import: a bundle of up to 2 MiB streams through it."""
+    """How long the signer waits for an import's stream to end; the api waits
+    ``IMPORT_DEADLINE_MARGIN_SECONDS`` more for the answer."""
     # the signer role: its callers' tokens (Decision 12), its port, its backends, its KMS, its rules
     token_api: SecretStr | None = None
     token_worker: SecretStr | None = None

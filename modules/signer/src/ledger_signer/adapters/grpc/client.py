@@ -22,6 +22,9 @@ What the signer answers becomes what the signer's own process would raise:
 - any other call: a refusal of ``API_REFUSALS`` is built again as the facade raises it (the same type, code,
   kind and message), when its status is the one its kind is answered with; the HTTP edge maps those to its
   problems, whichever process answered;
+- an import whose deadline passed while its bundle was still coming (the signer had its header, the rest
+  never came) is ``ImportTooSlowError``, as the signer itself answers it first (the api waits
+  ``IMPORT_DEADLINE_MARGIN_SECONDS`` longer than the signer);
 - every call: whatever the signer could not reach (its KMS, the entity), a signer that is down, too slow or
   not open is ``SignerUnavailableError``; a defect the signer reports (``INTERNAL`` with the platform's
   ``INTERNAL_CODE``: custody damaged or tampered with, a KMS that refuses, an entity's answer that cannot be
@@ -70,17 +73,18 @@ from ledger_signer.adapters.grpc.codec import (
     ImportHeaderFirstError,
     ImportTooSlowError,
 )
-from ledger_signer.adapters.http.service import CertificateService
 from ledger_signer.adapters.settings import MAX_DEADLINE_SECONDS
 from ledger_signer.api import BackendKind, BackendNotOfferedError, CertificateNotFoundError, SignerApi
+from ledger_signer.application.certificates import CertificateServesLiveError
 from ledger_signer.application.facade import port_error
-from ledger_signer.application.importing import MAX_BUNDLE_BYTES, ImportTooLargeError
+from ledger_signer.application.importing import MAX_BUNDLE_BYTES, ImportModesRefusedError, ImportTooLargeError
 from ledger_signer.application.ports import (
     ActiveCertificateTakenError,
     BundleIncompleteError,
     BundleUnreadableError,
     EntityRefusedError,
 )
+from ledger_signer.application.service import CertificateService
 from ledger_signer.domain.certificates import MIN_RSA_BITS, CertificateStatus
 from ledger_signer.domain.errors import (
     CertificateExpiredError,
@@ -176,6 +180,8 @@ API_REFUSALS: Final[Mapping[str, Refusal]] = {
             EntityRefusedError,
             ActiveCertificateTakenError,
             CertificateNotFoundError,
+            CertificateServesLiveError,
+            ImportModesRefusedError,
         )
     },
 }
@@ -309,10 +315,14 @@ class SignerClient(SignerPort, SignerApi, CertificateService):
     ) -> ImportOutcome:
         """Stream the header ``header_of`` makes, then ``bundle`` (if any) in chunks, as one import."""
         stub = self._opened()
+        begun: list[bool] = []  # [True] once grpc took the header: the call reached the signer
+        streamed: list[bool] = []  # [True] once grpc took the whole stream
 
         async def requests() -> AsyncGenerator[signer_pb2.ImportCertificateRequest]:
             yield signer_pb2.ImportCertificateRequest(header=header_of())
+            begun.append(True)
             if bundle is None:
+                streamed.append(True)
                 return
             size = 0
             async for part in bundle:
@@ -322,8 +332,12 @@ class SignerClient(SignerPort, SignerApi, CertificateService):
                 view = memoryview(part)
                 for start in range(0, len(view), CHUNK_BYTES):
                     yield signer_pb2.ImportCertificateRequest(chunk=bytes(view[start : start + CHUNK_BYTES]))
+            streamed.append(True)
 
         def refused(error: RemoteError) -> LedgerError | None:
+            if error.status is grpc.StatusCode.DEADLINE_EXCEEDED and begun and not streamed:
+                # the signer had the header, the bundle was still coming: its sender was slow, not the signer
+                return ImportTooSlowError()
             return _api_error(error, backend)
 
         sent = call_stream_unary(

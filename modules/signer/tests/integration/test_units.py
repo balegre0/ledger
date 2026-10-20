@@ -368,7 +368,7 @@ async def test_the_use_cases_keep_sign_and_retire_over_custody_and_postgres(
     signed = await signing.sign_xml("worker", to_sign)
     assert signed.certificate == installed.view.id
     assert b"<SignatureValue>" in signed.document
-    retired = await Retiring(units).retire(owner_of(tenant), installed.view.id)
+    retired = await Retiring(units).retire(tenant, installed.view.id)
     assert retired.status is CertificateStatus.RETIRED
     assert await rows(admin, "SELECT 1 FROM signer.custody WHERE company_id = %s", tenant.company) == []
     with pytest.raises(SigningCertificateMissingError):

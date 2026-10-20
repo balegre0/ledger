@@ -1,7 +1,7 @@
 """``/v1/certificates``: a company's signing certificates, installed, read and retired through the signer.
 
 Served by ``api``, which holds no key and opens no bundle (spec §3.7): every route forwards to the signer's
-gRPC service (``service.CertificateService``) and shows what it answers. The company is the
+gRPC service (``application.service.CertificateService``) and shows what it answers. The company is the
 ``Ledger-Company`` header's (§9.7) and the mode ``Ledger-Mode``'s (or the API client's). Every route requires,
 as its first dependency, the caller (401) with a role in the company (404) holding the route's permission
 (``signer.certificates.read`` or ``.manage``, 403): the signer trusts the company and the actor the api
@@ -18,20 +18,32 @@ refused 403, never answered).
 
 ``POST /v1/certificates`` takes the PKCS#12 bundle as the raw body (``application/x-pkcs12``, else 415), at
 most 2 MiB (``larger_body``: 413 as it is read), its password in ``Ledger-Certificate-Password``
-(``UNLOCK_HEADER``) and the modes in the query. The body is streamed to the signer as it arrives
-(``request.stream()``), never buffered whole nor parsed here; a client gone before it ended is a 400.
-``POST /v1/certificates/remote`` takes the credential of a certification entity. ``DELETE`` retires a
-certificate for every mode, naturally idempotent (no key, Decision 8); like a read, it finds the certificate
-among those of the request's mode, so a request in one mode never touches a certificate that served the
-other alone. What the signer answers is ``problems.answered``'s.
+(``UNLOCK_HEADER``) and the modes in the query. The password travels as base64 (standard alphabet, padded)
+of its UTF-8: a header is Latin-1 to the server, so a password with letters past ASCII (``contraseña``) would
+otherwise reach the bundle changed; anything else is 422 ``invalid_request`` naming the header. A header keeps
+the body free to stream; it is also what proxies and APM agents log, so each must redact it (ADR 0010,
+accepted risks). The body is streamed to the signer as it arrives (``request.stream()``), never buffered whole
+nor parsed here; a client gone before it ended is a 400. What the request's headers and query say is judged
+before the body's type: a request missing its password or its key is 422 even with the wrong type, which is
+415 otherwise. ``POST /v1/certificates/remote`` takes the credential of a certification entity.
+
+Modes follow the request's (ADR 0007: a test-mode credential is safe to hand out): a test-mode request
+installs for test alone, a live one for live or both (``certificate_modes_not_allowed``, 422, before the
+bundle is read; the signer refuses them too). ``DELETE`` retires a certificate for every mode, naturally
+idempotent (no key, Decision 8); like a read, it finds the certificate among those of the request's mode, and
+a test-mode request never retires one that serves live (``certificate_serves_live``, 409, the signer's).
+What the signer answers is ``problems.answered``'s.
 """
 
+import base64
+import binascii
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Annotated, ClassVar, Final, final
 lazy from collections.abc import AsyncGenerator, Callable, Coroutine
 
 from fastapi import APIRouter, Depends, Header, Query
+from pydantic import AfterValidator
 from starlette.exceptions import HTTPException
 from starlette.requests import ClientDisconnect
 lazy from fastapi import Request, Response
@@ -56,7 +68,7 @@ from ledger_platform.runtime.calls import Call
 from ledger_signer.adapters.http.models import CertificateResource, modes_of, parse_certificate_ref
 from ledger_signer.adapters.http.problems import RETRY_AFTER_SECONDS, answered
 from ledger_signer.api import CertificateNotFoundError
-from ledger_signer.application.importing import ImportRequest
+from ledger_signer.application.importing import ImportRequest, require_import_modes
 from ledger_signer.application.ports import Secret
 lazy from ledger_kernel.access import Permission
 lazy from ledger_kernel.tenancy import Mode
@@ -65,16 +77,16 @@ lazy from ledger_platform.http import Authentication, InCompany
 lazy from ledger_platform.http.mode import ModeDependency
 lazy from ledger_platform.http.openapi import Answers
 lazy from ledger_signer.adapters.http.models import ModeWord, RemoteImport
-lazy from ledger_signer.adapters.http.service import CertificateService
 lazy from ledger_signer.api import CertificateView
 lazy from ledger_signer.application.ports import ImportOutcome
+lazy from ledger_signer.application.service import CertificateService
 
 PREFIX: Final = "/v1/certificates"
 PKCS12: Final = "application/x-pkcs12"
 UNLOCK_HEADER: Final = "Ledger-Certificate-Password"
 """The header that carries a bundle's password: forwarded to the signer, never kept, logged or shown."""
-MAX_UNLOCK: Final = 1024
-"""The longest password the header may carry."""
+MAX_UNLOCK: Final = 1368
+"""The longest header: base64 of a password of up to 1024 bytes of UTF-8."""
 CERTIFICATES_READ: Final = parse_permission("signer.certificates.read")
 CERTIFICATES_MANAGE: Final = parse_permission("signer.certificates.manage")
 _RETRY_AFTER: Final[dict[str, object]] = {
@@ -105,6 +117,7 @@ def _refusals(*statuses: int) -> Answers:
 
 
 READ: Final = _refusals(400, 401, 403, 404, 422)
+RETIRE: Final = _refusals(400, 401, 403, 404, 409, 422)
 IMPORT: Final = _refusals(400, 401, 403, 404, 408, 409, 413, 415, 422) | success(
     HTTPStatus.CREATED, "Location", REPLAYED_HEADER
 )
@@ -170,10 +183,31 @@ class Acting:
         return Call(principal=self.access.principal, scope=self.tenant, request_id=request_id)
 
     def importing(self, key: str, modes: list[ModeWord] | None) -> ImportRequest:
-        """An import for the request's company under ``key``, for ``modes`` (by default the request's)."""
-        return ImportRequest(
-            tenant=self.tenant, modes=modes_of(modes, default=self.mode), idempotency_key=key
-        )
+        """An import for the request's company under ``key``, for ``modes`` (by default the request's).
+
+        ``ImportModesRefusedError`` for modes the request's mode may not install, before anything is sent.
+        """
+        named = modes_of(modes, default=self.mode)
+        require_import_modes(self.mode, named)
+        return ImportRequest(tenant=self.tenant, modes=named, idempotency_key=key)
+
+
+class UnlockUnreadableError(ValueError):
+    """A password header that is not base64 of UTF-8: pydantic's ``value_error``, its message our own."""
+
+    def __init__(self) -> None:
+        super().__init__("the password must be base64 of its UTF-8")
+
+
+def unlocked(sent: str) -> str:
+    """The password ``sent`` carries: base64 (standard alphabet, padded) of its UTF-8; else ``ValueError``.
+
+    The error never repeats what was sent.
+    """
+    try:
+        return base64.b64decode(sent.encode("ascii"), validate=True).decode("utf-8")
+    except UnicodeError, binascii.Error:
+        raise UnlockUnreadableError from None
 
 
 def _acting(routes: Routes, permission: Permission) -> ActingDependency:
@@ -243,10 +277,16 @@ def _imports(certificates: APIRouter, service: CertificateService, manager: Acti
         key: Annotated[str, Depends(idempotency_key)],
         unlock: Annotated[
             str,
+            AfterValidator(unlocked),
             Header(
                 alias=UNLOCK_HEADER,
+                min_length=1,
                 max_length=MAX_UNLOCK,
-                description="The bundle's password: it opens the bundle in the signer, and is never kept.",
+                description=(
+                    "The bundle's password, as base64 (standard alphabet, padded) of its UTF-8: it opens the "
+                    "bundle in the signer, and is never kept. Redact this header at every proxy, WAF and APM "
+                    "agent."
+                ),
                 json_schema_extra={"format": "password", "writeOnly": True},
             ),
         ],
@@ -266,7 +306,9 @@ def _imports(certificates: APIRouter, service: CertificateService, manager: Acti
         (``certificate_bundle_unreadable``, whichever was wrong), holds no RSA key with its certificate
         (``certificate_bundle_incomplete``), or its certificate cannot sign: a key under 2048 bits, no
         digital signature usage, a CA, not valid now or for too short a time. The same key with another
-        bundle or other modes is ``idempotency_key_reused``.
+        bundle or other modes is ``idempotency_key_reused``. A test-mode request installs for test alone
+        (``certificate_modes_not_allowed``). Its outcome can be confirmed with ``GET /v1/certificates``, which
+        needs only ``signer.certificates.read``.
         """
         if not _is_pkcs12(request.headers.get("content-type")):
             raise HTTPException(HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
@@ -327,18 +369,19 @@ def _reads(
         """A certificate that serves, or served, the request's mode; else 404 ``certificate_not_found``."""
         return CertificateResource.of(await _found(service, caller, certificate_id), mode=caller.mode)
 
-    @certificates.delete("/{certificate_id}", response_model=CertificateResource, responses=READ)
+    @certificates.delete("/{certificate_id}", response_model=CertificateResource, responses=RETIRE)
     async def retire_certificate(
         caller: Annotated[Acting, Depends(manager)], certificate_id: str
     ) -> CertificateResource:
         """Retire a certificate of the request's mode for every mode: it never signs again.
 
         Needs ``signer.certificates.manage``. One retired already is answered as it is. The company then has
-        no certificate in the modes it served until it installs another.
+        no certificate in the modes it served until it installs another. A test-mode request never retires a
+        certificate that serves live: 409 ``certificate_serves_live``.
         """
         view = await _found(service, caller, certificate_id)
         with answered():
-            retired = await service.retire(caller.call, caller.access.tenant, view.id)
+            retired = await service.retire(caller.call, caller.tenant, view.id)
         return CertificateResource.of(retired, mode=caller.mode)
 
 

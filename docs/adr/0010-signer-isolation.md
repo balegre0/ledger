@@ -70,3 +70,11 @@ Recorded at the review of the runtime's signer role (v2-M2b Task 3); each names 
    the migrator, item 5), and an entity's credential is expected to be a long random secret. Follow-up (with
    the real entity adapter, v2-M5): key the credential's digest with a secret of the signer (HMAC) if the
    entity's credentials can be guessed.
+7. **A bundle's password travels in a request header.** `POST /v1/certificates` takes the PKCS#12 bundle as
+   the raw body, so that the api streams it to the signer unread, and its password in
+   `Ledger-Certificate-Password`, as base64 of its UTF-8 (a header is Latin-1 to the server: a password past
+   ASCII would otherwise reach the bundle changed). A header is what reverse proxies, WAFs and APM agents log
+   by default, and base64 hides nothing (recorded at the review of v2-M2b Task 13). The app never logs it, nor
+   any header. Accepted for the streaming it keeps (a multipart body would let Starlette spool the bundle to
+   disk). Follow-up (v2-M6, with the ingress and the APM agent): redact `Ledger-Certificate-Password` at every
+   proxy, WAF and APM agent in front of `api`, and test the redaction in the deployment's checks.

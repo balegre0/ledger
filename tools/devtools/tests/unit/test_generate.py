@@ -596,6 +596,11 @@ packages = ["kernel", "platform"]
 schema = "vault"
 isolated_in = "signer"
 """
+VAULT_HTTP: Final = """
+[http]
+mounted_in = ["api"]
+prefixes = ["/v1/vaults"]
+"""
 SIGNER_APP: Final = """
 [package]
 name = "signer"
@@ -649,6 +654,37 @@ def test_an_isolated_module_without_an_app_of_its_role_gets_the_one_contract(
     text = importlinter_text(Workspace.load(tree))
     assert "[importlinter:contract:vault-custody]\n" in text
     assert "vault-custody-signer-apps" not in text
+
+
+def test_an_isolated_module_s_http_adapter_opens_no_bundle_and_reaches_no_custody(
+    tree: Path, write: Writer
+) -> None:
+    """Its routes forward secrets unread (ADR 0010): not even indirectly may they reach a parser of keys."""
+    write("modules/vault", VAULT + VAULT_HTTP, ("adapters",))
+    text = importlinter_text(Workspace.load(tree))
+    assert (
+        "[importlinter:contract:vault-http-holds-no-key]\n"
+        "name = vault's HTTP adapter reaches no custody, even indirectly\n"
+        "type = forbidden\n"
+        "source_modules =\n"
+        "    ledger_vault.adapters.http\n"
+        "forbidden_modules =\n"
+        "    ledger_vault.adapters.custody\n"
+        "\n"
+        "[importlinter:contract:vault-http-opens-no-key]\n"
+        "name = vault's HTTP adapter imports no cryptography itself (its use cases' types may)\n"
+        "type = forbidden\n"
+        "source_modules =\n"
+        "    ledger_vault.adapters.http\n"
+        "forbidden_modules =\n"
+        "    cryptography\n"
+        "allow_indirect_imports = True\n"
+    ) in text
+
+
+def test_an_isolated_module_without_routes_gets_no_http_contract(tree: Path, write: Writer) -> None:
+    write("modules/vault", VAULT, ("adapters",))
+    assert "vault-http-" not in importlinter_text(Workspace.load(tree))
 
 
 def test_no_custody_contract_without_an_isolated_module(tree: Path) -> None:

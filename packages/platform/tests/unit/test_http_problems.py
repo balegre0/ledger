@@ -188,3 +188,39 @@ async def test_an_error_that_names_its_answer_is_answered_with_its_status_and_he
         False,
     )
     assert [entry["code"] for entry in logs] == ["answered_defect"]
+
+
+class SucceedingRefusalError(InvalidInputError):
+    """A refusal that names a status no refusal may have: a defect of its class, answered as one."""
+
+    code: ClassVar[str] = "succeeding_refusal"
+
+    def __init__(self) -> None:
+        super().__init__("refused")
+
+    def problem_status(self) -> HTTPStatus:
+        return HTTPStatus.OK
+
+    def problem_headers(self) -> Mapping[str, str]:
+        return {"Retry-After": "5"}
+
+
+async def test_an_error_that_names_a_status_below_400_is_a_defect() -> None:
+    router = APIRouter()
+
+    @router.get("/fine")
+    async def fine() -> None:
+        raise SucceedingRefusalError
+
+    async with client_of(bare(router)) as client:
+        with capture_logs() as logs:
+            response = await client.get("/fine")
+    assert (response.status_code, response.json()["code"], "retry-after" in response.headers) == (
+        500,
+        "internal",
+        False,
+    )
+    assert status_of(SucceedingRefusalError()) == HTTPStatus.INTERNAL_SERVER_ERROR
+    assert [(entry["event"], entry["code"]) for entry in logs] == [
+        ("http.unhandled_error", "succeeding_refusal")
+    ]

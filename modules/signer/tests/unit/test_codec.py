@@ -239,12 +239,19 @@ def test_a_tenant_s_description_and_a_retirement_are_asked_by_company() -> None:
         signer_pb2.MODE_TEST,
         True,
     )
-    retired = codec.retire_request(CALL, Tenant(ORGANIZATION, COMPANY, None), ACTIVE.id)
-    assert (retired.call.call_id, retired.company.organization_id, retired.certificate_id) == (
+    retired = codec.retire_request(CALL, Tenant(ORGANIZATION, COMPANY, Mode.LIVE), ACTIVE.id)
+    assert (retired.call.call_id, retired.company.organization_id, retired.certificate_id, retired.mode) == (
         "call-1",
         str(ORGANIZATION),
         str(ACTIVE.id),
+        signer_pb2.MODE_LIVE,
     )
+    with pytest.raises(InvalidValueError, match=r"signer\.tenant"):
+        codec.retire_request(CALL, Tenant(ORGANIZATION, COMPANY, None), ACTIVE.id)
+    unnamed = codec.retire_request(CALL, TENANT, ACTIVE.id)
+    unnamed.mode = signer_pb2.MODE_UNSPECIFIED
+    with pytest.raises(InvalidValueError, match=r"signer\.retire\.mode"):
+        codec.retirement(unnamed)
 
 
 def test_a_tenant_without_a_mode_cannot_be_described() -> None:
@@ -271,11 +278,11 @@ def test_the_server_reads_what_the_client_sends() -> None:
         tenant=TENANT, profile=PROFILE, document=b"<a/>", signed_at=AT, reference="E310000000001"
     )
     seed = SeedToSign(tenant=TENANT, profile=PROFILE, seed=b"<s/>", audience="ecf.dgii.gov.do:443")
-    retirement = codec.retire_request(CALL, Tenant(ORGANIZATION, COMPANY, None), ACTIVE.id)
+    retirement = codec.retire_request(CALL, Tenant(ORGANIZATION, COMPANY, Mode.TEST), ACTIVE.id)
     assert codec.xml_to_sign(codec.xml_request(CALL, document)) == document
     assert codec.seed_to_sign(codec.seed_request(CALL, seed)) == seed
     assert codec.described(codec.describe_request(CALL, TENANT, include_retired=False)) == TENANT
-    assert codec.retirement(retirement) == (Tenant(ORGANIZATION, COMPANY, None), ACTIVE.id)
+    assert codec.retirement(retirement) == (Tenant(ORGANIZATION, COMPANY, Mode.TEST), ACTIVE.id)
     assert codec.import_request(codec.local_header(CALL, REQUEST, Secret("p"))) == REQUEST
     assert codec.call_actor(codec.call_context(CALL)) == Actor("system:ecf_emission", "call-1")
 

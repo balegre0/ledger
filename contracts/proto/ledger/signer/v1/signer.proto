@@ -16,7 +16,8 @@ service SignerService {
   rpc ImportCertificate(stream ImportCertificateRequest) returns (ImportCertificateResponse);
   // The company's certificates serving a mode, active first.
   rpc DescribeCertificates(DescribeCertificatesRequest) returns (DescribeCertificatesResponse);
-  // Retires a certificate for every mode; retiring a retired one answers it unchanged.
+  // Retires a certificate for every mode; retiring a retired one answers it unchanged. A request in test mode
+  // never retires a certificate that serves live (FAILED_PRECONDITION certificate_serves_live).
   rpc RetireCertificate(RetireCertificateRequest) returns (RetireCertificateResponse);
   // Signs a document (enveloped signature, the root's last child) with the active certificate of the company
   // and mode, once the signature is audited.
@@ -125,6 +126,7 @@ message RetireCertificateRequest {
   CallContext call = 1;
   Company company = 2;
   string certificate_id = 3;
+  Mode mode = 4;  // the request's mode: a test-mode one retires no certificate that serves live
 }
 
 message RetireCertificateResponse {

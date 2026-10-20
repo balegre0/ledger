@@ -1,14 +1,15 @@
 """Importing a certificate: admitted by custody outside any unit, installed in one unit under its key.
 
-The order (spec §3.6, plan Decisions 8 to 10): the backend must be offered and the idempotency key well formed
-(nothing else happens otherwise); a short unit looks the key up, and an answer stored under it is replayed at
-once, with no custody, KMS or entity call (a replay needs neither the password nor a certificate still valid);
-custody opens the bundle or asks the entity, and seals the secret under a data key the KMS wraps, outside any
-unit and at most ``import_concurrency`` at once (a pool of the imports' own, apart from the signatures'); the
-domain admits the certificate's facts; then one unit, under the
-request's tenant (its mode scopes the key), claims the key and, unless it replays an earlier answer, locks the
-company's active certificates, installs the new one (each of them loses its modes, retired once it serves
-none), keeps it, audits it, announces it and every certificate it retired, and plans its expiry notices.
+The order (spec §3.6, plan Decisions 8 to 10): the modes must be ones the request's mode may install, the
+backend must be offered and the idempotency key well formed (nothing else happens otherwise); a short unit
+looks the key up, and an answer stored under it is replayed at once, with no custody, KMS or entity call (a
+replay needs neither the password nor a certificate still valid); custody opens the bundle or asks the entity,
+and seals the secret under a data key the KMS wraps, outside any unit and at most ``import_concurrency`` at
+once (a pool of the imports' own, apart from the signatures'); the domain admits the certificate's facts; then
+one unit, under the request's tenant (its mode scopes the key), claims the key and, unless it replays an
+earlier answer, locks the company's active certificates, installs the new one (each of them loses its modes,
+retired once it serves none), keeps it, audits it, announces it and every certificate it retired, and plans
+its expiry notices.
 
 Two imports for one mode at once, with different keys, both find no certificate to lock: the second to
 commit is refused by the partial unique index (``ActiveCertificateTakenError``) and is tried again once, when
@@ -23,15 +24,21 @@ import asyncio
 import hashlib
 from dataclasses import dataclass
 from typing import ClassVar, Final, final
-lazy from collections.abc import Awaitable, Callable
+lazy from collections.abc import Awaitable, Callable, Mapping
 
 from ledger_kernel.errors import InvalidInputError, InvalidValueError
 from ledger_kernel.ids import new_id
-from ledger_kernel.tenancy import Tenant
+from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.data.audit import current_actor
 from ledger_platform.data.idempotency import InvalidIdempotencyKeyError, is_idempotency_key
 from ledger_signer.api import BackendNotOfferedError
-from ledger_signer.application.certificates import modes_of, retired_event, state_of, view_of
+from ledger_signer.application.certificates import (
+    modes_of,
+    require_mode,
+    retired_event,
+    state_of,
+    view_of,
+)
 from ledger_signer.application.notices import plan_notices
 from ledger_signer.application.ports import ActiveCertificateTakenError, ImportClaim, SealContext
 from ledger_signer.domain.certificates import (
@@ -44,7 +51,6 @@ from ledger_signer.domain.certificates import (
 )
 from ledger_signer.events import CertificateInstalled
 lazy from ledger_kernel.clock import Clock
-lazy from ledger_kernel.tenancy import Mode
 lazy from ledger_signer.api import CertificateView
 lazy from ledger_signer.application.ports import (
     Admitted,
@@ -70,6 +76,31 @@ class ImportTooLargeError(InvalidInputError):
         super().__init__(f"a certificate bundle is at most {MAX_BUNDLE_BYTES} bytes")
 
 
+class ImportModesRefusedError(InvalidInputError):
+    """Modes the request's mode may not install (ADR 0007: a test-mode credential never touches live).
+
+    A test-mode request names test alone; a live one names live, or both.
+    """
+
+    code: ClassVar[str] = "certificate_modes_not_allowed"
+
+    def __init__(self) -> None:
+        super().__init__("a test-mode request installs for test alone; a live-mode one for live, or both")
+
+
+_INSTALLABLE: Final[Mapping[Mode, frozenset[frozenset[Mode]]]] = {
+    Mode.TEST: frozenset({frozenset({Mode.TEST})}),
+    Mode.LIVE: frozenset({frozenset({Mode.LIVE}), frozenset({Mode.TEST, Mode.LIVE})}),
+}
+"""The modes a request in each mode may install a certificate for."""
+
+
+def require_import_modes(mode: Mode, modes: frozenset[Mode]) -> None:
+    """Refuse ``modes`` a request in ``mode`` may not install (``ImportModesRefusedError``)."""
+    if modes not in _INSTALLABLE[mode]:
+        raise ImportModesRefusedError
+
+
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ImportRequest:
@@ -78,7 +109,8 @@ class ImportRequest:
     tenant: Tenant
     """The organization, the company and the request's mode (which scopes the key)."""
     modes: frozenset[Mode]
-    """The modes the certificate serves: one or both (they need not include the request's)."""
+    """The modes the certificate serves: one or both, as ``require_import_modes`` admits them for the
+    request's mode (a test-mode request installs for test alone; a live one for live, or both)."""
     idempotency_key: str
 
     def __post_init__(self) -> None:
@@ -145,6 +177,7 @@ class Importing:
         source_sha256: bytes,
         admitted: Callable[[SealContext], Awaitable[Admitted]],
     ) -> ImportOutcome:
+        require_import_modes(require_mode("importing", request.tenant), request.modes)
         if backend not in self._rules.backends:
             raise BackendNotOfferedError(backend)
         if not is_idempotency_key(request.idempotency_key):

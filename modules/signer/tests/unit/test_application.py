@@ -25,13 +25,19 @@ from ledger_platform.data.idempotency import InvalidIdempotencyKeyError
 from ledger_platform.http.idempotency import IdempotencyKeyReusedError
 from ledger_signer.api import BackendNotOfferedError, CertificateNotFoundError
 from ledger_signer.application.certificates import (
+    CertificateServesLiveError,
     Describing,
     Retiring,
     retire_company,
     retired_event,
     view_of,
 )
-from ledger_signer.application.importing import Importing, ImportRequest, fingerprint_of
+from ledger_signer.application.importing import (
+    Importing,
+    ImportModesRefusedError,
+    ImportRequest,
+    fingerprint_of,
+)
 from ledger_signer.application.notices import EXPIRY_NOTICE, Notices
 from ledger_signer.application.ports import (
     ActiveCertificateTakenError,
@@ -315,11 +321,12 @@ async def test_the_import_claims_its_key_with_the_fingerprint_of_decision_9(
 ) -> None:
     sent = bundle(holder, password=PASSWORD)
 
-    _ = await importing(units, custody, clock).local(request(BOTH), sent, Secret(PASSWORD))
+    _ = await importing(units, custody, clock).local(request(BOTH, mode=Mode.LIVE), sent, Secret(PASSWORD))
 
     [claim] = units.claims
     assert (claim.principal, claim.key) == (current_actor().name, KEY)
-    assert claim.request_hash == expected_hash("live,test", "local", hashlib.sha256(sent).digest())
+    source = hashlib.sha256(sent).digest()
+    assert claim.request_hash == expected_hash("live,test", "local", source, mode="live")
 
 
 async def test_the_same_key_replays_the_first_answer_and_installs_nothing_more(
@@ -346,7 +353,7 @@ async def test_another_request_under_a_used_key_is_refused(
     _ = await use_case.local(request(), sent, Secret(PASSWORD))
 
     with pytest.raises(IdempotencyKeyReusedError):
-        await use_case.local(request(BOTH), sent, Secret(PASSWORD))
+        await use_case.local(request(), bundle(holder, password=PASSWORD), Secret(PASSWORD))  # new salt
 
     assert len(units.rows) == 1
 
@@ -358,7 +365,7 @@ async def test_the_same_key_in_the_other_mode_is_another_key(
     sent = bundle(holder, password=PASSWORD)
     first = await use_case.local(request(), sent, Secret(PASSWORD))
 
-    other = await use_case.local(request(mode=Mode.LIVE), sent, Secret(PASSWORD))
+    other = await use_case.local(request(LIVE, mode=Mode.LIVE), sent, Secret(PASSWORD))
 
     assert not other.replayed
     assert other.view.id != first.view.id
@@ -374,6 +381,47 @@ async def test_a_key_that_is_not_visible_ascii_is_refused_before_anything(
         )
 
     assert units.opened == []
+
+
+@pytest.mark.parametrize(
+    "asked",
+    [(Mode.TEST, LIVE), (Mode.TEST, BOTH), (Mode.LIVE, TEST)],
+    ids=["test asks live", "test asks both", "live asks test alone"],
+)
+async def test_an_import_names_only_the_modes_its_request_s_mode_may_install(
+    units: Store, custody: Custody, clock: Clock, holder: Issued, asked: tuple[Mode, frozenset[Mode]]
+) -> None:
+    """A test-mode credential installs for test only; a live one for live, or both (ADR 0007)."""
+    mode, modes = asked
+    refusals: list[ImportModesRefusedError] = []
+    for importing_with in (
+        importing(units, custody, clock),
+        importing(units, custody, clock, BackendKind.REMOTE),
+    ):
+        with pytest.raises(ImportModesRefusedError) as refused:
+            await importing_with.local(
+                request(modes, mode=mode), bundle(holder, password=PASSWORD), Secret(PASSWORD)
+            )
+        refusals.append(refused.value)
+        with pytest.raises(ImportModesRefusedError):
+            await importing_with.remote(request(modes, mode=mode), Secret(CREDENTIAL))
+    assert {(error.code, error.kind) for error in refusals} == {
+        ("certificate_modes_not_allowed", ErrorKind.INVALID)
+    }
+    assert units.opened == []
+
+
+@pytest.mark.parametrize(
+    "asked", [(Mode.TEST, TEST), (Mode.LIVE, LIVE), (Mode.LIVE, BOTH)], ids=["test", "live", "both"]
+)
+async def test_an_import_may_name_its_own_mode_and_a_live_one_both(
+    units: Store, custody: Custody, clock: Clock, holder: Issued, asked: tuple[Mode, frozenset[Mode]]
+) -> None:
+    mode, modes = asked
+    outcome = await importing(units, custody, clock).local(
+        request(modes, mode=mode), bundle(holder, password=PASSWORD), Secret(PASSWORD)
+    )
+    assert outcome.view.modes == modes
 
 
 async def test_installing_takes_the_modes_of_the_certificates_before_it_in_one_unit(
@@ -393,7 +441,7 @@ async def test_installing_takes_the_modes_of_the_certificates_before_it_in_one_u
     assert of_type(units.events, CertificateInstalled)[0].replaces == (earlier.id,)
     assert of_type(units.events, CertificateRetired) == []
 
-    for_both = await use_case.local(request(BOTH, key="two"), sent, Secret(PASSWORD))
+    for_both = await use_case.local(request(BOTH, mode=Mode.LIVE, key="two"), sent, Secret(PASSWORD))
 
     assert len(units.opened) == 4
     retired = [units.rows[earlier.id], units.rows[for_test.view.id]]
@@ -524,7 +572,7 @@ async def test_another_request_under_a_used_key_is_refused_before_custody(
     kms.available = False
 
     with pytest.raises(IdempotencyKeyReusedError):
-        await use_case.local(request(BOTH), sent, Secret(PASSWORD))
+        await use_case.local(request(), bundle(holder, password=PASSWORD), Secret(PASSWORD))
 
 
 async def test_a_first_import_with_a_wrong_password_is_refused_then_one_with_the_right_one_installs(
@@ -636,7 +684,7 @@ async def test_retiring_retires_for_every_mode_audits_and_announces(units: Store
     kept = certificate(BOTH)
     units.seed(kept, MATERIAL)
 
-    view = await Retiring(units).retire(OWNER, kept.id)
+    view = await Retiring(units).retire(IN_LIVE, kept.id)
 
     assert (view.status, view.retired_reason, view.retired_at, view.version) == (
         CertificateStatus.RETIRED,
@@ -667,7 +715,7 @@ async def test_retiring_a_retired_certificate_answers_it_unchanged(units: Store,
     retired = certificate(TEST).retired(RetiredReason.REPLACED, at=clock())
     units.seed(retired, MATERIAL)
 
-    view = await Retiring(units).retire(OWNER, retired.id)
+    view = await Retiring(units).retire(IN_TEST, retired.id)
 
     assert view == view_of(retired)
     assert (units.events, units.audits) == ([], [])
@@ -678,16 +726,44 @@ async def test_retiring_another_company_s_certificate_finds_none(units: Store) -
     units.seed(elsewhere, MATERIAL)
 
     with pytest.raises(CertificateNotFoundError):
-        await Retiring(units).retire(OWNER, elsewhere.id)
+        await Retiring(units).retire(IN_TEST, elsewhere.id)
     with pytest.raises(CertificateNotFoundError):
-        await Retiring(units).retire(OWNER, CertificateId(new_id()))
+        await Retiring(units).retire(IN_TEST, CertificateId(new_id()))
 
     assert units.rows[elsewhere.id] == elsewhere
 
 
-async def test_retiring_names_a_company_without_a_mode(units: Store) -> None:
+async def test_retiring_names_the_request_s_mode(units: Store) -> None:
     with pytest.raises(InvalidValueError):
-        _ = await Retiring(units).retire(IN_TEST, CertificateId(new_id()))
+        _ = await Retiring(units).retire(OWNER, CertificateId(new_id()))
+
+
+@pytest.mark.parametrize("serving", [LIVE, BOTH], ids=["live", "both"])
+async def test_a_test_mode_retirement_refuses_a_certificate_that_serves_live(
+    units: Store, serving: frozenset[Mode]
+) -> None:
+    """A test-mode credential never stops live signing (ADR 0007); a live-mode one may retire it."""
+    kept = certificate(serving)
+    units.seed(kept, MATERIAL)
+
+    with pytest.raises(CertificateServesLiveError) as refused:
+        await Retiring(units).retire(IN_TEST, kept.id)
+
+    assert (refused.value.code, refused.value.kind) == ("certificate_serves_live", ErrorKind.CONFLICT)
+    assert units.rows[kept.id] == kept
+    assert (units.events, units.audits) == ([], [])
+    retired = await Retiring(units).retire(IN_LIVE, kept.id)
+    assert retired.status is CertificateStatus.RETIRED
+
+
+async def test_a_test_mode_retirement_retires_a_certificate_that_serves_test_alone(units: Store) -> None:
+    kept = certificate(TEST)
+    units.seed(kept, MATERIAL)
+
+    retired = await Retiring(units).retire(IN_TEST, kept.id)
+
+    assert retired.status is CertificateStatus.RETIRED
+    assert units.opened == [OWNER]
 
 
 async def test_a_deactivated_company_has_every_active_certificate_retired(units: Store, clock: Clock) -> None:

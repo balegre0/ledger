@@ -35,12 +35,11 @@ from ledger_signer.adapters.grpc.client import SignerClient
 from ledger_signer.adapters.http.router import Routes, router
 from ledger_signer.adapters.identity import IdentityPermissions
 from ledger_signer.adapters.postgres.schema import MIGRATIONS, migrations
-from ledger_signer.adapters.settings import SignerSettings
+from ledger_signer.adapters.settings import IMPORT_DEADLINE_MARGIN_SECONDS, SignerSettings
 from ledger_signer.adapters.unavailable import UnavailableSigner
 from ledger_signer.api import SIGNER_API
 lazy from ledger_platform.runtime import ModuleContext
 lazy from ledger_signer.adapters.grpc.server import SignerServer
-lazy from ledger_signer.adapters.http.service import CertificateService
 lazy from ledger_signer.adapters.serving import (
     build,
     caller_tokens,
@@ -51,6 +50,7 @@ lazy from ledger_signer.adapters.serving import (
 )
 lazy from ledger_signer.adapters.settings import Caller
 lazy from ledger_signer.application.notices import EXPIRY_NOTICE
+lazy from ledger_signer.application.service import CertificateService
 
 COMPANY_DEACTIVATIONS: Final = "signer.company_deactivations"
 PURGES: Final = ("signer.purge_idempotency_keys", "signer.purge_done_jobs")
@@ -62,9 +62,8 @@ def _client(settings: SignerSettings, caller: Caller) -> SignerClient | None:
     address, token = settings.address, settings.token_of(caller)
     if address is None or token is None:
         return None
-    return SignerClient(
-        address, token, deadline=settings.deadline_seconds, import_deadline=settings.import_deadline_seconds
-    )
+    import_deadline = settings.import_deadline_seconds + IMPORT_DEADLINE_MARGIN_SECONDS
+    return SignerClient(address, token, deadline=settings.deadline_seconds, import_deadline=import_deadline)
 
 
 def _routers(context: ModuleContext, service: CertificateService) -> tuple[APIRouter, ...]:

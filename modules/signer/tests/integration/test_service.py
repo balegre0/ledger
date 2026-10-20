@@ -512,7 +512,7 @@ async def test_expiry_notice_publishes_for_an_active_certificate_only(
 ) -> None:
     tenant = a_company()
     gone = await imported(api, tenant, issued(authority), "import-0001")
-    _ = await api.retire(call_for(tenant), Tenant(tenant.organization, tenant.company, None), gone.id)
+    _ = await api.retire(call_for(tenant), tenant, gone.id)
     kept = await imported(api, tenant, issued(authority), "import-0002")
     now = datetime.now(UTC)
     async with signer.app.bound("signer").unit(tenant) as unit:

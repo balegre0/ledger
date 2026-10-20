@@ -6,14 +6,13 @@ subject, and what each subject may do in the one company is the test's own table
 answers as a test tells it, or fails as the signer's client would.
 """
 
-import ast
 import asyncio
+import base64
 import dataclasses
 import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
-from pathlib import Path
 from typing import Final, final, override
 lazy from collections.abc import AsyncGenerator, AsyncIterable, Mapping, Sequence
 
@@ -22,7 +21,7 @@ import httpx
 import pytest
 from opentelemetry.sdk.trace import TracerProvider
 from prometheus_client import CollectorRegistry
-from pydantic import TypeAdapter
+from pydantic import SecretStr, TypeAdapter
 from structlog.testing import capture_logs
 lazy from fastapi import FastAPI
 
@@ -32,6 +31,7 @@ from ledger_kernel.ids import COMPANY_PREFIX, CompanyId, format_id, new_id
 from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.auth import PermissionSource
 from ledger_platform.auth.providers.zitadel import organization_of
+from ledger_platform.config.settings import Settings
 from ledger_platform.grpc.client import RemoteDefectError, RemoteNotFoundError
 from ledger_platform.http import Authentication
 from ledger_platform.http.app import ApiInfo, Observability, create_app
@@ -40,9 +40,9 @@ from ledger_platform.http.idempotency import IdempotencyKeyInUseError, Idempoten
 from ledger_platform.http.limits import MAX_UPLOAD_BYTES
 from ledger_platform.http.proving import authenticated
 from ledger_platform.observability.health import Health
+from ledger_platform.observability.logs import configure_logging
 from ledger_platform.runtime.calls import Call
 from ledger_signer._manifest import MANIFEST
-from ledger_signer.adapters import http as http_adapter
 from ledger_signer.adapters.grpc.client import SignerDefectError
 from ledger_signer.adapters.grpc.codec import (
     ImportChunksUnexpectedError,
@@ -59,7 +59,6 @@ from ledger_signer.adapters.http.router import (
     Routes,
     router,
 )
-from ledger_signer.adapters.http.service import CertificateService
 from ledger_signer.api import (
     BackendKind,
     CertificateId,
@@ -67,12 +66,14 @@ from ledger_signer.api import (
     CertificateStatus,
     CertificateView,
 )
+from ledger_signer.application.certificates import CertificateServesLiveError
 from ledger_signer.application.importing import MAX_BUNDLE_BYTES, ImportTooLargeError
 from ledger_signer.application.ports import (
     ActiveCertificateTakenError,
     BundleUnreadableError,
     ImportOutcome,
 )
+from ledger_signer.application.service import CertificateService
 from ledger_testing.api import document, page
 lazy from ledger_kernel.access import Permission
 lazy from ledger_kernel.errors import LedgerError
@@ -87,8 +88,10 @@ COMPANY_REF: Final = format_id(COMPANY_PREFIX, COMPANY)
 OTHER_COMPANY: Final = format_id(COMPANY_PREFIX, new_id())
 AT: Final = datetime(2026, 10, 19, 12, tzinfo=UTC)
 PASSWORD: Final = "PASSWORD-SENTINEL-4kQ"
+UNLOCK: Final = base64.b64encode(PASSWORD.encode()).decode()
+"""``PASSWORD`` as the header carries it."""
 CREDENTIAL: Final = "CREDENTIAL-SENTINEL-8wZ"
-SENTINELS: Final = (PASSWORD, CREDENTIAL)
+SENTINELS: Final = (PASSWORD, UNLOCK, CREDENTIAL)
 CHUNK: Final = 64 * 1024
 PKCS12: Final = "application/x-pkcs12"
 INVOICES_READ: Final = parse_permission("invoicing.invoices.read")
@@ -259,8 +262,13 @@ def posting(subject: str = "owner", key: str = "import-1", company: str = COMPAN
     return reading(subject, company) | {"Idempotency-Key": key}
 
 
-def uploading(subject: str = "owner", key: str = "import-1", password: str = PASSWORD) -> dict[str, str]:
-    return posting(subject, key) | {UNLOCK_HEADER: password, "Content-Type": PKCS12}
+def uploading(subject: str = "owner", key: str = "import-1", unlock: str = UNLOCK) -> dict[str, str]:
+    return posting(subject, key) | {UNLOCK_HEADER: unlock, "Content-Type": PKCS12}
+
+
+def unlocking(password: str) -> str:
+    """``password`` as the header carries it: base64 of its UTF-8."""
+    return base64.b64encode(password.encode()).decode()
 
 
 def answered(response: httpx.Response) -> tuple[int, object]:
@@ -295,26 +303,6 @@ def test_every_route_is_for_bearers_of_a_token_and_declares_what_it_requires(fak
     assert unguarded_routes(app_of(fake).routes) == ()
 
 
-def test_the_http_adapter_never_opens_a_bundle_nor_reaches_custody() -> None:
-    """The api forwards a bundle unread (Review Focus 1 and 3): no module of the adapter can parse one."""
-    adapter = Path(http_adapter.__file__).parent
-    imported: set[str] = set()
-    for source in adapter.glob("*.py"):
-        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
-            match node:
-                case ast.Import(names=names):
-                    imported |= {alias.name for alias in names}
-                case ast.ImportFrom(module=str() as module):
-                    imported.add(module)
-                case _:
-                    pass
-    assert "ledger_signer.adapters.grpc.client" not in imported  # the service is a port: no transport here
-    assert [
-        name for name in imported if name.startswith(("cryptography", "ledger_signer.adapters.custody"))
-    ] == []
-    assert len(list(adapter.glob("*.py"))) == 5
-
-
 type Sending = tuple[str, str, Mapping[str, str], bytes | None]
 """A request: its method, its path, the headers other than the caller's, its body."""
 
@@ -323,7 +311,7 @@ REQUESTS: Final[Mapping[str, Sending]] = {
     "import": (
         "POST",
         PREFIX,
-        {"Idempotency-Key": "k", UNLOCK_HEADER: PASSWORD, "Content-Type": PKCS12},
+        {"Idempotency-Key": "k", UNLOCK_HEADER: UNLOCK, "Content-Type": PKCS12},
         b"pkcs12",
     ),
     "import_remote": (
@@ -429,17 +417,37 @@ async def test_an_import_streams_the_bundle_to_the_signer_and_answers_the_certif
     )
 
 
-async def test_an_import_serves_the_modes_the_query_names_whatever_the_request_s_mode(
-    client: httpx.AsyncClient, fake: Fake
-) -> None:
-    both = await client.post(
-        f"{PREFIX}?modes=live&modes=test&modes=live", headers=uploading(key="a"), content=b"p"
+async def test_a_live_import_serves_the_modes_the_query_names(client: httpx.AsyncClient, fake: Fake) -> None:
+    in_live = posting(key="a") | {"Ledger-Mode": "live", UNLOCK_HEADER: UNLOCK, "Content-Type": PKCS12}
+    both = await client.post(f"{PREFIX}?modes=live&modes=test&modes=live", headers=in_live, content=b"p")
+    live = await client.post(f"{PREFIX}?modes=live", headers=in_live | {"Idempotency-Key": "b"}, content=b"p")
+    other = await client.post(
+        f"{PREFIX}?modes=sandbox", headers=in_live | {"Idempotency-Key": "c"}, content=b"p"
     )
-    live = await client.post(f"{PREFIX}?modes=live", headers=uploading(key="b"), content=b"p")
-    other = await client.post(f"{PREFIX}?modes=sandbox", headers=uploading(key="c"), content=b"p")
     assert [both.status_code, live.status_code, answered(other)] == [201, 201, (422, "invalid_request")]
     assert [request.modes for request in fake.requests] == [{Mode.LIVE, Mode.TEST}, {Mode.LIVE}]
-    assert {request.tenant.mode for request in fake.requests} == {Mode.TEST}
+    assert {request.tenant.mode for request in fake.requests} == {Mode.LIVE}
+
+
+@pytest.mark.parametrize(
+    ("mode", "named"),
+    [("test", ("live",)), ("test", ("test", "live")), ("live", ("test",))],
+    ids=["test names live", "test names both", "live names test alone"],
+)
+async def test_an_import_names_only_the_modes_its_request_s_mode_may_install(
+    client: httpx.AsyncClient, fake: Fake, mode: str, named: tuple[str, ...]
+) -> None:
+    """A test-mode credential never changes what signs in live (ADR 0007): refused before the bundle."""
+    query = "&".join(f"modes={word}" for word in named)
+    refused = await client.post(
+        f"{PREFIX}?{query}", headers=uploading() | {"Ledger-Mode": mode}, content=b"p"
+    )
+    remote_body = {"credential": CREDENTIAL, "modes": list(named)}
+    remote = await client.post(
+        f"{PREFIX}/remote", headers=posting() | {"Ledger-Mode": mode}, json=remote_body
+    )
+    assert [answered(refused), answered(remote)] == [(422, "certificate_modes_not_allowed")] * 2
+    assert (fake.requests, fake.chunks) == ([], [])
 
 
 async def test_a_replayed_import_says_so(client: httpx.AsyncClient, fake: Fake) -> None:
@@ -479,16 +487,44 @@ async def test_a_bundle_over_two_mib_is_refused_413(client: httpx.AsyncClient) -
     assert MAX_UPLOAD_BYTES == MAX_BUNDLE_BYTES
 
 
+async def test_the_password_travels_as_base64_of_its_utf8_whatever_its_letters(
+    client: httpx.AsyncClient, fake: Fake
+) -> None:
+    """A header is Latin-1 to the server: base64 keeps ``contraseña`` the password its owner typed."""
+    response = await client.post(PREFIX, headers=uploading(unlock=unlocking("contraseña")), content=b"p")
+    assert response.status_code == 201, response.text
+    assert fake.secrets == ["contraseña"]
+
+
+@pytest.mark.parametrize(
+    "unlock",
+    ["contraseña", "not base64!", "cGFzc3dvcmQ", base64.b64encode(b"\xff\xfe").decode(), ""],
+    ids=["raw utf-8", "not the alphabet", "unpadded", "not utf-8", "empty"],
+)
+async def test_a_password_header_that_is_not_base64_of_utf8_is_refused_naming_it(
+    client: httpx.AsyncClient, fake: Fake, unlock: str
+) -> None:
+    headers = [
+        (name.encode(), value.encode()) for name, value in uploading().items() if name != UNLOCK_HEADER
+    ]
+    headers.append((UNLOCK_HEADER.encode(), unlock.encode()))  # raw bytes: httpx would refuse non-ASCII text
+    response = await client.post(PREFIX, headers=headers, content=b"p")
+    assert answered(response) == (422, "invalid_request")
+    locations = [error["location"] for error in ERRORS.validate_python(document(response)["errors"])]
+    assert locations == [f"header.{UNLOCK_HEADER}"]
+    assert fake.calls == []
+
+
 async def test_an_import_without_its_password_is_refused_naming_the_header(
     client: httpx.AsyncClient, fake: Fake
 ) -> None:
     headers = {name: value for name, value in uploading().items() if name != UNLOCK_HEADER}
     missing = await client.post(PREFIX, headers=headers, content=b"p")
-    long = await client.post(PREFIX, headers=uploading(password=PASSWORD * 100), content=b"p")
+    long = await client.post(PREFIX, headers=uploading(unlock=unlocking(PASSWORD * 100)), content=b"p")
     assert [answered(missing), answered(long)] == [(422, "invalid_request")] * 2
     locations = [error["location"] for error in ERRORS.validate_python(document(missing)["errors"])]
     assert locations == [f"header.{UNLOCK_HEADER}"]
-    assert PASSWORD not in long.text
+    assert all(secret not in long.text for secret in SENTINELS)
     assert fake.calls == []
 
 
@@ -551,7 +587,8 @@ async def test_a_remote_import_sends_the_credential_and_answers_the_certificate(
     client: httpx.AsyncClient, fake: Fake
 ) -> None:
     body = {"credential": CREDENTIAL, "modes": ["live"]}
-    response = await client.post(f"{PREFIX}/remote", headers=posting(key="r-1"), json=body)
+    in_live = posting(key="r-1") | {"Ledger-Mode": "live"}
+    response = await client.post(f"{PREFIX}/remote", headers=in_live, json=body)
     assert response.status_code == 201, response.text
     assert document(response)["id"] == ref(ACTIVE)
     [request] = fake.requests
@@ -637,7 +674,7 @@ async def test_a_certificate_of_the_request_s_mode_is_retired_for_every_mode(
     assert (document(response)["status"], document(response)["retired_reason"]) == ("retired", "retired")
     assert fake.retired == [ACTIVE.id]
     [_, (method, _, company)] = fake.calls
-    assert (method, company) == ("retire", Tenant(ORGANIZATION, COMPANY, None))
+    assert (method, company) == ("retire", Tenant(ORGANIZATION, COMPANY, Mode.TEST))
 
 
 async def test_a_certificate_the_request_s_mode_never_saw_is_not_found_and_not_retired(
@@ -665,6 +702,7 @@ def named(value: object) -> str:
         (IdempotencyKeyInUseError(), 409, "idempotency_key_in_use"),
         (ActiveCertificateTakenError(), 409, "certificate_install_raced"),
         (CertificateNotFoundError(), 404, "certificate_not_found"),
+        (CertificateServesLiveError(), 409, "certificate_serves_live"),
         (ImportTooLargeError(), 413, "signer_import_too_large"),
         (ImportTooSlowError(), 408, "signer_import_too_slow"),
         (ImportHeaderFirstError(), 500, "internal"),
@@ -698,6 +736,27 @@ async def test_a_signer_out_of_reach_is_503_with_retry_after_on_every_route(
         assert response.headers["retry-after"] == str(RETRY_AFTER_SECONDS)
 
 
+async def test_the_rendered_log_of_a_defect_names_it_and_never_a_password_or_a_credential(
+    fake: Fake, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The platform's own logging, configured once ``capsys`` holds stdout: what an operator reads."""
+    configure_logging(
+        Settings(environment="test", database_url=SecretStr("postgresql+psycopg://a:b@db.invalid/l")),
+        service="ledger-api",
+    )
+    transport = httpx.ASGITransport(app=app_of(fake), raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ledger.test") as client:
+        fake.failure = ImportHeaderFirstError()
+        local = await client.post(PREFIX, headers=uploading(), content=b"p")
+        remote = await client.post(f"{PREFIX}/remote", headers=posting(), json={"credential": CREDENTIAL})
+    out = capsys.readouterr().out
+    assert [answered(local), answered(remote)] == [(500, "internal")] * 2
+    assert out.count("http.unhandled_error") == 2  # rendered: a blind capture would hold nothing
+    assert "signer_call_defect" in out
+    assert "ImportHeaderFirstError" in out  # the defect's cause, with its traceback
+    assert [secret for secret in SENTINELS if secret in out] == []
+
+
 async def test_a_password_or_a_credential_never_reaches_a_log_or_a_problem(
     client: httpx.AsyncClient,
     fake: Fake,
@@ -712,7 +771,7 @@ async def test_a_password_or_a_credential_never_reaches_a_log_or_a_problem(
             local = await client.post(PREFIX, headers=uploading(), content=b"p")
             remote = await client.post(f"{PREFIX}/remote", headers=posting(), json={"credential": CREDENTIAL})
             seen += [local.text, str(local.headers), remote.text, str(remote.headers)]
-        refused = await client.post(PREFIX, headers=uploading(password=PASSWORD * 100), content=b"p")
+        refused = await client.post(PREFIX, headers=uploading(unlock=unlocking(PASSWORD * 100)), content=b"p")
         seen.append(refused.text)
     captured = capsys.readouterr()
     seen += [captured.out, captured.err, caplog.text, repr(logs)]

@@ -11,8 +11,8 @@ lazy from collections.abc import AsyncIterable, Sequence
 
 from ledger_fiscal_kit.ports import SignerPort, SignerUnavailableError
 from ledger_platform.runtime.facade import facade
-from ledger_signer.adapters.http.service import CertificateService
 from ledger_signer.api import SignerApi
+from ledger_signer.application.service import CertificateService
 lazy from ledger_fiscal_kit.ports import CertificateValidity, SeedToSign, Signed, XmlToSign
 lazy from ledger_kernel.ids import CompanyId
 lazy from ledger_kernel.tenancy import Mode, Tenant

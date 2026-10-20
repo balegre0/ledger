@@ -1,8 +1,7 @@
-"""What the routes ask of the signer: in ``api`` its gRPC client, or the stand-in that it is unavailable.
+"""What the HTTP edge asks of the signer: a port of the application, so no transport depends on the edge.
 
-The routes never open a bundle, nor hold a key: they forward what a request carries and show what the signer
-answers. Each method raises what the signer's own process would (``client.API_REFUSALS``), fiscal-kit's
-``SignerUnavailableError`` when it cannot be reached, and the ``RemoteError`` family for any other failure.
+It lives beside ``ports`` rather than in it: it names ``importing.ImportRequest``, and ``importing`` imports
+``ports``.
 """
 
 from abc import ABCMeta, abstractmethod
@@ -17,9 +16,12 @@ lazy from ledger_signer.application.ports import ImportOutcome, Secret
 
 
 class CertificateService(Protocol, metaclass=ABCMeta):
-    """A company's certificates: listed, retired and imported, by the signer.
+    """A company's certificates listed, retired and imported by the signer: what the HTTP edge asks of it.
 
-    The methods are abstract so that they need no body: a ``...`` is a statement no test could reach.
+    In ``api`` the signer's gRPC client implements it, or the stand-in answering that the signer is
+    unavailable. Each method raises what the signer's own process would (``client.API_REFUSALS``),
+    fiscal-kit's ``SignerUnavailableError`` when it cannot be reached, and the ``RemoteError`` family for any
+    other failure. The edge never opens a bundle nor holds a key: it forwards what a request carries.
     """
 
     @abstractmethod
@@ -32,7 +34,7 @@ class CertificateService(Protocol, metaclass=ABCMeta):
     async def retire(
         self, call: Call | SystemCall, company: Tenant, certificate: CertificateId
     ) -> CertificateView:
-        """``certificate`` of ``company`` retired for every mode, or as it is if it was already."""
+        """``certificate`` of ``company`` (in the request's mode) retired for every mode, or as it is."""
 
     @abstractmethod
     async def import_local(

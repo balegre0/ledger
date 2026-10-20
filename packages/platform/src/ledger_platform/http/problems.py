@@ -131,8 +131,9 @@ class ProblemAnswer(Protocol, metaclass=ABCMeta):
 
     For what the kind table cannot say: a rate limit (429 and ``Retry-After``), a dependency to try again
     later (503 and ``Retry-After``), a body that did not arrive in time (408). The status must be a client's
-    or a server's error. A header the problem sets itself (``Content-Type``, ``Content-Length``,
-    ``Request-Id``) is never replaced. The methods are abstract so that they need no body.
+    or a server's error (one below 400 is answered as the defect it is). A header the problem sets itself
+    (``Content-Type``, ``Content-Length``, ``Request-Id``) is never replaced. The methods are abstract so that
+    they need no body.
     """
 
     @abstractmethod
@@ -175,14 +176,16 @@ class PayloadTooLargeError(InvalidInputError):
 def status_of(error: LedgerError) -> HTTPStatus:
     """400 for a ``BadRequestError``, 413 for a body too large, the status an error names, else by kind.
 
-    A defect (``INTERNAL``) is a 500 whatever it names.
+    A defect (``INTERNAL``) is a 500 whatever it names, and so is an error naming a status below 400: no
+    refusal succeeds.
     """
     if isinstance(error, BadRequestError):
         return HTTPStatus.BAD_REQUEST
     if isinstance(error, PayloadTooLargeError):
         return HTTPStatus.CONTENT_TOO_LARGE
     if isinstance(error, ProblemAnswer) and error.kind is not ErrorKind.INTERNAL:
-        return error.problem_status()
+        named = error.problem_status()
+        return named if named >= HTTPStatus.BAD_REQUEST else HTTPStatus.INTERNAL_SERVER_ERROR
     return _STATUS[error.kind]
 
 
@@ -331,7 +334,7 @@ def install_problem_handlers(app: FastAPI, *, route_of: RouteOf = declared_route
     @app.exception_handler(LedgerError)
     async def ledger_error(request: Request, error: LedgerError) -> JSONResponse:
         status = status_of(error)
-        if error.kind is ErrorKind.INTERNAL:
+        if status == HTTPStatus.INTERNAL_SERVER_ERROR:  # a defect, or an error naming no error's status
             # A defect of ours: the client gets what any bug gets, the log gets the code and the message.
             _report_defect(request, error, error.code, route_of)
             return _problem(status, INTERNAL_CODE)

@@ -233,6 +233,7 @@ async def test_a_configured_client_role_binds_one_client_with_its_own_token(
     assert [member.relay_only for member in app.members if member.name == "signer"] == [True]
     assert "signer.not_configured" not in capsys.readouterr().out
     assert routes_of(parts) == (ROUTES if role == "api" else [])
+    assert "import_deadline=30.0" in repr(client)  # the signer's 28 s, and 2 s to hear it answer
     async with AsyncExitStack() as resources:
         for resource in parts.resources:
             _ = await resources.enter_async_context(resource)

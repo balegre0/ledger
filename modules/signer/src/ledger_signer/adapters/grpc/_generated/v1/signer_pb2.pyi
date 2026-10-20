@@ -407,7 +407,10 @@ class RetireCertificateRequest(_message.Message):
     CALL_FIELD_NUMBER: _builtins.int
     COMPANY_FIELD_NUMBER: _builtins.int
     CERTIFICATE_ID_FIELD_NUMBER: _builtins.int
+    MODE_FIELD_NUMBER: _builtins.int
     certificate_id: _builtins.str
+    mode: Global___Mode.ValueType
+    """the request's mode: a test-mode one retires no certificate that serves live"""
     @_builtins.property
     def call(self) -> Global___CallContext: ...
     @_builtins.property
@@ -418,10 +421,11 @@ class RetireCertificateRequest(_message.Message):
         call: Global___CallContext | None = ...,
         company: Global___Company | None = ...,
         certificate_id: _builtins.str = ...,
+        mode: Global___Mode.ValueType = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["call", b"call", "company", b"company"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["call", b"call", "certificate_id", b"certificate_id", "company", b"company"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["call", b"call", "certificate_id", b"certificate_id", "company", b"company", "mode", b"mode"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 

@@ -92,7 +92,12 @@ class CertificateResource(_Shape):
     )
     version: int
     created_at: datetime = Field(description="When it was installed.")
-    updated_at: datetime = Field(description="When it was installed, or retired once it is.")
+    updated_at: datetime = Field(
+        description=(
+            "Approximate: when it was retired, else when it was installed. A mode a newer certificate took "
+            "from it does not move it (no such moment is kept yet)."
+        )
+    )
 
     @classmethod
     def of(cls, view: CertificateView, *, mode: Mode) -> Self:

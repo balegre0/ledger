@@ -392,7 +392,7 @@ class RetiringMidway(Custody):
         signed = await self._custody.sign(
             material, backend=backend, prepared=prepared, certificate_der=certificate_der, seal_for=seal_for
         )
-        _ = await retire.retire(OWNER, certificate.id)
+        _ = await retire.retire(Tenant(OWNER.organization, OWNER.company, Mode.TEST), certificate.id)
         return signed
 
 
