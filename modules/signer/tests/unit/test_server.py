@@ -58,6 +58,11 @@ from ledger_signer.adapters.grpc.server import (
     SignerServer,
     SignerServicer,
 )
+from ledger_signer.adapters.settings import (
+    IMPORT_DEADLINE_MARGIN_SECONDS,
+    MAX_DEADLINE_SECONDS,
+    MAX_IMPORT_DEADLINE_SECONDS,
+)
 from ledger_signer.api import CertificateStatus
 from ledger_signer.application.certificates import Describing, Retiring
 from ledger_signer.application.importing import (
@@ -94,9 +99,14 @@ SENTINELS: Final = (PASSWORD, CREDENTIAL, "DOCUMENT-SENTINEL")
 PROFILE: Final = SignatureProfile.XMLDSIG_ENVELOPED_RSA_SHA256
 REQUEST: Final = ImportRequest(tenant=IN_TEST, modes=frozenset({Mode.TEST}), idempotency_key="import-0001")
 CHUNK: Final = 64 * 1024
-DEADLINE: Final = 5.0
-IMPORT_SECONDS: Final = 0.5
-"""How long the service waits for an import's stream to end, in these tests."""
+DEADLINE: Final = MAX_DEADLINE_SECONDS
+"""What a call waits, as in production: a success path never races a wall clock."""
+IMPORT_DEADLINE: Final = MAX_IMPORT_DEADLINE_SECONDS + IMPORT_DEADLINE_MARGIN_SECONDS
+"""What an import's call waits, as the api's client does: past the service's own patience, to hear it."""
+IMPORT_SECONDS: Final = 10.0
+"""How long the service waits for an import's stream to end: generous (a stream held open has its own)."""
+HELD_IMPORT_SECONDS: Final = 0.5
+"""How long the service waits for the stream a test holds open."""
 NOW: Final = datetime(2026, 10, 19, 12, tzinfo=UTC)
 
 
@@ -151,7 +161,13 @@ def callers() -> CallerTokens:
 
 
 @pytest.fixture
-def servicer(units: SignerUnits, custody: Custody, clock: Clock) -> SignerServicer:
+def import_seconds() -> float:
+    """The service's patience with an import's stream (a test parametrizes its own)."""
+    return IMPORT_SECONDS
+
+
+@pytest.fixture
+def servicer(units: SignerUnits, custody: Custody, clock: Clock, import_seconds: float) -> SignerServicer:
     """The service over the stand-ins, offering both backends."""
     rules = SignerRules(
         backends=frozenset(BackendKind),
@@ -165,7 +181,7 @@ def servicer(units: SignerUnits, custody: Custody, clock: Clock) -> SignerServic
         describing=Describing(units),
         retiring=Retiring(units),
         signing=Signing(units=units, custody=custody, rules=rules, clock=clock),
-        import_seconds=IMPORT_SECONDS,
+        import_seconds=import_seconds,
     )
 
 
@@ -187,7 +203,10 @@ async def served(servicer: SignerServicer) -> AsyncGenerator[Served]:
 
 def client_of(served: Served, caller: str) -> SignerClient:
     return SignerClient(
-        served.address, SecretStr(TOKENS[caller]), deadline=DEADLINE, import_deadline=DEADLINE
+        served.address,
+        SecretStr(TOKENS[caller]),
+        deadline=MAX_DEADLINE_SECONDS,
+        import_deadline=MAX_IMPORT_DEADLINE_SECONDS,
     )
 
 
@@ -261,7 +280,7 @@ async def refused_import(
             stub.ImportCertificate,
             stream(*requests),
             rpc=codec.IMPORT,
-            deadline=DEADLINE,
+            deadline=IMPORT_DEADLINE,
             metadata=sent("api"),
         )
     return caught.value
@@ -555,14 +574,13 @@ async def test_the_server_says_where_it_serves_only_while_it_serves(servicer: Si
 async def held_open(
     *requests: signer_pb2.ImportCertificateRequest,
 ) -> AsyncGenerator[signer_pb2.ImportCertificateRequest]:
-    """``requests``, then the stream held open past the service's patience, sending empty chunks."""
+    """``requests``, then the stream held open until the call ends, sending nothing more."""
     for request in requests:
         yield request
-    for _ in range(20):
-        await asyncio.sleep(IMPORT_SECONDS / 5)
-        yield chunk(b"")
+    await asyncio.Event().wait()  # nobody sets it: the service gives up, and the call cancels this
 
 
+@pytest.mark.parametrize("import_seconds", [HELD_IMPORT_SECONDS])
 async def test_an_import_held_open_is_refused_once_the_service_stops_waiting(
     stub: SignerServiceAsyncStub, units: Store
 ) -> None:
@@ -571,7 +589,7 @@ async def test_an_import_held_open_is_refused_once_the_service_stops_waiting(
             stub.ImportCertificate,
             held_open(local()),
             rpc=codec.IMPORT,
-            deadline=DEADLINE,
+            deadline=IMPORT_DEADLINE,
             metadata=sent("api"),
         )
     assert (caught.value.status, caught.value.remote_code) == (

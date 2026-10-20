@@ -179,7 +179,7 @@ def pyproject_text(package: Package, workspace: Workspace) -> str:
             if package.kind is PackageKind.MODULE
             else [],
         ),
-        _entry_points("pytest11", [_PYTEST_PLUGIN] if package.name == "testing" else []),
+        _entry_points("pytest11", [_PYTEST_PLUGIN] if _is_the_test_kit(package) else []),
         _entry_points(
             "ledger.countries.regimes", [(regime.key, regime.entry_point) for regime in manifest.regimes]
         ),
@@ -198,6 +198,11 @@ def pyproject_text(package: Package, workspace: Workspace) -> str:
         _deptry(package),
     ]
     return "\n".join(section for section in sections if section is not None)
+
+
+def _is_the_test_kit(package: Package) -> bool:
+    """Whether ``package`` is the package named ``testing``, which declares the shared pytest plugin."""
+    return package.name == "testing" and package.kind is PackageKind.PACKAGE
 
 
 def _coverage(package: Package, workspace: Workspace) -> str:
@@ -368,7 +373,8 @@ class _Facts:
     third_party: tuple[str, ...]
     countries: tuple[str, ...]
     layers: Mapping[str, frozenset[str]]
-    """Each package's submodules once synced: those on disk, and ``_manifest`` when it is generated."""
+    """Each package's submodules once synced, by distribution (a name may be an app's and a module's): those
+    on disk, and ``_manifest`` when it is generated."""
 
     @classmethod
     def of(cls, workspace: Workspace) -> _Facts:
@@ -376,7 +382,9 @@ class _Facts:
         layers: dict[str, frozenset[str]] = {}
         for package in workspace.packages:
             on_disk = frozenset(workspace.children(package)) - {"_manifest"}
-            layers[package.name] = on_disk | {"_manifest"} if has_manifest_module(package) else on_disk
+            layers[package.distribution] = (
+                on_disk | {"_manifest"} if has_manifest_module(package) else on_disk
+            )
         return cls(
             workspace=workspace,
             roots=tuple(sorted(package.import_name for package in workspace.packages)),
@@ -385,16 +393,18 @@ class _Facts:
             layers=layers,
         )
 
+    def layers_of(self, package: Package) -> frozenset[str]:
+        """``package``'s submodules once synced."""
+        return self.layers[package.distribution]
+
     def submodules(self, package: Package, names: Sequence[str]) -> list[str]:
         """Those of ``names`` that ``package`` has (once synced), as module paths."""
-        return [f"{package.import_name}.{name}" for name in names if name in self.layers[package.name]]
+        return [f"{package.import_name}.{name}" for name in names if name in self.layers_of(package)]
 
-    def source_exists(self, name: str) -> bool:
-        """Whether the package named ``name`` is in the workspace with its import package on disk."""
-        return any(
-            package.name == name and (self.workspace.root / package.source).is_dir()
-            for package in self.workspace.packages
-        )
+    def present(self, name: str) -> Package | None:
+        """The package a manifest means by ``name`` (never an app), if its import package is on disk."""
+        found = [package for package in self.workspace.named if package.name == name]
+        return next((package for package in found if (self.workspace.root / package.source).is_dir()), None)
 
 
 def _workspace_contracts(facts: _Facts) -> Iterator[str | None]:
@@ -408,7 +418,7 @@ def _workspace_contracts(facts: _Facts) -> Iterator[str | None]:
     yield _contract(
         "workspace-layers", "Workspace layers", "layers", ("layers", [name for name in layers if name])
     )
-    if facts.source_exists("kernel"):
+    if facts.present("kernel") is not None:
         yield _contract(
             "kernel-is-stdlib-only",
             "Kernel is standard library only",
@@ -416,8 +426,9 @@ def _workspace_contracts(facts: _Facts) -> Iterator[str | None]:
             ("source_modules", ["ledger_kernel"]),
             ("forbidden_modules", sorted({*facts.third_party, *TEST_TOOLING})),
         )
-    if facts.source_exists(PLATFORM):
-        present = facts.layers[PLATFORM]
+    platform = facts.present(PLATFORM)
+    if platform is not None:
+        present = facts.layers_of(platform)
         platform_layers = (
             " | ".join(name for name in layer.split(" | ") if name in present) for layer in PLATFORM_LAYERS
         )
@@ -443,8 +454,8 @@ def _edge_contracts(facts: _Facts) -> Iterator[str | None]:
             *(dependency.import_name for dependency in workspace_dependencies(package, workspace)),
         }
         yield _contract(
-            f"{package.name}-declared-edges",
-            f"{package.name} imports only the workspace packages it declares",
+            f"{package.distribution}-declared-edges",  # a name may be an app's and a module's: not unique
+            f"{package.distribution} imports only the workspace packages it declares",
             "forbidden",
             ("source_modules", [package.import_name]),
             ("forbidden_modules", [root for root in facts.roots if root not in declared]),
@@ -497,7 +508,7 @@ def _kit_contracts(facts: _Facts) -> Iterator[str | None]:
 
 def _country_contracts(facts: _Facts) -> Iterator[str | None]:
     for country in facts.workspace.countries:
-        others = facts.submodules(country, sorted(facts.layers[country.name] - {"regime"}))
+        others = facts.submodules(country, sorted(facts.layers_of(country) - {"regime"}))
         yield _contract(
             f"{country.name}-regime-is-pure",
             f"Regime {country.name} is pure",
@@ -553,7 +564,7 @@ def _module_contracts(facts: _Facts, module: Package) -> Iterator[str | None]:
         "layers",
         ("containers", [module.import_name]),
         ("exhaustive", "True"),
-        ("layers", [layer for layer in MODULE_LAYERS if layer in facts.layers[module.name]]),
+        ("layers", [layer for layer in MODULE_LAYERS if layer in facts.layers_of(module)]),
     )
     yield _contract(
         f"{module.name}-domain-is-pure",
@@ -660,12 +671,12 @@ def _closing_contracts(facts: _Facts) -> Iterator[str | None]:
         ("allow_indirect_imports", "True"),
     )
     inner = [name for module in workspace.modules for name in facts.submodules(module, _INNER)]
-    below_runtime = [
-        name
-        for platform in workspace.packages
-        if platform.name == PLATFORM
-        for name in facts.submodules(platform, sorted(facts.layers[platform.name] - {"runtime"}))
-    ]
+    platform = next((package for package in workspace.named if package.name == PLATFORM), None)
+    below_runtime = (
+        []
+        if platform is None
+        else facts.submodules(platform, sorted(facts.layers_of(platform) - {"runtime"}))
+    )
     yield _contract(
         "apps-only-compose",
         "Apps only compose",

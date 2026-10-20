@@ -71,6 +71,11 @@ from ledger_signer.adapters.grpc.codec import (
 )
 from ledger_signer.adapters.http.router import BodyIncompleteError
 from ledger_signer.adapters.serving import SignerWorkUnreadableError
+from ledger_signer.adapters.settings import (
+    IMPORT_DEADLINE_MARGIN_SECONDS,
+    MAX_DEADLINE_SECONDS,
+    MAX_IMPORT_DEADLINE_SECONDS,
+)
 from ledger_signer.api import (
     BackendKind,
     BackendNotOfferedError,
@@ -152,7 +157,10 @@ RETIRED: Final = dataclasses.replace(
 REQUEST: Final = ImportRequest(tenant=TENANT, modes=frozenset({Mode.TEST}), idempotency_key="import-0001")
 PASSWORD: Final = "bundle-password-sentinel-7Hq2"
 CREDENTIAL: Final = "entity-credential-sentinel-9Zx4"
-DEADLINE: Final = 2.0
+DEADLINE: Final = MAX_DEADLINE_SECONDS
+"""What a call waits but in the tests of deadlines, as in production: no success path races a wall clock."""
+IMPORT_DEADLINE: Final = MAX_IMPORT_DEADLINE_SECONDS + IMPORT_DEADLINE_MARGIN_SECONDS
+"""What an import waits but in the tests of deadlines: the api's (the signer's 28 s, 2 s to hear it)."""
 
 type Context[Request, Response] = grpc.aio.ServicerContext[Request, Response]
 
@@ -287,7 +295,7 @@ async def address(stub: Stub) -> AsyncGenerator[str]:
 @pytest.fixture
 async def worker(address: str) -> AsyncGenerator[SignerClient]:
     async with SignerClient(
-        address, SecretStr(WORKER_TOKEN), deadline=DEADLINE, import_deadline=DEADLINE
+        address, SecretStr(WORKER_TOKEN), deadline=DEADLINE, import_deadline=IMPORT_DEADLINE
     ) as client:
         yield client
 
@@ -295,7 +303,7 @@ async def worker(address: str) -> AsyncGenerator[SignerClient]:
 @pytest.fixture
 async def api(address: str) -> AsyncGenerator[SignerClient]:
     async with SignerClient(
-        address, SecretStr(API_TOKEN), deadline=DEADLINE, import_deadline=DEADLINE
+        address, SecretStr(API_TOKEN), deadline=DEADLINE, import_deadline=IMPORT_DEADLINE
     ) as client:
         yield client
 
@@ -416,7 +424,7 @@ async def test_a_defect_of_the_signer_is_a_defect_never_a_port_error(
 async def test_a_signer_past_its_deadline_is_unavailable(address: str, stub: Stub) -> None:
     stub.delay = 1.0
     async with SignerClient(
-        address, SecretStr(WORKER_TOKEN), deadline=0.2, import_deadline=DEADLINE
+        address, SecretStr(WORKER_TOKEN), deadline=0.2, import_deadline=IMPORT_DEADLINE
     ) as client:
         with pytest.raises(SignerUnavailableError):
             await client.sign_seed(CALL, SEED)
@@ -431,7 +439,9 @@ async def test_a_signer_that_is_not_there_is_unavailable() -> None:
 
 
 async def test_a_client_never_opened_or_closed_again_is_unavailable(address: str) -> None:
-    client = SignerClient(address, SecretStr(WORKER_TOKEN), deadline=DEADLINE, import_deadline=DEADLINE)
+    client = SignerClient(
+        address, SecretStr(WORKER_TOKEN), deadline=DEADLINE, import_deadline=IMPORT_DEADLINE
+    )
     with pytest.raises(SignerUnavailableError):
         await client.sign_xml(CALL, DOCUMENT)
     async with client:
@@ -511,21 +521,23 @@ async def test_a_remote_import_is_its_header_alone(api: SignerClient, stub: Stub
 @pytest.mark.parametrize("token", ["", "short", "x" * 31])
 def test_an_empty_or_short_own_token_is_refused_when_the_client_is_built(token: str) -> None:
     with pytest.raises(SignerTokenRefusedError) as caught:
-        SignerClient("signer:50051", SecretStr(token), deadline=DEADLINE, import_deadline=DEADLINE)
+        SignerClient("signer:50051", SecretStr(token), deadline=DEADLINE, import_deadline=IMPORT_DEADLINE)
     assert str(caught.value) == "the signer client's own token must be at least 32 characters"
 
 
 @pytest.mark.parametrize("deadline", [0.0, -1.0, 10.5])
 def test_a_deadline_outside_its_bounds_is_refused(deadline: float) -> None:
     with pytest.raises(LedgerError, match="deadline"):
-        SignerClient("signer:50051", SecretStr(WORKER_TOKEN), deadline=deadline, import_deadline=DEADLINE)
+        SignerClient(
+            "signer:50051", SecretStr(WORKER_TOKEN), deadline=deadline, import_deadline=IMPORT_DEADLINE
+        )
     with pytest.raises(LedgerError, match="import_deadline"):
         SignerClient("signer:50051", SecretStr(WORKER_TOKEN), deadline=DEADLINE, import_deadline=deadline * 3)
 
 
 def test_the_client_never_shows_its_token() -> None:
     client = SignerClient("signer:50051", SecretStr(WORKER_TOKEN), deadline=DEADLINE, import_deadline=30.0)
-    assert repr(client) == "SignerClient(address='signer:50051', deadline=2.0, import_deadline=30.0)"
+    assert repr(client) == "SignerClient(address='signer:50051', deadline=10.0, import_deadline=30.0)"
     assert WORKER_TOKEN not in repr(client)
 
 
@@ -576,7 +588,7 @@ async def test_the_guard_s_refusals_are_defects_of_the_deployment(
     with pytest.raises(RemoteDefectError) as importing:
         await worker.import_remote(CALL, REQUEST, Secret(CREDENTIAL))
     async with SignerClient(
-        address, SecretStr("x" * 40), deadline=DEADLINE, import_deadline=DEADLINE
+        address, SecretStr("x" * 40), deadline=DEADLINE, import_deadline=IMPORT_DEADLINE
     ) as stranger:
         with pytest.raises(RemoteDefectError) as unknown:
             await stranger.describe(CALL, TENANT, include_retired=False)
@@ -714,7 +726,9 @@ def test_every_refusal_the_signer_declares_is_mapped_or_known_to_be_a_signature_
 
 async def test_an_import_waits_its_own_deadline(address: str, stub: Stub) -> None:
     stub.delay = 0.5
-    async with SignerClient(address, SecretStr(API_TOKEN), deadline=0.2, import_deadline=DEADLINE) as client:
+    async with SignerClient(
+        address, SecretStr(API_TOKEN), deadline=0.2, import_deadline=IMPORT_DEADLINE
+    ) as client:
         outcome = await client.import_remote(CALL, REQUEST, Secret(CREDENTIAL))
         with pytest.raises(SignerUnavailableError):
             await client.describe(CALL, TENANT, include_retired=False)

@@ -190,31 +190,14 @@ def test_a_role_isolates_one_module_at_most(repository: Path, capsys: pytest.Cap
         assert problem in capsys.readouterr().out
 
 
-SIGNER_APP: Final = """[package]
-name = "signing"
-kind = "app"
-summary = "An app planted by a test: the signer's role."
-owners = ["@o"]
-
-[dependencies]
-packages = ["platform"]
-
-[app]
-script = "ledger-signing"
-role = "signer"
-"""
 PLANTED_DOCSTRING: Final = '"""Planted."""\n'
 CUSTODY_KEY: Final = f"{PLANTED_DOCSTRING}\nfrom ledger_signer.adapters.custody.keys import KEY\n"
 """Code importing a key of the signer's custody."""
 PLANTED_FILES: Final = {
     "modules/signer/src/ledger_signer/adapters/custody/keys.py": f'{PLANTED_DOCSTRING}\nKEY = "k"\n',
-    "apps/signing/manifest.toml": SIGNER_APP,
-    "apps/signing/src/ledger_app_signing/__init__.py": PLANTED_DOCSTRING,
-    "apps/signing/src/ledger_app_signing/main.py": f"{PLANTED_DOCSTRING}\nimport ledger_platform.runtime\n",
 }
-"""A key in the workspace's own signer custody, and an app of its role (it imports the platform alone, as the
-real one will: the runtime assembles the module). Named ``signing``: an app named like the module it runs
-collides in devtools' lookups by name (to be settled with the real ``apps/signer``)."""
+"""A key in the workspace's own signer custody, which its app (``apps/signer``, named like the module: see
+``test_an_app_named_like_a_module_is_a_package_of_its_own``) reaches through the runtime alone."""
 LEAKS: Final = {
     "apps/api/src/ledger_app_api/leak.py": "import ledger_signer.adapters.custody.keys\n",
     "packages/testing/src/ledger_testing/leak.py": "from ledger_signer.adapters.custody import keys\n",
@@ -283,6 +266,52 @@ def test_import_linter_breaks_on_anything_but_the_role_s_apps_reaching_the_custo
     assert "ledger_invoicing.adapters.reexported -> ledger_signer " in section, section
     assert main(["check", "--root", str(repository)]) == 1
     assert "ledger_signer/__init__.py loads ledger_signer.adapters.custody" in capsys.readouterr().out
+
+
+NAMESAKE_APP: Final = """[package]
+name = "identity"
+kind = "app"
+summary = "An app planted by a test: named like the module the others depend on."
+owners = ["@o"]
+
+[dependencies]
+packages = ["platform"]
+
+[app]
+script = "ledger-identity"
+role = "worker"
+"""
+NAMESAKE_FILES: Final = {
+    "apps/identity/manifest.toml": NAMESAKE_APP,
+    "apps/identity/src/ledger_app_identity/__init__.py": PLANTED_DOCSTRING,
+    "apps/identity/src/ledger_app_identity/main.py": f"{PLANTED_DOCSTRING}\nimport ledger_platform.runtime\n",
+}
+"""An app named like a module (as ``apps/signer`` is named like ``modules/signer``): a name a manifest
+depends on names the module, never the app, and every contract and table keyed per package keeps both."""
+
+
+def test_an_app_named_like_a_module_is_a_package_of_its_own(
+    repository: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_files(repository, NAMESAKE_FILES)
+    assert main(["sync", "--root", str(repository)]) == 0
+    capsys.readouterr()
+    assert main(["check", "--root", str(repository)]) == 0, capsys.readouterr().out
+    for dependent in ("modules/signer", "modules/invoicing"):
+        pyproject = (repository / dependent / "pyproject.toml").read_text(encoding="utf-8")
+        assert '    "ledger-identity",\n' in pyproject
+        assert "ledger-app-identity" not in pyproject
+    contracts = (repository / ".importlinter").read_text(encoding="utf-8")
+    sections = [line for line in contracts.splitlines() if line.startswith("[importlinter:contract:")]
+    assert len(sections) == len(set(sections))
+    assert "[importlinter:contract:ledger-app-identity-declared-edges]" in sections
+    assert "[importlinter:contract:ledger-identity-declared-edges]" in sections
+    layers = contracts.split("[importlinter:contract:workspace-layers]", 1)[1].split("\n\n", 1)[0]
+    rows = [row.strip().split(" | ") for row in layers.split("layers =\n", 1)[1].splitlines()]
+    assert [row for row in rows if "ledger_app_identity" in row] == [rows[0]]
+    assert ["ledger_identity"] in rows
+    status, report = lint_imports(repository)
+    assert status == 0, report
 
 
 BILLS: Final = """[package]

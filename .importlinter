@@ -4,6 +4,7 @@
 root_packages =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_country_do
     ledger_country_do_testing
@@ -22,7 +23,7 @@ include_external_packages = True
 name = Workspace layers
 type = layers
 layers =
-    ledger_app_api | ledger_app_migrate | ledger_app_worker
+    ledger_app_api | ledger_app_migrate | ledger_app_signer | ledger_app_worker
     ledger_signer
     ledger_invoicing
     ledger_fiscal
@@ -89,12 +90,55 @@ layers =
     _manifest
     config
 
-[importlinter:contract:api-declared-edges]
-name = api imports only the workspace packages it declares
+[importlinter:contract:ledger-app-api-declared-edges]
+name = ledger-app-api imports only the workspace packages it declares
 type = forbidden
 source_modules =
     ledger_app_api
 forbidden_modules =
+    ledger_app_migrate
+    ledger_app_signer
+    ledger_app_worker
+    ledger_country_do
+    ledger_country_do_testing
+    ledger_devtools
+    ledger_fiscal
+    ledger_fiscal_kit
+    ledger_identity
+    ledger_invoicing
+    ledger_kernel
+    ledger_signer
+    ledger_testing
+allow_indirect_imports = True
+
+[importlinter:contract:ledger-app-migrate-declared-edges]
+name = ledger-app-migrate imports only the workspace packages it declares
+type = forbidden
+source_modules =
+    ledger_app_migrate
+forbidden_modules =
+    ledger_app_api
+    ledger_app_signer
+    ledger_app_worker
+    ledger_country_do
+    ledger_country_do_testing
+    ledger_devtools
+    ledger_fiscal
+    ledger_fiscal_kit
+    ledger_identity
+    ledger_invoicing
+    ledger_kernel
+    ledger_signer
+    ledger_testing
+allow_indirect_imports = True
+
+[importlinter:contract:ledger-app-signer-declared-edges]
+name = ledger-app-signer imports only the workspace packages it declares
+type = forbidden
+source_modules =
+    ledger_app_signer
+forbidden_modules =
+    ledger_app_api
     ledger_app_migrate
     ledger_app_worker
     ledger_country_do
@@ -109,14 +153,15 @@ forbidden_modules =
     ledger_testing
 allow_indirect_imports = True
 
-[importlinter:contract:migrate-declared-edges]
-name = migrate imports only the workspace packages it declares
+[importlinter:contract:ledger-app-worker-declared-edges]
+name = ledger-app-worker imports only the workspace packages it declares
 type = forbidden
 source_modules =
-    ledger_app_migrate
+    ledger_app_worker
 forbidden_modules =
     ledger_app_api
-    ledger_app_worker
+    ledger_app_migrate
+    ledger_app_signer
     ledger_country_do
     ledger_country_do_testing
     ledger_devtools
@@ -129,34 +174,15 @@ forbidden_modules =
     ledger_testing
 allow_indirect_imports = True
 
-[importlinter:contract:worker-declared-edges]
-name = worker imports only the workspace packages it declares
-type = forbidden
-source_modules =
-    ledger_app_worker
-forbidden_modules =
-    ledger_app_api
-    ledger_app_migrate
-    ledger_country_do
-    ledger_country_do_testing
-    ledger_devtools
-    ledger_fiscal
-    ledger_fiscal_kit
-    ledger_identity
-    ledger_invoicing
-    ledger_kernel
-    ledger_signer
-    ledger_testing
-allow_indirect_imports = True
-
-[importlinter:contract:do-declared-edges]
-name = do imports only the workspace packages it declares
+[importlinter:contract:ledger-country-do-declared-edges]
+name = ledger-country-do imports only the workspace packages it declares
 type = forbidden
 source_modules =
     ledger_country_do
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_country_do_testing
     ledger_devtools
@@ -167,14 +193,15 @@ forbidden_modules =
     ledger_testing
 allow_indirect_imports = True
 
-[importlinter:contract:do-testing-declared-edges]
-name = do-testing imports only the workspace packages it declares
+[importlinter:contract:ledger-country-do-testing-declared-edges]
+name = ledger-country-do-testing imports only the workspace packages it declares
 type = forbidden
 source_modules =
     ledger_country_do_testing
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_devtools
     ledger_fiscal
@@ -183,14 +210,15 @@ forbidden_modules =
     ledger_signer
 allow_indirect_imports = True
 
-[importlinter:contract:devtools-declared-edges]
-name = devtools imports only the workspace packages it declares
+[importlinter:contract:ledger-devtools-declared-edges]
+name = ledger-devtools imports only the workspace packages it declares
 type = forbidden
 source_modules =
     ledger_devtools
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_country_do
     ledger_country_do_testing
@@ -202,14 +230,15 @@ forbidden_modules =
     ledger_testing
 allow_indirect_imports = True
 
-[importlinter:contract:fiscal-declared-edges]
-name = fiscal imports only the workspace packages it declares
+[importlinter:contract:ledger-fiscal-declared-edges]
+name = ledger-fiscal imports only the workspace packages it declares
 type = forbidden
 source_modules =
     ledger_fiscal
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_country_do
     ledger_country_do_testing
@@ -219,14 +248,15 @@ forbidden_modules =
     ledger_testing
 allow_indirect_imports = True
 
-[importlinter:contract:fiscal-kit-declared-edges]
-name = fiscal-kit imports only the workspace packages it declares
+[importlinter:contract:ledger-fiscal-kit-declared-edges]
+name = ledger-fiscal-kit imports only the workspace packages it declares
 type = forbidden
 source_modules =
     ledger_fiscal_kit
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_country_do
     ledger_country_do_testing
@@ -238,14 +268,15 @@ forbidden_modules =
     ledger_testing
 allow_indirect_imports = True
 
-[importlinter:contract:identity-declared-edges]
-name = identity imports only the workspace packages it declares
+[importlinter:contract:ledger-identity-declared-edges]
+name = ledger-identity imports only the workspace packages it declares
 type = forbidden
 source_modules =
     ledger_identity
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_country_do
     ledger_country_do_testing
@@ -257,14 +288,15 @@ forbidden_modules =
     ledger_testing
 allow_indirect_imports = True
 
-[importlinter:contract:invoicing-declared-edges]
-name = invoicing imports only the workspace packages it declares
+[importlinter:contract:ledger-invoicing-declared-edges]
+name = ledger-invoicing imports only the workspace packages it declares
 type = forbidden
 source_modules =
     ledger_invoicing
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_country_do
     ledger_country_do_testing
@@ -275,14 +307,15 @@ forbidden_modules =
     ledger_testing
 allow_indirect_imports = True
 
-[importlinter:contract:kernel-declared-edges]
-name = kernel imports only the workspace packages it declares
+[importlinter:contract:ledger-kernel-declared-edges]
+name = ledger-kernel imports only the workspace packages it declares
 type = forbidden
 source_modules =
     ledger_kernel
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_country_do
     ledger_country_do_testing
@@ -296,14 +329,15 @@ forbidden_modules =
     ledger_testing
 allow_indirect_imports = True
 
-[importlinter:contract:platform-declared-edges]
-name = platform imports only the workspace packages it declares
+[importlinter:contract:ledger-platform-declared-edges]
+name = ledger-platform imports only the workspace packages it declares
 type = forbidden
 source_modules =
     ledger_platform
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_country_do
     ledger_country_do_testing
@@ -316,14 +350,15 @@ forbidden_modules =
     ledger_testing
 allow_indirect_imports = True
 
-[importlinter:contract:signer-declared-edges]
-name = signer imports only the workspace packages it declares
+[importlinter:contract:ledger-signer-declared-edges]
+name = ledger-signer imports only the workspace packages it declares
 type = forbidden
 source_modules =
     ledger_signer
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_country_do
     ledger_country_do_testing
@@ -333,14 +368,15 @@ forbidden_modules =
     ledger_testing
 allow_indirect_imports = True
 
-[importlinter:contract:testing-declared-edges]
-name = testing imports only the workspace packages it declares
+[importlinter:contract:ledger-testing-declared-edges]
+name = ledger-testing imports only the workspace packages it declares
 type = forbidden
 source_modules =
     ledger_testing
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_country_do
     ledger_country_do_testing
@@ -372,6 +408,7 @@ forbidden_modules =
     joserfc
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_country_do
     ledger_country_do_testing
@@ -422,6 +459,7 @@ forbidden_modules =
     joserfc
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_country_do.channels
     ledger_country_do_testing
@@ -485,6 +523,7 @@ forbidden_modules =
     joserfc
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_country_do_testing
     ledger_devtools
@@ -591,6 +630,7 @@ forbidden_modules =
     joserfc
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_country_do
     ledger_country_do_testing
@@ -717,6 +757,7 @@ forbidden_modules =
     joserfc
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_country_do
     ledger_country_do_testing
@@ -843,6 +884,7 @@ forbidden_modules =
     joserfc
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_country_do
     ledger_country_do_testing
@@ -969,6 +1011,7 @@ forbidden_modules =
     joserfc
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_country_do
     ledger_country_do_testing
@@ -1061,6 +1104,15 @@ source_modules =
 forbidden_modules =
     ledger_signer.adapters.custody
 
+[importlinter:contract:signer-custody-signer-apps]
+name = The apps of the signer role reach signer's custody through its assembly only
+type = forbidden
+source_modules =
+    ledger_app_signer
+forbidden_modules =
+    ledger_signer.adapters.custody
+allow_indirect_imports = True
+
 [importlinter:contract:signer-http-holds-no-key]
 name = signer's HTTP adapter reaches no custody, even indirectly
 type = forbidden
@@ -1084,6 +1136,7 @@ type = forbidden
 source_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
     ledger_country_do
     ledger_fiscal
@@ -1129,6 +1182,7 @@ type = forbidden
 source_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_signer
     ledger_app_worker
 forbidden_modules =
     ledger_country_do

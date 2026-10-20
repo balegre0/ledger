@@ -26,7 +26,7 @@ lazy from contextlib import AbstractAsyncContextManager
 
 from pydantic import TypeAdapter
 lazy from fastapi import APIRouter
-lazy from prometheus_client import CollectorRegistry
+lazy from prometheus_client import CollectorRegistry, Gauge
 
 from ledger_kernel.errors import LedgerError
 from ledger_platform._manifest import MANIFEST as PLATFORM_MANIFEST
@@ -40,6 +40,7 @@ from ledger_platform.events.consumers import Consumer
 from ledger_platform.http.outbound import OutboundHttp
 from ledger_platform.jobs.maintenance import maintenance_jobs
 from ledger_platform.jobs.schedules import Schedule
+from ledger_platform.observability.metrics import gauge
 from ledger_platform.observability.telemetry import Telemetry
 from ledger_platform.runtime.contexts import (
     AssembledChannels,
@@ -294,6 +295,21 @@ class Assembled:
     schedules: tuple[Schedule, ...]
 
 
+def _served(registry: CollectorRegistry) -> Gauge:
+    """Whether this app serves an isolated module it installs (1: its role's app) or only relays it (0).
+
+    Installed and served by no live app (``max by (module, isolated_in) (...) == 0``): the module's role is
+    absent, and the fan-out keeps filling its inbox with no unrouted flag
+    (``docs/runbooks/signer/signer-unavailable.md``).
+    """
+    return gauge(
+        registry,
+        "ledger_isolated_module_served",
+        "1 when this app serves the isolated module, 0 when it installs it as a client and relays its events",
+        ["module", "isolated_in"],
+    )
+
+
 def _ordered(modules: Iterable[Module]) -> tuple[Module, ...]:
     """``modules`` in dependency order: a module after every module it depends on."""
     by_name = {module.manifest.package.name: module for module in modules}
@@ -495,6 +511,8 @@ class _Assembly:
         database = self._bound[_schema_of(manifest)]
         own = isolated_in == shared.role
         relayed_from = None if own else isolated_in  # the role it is isolated in, when that is another
+        if isolated_in is not None:
+            _served(shared.registry).labels(module=name, isolated_in=isolated_in).set(1 if own else 0)
         context = ModuleContext(
             manifest=manifest,
             role=shared.role,

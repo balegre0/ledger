@@ -53,6 +53,11 @@ from ledger_signer.adapters.grpc._generated.v1 import signer_pb2, signer_pb2_grp
 from ledger_signer.adapters.grpc.client import SignerClient, SignerDefectError
 from ledger_signer.adapters.grpc.codec import ImportHeaderFirstError
 from ledger_signer.adapters.grpc.server import SignerServer
+from ledger_signer.adapters.settings import (
+    IMPORT_DEADLINE_MARGIN_SECONDS,
+    MAX_DEADLINE_SECONDS,
+    MAX_IMPORT_DEADLINE_SECONDS,
+)
 from ledger_signer.application.importing import MAX_BUNDLE_BYTES, ImportRequest, ImportTooLargeError
 from ledger_signer.application.ports import BundleUnreadableError, Secret
 from ledger_signer.domain.errors import ClockSkewError, NotCoveredError
@@ -78,7 +83,9 @@ DOCUMENT: Final = b"<ECF><Encabezado><Nombre>DOCUMENT-SENTINEL</Nombre></Encabez
 SENTINELS: Final = (PASSWORD, "DOCUMENT-SENTINEL")
 PROFILE: Final = SignatureProfile.XMLDSIG_ENVELOPED_RSA_SHA256
 REFERENCE: Final = "E310000000001"
-DEADLINE: Final = 10.0
+DEADLINE: Final = MAX_DEADLINE_SECONDS
+IMPORT_DEADLINE: Final = MAX_IMPORT_DEADLINE_SECONDS + IMPORT_DEADLINE_MARGIN_SECONDS
+"""The api's own: an import never races a wall clock shorter than the signer's patience."""
 CHUNK: Final = 64 * 1024
 CHECKS: Final = TypeAdapter(dict[str, bool])
 YEAR: Final = timedelta(days=365)
@@ -191,7 +198,7 @@ async def signer(deployment: Deployment) -> AsyncGenerator[Running]:
 async def client(signer: Running, caller: str) -> AsyncGenerator[SignerClient]:
     """A client of the signer with ``caller``'s token."""
     async with SignerClient(
-        signer.address, SecretStr(TOKENS[caller]), deadline=DEADLINE, import_deadline=DEADLINE
+        signer.address, SecretStr(TOKENS[caller]), deadline=DEADLINE, import_deadline=IMPORT_DEADLINE
     ) as opened:
         yield opened
 

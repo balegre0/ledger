@@ -1,0 +1,13 @@
+[package]
+name = "signer"
+kind = "app"
+summary = "The signer: certificate custody and signatures over gRPC, its own consumer, jobs and schedules."
+owners = ["@balegre0"]
+
+[dependencies]
+packages = ["platform"]
+python = []
+
+[app]
+script = "ledger-signer"
+role = "signer"

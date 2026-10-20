@@ -140,7 +140,7 @@ def test_scripts_and_third_party_module_names_are_written(tree: Path) -> None:
     assert '[project.scripts]\nledger-probe = "ledger_platform.observability.probe:main"' in platform
     assert "[tool.deptry.package_module_name_map]" not in platform  # deptry reads - as _ itself
     assert 'source = ["packages/platform/src/ledger_platform/data/revisions"]' in platform
-    app = pyproject_text(workspace.by_name("api"), workspace)
+    app = pyproject_text(workspace.app("api"), workspace)
     assert '[project.scripts]\nledger-api = "ledger_app_api.main:main"' in app
     kernel = pyproject_text(workspace.by_name("kernel"), workspace)
     assert "dependencies = []\n" in kernel
@@ -291,7 +291,7 @@ def test_importlinter_contracts_follow_the_manifests(tree: Path) -> None:
     assert "    adapters\n    application\n    domain\n    _manifest\n" in text
     assert "[importlinter:contract:identity-is-protected]" in text
     assert "[importlinter:contract:apps-only-compose]" in text
-    assert "[importlinter:contract:identity-declared-edges]" in text
+    assert "[importlinter:contract:ledger-identity-declared-edges]" in text
     assert "modules-never-import-countries" not in text
     assert "countries-are-independent" not in text
     assert "containers =\n    ledger_platform\nexhaustive = True\nlayers =\n    _manifest\n" in text
@@ -336,8 +336,8 @@ def test_importlinter_contracts_cover_countries_edges_and_the_kit(tree: Path, wr
         "name = Countries are independent\ntype = independence\n"
     )
     assert independent in text
-    assert "[importlinter:contract:billing-declared-edges]" in text
-    assert "[importlinter:contract:identity-declared-edges]\n" in text
+    assert "[importlinter:contract:ledger-billing-declared-edges]" in text
+    assert "[importlinter:contract:ledger-identity-declared-edges]\n" in text
     assert "source_modules =\n    ledger_billing.domain\n    ledger_billing.events\n" in text
     assert "    ledger_country_do_testing\n" in text
     assert "    lxml\n" in text
@@ -451,13 +451,13 @@ def test_every_package_imports_only_the_workspace_packages_it_declares(tree: Pat
     write("packages/testing", TESTING, ())
     text = importlinter_text(Workspace.load(tree))
     assert (
-        "[importlinter:contract:api-declared-edges]\n"
-        "name = api imports only the workspace packages it declares\n"
+        "[importlinter:contract:ledger-app-api-declared-edges]\n"
+        "name = ledger-app-api imports only the workspace packages it declares\n"
         "type = forbidden\n"
         "source_modules =\n    ledger_app_api\n"
         "forbidden_modules =\n    ledger_identity\n    ledger_kernel\n    ledger_testing\n"
     ) in text
-    assert "[importlinter:contract:identity-declared-edges]\n" in text
+    assert "[importlinter:contract:ledger-identity-declared-edges]\n" in text
     assert "source_modules =\n    ledger_kernel\nforbidden_modules =\n    ledger_app_api\n" in text
 
 
@@ -645,6 +645,31 @@ def test_an_isolated_module_gets_a_custody_contract(tree: Path, write: Writer) -
         "    ledger_vault.adapters.custody\n"
         "allow_indirect_imports = True\n"
     ) in text
+
+
+def test_an_app_named_like_its_module_keeps_contracts_and_layers_of_its_own(
+    tree: Path, write: Writer
+) -> None:
+    """``apps/signer`` beside ``modules/signer``: one section per contract, each package's layers its own."""
+    write("modules/signer", VAULT.replace('"vault"', '"signer"'), ("adapters", "assembly", "domain"))
+    write("apps/signer", SIGNER_APP, ())
+    text = importlinter_text(Workspace.load(tree))
+    sections = [line for line in text.splitlines() if line.startswith("[importlinter:contract:")]
+    assert len(sections) == len(set(sections))
+    assert "[importlinter:contract:ledger-app-signer-declared-edges]" in sections
+    assert "[importlinter:contract:ledger-signer-declared-edges]" in sections
+    assert (
+        "layers =\n    ledger_app_api | ledger_app_signer\n    ledger_signer\n    ledger_identity\n" in text
+    )
+    assert (
+        "containers =\n    ledger_signer\nexhaustive = True\nlayers =\n    assembly\n    adapters\n"
+        "    domain\n    _manifest\n"
+    ) in text
+    assert "source_modules =\n    ledger_app_signer\nforbidden_modules =\n    ledger_vault" not in text
+    workspace = Workspace.load(tree)
+    signer = tomllib.loads(pyproject_text(workspace.by_name("signer"), workspace))
+    assert signer["project"]["name"] == "ledger-signer"
+    assert "ledger.modules" in signer["project"]["entry-points"]
 
 
 def test_an_isolated_module_without_an_app_of_its_role_gets_the_one_contract(
