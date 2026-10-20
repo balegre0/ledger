@@ -31,6 +31,7 @@ from ledger_invoicing.domain.pricing import (
     Terms,
     local_date,
     price,
+    refuse_undeclared,
 )
 from ledger_kernel.errors import ErrorKind, InvalidValueError
 from ledger_kernel.money import Currency, Money
@@ -410,7 +411,7 @@ def with_fields(fields: dict[str, dict[str, FieldValue]]) -> Terms:
 
 def test_a_regime_that_declares_no_field_refuses_every_one(regime: RegimeDef) -> None:
     with pytest.raises(FieldUnknownError) as caught:
-        priced(regime, with_fields({"do": {"ecf_type": "31"}}))
+        refuse_undeclared(priced(regime, with_fields({"do": {"ecf_type": "31"}})), regime)
     assert str(caught.value) == "fiscal.do holds a field the regime does not declare"
     assert (caught.value.kind, caught.value.code) == (ErrorKind.INVALID, "field_unknown")
     with pytest.raises(FieldUnknownError, match=r"^fiscal holds a namespace other than the regime's, do$"):
@@ -474,3 +475,21 @@ def test_a_field_of_another_kind_is_refused_by_its_name(
         priced(regime_with_fields, with_fields({"do": {"ecf_type": "31", name: value}}))
     assert str(caught.value) == f"fiscal.do.{name} must be {requirement}"
     assert (caught.value.kind, caught.value.code) == (ErrorKind.INVALID, "field_invalid")
+
+
+def test_fields_the_regime_does_not_declare_are_kept_for_the_issue_policy_chain_to_judge(
+    regime_with_fields: RegimeDef,
+) -> None:
+    """Decision 24: the regime's channels' fields are kept; the chain judges them, or without one none may."""
+    fields: dict[str, FieldValue] = {
+        "ecf_type": "31",
+        "modification_code": "3",
+        "withholdings": {"0": {"itbis": "18.00", "isr": "10.00"}},
+    }
+    kept = priced(regime_with_fields, with_fields({"do": fields}))
+    assert kept.fiscal == fields
+    with pytest.raises(FieldUnknownError, match=r"^fiscal\.do holds a field the regime does not declare$"):
+        refuse_undeclared(kept, regime_with_fields)
+    refuse_undeclared(priced(regime_with_fields, with_fields({"do": {"ecf_type": "31"}})), regime_with_fields)
+    with pytest.raises(FieldInvalidError, match=r"^fiscal\.do\.ecf_type must be"):
+        priced(regime_with_fields, with_fields({"do": {**fields, "ecf_type": {"x": "1"}}}))

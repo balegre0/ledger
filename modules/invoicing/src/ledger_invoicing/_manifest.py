@@ -93,6 +93,17 @@ MANIFEST: Final = PackageManifest.model_validate(
                     "type": "invoicing.invoice.voided",
                     "version": 1,
                 },
+                {
+                    "type": "invoicing.invoice.fiscal_updated",
+                    "version": 1,
+                    "public": "invoice.fiscal_updated",
+                },
+            ],
+        },
+        "extension_points": {
+            "declares": [
+                "IssuePolicy",
+                "Renderer",
             ],
         },
         "http": {

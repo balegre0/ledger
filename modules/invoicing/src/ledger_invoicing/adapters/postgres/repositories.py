@@ -12,6 +12,8 @@ type holds is not kept: the insert does nothing on the unique index's conflict (
 and the holder is then read, never a unique violation caught (which would abort the unit's transaction). A
 change replaces the version the unit holds locked, the lines and totals with it: issuing a draft prices it
 again. Rows are read into typed rows (``_InvoiceRow`` and the others), checked as they are read.
+
+The fiscal mirror (``PgFiscalMirror``) keeps, per document and channel, the newest status a channel reported.
 """
 
 from dataclasses import dataclass
@@ -29,17 +31,14 @@ lazy from sqlalchemy import ColumnElement, Select
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ledger_invoicing.adapters.postgres.tables import (
+    FiscalStatusRecord,
     InvoiceLineRecord,
     InvoiceLineTaxRecord,
     InvoiceRecord,
     InvoiceTaxRecord,
 )
-from ledger_invoicing.application.ports import (
-    ForeignTenantError,
-    Invoices,
-    StaleWriteError,
-    UnmirroredAcceptanceError,
-)
+from ledger_invoicing.application.ports import FiscalMirror, ForeignTenantError, Invoices, StaleWriteError
+from ledger_invoicing.domain.fiscal import ACCEPTANCES, Applied, AuthorityMessage, FiscalStatus
 from ledger_invoicing.domain.ids import InvoiceId
 from ledger_invoicing.domain.invoice import Invoice, InvoiceStatus
 from ledger_invoicing.domain.lines import LineTerms
@@ -55,6 +54,7 @@ from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.data import paged
 lazy from ledger_invoicing.application.ports import InvoiceFilters
+lazy from ledger_invoicing.domain.fiscal import Detail, FiscalStatusName
 lazy from ledger_invoicing.domain.pricing import CountryFields, FieldValue
 lazy from ledger_kernel.pagination import Page, PageRequest
 lazy from ledger_kernel.regimes import Direction, DocumentKind, TaxCategoryKind
@@ -371,7 +371,6 @@ def _invoice(row: _InvoiceRow, parts: _Parts) -> Invoice:
             fiscal=terms.fiscal.get(regime, MappingProxyType({})),
         ),
         seller=seller_from_columns(row.seller_legal_name, row.seller_tax_scheme, row.seller_tax_value),
-        accepted_by=(),
         void_reason=None if row.void_reason is None else Reason(row.void_reason),
         version=row.version,
         created_at=row.created_at,
@@ -532,11 +531,9 @@ class PgInvoices(Invoices):
         return page_of(found, request, key=lambda invoice: invoice.id)
 
     def _require_own(self, invoice: Invoice) -> None:
-        """Refuse another tenant's document, and one a channel accepted (no mirror keeps that yet)."""
+        """Refuse another tenant's document."""
         if invoice.tenant != self._tenant:
             raise ForeignTenantError
-        if invoice.accepted_by:
-            raise UnmirroredAcceptanceError
 
     def _identity(self, invoice: Invoice) -> dict[str, object]:
         return {
@@ -644,3 +641,162 @@ class PgInvoices(Invoices):
         await self._connection.execute(insert(InvoiceLineRecord), lines)
         await self._connection.execute(insert(InvoiceLineTaxRecord), line_taxes)
         await self._connection.execute(insert(InvoiceTaxRecord), taxes)
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _MessageRow:
+    """An authority's message, as ``fiscal_statuses.messages`` keeps it."""
+
+    code: str
+    message: str
+    lang: str
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _StatusRow:
+    """A row of ``fiscal_statuses``, as read."""
+
+    invoice_id: UUID
+    channel: str
+    environment: str
+    status: FiscalStatusName
+    version: int
+    authority_number: str | None
+    messages: list[_MessageRow]
+    regime: str
+    details: dict[str, Detail]
+    updated_at: datetime
+
+
+_STATUSES: Final = TypeAdapter(list[_StatusRow])
+_ACCEPTANCES: Final = tuple(status.value for status in ACCEPTANCES)
+_STATUS_COLUMNS: Final = (
+    FiscalStatusRecord.invoice_id,
+    FiscalStatusRecord.channel,
+    FiscalStatusRecord.environment,
+    FiscalStatusRecord.status,
+    FiscalStatusRecord.version,
+    FiscalStatusRecord.authority_number,
+    FiscalStatusRecord.messages,
+    FiscalStatusRecord.regime,
+    FiscalStatusRecord.details,
+    FiscalStatusRecord.updated_at,
+)
+
+
+def _status(row: _StatusRow) -> FiscalStatus:
+    return FiscalStatus(
+        channel=row.channel,
+        environment=row.environment,
+        status=row.status,
+        version=row.version,
+        authority_number=row.authority_number,
+        messages=tuple(
+            AuthorityMessage(code=message.code, message=message.message, lang=message.lang)
+            for message in row.messages
+        ),
+        regime=row.regime,
+        details=row.details,
+        updated_at=row.updated_at,
+    )
+
+
+@final
+class PgFiscalMirror(FiscalMirror):
+    """The fiscal mirror of the unit's tenant (a company in a mode), in PostgreSQL.
+
+    A status is written by one statement, ``INSERT ... ON CONFLICT (tenant, invoice, channel) DO UPDATE ...
+    WHERE`` the kept version is older, which answers the row only when it wrote it. It first takes a share of
+    the document's row lock (``FOR SHARE``), which also tells a document the tenant does not have.
+    """
+
+    __slots__ = ("_connection", "_mode", "_tenant")
+
+    def __init__(self, connection: AsyncConnection, tenant: Tenant, mode: Mode) -> None:
+        self._connection = connection
+        self._tenant = tenant
+        self._mode = mode.value
+
+    @override
+    async def of(self, invoices: Sequence[InvoiceId]) -> Mapping[InvoiceId, tuple[FiscalStatus, ...]]:
+        if not invoices:
+            return {}
+        found: dict[InvoiceId, list[FiscalStatus]] = {invoice: [] for invoice in invoices}
+        statement = (
+            select(*_STATUS_COLUMNS)
+            .where(*self._mine(), FiscalStatusRecord.invoice_id.in_(list(invoices)))
+            .order_by(FiscalStatusRecord.invoice_id, FiscalStatusRecord.channel)
+        )
+        rows = (await self._connection.execute(statement)).mappings()
+        for row in _STATUSES.validate_python([dict(row) for row in rows]):
+            found[InvoiceId(row.invoice_id)].append(_status(row))
+        return {invoice: tuple(statuses) for invoice, statuses in found.items()}
+
+    @override
+    async def accepted(self, invoice: InvoiceId) -> bool:
+        statement = select(
+            exists().where(
+                *self._mine(),
+                FiscalStatusRecord.invoice_id == invoice,
+                FiscalStatusRecord.status.in_(_ACCEPTANCES),
+            )
+        )
+        return bool((await self._connection.execute(statement)).scalar_one())
+
+    @override
+    async def apply(self, invoice: InvoiceId, status: FiscalStatus) -> Applied | None:
+        shared = (
+            select(InvoiceRecord.id)
+            .where(
+                InvoiceRecord.organization_id == self._tenant.organization,
+                InvoiceRecord.company_id == self._tenant.company,
+                InvoiceRecord.mode == self._mode,
+                InvoiceRecord.id == invoice,
+            )
+            .with_for_update(read=True)
+        )
+        if (await self._connection.execute(shared)).first() is None:
+            return None
+        values: dict[str, object] = {
+            "environment": status.environment,
+            "status": status.status.value,
+            "version": status.version,
+            "authority_number": status.authority_number,
+            "messages": [
+                {"code": message.code, "message": message.message, "lang": message.lang}
+                for message in status.messages
+            ],
+            "regime": status.regime,
+            "details": dict(status.details),
+            "updated_at": status.updated_at,
+        }
+        fresh = insert(FiscalStatusRecord).values(
+            organization_id=self._tenant.organization,
+            company_id=self._tenant.company,
+            mode=self._mode,
+            invoice_id=invoice,
+            channel=status.channel,
+            **values,
+        )
+        written = fresh.on_conflict_do_update(
+            index_elements=[
+                FiscalStatusRecord.organization_id,
+                FiscalStatusRecord.company_id,
+                FiscalStatusRecord.mode,
+                FiscalStatusRecord.invoice_id,
+                FiscalStatusRecord.channel,
+            ],
+            set_={name: fresh.excluded[name] for name in values},
+            where=FiscalStatusRecord.version < fresh.excluded.version,
+        ).returning(FiscalStatusRecord.version)
+        kept = (await self._connection.execute(written)).first()
+        return Applied.STALE if kept is None else Applied.APPLIED
+
+    def _mine(self) -> tuple[ColumnElement[bool], ...]:
+        return (
+            FiscalStatusRecord.organization_id == self._tenant.organization,
+            FiscalStatusRecord.company_id == self._tenant.company,
+            FiscalStatusRecord.mode == self._mode,
+        )

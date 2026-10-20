@@ -40,6 +40,7 @@ from ledger_platform.http.metrics import declared_route
 from ledger_platform.http.rate import RateLimitedError
 from ledger_platform.http.request_fields import remembered
 from ledger_platform.observability.logs import MAX_ISSUES, location_of
+lazy from ledger_platform.data.codec import JsonValue
 
 PROBLEM_JSON: Final = "application/problem+json"
 REQUEST_ID_HEADER: Final = "Request-Id"
@@ -110,15 +111,15 @@ type RouteOf = Callable[[Mapping[str, object]], str]
 
 @runtime_checkable
 class ProblemMembers(Protocol, metaclass=ABCMeta):
-    """A ``LedgerError`` that adds members of its own to its problem (§9.6): ``existing_id``, say.
+    """A ``LedgerError`` that adds members of its own to its problem (§9.6): ``existing_id``, ``errors``.
 
-    What it names is the error's to keep free of client input, as its message is. A member never replaces a
-    standard one (``type``, ``title``, ``status``, ``code``, ``detail``, ``request_id``): such a member is
-    dropped. The method is abstract so that it needs no body.
+    What it names is the error's to keep free of client input, as its message is: JSON (a text, a list of
+    objects). A member never replaces a standard one (``type``, ``title``, ``status``, ``code``, ``detail``,
+    ``request_id``): such a member is dropped. The method is abstract so that it needs no body.
     """
 
     @abstractmethod
-    def problem_members(self) -> Mapping[str, str]:
+    def problem_members(self) -> Mapping[str, JsonValue]:
         """The members the problem adds, by name."""
 
 

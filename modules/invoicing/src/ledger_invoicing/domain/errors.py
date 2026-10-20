@@ -6,13 +6,15 @@ client's data. ``InvalidValueError`` (``ledger_kernel.errors``) is for a value o
 """
 
 from enum import StrEnum
-from typing import ClassVar
-lazy from collections.abc import Mapping
+from typing import ClassVar, Final
+lazy from collections.abc import Mapping, Sequence
 lazy from uuid import UUID
 
 from ledger_invoicing.domain.ids import INVOICE_PREFIX
 from ledger_kernel.errors import ConflictError, InvalidInputError, LedgerError, NotFoundError
 from ledger_kernel.ids import format_id
+lazy from ledger_invoicing.domain.fiscal import Detail
+lazy from ledger_invoicing.domain.objections import Objection
 
 
 def _public(invoice: UUID) -> str:
@@ -301,3 +303,41 @@ class RegimeMissingError(LedgerError):
 
     def __init__(self) -> None:
         super().__init__("no installed regime governs the company's jurisdiction")
+
+
+MAX_LISTED_OBJECTIONS: Final = 20
+"""The objections a problem lists (``errors[]``, §9.6); the rest are counted (``omitted_errors``)."""
+
+
+class DocumentInvalidError(InvalidInputError):
+    """What the document is issued through would refuse it: the ``IssuePolicy`` chain's objections (§8.5).
+
+    The problem lists them (``errors[]``: code, field, message, in chain order; at most
+    ``MAX_LISTED_OBJECTIONS``, the rest counted in ``omitted_errors``). Messages name rules, never values.
+    """
+
+    code: ClassVar[str] = "invalid_document"
+    objections: tuple[Objection, ...]
+
+    def __init__(self, objections: Sequence[Objection]) -> None:
+        count = len(objections)
+        rules = "rule" if count == 1 else "rules"
+        super().__init__(f"the document breaks {count} {rules} of the fiscal channels it is issued through")
+        self.objections = tuple(objections)
+
+    def problem_members(self) -> Mapping[str, Detail]:
+        """``errors``, each objection as ``{code, field, message}``, and how many were left out."""
+        listed: list[Detail] = [
+            {"code": objection.code, "field": objection.field, "message": objection.message}
+            for objection in self.objections[:MAX_LISTED_OBJECTIONS]
+        ]
+        return {"errors": listed, "omitted_errors": max(len(self.objections) - MAX_LISTED_OBJECTIONS, 0)}
+
+
+class RepresentationUnavailableError(NotFoundError):
+    """No ``Renderer`` renders the document for the channel asked (none is installed, or none answers)."""
+
+    code: ClassVar[str] = "representation_unavailable"
+
+    def __init__(self) -> None:
+        super().__init__("no fiscal channel renders this document")

@@ -27,16 +27,18 @@ from ledger_invoicing.adapters.postgres.tables import (
 )
 from ledger_invoicing.adapters.postgres.unit import PgUnits, UnscopedUnitError, bind
 from ledger_invoicing.application.commands import Creation, InvoicingCommands
+from ledger_invoicing.application.issuing import IssuePolicies
 from ledger_invoicing.application.ports import (
     ForeignTenantError,
     IdentityLookup,
     InvoiceFilters,
     Invoices,
     InvoicingUnits,
+    Log,
     StaleWriteError,
-    UnmirroredAcceptanceError,
 )
 from ledger_invoicing.domain.errors import CorrectionInvalidError, InvoiceNotVoidableError
+from ledger_invoicing.domain.fiscal import Applied, AuthorityMessage, FiscalStatus, FiscalStatusName
 from ledger_invoicing.domain.ids import InvoiceId
 from ledger_invoicing.domain.invoice import Invoice, InvoiceStatus, Opening
 from ledger_invoicing.domain.lines import LineTerms
@@ -271,16 +273,112 @@ async def test_a_unit_keeps_the_documents_of_its_own_tenant_only(
     assert (await rows(module_database, tenant))["invoices"] == 0
 
 
-async def test_a_document_a_channel_accepted_is_not_kept_before_the_fiscal_mirror_exists(
+# ── The fiscal mirror ───────────────────────────────────────────────────────────
+
+
+def status_of(
+    version: int, status: FiscalStatusName = FiscalStatusName.PENDING, channel: str = "do-ecf-v1"
+) -> FiscalStatus:
+    return FiscalStatus(
+        channel=channel,
+        environment="testecf",
+        status=status,
+        version=version,
+        authority_number="E310000000001" if version > 1 else None,
+        messages=(AuthorityMessage(code="2", message="Aceptado condicional", lang="es"),),
+        regime="do",
+        details={
+            "encf": "E310000000001",
+            "qr": {"url": "https://ecf.dgii.gov.do/x"},
+            "lines": [1, True, None],
+        },
+        updated_at=NOW,
+    )
+
+
+async def test_the_mirror_keeps_the_newest_status_per_channel_in_channel_order(
     module_database: BoundDatabase, regime: RegimeDef
 ) -> None:
     tenant = tenant_of()
-    accepted = replace(made(regime, tenant), accepted_by=("do-ecf-v1",))
-    with pytest.raises(UnmirroredAcceptanceError) as caught:
-        await kept(module_database, accepted)
-    assert caught.value.code == "invoice_acceptance_unmirrored"
-    with pytest.raises(UnmirroredAcceptanceError):
-        await in_unit(module_database, tenant, lambda unit: unit.invoices.update(accepted))
+    invoice, other = made(regime, tenant), made(regime, tenant)
+    for document in (invoice, other):
+        await kept(module_database, document)
+    newest = status_of(3, FiscalStatusName.ACCEPTED)
+    ours = status_of(1, channel="do-abc-v1")
+
+    async def apply(unit: InvoicingUnit) -> list[Applied | None]:
+        return [
+            await unit.fiscal.apply(invoice.id, newest),
+            await unit.fiscal.apply(invoice.id, status_of(2)),
+            await unit.fiscal.apply(invoice.id, newest),
+            await unit.fiscal.apply(invoice.id, ours),
+        ]
+
+    assert await in_unit(module_database, tenant, apply) == [
+        Applied.APPLIED,
+        Applied.STALE,
+        Applied.STALE,
+        Applied.APPLIED,
+    ]
+
+    async def look(unit: InvoicingUnit) -> tuple[object, ...]:
+        return (
+            await unit.fiscal.of([invoice.id, other.id]),
+            await unit.fiscal.accepted(invoice.id),
+            await unit.fiscal.accepted(other.id),
+            await unit.fiscal.of([]),
+        )
+
+    assert await in_unit(module_database, tenant, look) == (
+        {invoice.id: (ours, newest), other.id: ()},
+        True,
+        False,
+        {},
+    )
+
+
+async def test_the_mirror_of_another_tenant_s_document_is_neither_read_nor_written(
+    module_database: BoundDatabase, regime: RegimeDef
+) -> None:
+    tenant = tenant_of()
+    invoice = made(regime, tenant)
+    await kept(module_database, invoice)
+    await in_unit(module_database, tenant, lambda unit: unit.fiscal.apply(invoice.id, status_of(1)))
+    for other in (Tenant(tenant.organization, tenant.company, Mode.LIVE), tenant_of()):
+
+        async def look(unit: InvoicingUnit) -> tuple[object, ...]:
+            return (
+                await unit.fiscal.apply(invoice.id, status_of(2, FiscalStatusName.ACCEPTED)),
+                await unit.fiscal.of([invoice.id]),
+                await unit.fiscal.accepted(invoice.id),
+            )
+
+        assert await in_unit(module_database, other, look) == (None, {invoice.id: ()}, False)
+    unknown = await in_unit(
+        module_database, tenant, lambda unit: unit.fiscal.apply(InvoiceId(new_id()), status_of(1))
+    )
+    assert unknown is None
+
+
+async def test_a_status_waits_for_a_void_that_locked_the_invoice_and_is_kept_after_it(
+    module_database: BoundDatabase, migrated: WorkerDatabase, regime: RegimeDef
+) -> None:
+    """A void decides on the mirror under the invoice's lock; a status takes a share of that lock first, so
+    an acceptance is never written between the void's read of the mirror and its commit."""
+    world = World(module_database, regime)
+    invoice = await world.create(world.call, INVOICE)
+    voiding, units = world.holding(module_database, regime, invoice.id)
+    void = asyncio.create_task(voiding.void(world.call, invoice.id, None))
+    await units.holding.wait()
+    accepted = status_of(2, FiscalStatusName.ACCEPTED)
+    applying = asyncio.create_task(
+        in_unit(module_database, world.tenant, lambda unit: unit.fiscal.apply(invoice.id, accepted))
+    )
+    await eventually(lambda: waits_for_a_lock(app_url(migrated)))  # the status waits for the void
+    assert not applying.done()
+    units.release.set()
+    assert (await void).status is InvoiceStatus.VOIDED
+    assert await applying is Applied.APPLIED  # what the channel says is kept, whatever the document's state
 
 
 # ── Changing ────────────────────────────────────────────────────────────────────
@@ -309,7 +407,9 @@ async def test_an_issued_draft_is_kept_at_its_next_version_priced_anew(
     await in_unit(module_database, tenant, issue)
     assert await read(module_database, tenant, draft.id) == issued
     assert (await rows(module_database, tenant))["invoice_lines"] == 1
-    voided, _ = issued.void(reason=parse_reason("Wrong buyer"), corrected_by_a_note=False, now=NOW)
+    voided, _ = issued.void(
+        reason=parse_reason("Wrong buyer"), corrected_by_a_note=False, accepted=False, now=NOW
+    )
     await in_unit(module_database, tenant, lambda unit: unit.invoices.update(voided))
     assert await read(module_database, tenant, draft.id) == voided
 
@@ -320,7 +420,7 @@ async def test_a_change_that_skips_a_version_is_a_defect_and_changes_nothing(
     tenant = tenant_of()
     invoice = made(regime, tenant)
     await kept(module_database, invoice)
-    voided, _ = invoice.void(reason=None, corrected_by_a_note=False, now=NOW)
+    voided, _ = invoice.void(reason=None, corrected_by_a_note=False, accepted=False, now=NOW)
     for wrong in (replace(voided, version=3), replace(voided, id=InvoiceId(new_id()))):
 
         async def change(unit: InvoicingUnit, document: Invoice = wrong) -> None:
@@ -352,7 +452,7 @@ async def test_an_invoice_is_corrected_by_its_draft_and_issued_notes_not_by_a_vo
     issued, _ = credit.issue(seller=SELLER, pricing=credit.pricing, corrected=original, now=NOW)
     await in_unit(module_database, tenant, lambda unit: unit.invoices.update(issued))
     assert await corrected(original)
-    voided, _ = issued.void(reason=None, corrected_by_a_note=False, now=NOW)
+    voided, _ = issued.void(reason=None, corrected_by_a_note=False, accepted=False, now=NOW)
     await in_unit(module_database, tenant, lambda unit: unit.invoices.update(voided))
     assert not await corrected(original)
 
@@ -523,6 +623,17 @@ class HoldingUnits(InvoicingUnits):
 
 
 @final
+class Unlogged(Log):
+    @override
+    def warning(self, event: str, /, **fields: str) -> None:
+        raise AssertionError(event)
+
+    @override
+    def exception(self, event: str, /, **fields: str) -> None:
+        raise AssertionError(event)
+
+
+@final
 class World:
     """The use cases over invoicing's real units, identity answered by ``Directory``."""
 
@@ -537,6 +648,7 @@ class World:
             regime_of=lambda _: regime,
             clock=lambda: NOW,
             new_id=new_id,
+            policies=IssuePolicies(chain=lambda: (), log=Unlogged()),
         )
 
     async def create(self, call: Call, creation: Creation) -> Invoice:

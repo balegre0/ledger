@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from ledger_invoicing.adapters.http.public import InvoiceRef, invoice_ref, parse_invoice_ref
 from ledger_invoicing.application.commands import Creation
+from ledger_invoicing.domain.fiscal import FiscalStatusName
 from ledger_invoicing.domain.invoice import InvoiceStatus
 from ledger_invoicing.domain.lines import MAX_PRICE_PLACES, MAX_QUANTITY_PLACES, LineTerms
 from ledger_invoicing.domain.parties import party
@@ -38,7 +39,8 @@ from ledger_kernel.money import MAX_INTEGER_DIGITS, Currency
 from ledger_kernel.regimes import Direction, DocumentKind, TaxCategoryKind
 from ledger_kernel.tax_ids import MAX_TAX_ID_LENGTH
 from ledger_kernel.tenancy import Mode
-lazy from ledger_invoicing.domain.invoice import Invoice
+lazy from ledger_invoicing.application.queries import Kept
+lazy from ledger_invoicing.domain.fiscal import FiscalStatus
 lazy from ledger_invoicing.domain.parties import Party, Seller
 lazy from ledger_invoicing.domain.pricing import PricedLine
 lazy from ledger_invoicing.domain.text import Reason
@@ -68,8 +70,13 @@ type Rate = Annotated[str, StringConstraints(pattern=_decimal(MAX_EXCHANGE_RATE_
 type CategoryKey = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_.-]{0,63}$")]
 type FieldText = Annotated[str, StringConstraints(min_length=1, max_length=MAX_FIELD_TEXT)]
 type FieldName = Annotated[str, StringConstraints(min_length=1, max_length=MAX_FIELD_NAME)]
-type CountryField = FieldText | Annotated[dict[FieldName, FieldText], Field(max_length=MAX_FIELD_OBJECT)]
-"""A country field: text, or an object of text fields (``replaces_ncf``); the regime says which."""
+type FieldObject = Annotated[dict[FieldName, FieldText], Field(max_length=MAX_FIELD_OBJECT)]
+type CountryField = (
+    FieldText | Annotated[dict[FieldName, FieldText | FieldObject], Field(max_length=MAX_FIELD_OBJECT)]
+)
+"""A country field: text, or an object of text fields or of such objects. The regime says which of its own
+fields is what (``replaces_ncf``, an object of text); a channel's (Decision 24) may nest one level deeper
+(DO's ``withholdings``: an object per line of ``{"itbis", "isr"}``)."""
 
 
 def _text(amount: Decimal) -> str:
@@ -342,12 +349,53 @@ class SellerView(_Shape):
         return cls(legal_name=seller.legal_name, tax_id=PartyTaxId.of(seller.tax_id))
 
 
-class FiscalView(_Shape):
-    """What a fiscal channel made of the document (§9.8): kept by the fiscal module, from v2-M3b."""
+class AuthorityMessageView(_Shape):
+    """One of the authority's messages, verbatim (§7.10): clients translate by ``code``."""
 
+    code: str
+    message: str
+    lang: str = Field(examples=["es"])
+
+
+class FiscalView(BaseModel):
+    """What a fiscal channel last reported of the document (§9.8): one entry per channel.
+
+    The channel's own details are under the regime's key (``"do": {"encf": ..., "security_code": ...,
+    "qr_url": ...}``): every field a printed representation shows is there, so a client may print its own.
+    """
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(
+        extra="allow",
+        frozen=True,
+        json_schema_extra={
+            "description": (
+                "Besides these, one member named after the regime (do) holds the channel's details: "
+                "encf, security_code, signed_at, qr_url, track_id, emission_mode, delivery and the like."
+            )
+        },
+    )
     channel: str = Field(examples=["do-ecf-v1"])
-    status: str
-    version: int
+    environment: str = Field(examples=["testecf"])
+    status: FiscalStatusName
+    version: int = Field(description="The channel's version of this status: a newer one replaces it.")
+    messages: list[AuthorityMessageView]
+
+    @classmethod
+    def of(cls, status: FiscalStatus) -> Self:
+        """The view of ``status``."""
+        return cls.model_validate(
+            {
+                "channel": status.channel,
+                "environment": status.environment,
+                "status": status.status,
+                "version": status.version,
+                "messages": [
+                    {"code": message.code, "message": message.message, "lang": message.lang}
+                    for message in status.messages
+                ],
+                status.regime: dict(status.details),
+            }
+        )
 
 
 class InvoiceView(_Shape):
@@ -377,14 +425,17 @@ class InvoiceView(_Shape):
     functional_totals: TotalsView | None = Field(
         description="In the company's functional currency, for a document in another one."
     )
-    fiscal: list[FiscalView] = Field(description="Each fiscal channel's status: none before v2-M3b.")
+    fiscal: list[FiscalView] = Field(
+        description="Each fiscal channel's status, by channel: none until a channel reports one."
+    )
     issued_at: datetime | None
     voided_at: datetime | None
     void_reason: str | None
 
     @classmethod
-    def of(cls, invoice: Invoice) -> Self:
-        """The view of ``invoice``."""
+    def of(cls, kept: Kept) -> Self:
+        """The view of a document as it is kept, with its fiscal mirror."""
+        invoice = kept.invoice
         terms, pricing = invoice.terms, invoice.pricing
         functional = pricing.functional
         return cls(
@@ -409,7 +460,7 @@ class InvoiceView(_Shape):
             lines=[LineView.of(line) for line in pricing.lines],
             totals=TotalsView.of(pricing.totals),
             functional_totals=None if functional is None else TotalsView.of(functional),
-            fiscal=[],
+            fiscal=[FiscalView.of(status) for status in kept.fiscal],
             issued_at=invoice.issued_at,
             voided_at=invoice.voided_at,
             void_reason=invoice.void_reason,

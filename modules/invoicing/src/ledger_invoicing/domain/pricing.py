@@ -16,9 +16,11 @@ company's jurisdiction, at the document's tax point (rule 12: never ``now()``):
 - a document in another currency than the company's functional one carries the exchange rate (units of the
   functional currency per one of the document's), and its functional totals are converted once, each amount
   rounded as the regime rounds (Decision 5);
-- country fields (``fiscal.<regime>.<field>``) are only those the regime declares, each of its kind and
-  bounded: text and codes without invisible characters, decimals money can hold, objects of text fields only
-  (Decision 12).
+- country fields (``fiscal.<regime>.<field>``) the regime declares are each of its kind and bounded: text and
+  codes without invisible characters, decimals money can hold, objects of text fields only (Decision 12);
+  another regime's namespace is refused. A key the regime does not declare (a channel's format-level field)
+  is kept as sent: whether it may be sent at all is the ``IssuePolicy`` chain's to judge (M3b Decision 24),
+  and without a chain ``refuse_undeclared`` refuses it, as the use cases call it.
 
 **Taxes on one line do not compound.** A line may name several categories, one of each tax (ITBIS and a
 selective tax, say): each is charged on the line's whole base, never on a base that includes another
@@ -384,15 +386,22 @@ def _converted(totals: Totals, rate: Decimal, currency: Currency, rule: Rounding
     return Totals(net=net, categories=categories, tax=tax, gross=net + tax)
 
 
+def refuse_undeclared(pricing: Pricing, regime: RegimeDef) -> None:
+    """Refuse a country field of ``pricing`` that ``regime`` does not declare (``FieldUnknownError``).
+
+    What a document with no ``IssuePolicy`` chain to judge its other fields is held to (Decision 24).
+    """
+    declared = {definition.name for definition in regime.fields}
+    if not declared.issuperset(pricing.fiscal):
+        raise FieldUnknownError(regime.key, namespace=False)
+
+
 def _country_fields(fiscal: CountryFields, regime: RegimeDef) -> Mapping[str, FieldValue]:
-    """The regime's fields as sent, once every key is one it declares and every value of its kind."""
+    """The regime's namespace as sent, once each value the regime declares is of its kind (see the module)."""
     key = regime.key
     if any(namespace != key for namespace in fiscal):
         raise FieldUnknownError(key, namespace=True)
     sent = fiscal.get(key, _NOTHING)
-    declared = {definition.name for definition in regime.fields}
-    if not declared.issuperset(sent):
-        raise FieldUnknownError(key, namespace=False)
     for definition in regime.fields:
         value = sent.get(definition.name)
         if value is None:

@@ -44,6 +44,14 @@ version = 1
 type = "invoicing.invoice.voided"
 version = 1
 
+[[events.publishes]]
+type = "invoicing.invoice.fiscal_updated"
+version = 1
+public = "invoice.fiscal_updated"
+
+[extension_points]
+declares = ["IssuePolicy", "Renderer"]  # implemented by fiscal (M3b Task 20); neither required: an empty chain issues with fiscal: []
+
 [http]
 mounted_in = ["api"]
 prefixes = ["/v1/invoices"]

@@ -1,11 +1,11 @@
-"""invoicing's unit of work over a chassis unit: the tenant's documents, its events and its audit."""
+"""invoicing's unit of work over a chassis unit: the tenant's documents and fiscal mirror, events, audit."""
 
 from contextlib import asynccontextmanager
 from typing import ClassVar, final, override
 lazy from collections.abc import AsyncGenerator, Mapping
 lazy from uuid import UUID
 
-from ledger_invoicing.adapters.postgres.repositories import PgInvoices
+from ledger_invoicing.adapters.postgres.repositories import PgFiscalMirror, PgInvoices
 from ledger_invoicing.application.ports import Audit, Events, InvoicingUnit, InvoicingUnits
 from ledger_kernel.errors import LedgerError
 from ledger_kernel.tenancy import Tenant
@@ -70,6 +70,7 @@ def bind(unit: UnitOfWork) -> InvoicingUnit:
         raise UnscopedUnitError
     return InvoicingUnit(
         invoices=PgInvoices(unit.connection, scope, scope.mode),
+        fiscal=PgFiscalMirror(unit.connection, scope, scope.mode),
         events=UnitEvents(unit),
         audit=UnitAudit(unit),
         now=unit.now,

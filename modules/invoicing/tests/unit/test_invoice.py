@@ -27,7 +27,7 @@ from ledger_invoicing.domain.lines import LineTerms
 from ledger_invoicing.domain.parties import Seller, party
 from ledger_invoicing.domain.pricing import Dating, EstablishmentRef, Terms, price
 from ledger_invoicing.domain.text import parse_external_reference, parse_reason
-from ledger_invoicing.events import InvoiceIssued, InvoiceVoided
+from ledger_invoicing.events import InvoiceFiscalUpdated, InvoiceIssued, InvoiceVoided
 from ledger_kernel.errors import ErrorKind, InvalidValueError
 from ledger_kernel.ids import CompanyId, OrganizationId, format_id, new_id
 from ledger_kernel.money import Currency
@@ -100,14 +100,10 @@ def issued_invoice(pricing: Pricing) -> Invoice:
 
 def test_a_document_has_the_json_form_its_audit_hashes(pricing: Pricing) -> None:
     """A unit's audit hashes a changed document as the platform's codec writes it: every part has a form."""
-    accepted = replace(issued_invoice(pricing), accepted_by=("do-ecf-v1",))
-    encoded = encode(accepted)
+    encoded = encode(issued_invoice(pricing))
     assert isinstance(encoded, dict)
-    assert (encoded["accepted_by"], encoded["status"], encoded["kind"]) == (
-        ["do-ecf-v1"],
-        "issued",
-        "invoice",
-    )
+    assert (encoded["status"], encoded["kind"]) == ("issued", "invoice")
+    assert "accepted_by" not in encoded  # what channels made of it is the fiscal mirror's, not the document's
 
 
 def test_a_draft_is_kept_without_its_seller_and_announces_nothing(pricing: Pricing) -> None:
@@ -131,12 +127,7 @@ def test_a_draft_is_kept_without_its_seller_and_announces_nothing(pricing: Prici
         NOW,
         NOW,
     )
-    assert (invoice.corrects, invoice.accepted_by, invoice.voided_at, invoice.void_reason) == (
-        None,
-        (),
-        None,
-        None,
-    )
+    assert (invoice.corrects, invoice.voided_at, invoice.void_reason) == (None, None, None)
 
 
 def test_a_document_issued_at_once_is_at_its_first_version(pricing: Pricing) -> None:
@@ -182,7 +173,7 @@ def test_issuing_a_draft_snapshots_the_seller_and_announces_it(pricing: Pricing,
 
 def test_only_a_draft_is_issued(pricing: Pricing) -> None:
     issued = issued_invoice(pricing)
-    voided, _ = issued.void(reason=None, corrected_by_a_note=False, now=LATER)
+    voided, _ = issued.void(reason=None, corrected_by_a_note=False, accepted=False, now=LATER)
     for invoice in (issued, voided):
         with pytest.raises(InvoiceNotIssuableError) as caught:
             invoice.issue(seller=SELLER, pricing=pricing, corrected=None, now=LATER)
@@ -195,7 +186,9 @@ def test_only_a_draft_is_issued(pricing: Pricing) -> None:
 
 def test_voiding_an_issued_document_keeps_its_reason_and_announces_it(pricing: Pricing) -> None:
     issued = issued_invoice(pricing)
-    voided, event = issued.void(reason=parse_reason("Wrong buyer"), corrected_by_a_note=False, now=LATER)
+    voided, event = issued.void(
+        reason=parse_reason("Wrong buyer"), corrected_by_a_note=False, accepted=False, now=LATER
+    )
     assert (voided.status, voided.version, voided.voided_at, voided.void_reason, voided.updated_at) == (
         InvoiceStatus.VOIDED,
         2,
@@ -214,11 +207,16 @@ def test_voiding_an_issued_document_keeps_its_reason_and_announces_it(pricing: P
 
 def test_a_draft_a_voided_document_and_one_a_channel_accepted_are_not_voided(pricing: Pricing) -> None:
     issued = issued_invoice(pricing)
-    voided, _ = issued.void(reason=None, corrected_by_a_note=False, now=LATER)
-    accepted = replace(issued, accepted_by=("do-ecf-v1",))
-    for invoice, corrected in ((draft(pricing), False), (voided, False), (accepted, False), (issued, True)):
+    voided, _ = issued.void(reason=None, corrected_by_a_note=False, accepted=False, now=LATER)
+    refused = (
+        (draft(pricing), False, False),
+        (voided, False, False),
+        (issued, False, True),  # a channel accepted it: a credit note corrects it
+        (issued, True, False),
+    )
+    for invoice, corrected, accepted in refused:
         with pytest.raises(InvoiceNotVoidableError) as caught:
-            invoice.void(reason=None, corrected_by_a_note=corrected, now=LATER)
+            invoice.void(reason=None, corrected_by_a_note=corrected, accepted=accepted, now=LATER)
         assert str(caught.value) == (
             f"invoice {format_id(INVOICE_PREFIX, invoice.id)} is not issued, a channel accepted it, "
             "or a note corrects it"
@@ -248,7 +246,7 @@ def test_an_invoice_corrects_nothing_and_a_note_corrects_an_invoice(pricing: Pri
 
 def test_a_note_corrects_an_issued_invoice_of_its_company_mode_and_direction(pricing: Pricing) -> None:
     original = issued_invoice(pricing)
-    voided, _ = original.void(reason=None, corrected_by_a_note=False, now=LATER)
+    voided, _ = original.void(reason=None, corrected_by_a_note=False, accepted=False, now=LATER)
     note, _ = new(pricing, kind=DocumentKind.CREDIT_NOTE, corrects=original, seller=SELLER)
     for corrected, problem in (
         (draft(pricing), CorrectionProblem.NOT_ISSUED),
@@ -301,7 +299,7 @@ def test_whether_a_document_names_an_invoice_is_checked_before_anything_else() -
 def test_issuing_a_note_checks_its_invoice_again(pricing: Pricing) -> None:
     original = issued_invoice(pricing)
     note, _ = new(pricing, kind=DocumentKind.CREDIT_NOTE, corrects=original)
-    voided, _ = original.void(reason=None, corrected_by_a_note=False, now=LATER)
+    voided, _ = original.void(reason=None, corrected_by_a_note=False, accepted=False, now=LATER)
     with pytest.raises(CorrectionInvalidError, match=r"^corrects is not an issued document$"):
         note.issue(seller=SELLER, pricing=pricing, corrected=voided, now=LATER)
     issued, event = note.issue(seller=SELLER, pricing=pricing, corrected=original, now=LATER)
@@ -359,7 +357,9 @@ def test_an_issued_invoice_has_its_seller_and_a_voided_one_its_time(pricing: Pri
 def test_a_seller_and_an_invoice_show_nothing_a_client_wrote_in_their_repr(pricing: Pricing) -> None:
     assert repr(SELLER) == "Seller(tax_id=TaxId(scheme='do.rnc', value='******043'))"
     invoice = issued_invoice(pricing)
-    voided, _ = invoice.void(reason=parse_reason("Juana's order"), corrected_by_a_note=False, now=LATER)
+    voided, _ = invoice.void(
+        reason=parse_reason("Juana's order"), corrected_by_a_note=False, accepted=False, now=LATER
+    )
     shown = repr(voided)
     assert shown == f"Invoice(id={voided.id!r}, kind='invoice', status='voided', version=2)"
     assert "Acme" not in shown
@@ -395,12 +395,35 @@ def test_events_are_the_ones_the_manifest_declares_and_encode(pricing: Pricing) 
     assert declared == {
         (InvoiceIssued.TYPE, InvoiceIssued.VERSION),
         (InvoiceVoided.TYPE, InvoiceVoided.VERSION),
+        (InvoiceFiscalUpdated.TYPE, InvoiceFiscalUpdated.VERSION),
     }
+    public = {event.type: event.public for event in MANIFEST.events.publishes}
+    assert public[InvoiceFiscalUpdated.TYPE] == "invoice.fiscal_updated"
     invoice, issued = new(pricing, seller=SELLER)
-    _, voided = invoice.void(reason=None, corrected_by_a_note=False, now=LATER)
+    _, voided = invoice.void(reason=None, corrected_by_a_note=False, accepted=False, now=LATER)
     assert issued is not None
     assert payload_of(issued) == {"kind": "invoice", "direction": "sales", "corrects": None}
     assert payload_of(voided) == {"kind": "invoice", "direction": "sales"}
+    updated = InvoiceFiscalUpdated(
+        scope=TENANT,
+        subject=invoice.id,
+        aggregate_version=3,
+        channel="do-ecf-v1",
+        status="accepted",
+        version=3,
+    )
+    assert payload_of(updated) == {"channel": "do-ecf-v1", "status": "accepted", "version": 3}
+    with pytest.raises(
+        InvalidValueError, match=r"^invoice_fiscal_updated\.aggregate_version must be the version$"
+    ):
+        InvoiceFiscalUpdated(
+            scope=TENANT,
+            subject=invoice.id,
+            aggregate_version=2,
+            channel="do-ecf-v1",
+            status="pending",
+            version=3,
+        )
 
 
 def test_errors_name_documents_by_their_public_id_and_repeat_nothing_sent() -> None:

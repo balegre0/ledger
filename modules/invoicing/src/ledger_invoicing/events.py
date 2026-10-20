@@ -16,13 +16,20 @@ and directions travel as their words, ids as UUID strings (the platform's codec)
 
 - ``invoicing.invoice.issued`` v1: ``{"kind": "invoice" | "credit_note" | "debit_note", "direction": "sales"
   | "purchase", "corrects": "<uuid>" | null}``;
-- ``invoicing.invoice.voided`` v1: ``{"kind": ..., "direction": ...}``.
+- ``invoicing.invoice.voided`` v1: ``{"kind": ..., "direction": ...}``;
+- ``invoicing.invoice.fiscal_updated`` v1 (public ``invoice.fiscal_updated``): ``{"channel": "do-ecf-v1",
+  "status": "pending" | "accepted" | "accepted_with_observations" | "rejected" | "voided", "version": 3}``,
+  announced by the unit that keeps a channel's newer status in the fiscal mirror. Its ``aggregate_version`` is
+  that status's version in its channel (the mirror is not the document's state: the document's own version is
+  unchanged), so a consumer keeps the newest per channel; the payload repeats it for webhooks, which show no
+  envelope.
 """
 
 from dataclasses import dataclass
 from typing import ClassVar, final
 lazy from uuid import UUID
 
+from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.events import Event
 lazy from ledger_kernel.regimes import Direction, DocumentKind
 
@@ -51,5 +58,25 @@ class InvoiceVoided(Event):
     direction: Direction
 
 
-type InvoicingEvent = InvoiceIssued | InvoiceVoided
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InvoiceFiscalUpdated(Event):
+    """A channel's newer status of a document was kept in the fiscal mirror (see the module)."""
+
+    TYPE: ClassVar[str] = "invoicing.invoice.fiscal_updated"
+    VERSION: ClassVar[int] = 1
+    channel: str
+    status: str
+    """The platform's word for it (``FiscalStatusName``'s value)."""
+    version: int
+    """The status's version in its channel: the envelope's ``aggregate_version``, repeated."""
+
+    def __post_init__(self) -> None:
+        if self.aggregate_version != self.version:
+            raise InvalidValueError(
+                field="invoice_fiscal_updated.aggregate_version", requirement="the version"
+            )
+
+
+type InvoicingEvent = InvoiceIssued | InvoiceVoided | InvoiceFiscalUpdated
 """Every event invoicing publishes (its manifest's ``[[events.publishes]]``)."""
