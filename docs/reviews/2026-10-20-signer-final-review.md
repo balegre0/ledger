@@ -160,4 +160,10 @@ migrator's reach (ADR item 5).
 
 ## Gate
 
-See the commit message of this review: `uv run poe check` result, its duration and log name.
+`LEDGER_TEST_JOBS=2 uv run poe check` on `9ff1ed8` (this review's commit, before this section was filled in):
+exit 0, seen to finish, on its first run. Coverage 100 % in every package. Tests: platform 1846, DO 2317, signer
+650, identity 438, invoicing 325, kernel 620, fiscal-kit 218, devtools 210, testing 126, DO testing 114, fiscal
+78, apps 7. Devtools was the slowest package at 8 min, on a shared machine. The compose smoke run (plan Task 15
+Step 3) was not repeated: Zitadel is not up here, and Task 14 had already run it. The integration tests
+`test_certificates_api.py` and `test_service.py` (import through the api, sign as the worker, one audit row)
+cover the same path.
