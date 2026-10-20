@@ -62,3 +62,11 @@ Recorded at the review of the runtime's signer role (v2-M2b Task 3); each names 
    is useless without the KMS, which only the signer's workload identity may call (port contract
    `KeyManagement`). Follow-up (v2-M6): run migrations under a migrator that cannot assume the signer's owner
    outside a rollout, and alert on any session of `signer_owner` that is not a migration.
+6. **An import's request hash holds an unsalted digest of the credential.** The idempotency fingerprint of a
+   remote import (plan Decision 9) is SHA-256 over the request, the SHA-256 of the entity's credential among
+   its parts, kept seven days in `signer.idempotency_keys` (recorded at the review of v2-M2b Task 9). Whoever
+   reads that table could test guesses of a low-entropy credential against it; a bundle's digest reveals
+   nothing that the bundle (sealed elsewhere) does not. The table is reachable by `ledger_signer` alone (and
+   the migrator, item 5), and an entity's credential is expected to be a long random secret. Follow-up (with
+   the real entity adapter, v2-M5): key the credential's digest with a secret of the signer (HMAC) if the
+   entity's credentials can be guessed.

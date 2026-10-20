@@ -337,3 +337,90 @@ async def test_a_committed_key_without_an_answer_is_a_defect(
 def test_a_retention_of_nothing_is_refused() -> None:
     with pytest.raises(InvalidOptionError, match="retention"):
         Idempotency(retention=timedelta(0))
+
+
+async def look_up(
+    probe: BoundDatabase, tried: Attempt, *, scope: Scope | None = None
+) -> StoredResponse | None:
+    """``Idempotency.stored`` for ``tried`` in a unit of its own (by default test mode)."""
+    async with probe.unit(moded() if scope is None else scope) as unit:
+        return await Idempotency().stored(unit, tried)
+
+
+async def test_a_look_up_finds_nothing_before_the_first_use_and_claims_nothing(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection
+) -> None:
+    assert await look_up(probe, attempt()) is None
+    assert await count(admin, KEYS) == 0
+
+
+async def test_a_look_up_after_the_first_use_answers_its_bytes_and_changes_nothing(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection
+) -> None:
+    runs = Runs()
+    first, _ = await run_once(probe, attempt(), runs)
+
+    found = await look_up(probe, attempt())
+
+    assert found is not None
+    assert (found.status, found.body, dict(found.headers)) == (first.status, first.body, dict(first.headers))
+    assert (runs.count, await count(admin, KEYS), await count(admin, MARKS)) == (1, 1, 1)
+
+
+async def test_a_look_up_with_another_request_under_the_key_is_refused(probe: BoundDatabase) -> None:
+    await run_once(probe, attempt(), Runs())
+
+    with pytest.raises(IdempotencyKeyReusedError):
+        await look_up(probe, attempt(name="second"))
+
+
+async def test_a_look_up_is_scoped_as_a_claim_is(probe: BoundDatabase) -> None:
+    await run_once(probe, attempt(route="POST /v1/a"), Runs())
+
+    assert await look_up(probe, attempt(route="POST /v1/b")) is None
+    assert await look_up(probe, attempt(route="POST /v1/a", subject="2002")) is None
+    assert await look_up(probe, attempt(route="POST /v1/a"), scope=moded(Mode.LIVE)) is None
+
+
+async def test_a_look_up_ignores_an_expired_key(probe: BoundDatabase, admin: psycopg.AsyncConnection) -> None:
+    await run_once(probe, attempt(), Runs())
+    await admin.execute("UPDATE probe.idempotency_keys SET expires_at = now() - interval '1 second'")
+
+    assert await look_up(probe, attempt(name="after expiry")) is None
+
+
+async def test_a_look_up_does_not_wait_for_a_use_in_flight(probe: BoundDatabase) -> None:
+    """An uncommitted claim is unseen: the look-up answers nothing, and ``once`` then waits as a twin."""
+    first_runs = Runs(holding=asyncio.Event())
+    first = asyncio.create_task(run_once(probe, attempt(), first_runs))
+    await first_runs.started.wait()
+    try:
+        async with asyncio.timeout(5):
+            assert await look_up(probe, attempt()) is None
+    finally:
+        assert first_runs.holding is not None
+        first_runs.holding.set()
+        await first
+
+
+async def test_a_look_up_finds_a_committed_key_without_an_answer_a_defect(
+    probe: BoundDatabase, admin: psycopg.AsyncConnection
+) -> None:
+    tried = attempt()
+    await admin.execute(
+        """
+        INSERT INTO probe.idempotency_keys
+            (organization_id, mode, principal, route, key, request_hash, created_at, expires_at)
+        VALUES (%s, 'test', %s, %s, %s, %s, now(), now() + interval '1 day')
+        """,
+        (ORGANIZATION, tried.principal, tried.route, tried.key, tried.request_hash),
+    )
+
+    with pytest.raises(UnansweredIdempotencyKeyError):
+        await look_up(probe, tried)
+
+
+async def test_a_look_up_needs_a_moded_unit(probe: BoundDatabase) -> None:
+    async with probe.unit(OrganizationScope(ORGANIZATION, None)) as unit:
+        with pytest.raises(UnmodedIdempotencyScopeError):
+            await Idempotency().stored(unit, attempt())
