@@ -6,6 +6,7 @@ lazy from collections.abc import AsyncGenerator
 import grpc
 import pytest
 from prometheus_client import CollectorRegistry
+from pydantic import SecretStr
 
 from ledger_kernel.errors import ErrorKind, NotFoundError, truncate
 from ledger_platform.config.options import InvalidOptionError
@@ -21,9 +22,16 @@ from ledger_platform.grpc.client import (
     RemoteUnavailableError,
     call_unary,
 )
+from ledger_platform.grpc.guard import CallerPolicy, CallerTokens
+from ledger_platform.grpc.metadata import call_metadata
 from ledger_platform.grpc.server import serve_grpc
 
 RPC: Final = "/test.Remote/Call"
+TOKEN: Final = "remote-token-0123456789abcdefghijklmnop"
+CALLERS: Final = CallerTokens(
+    [CallerPolicy(name="probe", tokens=(SecretStr(TOKEN),), methods=frozenset({RPC}))]
+)
+METADATA: Final = call_metadata(SecretStr(TOKEN), call_id="test")
 LONG_CODE: Final = "x" * 1_000
 """A code no chassis server writes, but another side could (within gRPC's 8 KiB of metadata)."""
 ODD_CODE: Final = "Bad Code! <b>"
@@ -75,7 +83,7 @@ def caller(channel: grpc.aio.Channel) -> grpc.aio.UnaryUnaryMultiCallable[bytes,
 @pytest.fixture
 async def call() -> AsyncGenerator[grpc.aio.UnaryUnaryMultiCallable[bytes, bytes]]:
     async with (
-        serve_grpc(port=0, register=register, registry=CollectorRegistry()) as port,
+        serve_grpc(port=0, register=register, registry=CollectorRegistry(), callers=CALLERS) as port,
         grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel,
     ):
         yield caller(channel)
@@ -85,14 +93,14 @@ async def failure(
     call: grpc.aio.UnaryUnaryMultiCallable[bytes, bytes], request: bytes, deadline: float = 2.0
 ) -> RemoteError:
     with pytest.raises(RemoteError) as caught:
-        await call_unary(call, request, rpc=RPC, deadline=deadline)
+        await call_unary(call, request, rpc=RPC, deadline=deadline, metadata=METADATA)
     return caught.value
 
 
 async def test_an_answer_comes_back_as_it_was_sent(
     call: grpc.aio.UnaryUnaryMultiCallable[bytes, bytes],
 ) -> None:
-    assert await call_unary(call, b"hello", rpc=RPC) == b"hello"
+    assert await call_unary(call, b"hello", rpc=RPC, metadata=METADATA) == b"hello"
 
 
 async def test_a_ledger_error_of_the_other_side_comes_back_with_its_kind_and_code(
@@ -195,6 +203,17 @@ async def test_a_call_past_its_deadline_is_unavailable(
     )
 
 
+async def test_a_call_its_guard_refuses_is_forbidden_with_the_guard_s_code(
+    call: grpc.aio.UnaryUnaryMultiCallable[bytes, bytes],
+) -> None:
+    with pytest.raises(RemoteForbiddenError) as caught:
+        await call_unary(call, b"hello", rpc=RPC)
+    assert (caught.value.status, caught.value.remote_code) == (
+        grpc.StatusCode.UNAUTHENTICATED,
+        "signer_caller_unknown",
+    )
+
+
 async def test_a_service_that_is_not_there_is_unavailable() -> None:
     async with grpc.aio.insecure_channel("127.0.0.1:1") as channel:
         error = await failure(caller(channel), b"hello", deadline=1.0)
@@ -206,7 +225,7 @@ async def test_every_call_has_a_bounded_deadline(
     call: grpc.aio.UnaryUnaryMultiCallable[bytes, bytes], deadline: float
 ) -> None:
     with pytest.raises(InvalidOptionError, match="gRPC client option deadline must be"):
-        await call_unary(call, b"hello", rpc=RPC, deadline=deadline)
+        await call_unary(call, b"hello", rpc=RPC, deadline=deadline, metadata=METADATA)
 
 
 def test_the_kinds_of_remote_errors() -> None:
