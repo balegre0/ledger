@@ -39,7 +39,7 @@ workspace = [
     "ledger-devtools",
     "ledger-testing",
     "signxml>=5.1.0",
-    "types-boto3>=1.43.115",
+    "types-boto3>=1.43.100",
     "types-lxml>=2026.2.16",
     "types-protobuf>=7.35.1.20260906",
     "xmlschema>=4.3.2",
@@ -84,6 +84,9 @@ known-first-party = [
 required-version = ">=0.13.0"
 package = false
 constraint-dependencies = ["cryptography>=50.0.2"]  # joserfc's: the first release with CPython 3.15 wheels of its own
+# The AWS SDK family releases daily: a release is taken only once it is a week old (a cooldown against a bad or
+# hijacked upload, which is pulled within days). The archive's client is botocore (ledger_platform.blobs.s3).
+exclude-newer-package = { boto3 = "7 days", botocore = "7 days", s3transfer = "7 days", botocore-stubs = "7 days", types-boto3 = "7 days", types-boto3-s3 = "7 days", types-s3transfer = "7 days" }
 
 [tool.uv.workspace]
 members = ["packages/*", "modules/*", "countries/*", "countries/*/testing", "apps/*", "tools/*"]

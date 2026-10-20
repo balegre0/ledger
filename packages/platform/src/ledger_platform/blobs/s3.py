@@ -4,10 +4,16 @@ What holds the contract is S3, not this code: the bucket has object lock enabled
 every object is written under a lock in compliance mode, which nobody, the account's root included, can
 delete, overwrite or shorten before its date. The store adds:
 
-- **put once**: ``PutObject`` with ``If-None-Match: *``, so S3 writes only where the key holds nothing. When
-  the key holds an object (412) the store reads its SHA-256 checksum (``HeadObject``): the same bytes answer
-  the stored object, other bytes are ``ObjectConflictError``. A write that races another one to the key
-  (409) is tried again, ``conflict_attempts`` times at most.
+- **put once**: a ``HeadObject`` first; where the key holds nothing, ``PutObject`` with ``If-None-Match: *``,
+  so S3 writes only where the key still holds nothing. An object found (first, or after a 412 when another
+  writer won the race) is the stored object only if it carries the same SHA-256 checksum under a compliance
+  lock through the day its metadata records (``BlobRecordCorruptError`` for a lock that can be lifted, a
+  shorter one or none; ``ObjectConflictError`` for other bytes). A write that races another one in flight to
+  the key (409) is tried again, ``conflict_attempts`` times at most.
+- **delete markers**: object lock lets anyone allowed ``s3:DeleteObject`` hide a locked object behind a
+  delete marker (a delete without a version id). Every 404 S3 answers is read for its
+  ``x-amz-delete-marker: true``: a key so hidden is ``BlobRecordCorruptError`` (tampering, an alert), never
+  "not found" and never written again, so no other bytes can take the place of an archived document.
 - **SHA-256 end to end**: the write carries the bytes' SHA-256 (``x-amz-checksum-sha256``), which S3 checks
   before it stores them and keeps with the object; a write it answers without that checksum was not checked
   (an S3 look-alike that ignores checksums) and is refused. A read is checked by botocore against the
@@ -20,42 +26,62 @@ delete, overwrite or shorten before its date. The store adds:
 - **encryption at rest** by S3 (``SSE-S3``, ``AES256``) or by KMS (``aws:kms``, under a key of the
   operator's naming or the account's own): ``S3Encryption``.
 
-Errors: S3's answers that may pass (5xx, throttling, a timeout, a lost connection, a checksum S3 or botocore
-found wrong on the way) are ``BlobStoreUnavailableError``; the others (no such bucket, a bucket without object
-lock, access denied, no credentials) are ``BlobStoreRefusedError``, a fault of the configuration that no retry
-mends, naming S3's error code and never a bucket, a key or a credential.
+Errors: S3's answers that may pass (5xx, throttling, ``OperationAborted``, a timeout, a lost connection, a
+checksum S3 or botocore found wrong on the way) are ``BlobStoreUnavailableError``; the others (no such bucket,
+a bucket without object lock, access denied, no credentials, a client misconfigured) are
+``BlobStoreRefusedError``, a fault of the configuration that no retry mends, naming S3's error code and never
+a bucket, a key or a credential. The logs show botocore's own errors by operation, code and status alone
+(``observability.logs``): S3's messages name roles, accounts, buckets and keys.
 
-The bucket is checked once, before the first request: one without object lock enabled is refused
-(``BlobStoreRefusedError``), whatever its writes would answer (AWS refuses a locked write to such a bucket;
-an emulator may store it unlocked). The archive's role needs ``s3:GetBucketObjectLockConfiguration`` for it,
-besides ``s3:PutObject``, ``s3:GetObject`` and ``s3:PutObjectRetention``'s implicit grant to set a lock on a
-write (and ``kms:GenerateDataKey``/``kms:Decrypt`` on the key under ``aws:kms``).
+The bucket is checked once, before the first request (``check``, which a start or a readiness probe may call
+itself): one without object lock enabled is refused (``BlobStoreRefusedError``), whatever its writes would
+answer (AWS refuses a locked write to such a bucket; an emulator may store it unlocked).
 
-Nothing here deletes: the store has no such method, and production's IAM policy should deny the archive's
-role ``s3:DeleteObject`` and ``s3:PutObjectRetention`` besides (a delete without a version only hides an
-object behind a delete marker, its locked version stays; the runbook's).
+Permissions (AWS's "Required permissions for Amazon S3 API operations" and the ``HeadObject`` reference):
+the archive's role needs ``s3:GetBucketObjectLockConfiguration`` (the check), ``s3:PutObject`` and
+``s3:PutObjectRetention`` (a write that sets a lock needs both), ``s3:GetObject`` (reads and HEADs),
+``s3:GetObjectRetention`` (without it a HEAD omits the lock, and ``retained_until`` reports every object
+corrupt) and ``s3:ListBucket`` (without it S3 answers 403 for a missing key, which reads as a refusal, not
+"not found"); under ``aws:kms`` also ``kms:GenerateDataKey`` and ``kms:Decrypt`` on the key. Nothing here
+deletes: the store has no such method, and the bucket policy, not one role's IAM, must deny every principal
+``s3:DeleteObject``, ``s3:DeleteObjectVersion`` and ``s3:PutLifecycleConfiguration`` (a lifecycle rule can
+place delete markers), and deny ``s3:PutObject`` unless ``s3:object-lock-mode`` is ``COMPLIANCE`` and
+``s3:object-lock-remaining-retention-days`` is at least 3650; an organization SCP keeps that policy from being
+loosened (the plan's Owner item 4).
 
 The client is botocore's, the one boto3 wraps (boto3's resources and transfers are of no use here; its
-types, ``types-boto3-s3``, type botocore's client as ``S3Client``: ``as_s3_client``). botocore is
-synchronous: every request runs in a worker thread (``asyncio.to_thread``), on one client made on first use,
-its credentials found by AWS's own chain (the environment, a profile, a web identity, an instance role;
-never ``LEDGER_*`` settings, never logged). A client is safe to share between threads; the session that
-makes it is not, so each client gets a session of its own (``s3_client``).
+types, ``types-boto3-s3``, type botocore's client as ``S3Client``: ``as_s3_client``). It sends requests only
+to AWS's endpoint for the region, or to the one ``s3_client`` is given: endpoints from ``AWS_ENDPOINT_URL*``
+or an AWS configuration file are ignored, so the settings' refusal of an endpoint beyond a laptop holds.
+botocore is synchronous: every request runs in the store's own threads (``WORKERS`` of them, named
+``ledger-s3``), never the event loop's default executor, on one client made on first use, its credentials
+found by AWS's own chain (the environment, a profile, a web identity, an instance role; never ``LEDGER_*``
+settings, never logged). A client is safe to share between threads; the session that makes it is not, so
+each client gets a session of its own. ``aclose`` stops the threads and closes the client.
 """
 
 import asyncio
 import base64
 import re
-import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from enum import Enum, auto
+from functools import partial
 from typing import ClassVar, Final, Literal, TypeIs, final, override
 lazy from collections.abc import Callable, Mapping
 
 import botocore.session
 from botocore.config import Config
-from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError, PartialCredentialsError
+from botocore.exceptions import (
+    BotoCoreError,
+    ClientError,
+    InvalidConfigError,
+    NoCredentialsError,
+    ParamValidationError,
+    PartialCredentialsError,
+    ProfileNotFound,
+)
 lazy from botocore.client import BaseClient
 lazy from types_boto3_s3.client import S3Client
 lazy from types_boto3_s3.type_defs import HeadObjectOutputTypeDef, PutObjectRequestTypeDef
@@ -80,11 +106,14 @@ LOCK_MODE: Final = "COMPLIANCE"
 """The only object-lock mode nobody can lift: governance mode yields to whoever may bypass it."""
 RETENTION_METADATA: Final = "retain-until"
 """The user metadata (``x-amz-meta-retain-until``) that keeps the retention day as first stored."""
+WORKERS: Final = 10
+"""The store's threads by default: as many as botocore's connection pool holds."""
 _COMPONENT: Final = "archive"
 _TRANSIENT: Final = frozenset(
     {
         "BadDigest",  # the bytes S3 received are not those sent: corrupted on the way
         "InternalError",
+        "OperationAborted",  # 409: a conflicting operation on the bucket in progress
         "RequestTimeout",
         "RequestTimeTooSkewed",
         "ServiceUnavailable",
@@ -94,8 +123,17 @@ _TRANSIENT: Final = frozenset(
     }
 )
 """S3's error codes below 500 that a later attempt may not meet."""
+_MISCONFIGURED: Final = (
+    NoCredentialsError,
+    PartialCredentialsError,
+    ParamValidationError,
+    ProfileNotFound,
+    InvalidConfigError,
+)
+"""botocore's failures before a request leaves: the configuration's to mend, no retry's."""
 _SERVER_ERROR: Final = 500
 _NOT_FOUND: Final = 404
+_DELETE_MARKER: Final = "x-amz-delete-marker"
 _ERROR_CODE: Final = re.compile(r"[A-Za-z0-9._]{1,64}", re.ASCII)
 """What a refusal may repeat of a reason: an error code's characters, never a message's."""
 _CONNECT_CEILING: Final = 60.0
@@ -143,7 +181,7 @@ class S3Encryption:
     """How S3 encrypts the objects at rest.
 
     With its own keys (``AES256``, SSE-S3), or with KMS (``aws:kms``, SSE-KMS) under ``kms_key_id`` (an id,
-    an alias or an ARN) or, without one, the account's key for S3.
+    an alias or an ARN) or, without one, the account's key for S3. A refusal never repeats the key's name.
     """
 
     algorithm: Literal["AES256", "aws:kms"] = "AES256"
@@ -155,7 +193,7 @@ class S3Encryption:
                 component=_COMPONENT,
                 option="kms_key_id",
                 requirement="a key's id, alias or ARN, only with aws:kms encryption",
-                value=self.kms_key_id,
+                value=None,
             )
 
 
@@ -168,19 +206,24 @@ def s3_client(
 ) -> S3Client:
     """A client of S3 in ``region``, or of the S3 at ``endpoint_url`` (LocalStack: local runs and tests).
 
-    Its credentials are AWS's chain's. Requests to an endpoint of our naming address the bucket in the path
-    (LocalStack's host names are not the bucket's); AWS's own are addressed by host, as AWS requires.
+    Its credentials are AWS's chain's; an endpoint configured anywhere else is ignored (see the module).
+    Requests to an endpoint of our naming address the bucket in the path (LocalStack's host names are not
+    the bucket's); AWS's own are addressed by host, as AWS requires.
     """
     config = Config(
         region_name=region,
         connect_timeout=timeouts.connect,
         read_timeout=timeouts.read,
+        max_pool_connections=WORKERS,
         retries={"mode": "standard", "total_max_attempts": timeouts.attempts},
         request_checksum_calculation="when_required",  # the store sends its own SHA-256
         response_checksum_validation="when_supported",
         s3={"addressing_style": "virtual" if endpoint_url is None else "path"},
     )
     session = botocore.session.Session()  # one per client: a session is not safe to share between threads
+    # Config's own switch is missing from botocore's types; the session's is the same one, read when the
+    # client's configuration leaves it unset.
+    session.set_config_variable("ignore_configured_endpoint_urls", value=True)
     return as_s3_client(session.create_client("s3", endpoint_url=endpoint_url, config=config))
 
 
@@ -224,8 +267,8 @@ def _failure(error: ClientError) -> LedgerError:
 
 
 def _unreached(error: BotoCoreError) -> LedgerError:
-    """What a failure before or after S3 answered means: no credentials to sign with, or no answer."""
-    if isinstance(error, NoCredentialsError | PartialCredentialsError):
+    """What a failure before or after S3 answered means: a client that cannot send, or no answer."""
+    if isinstance(error, _MISCONFIGURED):
         return BlobStoreRefusedError(type(error).__name__)
     return BlobStoreUnavailableError()
 
@@ -238,23 +281,70 @@ def _status(error: ClientError) -> int:
     return error.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
 
 
+def _absent(error: ClientError) -> bool:
+    """Whether S3 said the key holds nothing (404); a key hidden behind a delete marker is corrupt."""
+    if _status(error) != _NOT_FOUND:
+        return False
+    headers: Mapping[str, object] = error.response.get("ResponseMetadata", {}).get("HTTPHeaders", {})
+    if headers.get(_DELETE_MARKER) == "true":
+        raise BlobRecordCorruptError from error
+    return True
+
+
+def _present[T](answer: Mapping[str, object], field: str, kind: type[T]) -> T | None:
+    """``answer``'s ``field`` if S3 sent it: its types say every field is always there, and some are not."""
+    value = answer.get(field)
+    return value if isinstance(value, kind) else None
+
+
+def _recorded_retention(found: HeadObjectOutputTypeDef) -> date:
+    """The day ``found`` is kept until as first stored, which its lock must hold through.
+
+    ``BlobRecordCorruptError`` unless the metadata records a day and the object is locked in compliance mode
+    until its end at least: an object another writer left with a lock that can be lifted, or none, is not
+    one this store keeps.
+    """
+    recorded = found.get("Metadata", {}).get(RETENTION_METADATA, "")
+    try:
+        day = date.fromisoformat(recorded)
+    except ValueError as error:
+        raise BlobRecordCorruptError from error
+    lock = _present(found, "ObjectLockRetainUntilDate", datetime)
+    if _present(found, "ObjectLockMode", str) != LOCK_MODE or lock is None or lock < locked_until(day):
+        raise BlobRecordCorruptError
+    return day
+
+
+def _require_stored(found: HeadObjectOutputTypeDef, checksum: str) -> None:
+    """Refuse ``found`` as the object of the bytes whose SHA-256 is ``checksum`` (see the module)."""
+    stored = _present(found, "ChecksumSHA256", str)
+    if stored is None:  # every object this store writes carries its SHA-256
+        raise BlobRecordCorruptError
+    _recorded_retention(found)
+    if stored != checksum:
+        raise ObjectConflictError
+
+
 @final
 class S3ImmutableStore(ImmutableStore):
     """Objects in ``bucket`` under compliance lock, written once (see the module).
 
     ``client_factory`` makes the client on first use (``s3_client`` with the settings' region and endpoint;
     a test's own). A write that races another one to its key is tried ``conflict_attempts`` times at most,
-    ``backoff`` seconds apart at first, twice as long each time after.
+    ``backoff`` seconds apart at first, twice as long each time after. Requests run on ``WORKERS`` threads of
+    the store's own.
     """
 
     __slots__ = (
         "_backoff",
         "_bucket",
         "_client",
+        "_closed",
         "_conflict_attempts",
+        "_connecting",
         "_encryption",
+        "_executor",
         "_factory",
-        "_lock",
     )
 
     def __init__(
@@ -280,13 +370,35 @@ class S3ImmutableStore(ImmutableStore):
         self._encryption = encryption
         self._conflict_attempts = conflict_attempts
         self._backoff = backoff
+        self._executor = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="ledger-s3")
         self._client: S3Client | None = None
-        self._lock = threading.Lock()
+        self._connecting = asyncio.Lock()
+        self._closed = False
 
     @property
     def bucket(self) -> str:
         """The bucket the objects are in."""
         return self._bucket
+
+    async def check(self) -> None:
+        """Make the client and prove the bucket has object lock enabled, once: what a start may await.
+
+        It raises what the first request would (``BlobStoreRefusedError``, ``BlobStoreUnavailableError``);
+        once it succeeded, it asks nothing more.
+        """
+        await self._connected()
+
+    async def aclose(self) -> None:
+        """Stop the store's threads (once the requests in flight end) and close its client; idempotent.
+
+        A request after it is ``BlobStoreUnavailableError``.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        await asyncio.to_thread(self._executor.shutdown, wait=True)
+        if self._client is not None:
+            self._client.close()
 
     @override
     async def put_once(
@@ -296,6 +408,12 @@ class S3ImmutableStore(ImmutableStore):
         require_key(key)
         digest = digest_of(content)
         checksum = base64.b64encode(digest).decode("ascii")
+        stored = StoredObject(key=key, sha256=digest, size=len(content))
+        client = await self._connected()
+        found = await self._run(partial(self._head, client, key, checksum=True))
+        if found is not None:
+            _require_stored(found, checksum)
+            return stored
         request: PutObjectRequestTypeDef = {
             "Bucket": self._bucket,
             "Key": key,
@@ -311,18 +429,16 @@ class S3ImmutableStore(ImmutableStore):
         }
         if self._encryption.kms_key_id is not None:
             request["SSEKMSKeyId"] = self._encryption.kms_key_id
-        stored = StoredObject(key=key, sha256=digest, size=len(content))
         for attempt in range(self._conflict_attempts):
             if attempt > 0:
                 await asyncio.sleep(self._backoff * 2.0 ** (attempt - 1))
-            written = await asyncio.to_thread(self._write, request)
+            written = await self._run(partial(self._write, client, request))
             if written is _Written.STORED:
                 return stored
             if written is _Written.TAKEN:
-                found = await asyncio.to_thread(self._head, key)
-                if found is not None:  # else gone since (behind a delete marker): write again
-                    if _checksum_of(found) != checksum:
-                        raise ObjectConflictError
+                found = await self._run(partial(self._head, client, key, checksum=True))
+                if found is not None:  # else gone since (no delete marker: _head says so): write again
+                    _require_stored(found, checksum)
                     return stored
         raise BlobStoreUnavailableError
 
@@ -330,7 +446,8 @@ class S3ImmutableStore(ImmutableStore):
     async def get(self, key: str, *, sha256: bytes) -> bytes:
         require_key(key)
         require_digest("blob", sha256)
-        content = await asyncio.to_thread(self._read, key)
+        client = await self._connected()
+        content = await self._run(partial(self._read, client, key))
         if digest_of(content) != sha256:
             raise BlobDigestMismatchError
         return content
@@ -338,29 +455,32 @@ class S3ImmutableStore(ImmutableStore):
     @override
     async def retained_until(self, key: str) -> date:
         require_key(key)
-        found = await asyncio.to_thread(self._head, key)
+        client = await self._connected()
+        found = await self._run(partial(self._head, client, key, checksum=False))
         if found is None:
             raise BlobNotFoundError
-        recorded = found.get("Metadata", {}).get(RETENTION_METADATA, "")
-        try:
-            day = date.fromisoformat(recorded)
-        except ValueError as error:
-            raise BlobRecordCorruptError from error
-        lock = _present(found, "ObjectLockRetainUntilDate", datetime)
-        if _present(found, "ObjectLockMode", str) != LOCK_MODE or lock is None or lock < locked_until(day):
-            raise BlobRecordCorruptError
-        return day
+        return _recorded_retention(found)
 
-    def _connected(self) -> S3Client:
-        """The client, made by the first caller (in a worker thread: making one reads files).
+    async def _run[T](self, call: Callable[[], T]) -> T:
+        """``call`` on one of the store's threads; ``BlobStoreUnavailableError`` once the store is closed."""
+        if self._closed:
+            raise BlobStoreUnavailableError
+        return await asyncio.get_running_loop().run_in_executor(self._executor, call)
 
-        Kept once the bucket proved it has object lock enabled; until then each caller tries again.
+    async def _connected(self) -> S3Client:
+        """The client, made and its bucket checked by the first caller while the others wait.
+
+        Kept once the bucket proved it has object lock enabled; until then each caller tries again. The wait
+        is bounded by the client's timeouts and attempts; no thread is held while it lasts.
         """
-        with self._lock:
+        client = self._client
+        if client is not None:
+            return client
+        async with self._connecting:
             if self._client is None:
-                client = self._factory()
-                self._require_object_lock(client)
-                self._client = client
+                made = await self._run(self._factory)
+                await self._run(partial(self._require_object_lock, made))
+                self._client = made
             return self._client
 
     def _require_object_lock(self, client: S3Client) -> None:
@@ -374,9 +494,9 @@ class S3ImmutableStore(ImmutableStore):
         if answer.get("ObjectLockConfiguration", {}).get("ObjectLockEnabled") != "Enabled":
             raise BlobStoreRefusedError(_UNLOCKED)
 
-    def _write(self, request: PutObjectRequestTypeDef) -> _Written:
+    def _write(self, client: S3Client, request: PutObjectRequestTypeDef) -> _Written:
         try:
-            answer = self._connected().put_object(**request)
+            answer = client.put_object(**request)
         except ClientError as error:
             match _code(error):
                 case "PreconditionFailed":
@@ -391,45 +511,36 @@ class S3ImmutableStore(ImmutableStore):
             raise BlobStoreRefusedError(_UNVERIFIED)
         return _Written.STORED
 
-    def _head(self, key: str) -> HeadObjectOutputTypeDef | None:
-        """The object's headers, ``None`` when the key holds nothing."""
+    def _head(self, client: S3Client, key: str, *, checksum: bool) -> HeadObjectOutputTypeDef | None:
+        """The object's headers (its SHA-256 among them if ``checksum``), ``None`` when the key holds nothing.
+
+        Only ``put_once`` asks for the checksum: under ``aws:kms`` reading it needs ``kms:Decrypt``.
+        """
         try:
-            return self._connected().head_object(Bucket=self._bucket, Key=key, ChecksumMode="ENABLED")
+            if checksum:
+                return client.head_object(Bucket=self._bucket, Key=key, ChecksumMode="ENABLED")
+            return client.head_object(Bucket=self._bucket, Key=key)
         except ClientError as error:
-            if _status(error) == _NOT_FOUND:  # a HEAD's answer has no body, so no code to tell more by
+            if _absent(error):  # a HEAD's answer has no body: a missing bucket reads as a missing key
                 return None
             raise _failure(error) from error
         except BotoCoreError as error:
             raise _unreached(error) from error
 
-    def _read(self, key: str) -> bytes:
+    def _read(self, client: S3Client, key: str) -> bytes:
         try:
-            answer = self._connected().get_object(Bucket=self._bucket, Key=key, ChecksumMode="ENABLED")
+            answer = client.get_object(Bucket=self._bucket, Key=key, ChecksumMode="ENABLED")
             body = answer["Body"]
             try:
                 return body.read()
             finally:
                 body.close()
         except ClientError as error:
-            if _code(error) == "NoSuchKey":
+            if _code(error) == "NoSuchKey" and _absent(error):
                 raise BlobNotFoundError from error
             raise _failure(error) from error
         except BotoCoreError as error:
             raise _unreached(error) from error
-
-
-def _checksum_of(found: HeadObjectOutputTypeDef) -> str:
-    """The SHA-256 S3 keeps for the object: every object this store writes has one (see the module)."""
-    checksum = _present(found, "ChecksumSHA256", str)
-    if checksum is None:
-        raise BlobRecordCorruptError
-    return checksum
-
-
-def _present[T](answer: Mapping[str, object], field: str, kind: type[T]) -> T | None:
-    """``answer``'s ``field`` if S3 sent it: its types say every field is always there, and some are not."""
-    value = answer.get(field)
-    return value if isinstance(value, kind) else None
 
 
 class _Written(Enum):

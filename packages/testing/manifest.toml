@@ -8,8 +8,8 @@ owners = ["@balegre0"]
 packages = ["kernel", "platform", "fiscal-kit"]
 python = [
     "alembic>=1.20.0",
-    "boto3>=1.43.115",
-    "botocore>=1.43.115",
+    "boto3>=1.43.100",
+    "botocore>=1.43.100",
     "cryptography>=50.0.2",
     "httpx>=0.28.1",
     "joserfc>=1.7.5",
@@ -19,5 +19,5 @@ python = [
     "sqlalchemy>=2.1.4",
     "structlog>=26.1.0",
     "testcontainers>=4.15.0",
-    "types-boto3-s3>=1.43.106",
+    "types-boto3-s3>=1.43.100",
 ]

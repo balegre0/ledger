@@ -2,9 +2,14 @@
 
 import re
 
+import pytest
+
 from ledger_platform.config.settings import is_bucket_name
 from ledger_testing.images import image
 lazy from ledger_testing.localstack import LocalStack
+
+pytestmark = pytest.mark.xdist_group("localstack")
+"""Every test that needs LocalStack on one worker, so that one container serves them."""
 
 
 def test_the_run_s_localstack_is_the_pinned_image_on_loopback(localstack: LocalStack) -> None:

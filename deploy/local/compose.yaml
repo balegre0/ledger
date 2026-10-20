@@ -149,10 +149,15 @@ services:
     volumes:
       - ./localstack/init-s3.sh:/etc/localstack/init/ready.d/init-s3.sh:ro
     healthcheck:
-      # Healthy once the init script has run: the bucket exists, not merely S3.
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:4566/_localstack/init/ready | grep -q '\"completed\": true'"]
+      # Healthy once the init script has run and the bucket has object lock enabled, not merely once S3 answers.
+      test:
+        - CMD-SHELL
+        - >-
+          curl -sf http://127.0.0.1:4566/_localstack/init/ready | grep -q '"completed": true'
+          && awslocal s3api get-object-lock-configuration --bucket ledger-archive
+          | grep -q '"ObjectLockEnabled": "Enabled"'
       interval: 5s
-      timeout: 3s
+      timeout: 10s
       retries: 30
       start_period: 10s
 

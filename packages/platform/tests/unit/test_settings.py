@@ -580,3 +580,23 @@ def test_beyond_a_laptop_the_archive_is_aws_s_s3(
     assert "s3cret" not in str(caught.value)
     monkeypatch.setenv("LEDGER_ENVIRONMENT", "test")
     assert Settings().archive_endpoint_url == endpoint
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [("LEDGER_ARCHIVE_KMS_KEY_ID", "alias/s3cret"), ("LEDGER_ARCHIVE_ENDPOINT_URL", "http://s3cret:4566")],
+)
+@pytest.mark.parametrize("backend", ["file", None])
+def test_s3_options_are_refused_for_another_archive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, variable: str, value: str, backend: str | None
+) -> None:
+    """An S3 option beside another backend is a mistake: the operator meant one of the two."""
+    environment(monkeypatch, {**REQUIRED, variable: value})
+    if backend is not None:
+        monkeypatch.setenv("LEDGER_ARCHIVE_BACKEND", backend)
+        monkeypatch.setenv("LEDGER_ARCHIVE_PATH", str(tmp_path))
+    if variable == "LEDGER_ARCHIVE_KMS_KEY_ID":
+        monkeypatch.setenv("LEDGER_ARCHIVE_ENCRYPTION", "aws:kms")
+    with pytest.raises(ValidationError, match="are only for archive_backend s3") as caught:
+        Settings()
+    assert "s3cret" not in str(caught.value)

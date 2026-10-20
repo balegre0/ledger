@@ -179,6 +179,13 @@ class _KmsKeyWithoutKmsError(ValueError):
         super().__init__("archive_kms_key_id is only for archive_encryption aws:kms")
 
 
+class _S3OptionsElsewhereError(ValueError):
+    """An S3 option beside another archive: the operator meant one of the two, and only knows which."""
+
+    def __init__(self) -> None:
+        super().__init__("archive_endpoint_url and archive_kms_key_id are only for archive_backend s3")
+
+
 class _ArchiveEndpointError(ValueError):
     """An S3 of our own naming (LocalStack) holds nothing the law can rely on: a laptop's and tests' only."""
 
@@ -369,6 +376,14 @@ class Settings(_ClosedSettings):
         """Refuse a KMS key named for SSE-S3 encryption."""
         if self.archive_kms_key_id is not None and self.archive_encryption != "aws:kms":
             raise _KmsKeyWithoutKmsError
+        return self
+
+    @model_validator(mode="after")
+    def refuse_s3_options_for_another_archive(self) -> Self:
+        """Refuse an S3 endpoint or KMS key when the archive is not S3, naming the options, not the values."""
+        named = self.archive_endpoint_url is not None or self.archive_kms_key_id is not None
+        if named and self.archive_backend != "s3":
+            raise _S3OptionsElsewhereError
         return self
 
     @model_validator(mode="after")
