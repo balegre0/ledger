@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
+from ledger_country_do.channels.ecf_v1.adapters.signing.port import DocumentSigner
 from ledger_country_do_testing.fake_dgii.app import FakeDgii
 from ledger_country_do_testing.fake_dgii.state import dgii_check
 from ledger_country_do_testing.local_signer import KeyPairSigner
@@ -69,7 +70,7 @@ async def dgii(
         sleeps.append(seconds)
 
     client = DgiiClient(
-        signer,
+        DocumentSigner(signer),
         hosts=FAKE_HOSTS,
         clock=clock,
         sleep=sleep,

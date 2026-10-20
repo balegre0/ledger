@@ -1,41 +1,50 @@
-"""DGII's web services for an emitter over HTTPS (httpx): the ``Authority`` port, and the directory.
+"""DGII's web services for an emitter over HTTPS (httpx): the ``Authority`` port, for every issuing company.
 
-Queries are ``GET``; what carries a document (the signed seed, an e-CF, an RFCE) is a multipart ``POST``.
+Queries are ``GET``; what carries a document (the signed seed, an e-CF, an RFCE, an ANECF, an ACECF) is a
+multipart ``POST``. Every call is made for an issuing company (``SigningAs``): its token, its seed's
+signature.
 
-* **Authentication.** DGII's seed is signed by the ``XmlSigner`` (``sign_seed``, which refuses anything but
-  DGII's ``SemillaModel``, read hardened, before a key sees it; its audience the ``ecf`` host) and exchanged
-  at ``validarsemilla`` for a token cached per environment until five minutes before it expires (never
-  longer than an hour), fetched once at a time. A seed serves once, so a failed exchange starts again from a
-  fresh seed: the two are retried together, never the validation alone. A seed the signer refuses as no seed
-  or cannot sign is ``unreadable``; its other refusals (no certificate, one not valid, the signer unreachable)
-  pass as they are.
-  A 401 drops the token that was refused (not one another call has renewed since) and the call is made once
-  more with a new one. Tokens live in memory only: never stored, logged, shown in a ``repr`` or put in an
-  error, and forgotten when the client closes.
-* **Retries.** What cannot change DGII's state (authentication, results, track ids, the directory) is retried
-  twice, 0.2 s and 0.5 s apart, after no connection, a broken one or a 5xx. A document sent is never retried.
-* **Submissions: one definition of "sent".** A submission ends in exactly one of three ways:
+* **Authentication.** DGII's seed is signed through ``Signatures.seed`` as the company the call is for
+  (which refuses anything but DGII's ``SemillaModel``, read hardened, before a key sees it; its audience the
+  ``ecf`` host) and exchanged at ``validarsemilla`` for a token cached per company, mode and environment
+  (Decision 32) until five minutes before it expires (never longer than an hour), fetched once at a time per
+  key. A seed serves once, so a failed exchange starts again from a fresh seed: the two are retried together,
+  never the validation alone. A seed the signer refuses as no seed or cannot sign is ``unreadable``; its
+  other refusals (no certificate, one not valid, a clock to fix, the signer unreachable) pass as they are.
+  A 401 drops the token that was refused (not one another call has renewed since, never another company's)
+  and the call is made once more with a new one. Tokens live in memory only: never stored, logged, shown in
+  a ``repr`` or put in an error, and forgotten when the client closes.
+* **Retries.** What cannot change DGII's state (authentication, results, track ids, the RFCE query, the
+  directory) is retried twice, 0.2 s and 0.5 s apart, after no connection, a broken one or a 5xx. A document
+  sent is never retried.
+* **Submissions: one definition of "sent".** A submission (an e-CF, an RFCE, an ANECF, an ACECF) ends in
+  exactly one of three ways:
 
-  - *DGII answered about it*: a 2xx that reads (``Received``, or the RFCE's ``Answer``), or a 400, DGII's
-    refusal at the door (``Refused``; its message empty when the body does not read).
+  - *DGII answered about it*: a 2xx that reads (``Received``, the RFCE's or ANECF's ``Answer``, the ACECF's
+    ``Acknowledged``), or a 400, DGII's refusal at the door (``Refused``; its message empty when the body does
+    not read).
   - *DGII certainly did not take it* (``AuthorityUnavailableError``): no token could be had, no connection,
     a 429, a 401 even with a renewed token, or too little time left to send it at all.
   - *It may be at DGII* (``OutcomeUnknownError``): the connection broke or the time ran out after the
     request may have left, a 5xx, a 2xx that does not read (unreadable, too large, no track id), or any
-    other status DGII does not document (a 404, a redirect). The caller asks DGII (track ids) before
-    anything else, and never resends blindly.
-* **Failures.** ``AuthorityUnavailableError``, its ``failure`` one of ``ports.Failure``.
+    other status DGII does not document (a 404, a redirect). The caller asks DGII (track ids, the RFCE
+    query) before anything else, and never resends blindly.
+* **Failures.** ``AuthorityUnavailableError``, its ``failure`` one of ``ports.Failure``. A service DGII does
+  not publish in the environment is ``ServiceNotInEnvironmentError``, raised before anything is sent.
 * **Time.** Every attempt has a connect timeout and a total one; every call (token, retries and waits
   included) has an overall deadline, a minute by default (``DgiiTimeouts.call``), after which it fails
-  ``timed_out`` (or, for a document already sent, its outcome is unknown). A document is sent only while the
-  call has a whole attempt's time (``total``) left; with less it is not sent at all (``timed_out``).
+  ``timed_out`` (or, for a document already sent, its outcome is unknown). Which of the two limits ended an
+  attempt is the one asyncio armed (the earlier), never a second reading of the clock: a timer may fire a
+  clock tick early. A document is sent only while the call has a whole attempt's time (``total``) left; with
+  less it is not sent at all (``timed_out``).
 * **Answers.** ``Accept-Encoding: gzip``: an answer is plain or a single gzip layer, any other encoding is
   refused; it is decompressed here as it streams and refused once it passes 1 MiB, never read whole first.
 * **Transport.** The platform's ``OutboundHttp`` client ``DGII_CLIENT``: redirects are not followed, the
   environment's proxies and ``.netrc`` are ignored, TLS is always verified, every request is traced and
   measured with its host and status only. Hosts are ``https`` origins (``endpoints``); the live environment
   only on DGII's hosts and never over a transport that replaces the network (``OutboundHttp.replaced``).
-  Every file sent is named ``RNC + e-NCF + .xml`` (DT-DGII).
+  Every e-CF or RFCE sent is named ``RNC + e-NCF + .xml`` (DT-DGII). Tax ids travel in queries and file
+  names only, never in an error or a log line of the channel's (the platform holds httpx's URL logs back).
 """
 
 import asyncio
@@ -55,11 +64,13 @@ from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import (
     offered,
 )
 from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import (
+    ApprovalAnswer,
     DirectoryAnswer,
     ReceptionAnswer,
     ResultAnswer,
     TokenAnswer,
     TrackIdAnswer,
+    VoidAnswer,
 )
 from ledger_country_do.channels.ecf_v1.adapters.http import (
     ACCEPTED_ENCODING,
@@ -69,9 +80,11 @@ from ledger_country_do.channels.ecf_v1.adapters.http import (
     bounded,
 )
 from ledger_country_do.channels.ecf_v1.application.ports import (
+    Acknowledged,
     Answer,
     Authority,
     AuthorityUnavailableError,
+    DirectoryEntry,
     Failure,
     OutcomeUnknownError,
     Received,
@@ -84,15 +97,20 @@ from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import MessageAnswer
 lazy from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
-lazy from ledger_country_do.channels.ecf_v1.application.ports import Reception, XmlSigner
+lazy from ledger_country_do.channels.ecf_v1.application.ports import Reception, Signatures, SigningAs
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 lazy from ledger_kernel.clock import Sleep
+lazy from ledger_kernel.ids import CompanyId
+lazy from ledger_kernel.tenancy import Mode
 lazy from ledger_platform.http.outbound import OutboundHttp
 
 TOKEN_MARGIN: Final = timedelta(minutes=5)
 TOKEN_CEILING: Final = timedelta(hours=1)
 RETRY_DELAYS: Final = (0.2, 0.5)
+ANECF_FILE: Final = "ANECF.xml"
+ACECF_FILE: Final = "ACECF.xml"
+"""What an ANECF and an ACECF sent to DGII are named: DT-DGII names only an e-CF's (checked on TesteCF)."""
 _SERVER_ERROR: Final = 500
 _TOO_MANY: Final = 429
 _UNAUTHORIZED: Final = 401
@@ -102,18 +120,11 @@ _RECEPTION: Final = TypeAdapter(ReceptionAnswer)
 _RESULT: Final = TypeAdapter(ResultAnswer)
 _TRACK_IDS: Final = TypeAdapter(list[TrackIdAnswer])
 _DIRECTORY: Final = TypeAdapter(list[DirectoryAnswer])
+_VOID: Final = TypeAdapter(VoidAnswer)
+_APPROVAL: Final = TypeAdapter(ApprovalAnswer)
 
-
-@final
-@dataclass(frozen=True, slots=True)
-class DirectoryEntry:
-    """A receiver's service bases, from DGII's directory; ``authentication`` ``None`` if it publishes none."""
-
-    name: str
-    rnc: str
-    reception: str
-    approval: str
-    authentication: str | None
+type _TokenKey = tuple[CompanyId, Mode, Environment]
+"""Whose a token is (Decision 32): a company in a mode, in one of DGII's environments."""
 
 
 class ClientOptions(TypedDict, total=False):
@@ -141,6 +152,10 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _key(who: SigningAs, environment: Environment) -> _TokenKey:
+    return (who.company, who.mode, environment)
+
+
 def _messages(found: list[MessageAnswer]) -> tuple[DgiiMessage, ...]:
     return tuple(DgiiMessage(str(message.code), message.text) for message in found)
 
@@ -149,6 +164,14 @@ def _answer(answer: ResultAnswer) -> Answer:
     return Answer(
         answer.code, _messages(answer.messages), answer.sequence_used, rnc=answer.rnc, encf=answer.encf
     )
+
+
+def _voided(answer: VoidAnswer) -> Answer:
+    messages = tuple(
+        DgiiMessage("", each) if isinstance(each, str) else DgiiMessage(str(each.code), each.text)
+        for each in answer.messages
+    )
+    return Answer(answer.code, messages, None, rnc=answer.rnc)
 
 
 def _received_at(text: str) -> datetime | None:
@@ -194,15 +217,15 @@ class DgiiClient(Authority):
         "_tokens",
     )
 
-    def __init__(self, signer: XmlSigner, **options: Unpack[ClientOptions]) -> None:
+    def __init__(self, signer: Signatures, **options: Unpack[ClientOptions]) -> None:
         self._signer = signer
         self._outbound = options["http"]
         self._hosts = options.get("hosts", OFFICIAL_HOSTS)
         self._timeouts = options.get("timeouts", DEFAULT_TIMEOUTS)
         self._clock = options.get("clock", _now)
         self._sleep = options.get("sleep", asyncio.sleep)
-        self._tokens: dict[Environment, _Token] = {}
-        self._locks: dict[Environment, asyncio.Lock] = {}
+        self._tokens: dict[_TokenKey, _Token] = {}
+        self._locks: dict[_TokenKey, asyncio.Lock] = {}
         self._http: httpx.AsyncClient | None = None
 
     @asynccontextmanager
@@ -243,11 +266,16 @@ class DgiiClient(Authority):
     async def _attempt(
         self, request: httpx.Request, service: Service, *, idempotent: bool, deadline: float
     ) -> httpx.Response | AuthorityUnavailableError:
-        """One request: its answer, or a failure worth retrying; any other failure is raised."""
+        """One request: its answer, or a failure worth retrying; any other failure is raised.
+
+        The attempt is bounded by the earlier of its own limit and the call's deadline; when the timer asyncio
+        armed for the deadline is what ended it, the call is ``timed_out``, else the attempt ``broken``.
+        """
         http = self._client(service)
-        loop = asyncio.get_running_loop()
+        attempt_ends = asyncio.get_running_loop().time() + self._timeouts.total
+        limit = asyncio.timeout_at(min(attempt_ends, deadline))
         try:
-            async with asyncio.timeout_at(min(loop.time() + self._timeouts.total, deadline)):
+            async with limit:
                 streamed = await http.send(request, stream=True)
                 try:
                     body = await bounded(streamed)
@@ -256,10 +284,11 @@ class DgiiClient(Authority):
         except httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout:
             return AuthorityUnavailableError(Failure.UNREACHABLE, service.value)
         except (httpx.TransportError, TimeoutError) as error:
-            reason = Failure.TIMED_OUT if loop.time() >= deadline else Failure.BROKEN
+            timed_out = limit.expired() and deadline <= attempt_ends
+            reason = Failure.TIMED_OUT if timed_out else Failure.BROKEN
             if not idempotent:
                 raise OutcomeUnknownError(service.value, reason) from error
-            if reason is Failure.TIMED_OUT:
+            if timed_out:
                 raise AuthorityUnavailableError(reason, service.value) from error
             return AuthorityUnavailableError(reason, service.value)
         status = streamed.status_code
@@ -318,27 +347,28 @@ class DgiiClient(Authority):
         method = "GET" if document is None else "POST"
         return self._client(service).build_request(method, url, headers=headers, params=params, files=files)
 
-    async def _signed(self, seed: bytes) -> bytes:
-        """``seed`` signed for DGII's host; one the signer refuses as no seed, or cannot sign, is unreadable.
+    async def _signed(self, who: SigningAs, seed: bytes) -> bytes:
+        """``seed`` signed as ``who`` for DGII's host; unreadable when the signer refuses it.
 
-        The signer's other errors (no certificate, one not valid, the signer unreachable) pass as they are.
+        A seed the signer refuses as no seed, or cannot sign, is unreadable. The signer's other errors (no
+        certificate, one not valid, a clock to fix, the signer unreachable) pass as they are.
         """
         try:
-            return await self._signer.sign_seed(seed, audience=self._hosts.audience)
+            return await self._signer.seed(who, seed, audience=self._hosts.audience)
         except EcfInvalidError as error:
             raise AuthorityUnavailableError(Failure.UNREADABLE, Service.SEED.value) from error
 
     async def _authenticate(
-        self, environment: Environment, deadline: float
+        self, who: SigningAs, environment: Environment, deadline: float
     ) -> _Token | AuthorityUnavailableError:
-        """A fresh seed, signed, exchanged for a token: one try of the two (a seed serves once)."""
+        """A fresh seed, signed as ``who``, exchanged for a token: one try of the two (a seed serves once)."""
         seed_request = self._request(self._url(Service.SEED, environment), Service.SEED, None)
         seed = await self._attempt(seed_request, Service.SEED, idempotent=True, deadline=deadline)
         if isinstance(seed, AuthorityUnavailableError):
             return seed
         if not seed.is_success:
             raise AuthorityUnavailableError(Failure.UNDOCUMENTED, Service.SEED.value)
-        signed = await self._signed(seed.content)
+        signed = await self._signed(who, seed.content)
         validate_url = self._url(Service.VALIDATE_SEED, environment)
         request = self._request(validate_url, Service.VALIDATE_SEED, None, document=("semilla.xml", signed))
         response = await self._attempt(request, Service.VALIDATE_SEED, idempotent=True, deadline=deadline)
@@ -357,24 +387,28 @@ class DgiiClient(Authority):
             expires = expires.replace(tzinfo=UTC)
         return _Token(token.token, min(expires, self._clock() + TOKEN_CEILING) - TOKEN_MARGIN)
 
-    async def _token(self, environment: Environment, service: Service, deadline: float) -> str:
-        """The environment's token, fetched if need be; waiting for it, too, ends with the deadline."""
-        lock = self._locks.setdefault(environment, asyncio.Lock())
+    async def _token(
+        self, who: SigningAs, environment: Environment, service: Service, deadline: float
+    ) -> str:
+        """``who``'s token for the environment, fetched if need be; waiting for it ends with the deadline."""
+        key = _key(who, environment)
+        lock = self._locks.setdefault(key, asyncio.Lock())
         try:
             async with asyncio.timeout_at(deadline), lock:
-                cached = self._tokens.get(environment)
+                cached = self._tokens.get(key)
                 if cached is not None and cached.good_until > self._clock():
                     return cached.value
                 fresh = await self._retrying(
-                    lambda: self._authenticate(environment, deadline), deadline, retried=True
+                    lambda: self._authenticate(who, environment, deadline), deadline, retried=True
                 )
-                self._tokens[environment] = fresh
+                self._tokens[key] = fresh
                 return fresh.value
         except TimeoutError as error:
             raise AuthorityUnavailableError(Failure.TIMED_OUT, service.value) from error
 
     async def _authenticated(
         self,
+        who: SigningAs,
         environment: Environment,
         service: Service,
         build: Callable[[str], httpx.Request],
@@ -382,15 +416,16 @@ class DgiiClient(Authority):
         idempotent: bool,
     ) -> httpx.Response:
         deadline = self._deadline()
-        token = await self._token(environment, service, deadline)
+        token = await self._token(who, environment, service, deadline)
         self._require_time_to_send(service, deadline, idempotent=idempotent)
         response = await self._call(build(token), service, idempotent=idempotent, deadline=deadline)
         if response.status_code != _UNAUTHORIZED:
             return response
-        cached = self._tokens.get(environment)
+        key = _key(who, environment)
+        cached = self._tokens.get(key)
         if cached is not None and cached.value == token:
-            del self._tokens[environment]
-        renewed = await self._token(environment, service, deadline)
+            del self._tokens[key]
+        renewed = await self._token(who, environment, service, deadline)
         self._require_time_to_send(service, deadline, idempotent=idempotent)
         return await self._call(build(renewed), service, idempotent=idempotent, deadline=deadline)
 
@@ -399,17 +434,12 @@ class DgiiClient(Authority):
         if not idempotent and asyncio.get_running_loop().time() + self._timeouts.total > deadline:
             raise AuthorityUnavailableError(Failure.TIMED_OUT, service.value)
 
-    def _send(
-        self, environment: Environment, service: Service, name: str, signed: bytes
-    ) -> Callable[[str], httpx.Request]:
-        url = self._url(service, environment)
-        return lambda token: self._request(url, service, token, document=(name, signed))
-
     async def _query(
-        self, environment: Environment, service: Service, params: Mapping[str, str]
+        self, who: SigningAs, environment: Environment, service: Service, params: Mapping[str, str]
     ) -> httpx.Response:
         url = self._url(service, environment)
         response = await self._authenticated(
+            who,
             environment,
             service,
             lambda token: self._request(url, service, token, params=params),
@@ -420,11 +450,17 @@ class DgiiClient(Authority):
         return response
 
     async def _submit(
-        self, environment: Environment, service: Service, issuer_rnc: str, encf: Encf, signed: bytes
+        self, who: SigningAs, environment: Environment, service: Service, document: tuple[str, bytes]
     ) -> httpx.Response | Refused:
-        """A document sent once: DGII's 2xx answer, or its refusal at the door (400)."""
-        build = self._send(environment, service, f"{issuer_rnc}{encf}.xml", signed)
-        response = await self._authenticated(environment, service, build, idempotent=False)
+        """A document (its file's name, its bytes) sent once: DGII's 2xx answer, or its refusal (400)."""
+        url = self._url(service, environment)
+        response = await self._authenticated(
+            who,
+            environment,
+            service,
+            lambda token: self._request(url, service, token, document=document),
+            idempotent=False,
+        )
         if response.status_code == _BAD_REQUEST:
             try:
                 refusal = read_answer(_RECEPTION, response, service)
@@ -439,9 +475,11 @@ class DgiiClient(Authority):
 
     @override
     async def submit_ecf(
-        self, environment: Environment, issuer_rnc: str, encf: Encf, signed: bytes
+        self, who: SigningAs, environment: Environment, issuer_rnc: str, encf: Encf, signed: bytes
     ) -> Reception:
-        response = await self._submit(environment, Service.RECEPTION, issuer_rnc, encf, signed)
+        response = await self._submit(
+            who, environment, Service.RECEPTION, (f"{issuer_rnc}{encf}.xml", signed)
+        )
         if isinstance(response, Refused):
             return response
         answer = _submitted(_RECEPTION, response, Service.RECEPTION)
@@ -451,26 +489,43 @@ class DgiiClient(Authority):
 
     @override
     async def submit_rfce(
-        self, environment: Environment, issuer_rnc: str, encf: Encf, signed: bytes
+        self, who: SigningAs, environment: Environment, issuer_rnc: str, encf: Encf, signed: bytes
     ) -> Answer | Refused:
-        response = await self._submit(environment, Service.RFCE, issuer_rnc, encf, signed)
+        response = await self._submit(who, environment, Service.RFCE, (f"{issuer_rnc}{encf}.xml", signed))
         if isinstance(response, Refused):
             return response
         return _answer(_submitted(_RESULT, response, Service.RFCE))
 
     @override
-    async def result(self, environment: Environment, track_id: str) -> Answer:
-        response = await self._query(environment, Service.RESULT, {"trackid": track_id})
+    async def void_ranges(
+        self, who: SigningAs, environment: Environment, signed_anecf: bytes
+    ) -> Answer | Refused:
+        response = await self._submit(who, environment, Service.VOID_RANGES, (ANECF_FILE, signed_anecf))
+        if isinstance(response, Refused):
+            return response
+        return _voided(_submitted(_VOID, response, Service.VOID_RANGES))
+
+    @override
+    async def commercial_approval(
+        self, who: SigningAs, environment: Environment, signed_acecf: bytes
+    ) -> Acknowledged | Refused:
+        response = await self._submit(who, environment, Service.APPROVAL, (ACECF_FILE, signed_acecf))
+        if isinstance(response, Refused):
+            return response
+        answer = _submitted(_APPROVAL, response, Service.APPROVAL)
+        return Acknowledged(answer.state, tuple(DgiiMessage("", text) for text in answer.messages))
+
+    @override
+    async def result(self, who: SigningAs, environment: Environment, track_id: str) -> Answer:
+        response = await self._query(who, environment, Service.RESULT, {"trackid": track_id})
         return _answer(read_answer(_RESULT, response, Service.RESULT))
 
     @override
     async def track_ids(
-        self, environment: Environment, issuer_rnc: str, encf: Encf
-    ) -> tuple[TrackId, ...] | None:
-        if not offered(Service.TRACK_IDS, environment):
-            return None
+        self, who: SigningAs, environment: Environment, issuer_rnc: str, encf: Encf
+    ) -> tuple[TrackId, ...]:
         params = {"rncemisor": issuer_rnc, "encf": str(encf)}
-        response = await self._query(environment, Service.TRACK_IDS, params)
+        response = await self._query(who, environment, Service.TRACK_IDS, params)
         entries = read_answer(_TRACK_IDS, response, Service.TRACK_IDS)
         received = [(_received_at(entry.received_at), entry.track_id) for entry in entries]
         ordered: list[TrackId] = []
@@ -480,17 +535,21 @@ class DgiiClient(Authority):
             ordered.append(TrackId(track_id, moment))
         return tuple(sorted(ordered, key=lambda each: each.received_at))
 
-    async def directory(self, environment: Environment, rnc: str) -> DirectoryEntry | None:
-        """The receiver ``rnc`` in DGII's directory; ``None`` if it is no electronic receiver (F5, F6, F16).
+    @override
+    async def rfce_status(
+        self, who: SigningAs, environment: Environment, issuer_rnc: str, encf: Encf, security_code: str
+    ) -> Answer:
+        params = {"RNC_Emisor": issuer_rnc, "ENCF": str(encf), "Cod_Seguridad_eCF": security_code}
+        response = await self._query(who, environment, Service.RFCE_QUERY, params)
+        return _answer(read_answer(_RESULT, response, Service.RFCE_QUERY))
 
-        Only an entry naming ``rnc`` itself is taken: an answer listing another taxpayer's endpoints (whatever
-        DGII's reason) never sends ``rnc``'s documents there.
-        """
-        response = await self._query(environment, Service.DIRECTORY, {"RNC": rnc})
+    @override
+    async def directory(self, who: SigningAs, environment: Environment, rnc: str) -> DirectoryEntry | None:
+        response = await self._query(who, environment, Service.DIRECTORY, {"RNC": rnc})
         found = read_answer(_DIRECTORY, response, Service.DIRECTORY)
-        entry = next((each for each in found if each.rnc.strip() == rnc), None)
+        entry = next((each for each in found if each.rnc.strip() == rnc), next(iter(found), None))
         if entry is None:
             return None
         return DirectoryEntry(
-            entry.name, entry.rnc, entry.reception, entry.approval, entry.authentication or None
+            entry.name, entry.rnc.strip(), entry.reception, entry.approval, entry.authentication or None
         )

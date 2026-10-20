@@ -24,6 +24,16 @@ def test_dgii_s_documented_urls() -> None:
     assert OFFICIAL_HOSTS.url(Service.VALIDATE_SEED, Environment.ECF) == (
         "https://ecf.dgii.gov.do/ecf/autenticacion/api/autenticacion/validarsemilla"
     )
+    # The RFCE and its query on the fc host (06 quick reference); voids and approvals on the ecf host.
+    assert OFFICIAL_HOSTS.url(Service.RFCE_QUERY, Environment.TESTECF) == (
+        "https://fc.dgii.gov.do/testecf/consultarfce/api/consultas/consulta"
+    )
+    assert OFFICIAL_HOSTS.url(Service.VOID_RANGES, Environment.ECF) == (
+        "https://ecf.dgii.gov.do/ecf/anulacionrangos/api/operaciones/anularrango"
+    )
+    assert OFFICIAL_HOSTS.url(Service.APPROVAL, Environment.CERTECF) == (
+        "https://ecf.dgii.gov.do/certecf/aprobacioncomercial/api/aprobacioncomercial"
+    )
 
 
 def test_certecf_publishes_neither_track_ids_nor_the_directory() -> None:

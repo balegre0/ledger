@@ -1,19 +1,32 @@
 import asyncio
 import gzip
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+import logging
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Final, final, override
+from uuid import UUID
+lazy from collections.abc import Awaitable, Callable
 
 import httpx
 import pytest
 from pydantic import TypeAdapter
 
 from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient, read_answer
-from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts, LiveHostRefusedError, Service
+from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import (
+    DgiiHosts,
+    LiveHostRefusedError,
+    Service,
+    ServiceNotInEnvironmentError,
+)
 from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import TokenAnswer
 from ledger_country_do.channels.ecf_v1.adapters.http import DEFAULT_TIMEOUTS, MAX_ANSWER, DgiiTimeouts
+from ledger_country_do.channels.ecf_v1.adapters.signing.port import DocumentSigner
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf, rfce
+from ledger_country_do.channels.ecf_v1.adapters.xml.acecf import render_acecf
+from ledger_country_do.channels.ecf_v1.adapters.xml.anecf import render_anecf
 from ledger_country_do.channels.ecf_v1.application.ports import (
+    Acknowledged,
     Answer,
     AuthorityUnavailableError,
     CertificateMissingError,
@@ -22,32 +35,58 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
     OutcomeUnknownError,
     Received,
     Refused,
+    SignerClockSkewError,
     SignerUnavailableError,
-    XmlSigner,
 )
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
+from ledger_country_do.channels.ecf_v1.domain.exchanges import CommercialApproval, VoidedRange
 from ledger_country_do.channels.ecf_v1.domain.polling import TrackId
-from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage
+from ledger_country_do.channels.ecf_v1.domain.status_map import (
+    DgiiMessage,
+    DgiiService,
+    EcfState,
+    RfceQueryCode,
+    decide,
+)
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
-from ledger_country_do_testing.fake_dgii.state import Scripted, Status
+from ledger_country_do_testing.fake_dgii.state import Scripted, Status, VerifierCheck
+from ledger_country_do_testing.local_signer import SIGNING_AS
 from ledger_country_do_testing.samples import SIGNED_AT, consumer_invoice, credit_invoice
 from ledger_country_do_testing.transports import FAKE_HOSTS, BreaksAfterSending, Counting, outbound_over
+from ledger_fiscal_kit.ports import (
+    SignatureRefusedError,
+    SignerPort,
+    SigningCertificateMissingError,
+    SigningCertificateNotValidError,
+    SigningClockSkewError,
+)
+from ledger_fiscal_kit.ports import SignerUnavailableError as PortUnavailableError
+from ledger_kernel.ids import CompanyId
+from ledger_platform.config.settings import LogFormat
 from ledger_platform.http.outbound import OUTBOUND_SECONDS
+from ledger_platform.observability.logs import configure_logging
 from ledger_platform.observability.telemetry import Telemetry
+from ledger_testing.logs import restored_logging
+from ledger_testing.signer import TestSigner
 lazy from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 lazy from ledger_country_do_testing.fake_dgii.app import FakeDgii
 lazy from ledger_country_do_testing.local_signer import KeyPairSigner
+lazy from ledger_fiscal_kit.ports import CertificateValidity, SeedToSign, Signed, XmlToSign
+lazy from ledger_kernel.errors import LedgerError
+lazy from ledger_kernel.tenancy import Tenant
+lazy from ledger_platform.runtime.calls import SystemCall
 lazy from ledger_testing.clock import ManualClock
 
 T: Final = Environment.TESTECF
+WHO: Final = SIGNING_AS
 ISSUER: Final = "101850043"
 FIRST: Final = Encf(EcfType.CREDIT_INVOICE, 1)
 SEED_PATH: Final = "/testecf/autenticacion/api/autenticacion/semilla"
 
 
 async def signed(signer: KeyPairSigner, document: bytes) -> bytes:
-    return await signer.sign_document(document, signed_at=SIGNED_AT, reference="E310000000001")
+    return signer.sign(document)
 
 
 async def signed_ecf(signer: KeyPairSigner, sequence: int = 1, *, small_consumer: bool = False) -> bytes:
@@ -57,7 +96,7 @@ async def signed_ecf(signer: KeyPairSigner, sequence: int = 1, *, small_consumer
 
 def client_over(
     transport: httpx.AsyncBaseTransport,
-    signer: XmlSigner,
+    signer: SignerPort,
     clock: ManualClock,
     sleeps: list[float],
     timeouts: DgiiTimeouts | None = None,
@@ -65,21 +104,29 @@ def client_over(
     async def sleep(seconds: float) -> None:
         sleeps.append(seconds)
 
+    documents = DocumentSigner(signer)
     if timeouts is None:
-        return DgiiClient(signer, hosts=FAKE_HOSTS, clock=clock, sleep=sleep, http=outbound_over(transport))
+        return DgiiClient(
+            documents, hosts=FAKE_HOSTS, clock=clock, sleep=sleep, http=outbound_over(transport)
+        )
     return DgiiClient(
-        signer, hosts=FAKE_HOSTS, timeouts=timeouts, clock=clock, sleep=sleep, http=outbound_over(transport)
+        documents,
+        hosts=FAKE_HOSTS,
+        timeouts=timeouts,
+        clock=clock,
+        sleep=sleep,
+        http=outbound_over(transport),
     )
 
 
 async def test_an_e_cf_is_received_then_decided(
     dgii: DgiiClient, signer: KeyPairSigner, fake: FakeDgii
 ) -> None:
-    reception = await dgii.submit_ecf(T, ISSUER, FIRST, await signed_ecf(signer))
+    reception = await dgii.submit_ecf(WHO, T, ISSUER, FIRST, await signed_ecf(signer))
     assert isinstance(reception, Received)
     assert fake.received[-1].file_name == "101850043E310000000001.xml"
     assert fake.received[-1].host == "ecf.fake.test"
-    assert await dgii.result(T, reception.track_id) == Answer(
+    assert await dgii.result(WHO, T, reception.track_id) == Answer(
         code=1, messages=(), sequence_used=True, rnc=ISSUER, encf="E310000000001"
     )
 
@@ -90,9 +137,9 @@ async def test_dgii_s_messages_and_secuencia_utilizada_arrive_intact(
     fake.script.default = Scripted(
         status=Status.REJECTED, messages=(("145", "El RNC no es emisor"),), sequence_used=False
     )
-    reception = await dgii.submit_ecf(T, ISSUER, FIRST, await signed_ecf(signer))
+    reception = await dgii.submit_ecf(WHO, T, ISSUER, FIRST, await signed_ecf(signer))
     assert isinstance(reception, Received)
-    answer = await dgii.result(T, reception.track_id)
+    answer = await dgii.result(WHO, T, reception.track_id)
     assert answer == Answer(
         code=2,
         messages=(DgiiMessage("145", "El RNC no es emisor"),),
@@ -106,7 +153,7 @@ async def test_a_refusal_at_the_door_is_an_answer_not_a_failure(
     dgii: DgiiClient, signer: KeyPairSigner
 ) -> None:
     refused = await dgii.submit_ecf(
-        T, ISSUER, Encf(EcfType.CONSUMER_INVOICE, 1), await signed_ecf(signer, small_consumer=True)
+        WHO, T, ISSUER, Encf(EcfType.CONSUMER_INVOICE, 1), await signed_ecf(signer, small_consumer=True)
     )
     assert isinstance(refused, Refused)
     assert refused.messages[0].code == "400"
@@ -117,11 +164,11 @@ async def test_the_rfce_is_answered_at_once_on_the_fc_host(
 ) -> None:
     draft = consumer_invoice()
     summary = await signed(signer, rfce.render(draft, compute_totals(draft), security_code="dcp79q"))
-    answer = await dgii.submit_rfce(T, ISSUER, draft.encf, summary)
+    answer = await dgii.submit_rfce(WHO, T, ISSUER, draft.encf, summary)
     assert answer == Answer(code=1, messages=(), sequence_used=True, encf="E320000000001")
     assert fake.received[-1].host == "fc.fake.test"
     assert fake.received[-1].file_name == f"101850043{draft.encf}.xml"
-    refused = await dgii.submit_rfce(T, ISSUER, draft.encf, b"not xml")
+    refused = await dgii.submit_rfce(WHO, T, ISSUER, draft.encf, b"not xml")
     assert isinstance(refused, Refused)
 
 
@@ -133,7 +180,7 @@ async def test_the_rfce_s_messages_keep_their_string_codes_and_dgii_s_valor(
     )
     draft = consumer_invoice()
     summary = await signed(signer, rfce.render(draft, compute_totals(draft), security_code="dcp79q"))
-    answer = await dgii.submit_rfce(T, ISSUER, draft.encf, summary)
+    answer = await dgii.submit_rfce(WHO, T, ISSUER, draft.encf, summary)
     assert answer == Answer(
         code=2,
         messages=(DgiiMessage("RFCE-7", "El monto no cuadra"),),
@@ -142,18 +189,19 @@ async def test_the_rfce_s_messages_keep_their_string_codes_and_dgii_s_valor(
     )
 
 
-async def test_track_ids_of_an_e_ncf_and_none_where_dgii_has_no_such_service(
+async def test_track_ids_of_an_e_ncf_and_a_refusal_where_dgii_has_no_such_service(
     dgii: DgiiClient, signer: KeyPairSigner, clock: ManualClock
 ) -> None:
-    first = await dgii.submit_ecf(T, ISSUER, FIRST, await signed_ecf(signer))
-    second = await dgii.submit_ecf(T, ISSUER, FIRST, await signed_ecf(signer))
+    first = await dgii.submit_ecf(WHO, T, ISSUER, FIRST, await signed_ecf(signer))
+    second = await dgii.submit_ecf(WHO, T, ISSUER, FIRST, await signed_ecf(signer))
     assert isinstance(first, Received)
     assert isinstance(second, Received)
-    assert await dgii.track_ids(T, ISSUER, FIRST) == (
+    assert await dgii.track_ids(WHO, T, ISSUER, FIRST) == (
         TrackId(first.track_id, clock.now),
         TrackId(second.track_id, clock.now),
     )
-    assert await dgii.track_ids(Environment.CERTECF, ISSUER, FIRST) is None
+    with pytest.raises(ServiceNotInEnvironmentError):
+        await dgii.track_ids(WHO, Environment.CERTECF, ISSUER, FIRST)
 
 
 async def test_the_token_is_cached_and_renewed_five_minutes_before_it_expires(
@@ -161,12 +209,12 @@ async def test_the_token_is_cached_and_renewed_five_minutes_before_it_expires(
 ) -> None:
     counting = Counting(httpx.ASGITransport(app=fake.app))
     async with client_over(counting, signer, clock, sleeps).opened() as dgii:
-        await dgii.result(T, "a")
-        await dgii.result(T, "b")
+        await dgii.result(WHO, T, "a")
+        await dgii.result(WHO, T, "b")
         clock.advance(timedelta(minutes=54))
-        await dgii.result(T, "c")
+        await dgii.result(WHO, T, "c")
         clock.advance(timedelta(minutes=2))
-        await dgii.result(T, "d")
+        await dgii.result(WHO, T, "d")
     assert counting.paths.count(SEED_PATH) == 2
 
 
@@ -175,7 +223,7 @@ async def test_one_token_is_fetched_however_many_calls_wait_for_it(
 ) -> None:
     counting = Counting(httpx.ASGITransport(app=fake.app))
     async with client_over(counting, signer, clock, sleeps).opened() as dgii:
-        answers = await asyncio.gather(*(dgii.result(T, track_id) for track_id in "abcd"))
+        answers = await asyncio.gather(*(dgii.result(WHO, T, track_id) for track_id in "abcd"))
     assert [answer.code for answer in answers] == [0, 0, 0, 0]
     assert counting.paths.count(SEED_PATH) == 1
 
@@ -186,42 +234,42 @@ async def test_tokens_are_kept_per_environment_and_forgotten_when_closed(
     counting = Counting(httpx.ASGITransport(app=fake.app))
     client = client_over(counting, signer, clock, sleeps)
     async with client.opened() as dgii:
-        await dgii.result(T, "a")
-        await dgii.result(Environment.CERTECF, "a")
+        await dgii.result(WHO, T, "a")
+        await dgii.result(WHO, Environment.CERTECF, "a")
     async with client.opened() as dgii:
-        await dgii.result(T, "a")
+        await dgii.result(WHO, T, "a")
     seeds = [path for path in counting.paths if path.endswith("/semilla")]
     assert seeds == [SEED_PATH, "/certecf/autenticacion/api/autenticacion/semilla", SEED_PATH]
 
 
 async def test_a_token_dgii_forgot_is_replaced_once(dgii: DgiiClient, fake: FakeDgii) -> None:
-    await dgii.result(T, "a")
+    await dgii.result(WHO, T, "a")
     fake.state.dgii.revoke()
-    assert (await dgii.result(T, "a")).code == 0
+    assert (await dgii.result(WHO, T, "a")).code == 0
 
 
 async def test_what_cannot_change_dgii_s_state_is_retried_twice(
     dgii: DgiiClient, fake: FakeDgii, sleeps: list[float]
 ) -> None:
-    await dgii.result(T, "warm the token")
+    await dgii.result(WHO, T, "warm the token")
     fake.script.outage = 2
-    assert (await dgii.result(T, "a")).code == 0
+    assert (await dgii.result(WHO, T, "a")).code == 0
     assert sleeps == [0.2, 0.5]
     fake.script.outage = 3
     with pytest.raises(AuthorityUnavailableError, match="server_error"):
-        await dgii.result(T, "a")
+        await dgii.result(WHO, T, "a")
 
 
 async def test_a_submission_is_never_retried(
     dgii: DgiiClient, signer: KeyPairSigner, fake: FakeDgii, sleeps: list[float]
 ) -> None:
-    await dgii.result(T, "warm the token")
+    await dgii.result(WHO, T, "warm the token")
     fake.script.outage = 1
     with pytest.raises(OutcomeUnknownError, match="server_error"):
-        await dgii.submit_ecf(T, ISSUER, FIRST, await signed_ecf(signer))
+        await dgii.submit_ecf(WHO, T, ISSUER, FIRST, await signed_ecf(signer))
     fake.script.outage = 1
     with pytest.raises(OutcomeUnknownError, match="server_error"):
-        await dgii.submit_rfce(T, ISSUER, FIRST, await signed_ecf(signer))
+        await dgii.submit_rfce(WHO, T, ISSUER, FIRST, await signed_ecf(signer))
     assert sleeps == []
     assert fake.received == []
 
@@ -232,7 +280,7 @@ async def test_a_connection_broken_after_sending_leaves_the_outcome_unknown(
     broken = BreaksAfterSending(httpx.ASGITransport(app=fake.app), "facturaselectronicas")
     async with client_over(broken, signer, clock, sleeps).opened() as dgii:
         with pytest.raises(OutcomeUnknownError):
-            await dgii.submit_ecf(T, ISSUER, FIRST, await signed_ecf(signer))
+            await dgii.submit_ecf(WHO, T, ISSUER, FIRST, await signed_ecf(signer))
     assert [each.encf for each in fake.received] == ["E310000000001"]
     assert sleeps == []
 
@@ -245,7 +293,7 @@ async def test_an_rfce_whose_connection_broke_after_sending_is_not_sent_again(
     summary = await signed(signer, rfce.render(draft, compute_totals(draft), security_code="dcp79q"))
     async with client_over(broken, signer, clock, sleeps).opened() as dgii:
         with pytest.raises(OutcomeUnknownError, match="outcome is unknown"):
-            await dgii.submit_rfce(T, ISSUER, draft.encf, summary)
+            await dgii.submit_rfce(WHO, T, ISSUER, draft.encf, summary)
     assert [each.kind for each in fake.received] == ["rfce"]
     assert sleeps == []
 
@@ -256,9 +304,9 @@ async def test_the_live_environment_is_never_reached_through_a_fake(
     counting = Counting(httpx.ASGITransport(app=fake.app))
     async with client_over(counting, signer, clock, sleeps).opened() as dgii:
         with pytest.raises(LiveHostRefusedError):
-            await dgii.result(Environment.ECF, "a")
+            await dgii.result(WHO, Environment.ECF, "a")
         with pytest.raises(LiveHostRefusedError):
-            await dgii.submit_ecf(Environment.ECF, ISSUER, FIRST, await signed_ecf(signer))
+            await dgii.submit_ecf(WHO, Environment.ECF, ISSUER, FIRST, await signed_ecf(signer))
     assert counting.paths == []
 
 
@@ -271,11 +319,12 @@ async def test_the_live_environment_is_never_reached_through_an_injected_transpo
         sent.append(request.url.path)
         return reply(200, b"{}")
 
-    async with DgiiClient(signer, http=outbound_over(httpx.MockTransport(handler))).opened() as dgii:
+    documents = DocumentSigner(signer)
+    async with DgiiClient(documents, http=outbound_over(httpx.MockTransport(handler))).opened() as dgii:
         with pytest.raises(LiveHostRefusedError):
-            await dgii.result(Environment.ECF, "a")
+            await dgii.result(WHO, Environment.ECF, "a")
         with pytest.raises(LiveHostRefusedError):
-            await dgii.submit_rfce(Environment.ECF, ISSUER, FIRST, b"<RFCE/>")
+            await dgii.submit_rfce(WHO, Environment.ECF, ISSUER, FIRST, b"<RFCE/>")
     assert sent == []
 
 
@@ -381,19 +430,18 @@ async def test_answers_dgii_does_not_document_are_failures(
     assert sleeps == []
 
 
-async def call(dgii: DgiiClient, service: str) -> object:
+async def call(dgii: DgiiClient, service: str, environment: Environment = T) -> object:
     """The client's call of ``service``, with arguments that do not matter to the answer."""
-    match service:
-        case "submit":
-            return await dgii.submit_ecf(T, ISSUER, FIRST, b"<ECF/>")
-        case "rfce":
-            return await dgii.submit_rfce(T, ISSUER, FIRST, b"<RFCE/>")
-        case "track_ids":
-            return await dgii.track_ids(T, ISSUER, FIRST)
-        case "directory":
-            return await dgii.directory(T, "131098193")
-        case _:
-            return await dgii.result(T, "a")
+    calls: dict[str, Callable[[], Awaitable[object]]] = {
+        "submit": lambda: dgii.submit_ecf(WHO, environment, ISSUER, FIRST, b"<ECF/>"),
+        "rfce": lambda: dgii.submit_rfce(WHO, environment, ISSUER, FIRST, b"<RFCE/>"),
+        "track_ids": lambda: dgii.track_ids(WHO, environment, ISSUER, FIRST),
+        "directory": lambda: dgii.directory(WHO, environment, "131098193"),
+        "void": lambda: dgii.void_ranges(WHO, environment, b"<ANECF/>"),
+        "approval": lambda: dgii.commercial_approval(WHO, environment, b"<ACECF/>"),
+        "result": lambda: dgii.result(WHO, environment, "a"),
+    }
+    return await calls[service]()
 
 
 @dataclass(frozen=True, slots=True)
@@ -461,7 +509,7 @@ async def test_a_submission_dgii_refuses_twice_as_unauthorized_is_sent_exactly_t
 
     async with client_over(httpx.MockTransport(handler), signer, clock, sleeps).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="reception: undocumented"):
-            await dgii.submit_ecf(T, ISSUER, FIRST, b"<ECF/>")
+            await dgii.submit_ecf(WHO, T, ISSUER, FIRST, b"<ECF/>")
     assert sent == ["semilla", "validarsemilla", "facturaselectronicas"] * 2
 
 
@@ -492,9 +540,9 @@ async def test_only_the_token_dgii_refused_is_dropped(
         return reply(401)
 
     async with client_over(httpx.MockTransport(handler), signer, clock, sleeps).opened() as dgii:
-        answers = await asyncio.gather(dgii.result(T, "a"), dgii.result(T, "b"))
+        answers = await asyncio.gather(dgii.result(WHO, T, "a"), dgii.result(WHO, T, "b"))
         assert [answer.code for answer in answers] == [0, 0]
-        assert (await dgii.result(T, "c")).code == 0
+        assert (await dgii.result(WHO, T, "c")).code == 0
     assert issued == ["t1", "t2"]
 
 
@@ -521,7 +569,7 @@ async def test_a_failed_authentication_starts_again_from_a_fresh_seed(
         return reply(200, b'{"codigo": 0}')
 
     async with client_over(httpx.MockTransport(handler), signer, clock, sleeps).opened() as dgii:
-        assert (await dgii.result(T, "a")).code == 0
+        assert (await dgii.result(WHO, T, "a")).code == 0
     assert sent == ["semilla", "validarsemilla", "semilla", "validarsemilla", "estado"]
     assert b"<valor>v1</valor>" in validated[0]
     assert b"<valor>v2</valor>" in validated[1]
@@ -540,7 +588,7 @@ async def test_an_authentication_that_keeps_failing_is_tried_three_times(
 
     async with client_over(httpx.MockTransport(handler), signer, clock, sleeps).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="validate_seed: server_error"):
-            await dgii.result(T, "a")
+            await dgii.result(WHO, T, "a")
     assert sent == ["semilla", "validarsemilla"] * 3
     assert sleeps == [0.2, 0.5]
 
@@ -562,68 +610,70 @@ async def test_a_seed_dgii_would_not_send_is_never_signed(
         scripted_dgii(GOOD_TOKEN, 200, b"{}", seed=seed), signer, clock, sleeps
     ).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="seed: unreadable"):
-            await dgii.result(T, "a")
+            await dgii.result(WHO, T, "a")
 
 
-@final
-class SeedSigner(XmlSigner):
-    """Signs seeds with ``inner`` and records their audiences, or refuses each with ``refusal``."""
-
-    __slots__ = ("_inner", "_refusal", "audiences")
-
-    def __init__(self, inner: KeyPairSigner, refusal: EcfError | None = None) -> None:
-        self._inner = inner
-        self._refusal = refusal
-        self.audiences: list[str] = []
-
-    @override
-    async def sign_document(self, document: bytes, *, signed_at: datetime, reference: str) -> bytes:
-        raise AssertionError  # authentication signs seeds only
-
-    @override
-    async def sign_seed(self, seed: bytes, *, audience: str) -> bytes:
-        self.audiences.append(audience)
-        if self._refusal is not None:
-            raise self._refusal
-        return await self._inner.sign_seed(seed, audience=audience)
+def seed_signer(signer: KeyPairSigner, *failures: LedgerError) -> TestSigner:
+    """Signs with ``signer``'s key, refusing the first calls with ``failures``; records each request."""
+    return TestSigner(sign=signer.sign, sign_seed=signer.sign, failures=failures)
 
 
-async def test_a_seed_is_signed_for_dgii_s_host(
+async def test_a_seed_is_signed_for_dgii_s_host_as_the_company_the_call_is_for(
     signer: KeyPairSigner, fake: FakeDgii, clock: ManualClock, sleeps: list[float]
 ) -> None:
-    recording = SeedSigner(signer)
+    recording = seed_signer(signer)
     async with client_over(httpx.ASGITransport(app=fake.app), recording, clock, sleeps).opened() as dgii:
-        await dgii.result(T, "a")
-    official = DgiiClient(recording, http=outbound_over(scripted_dgii(GOOD_TOKEN, 200, b'{"codigo": 0}')))
+        await dgii.result(WHO, T, "a")
+    official = DgiiClient(
+        DocumentSigner(recording), http=outbound_over(scripted_dgii(GOOD_TOKEN, 200, b'{"codigo": 0}'))
+    )
     async with official.opened():
-        await official.result(T, "a")
-    assert recording.audiences == ["ecf.fake.test", "ecf.dgii.gov.do"]
+        await official.result(WHO, T, "a")
+    assert [call.audience for call in recording.calls] == ["ecf.fake.test", "ecf.dgii.gov.do"]
+    assert {call.tenant for call in recording.calls} == {WHO.tenant}
 
 
 async def test_a_seed_the_signer_refuses_to_sign_is_unreadable(
     signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
 ) -> None:
-    refusing = SeedSigner(signer, DocumentUnsignableError("xml_document_unsignable"))
+    refusing = seed_signer(signer, SignatureRefusedError("xml_document_unsignable"))
     async with client_over(scripted_dgii(GOOD_TOKEN, 200, b"{}"), refusing, clock, sleeps).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="seed: unreadable") as raised:
-            await dgii.result(T, "a")
+            await dgii.result(WHO, T, "a")
     assert isinstance(raised.value.__cause__, DocumentUnsignableError)
 
 
 @pytest.mark.parametrize(
-    "refusal",
-    [CertificateMissingError(), CertificateNotValidError(), SignerUnavailableError()],
-    ids=["missing", "not-valid", "unavailable"],
+    ("refusal", "raised"),
+    [
+        (SigningCertificateMissingError(), CertificateMissingError),
+        (SigningCertificateNotValidError(), CertificateNotValidError),
+        (SigningClockSkewError(), SignerClockSkewError),
+        (PortUnavailableError(), SignerUnavailableError),
+    ],
+    ids=["missing", "not-valid", "clock-skew", "unavailable"],
 )
-async def test_the_signer_s_other_refusals_pass_as_they_are(
-    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float], refusal: EcfError
+async def test_the_signer_s_other_refusals_pass_as_the_channel_s_and_nothing_is_sent(
+    signer: KeyPairSigner,
+    clock: ManualClock,
+    sleeps: list[float],
+    refusal: LedgerError,
+    raised: type[EcfError],
 ) -> None:
-    # The emitter parks on them by their own codes (a certificate to install, a signer to wait for).
-    refusing = SeedSigner(signer, refusal)
-    async with client_over(scripted_dgii(GOOD_TOKEN, 200, b"{}"), refusing, clock, sleeps).opened() as dgii:
-        with pytest.raises(type(refusal)) as raised:
-            await dgii.submit_ecf(T, ISSUER, FIRST, b"<ECF/>")
-    assert raised.value is refusal
+    # The emitter parks on them by their own codes (a certificate to install, a clock to fix, a signer to
+    # wait for): the e-CF never left.
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.url.path.rsplit("/", 1)[-1])
+        return seeded(request.url.path) or reply(200, b"{}")
+
+    refusing = seed_signer(signer, refusal)
+    async with client_over(httpx.MockTransport(handler), refusing, clock, sleeps).opened() as dgii:
+        with pytest.raises(raised) as caught:
+            await dgii.submit_ecf(WHO, T, ISSUER, FIRST, b"<ECF/>")
+    assert caught.value.__cause__ is refusal
+    assert sent == ["semilla"]
     assert sleeps == []
 
 
@@ -644,13 +694,13 @@ async def test_a_seed_or_its_validation_refused_is_a_failure(
 
     async with client_over(httpx.MockTransport(no_seed), signer, clock, sleeps).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="seed: undocumented"):
-            await dgii.result(T, "a")
+            await dgii.result(WHO, T, "a")
     async with client_over(httpx.MockTransport(refuses), signer, clock, sleeps).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="validate_seed: refused"):
-            await dgii.result(T, "a")
+            await dgii.result(WHO, T, "a")
     async with client_over(httpx.MockTransport(undocumented), signer, clock, sleeps).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="validate_seed: undocumented"):
-            await dgii.result(T, "a")
+            await dgii.result(WHO, T, "a")
     assert sleeps == []
 
 
@@ -663,8 +713,9 @@ async def test_a_client_with_every_default_reaches_dgii_s_own_hosts(signer: KeyP
         encodings.append(request.headers["accept-encoding"])
         return seeded(request.url.path) or reply(200, b'{"codigo": 0}')
 
-    async with DgiiClient(signer, http=outbound_over(httpx.MockTransport(handler))).opened() as dgii:
-        assert (await dgii.result(T, "a")).code == 0
+    documents = DocumentSigner(signer)
+    async with DgiiClient(documents, http=outbound_over(httpx.MockTransport(handler))).opened() as dgii:
+        assert (await dgii.result(WHO, T, "a")).code == 0
     assert set(hosts) == {"ecf.dgii.gov.do"}
     assert set(encodings) == {"gzip"}
 
@@ -676,7 +727,7 @@ async def test_no_error_quotes_a_token(
     token = b'{"token": "' + secret + b'", "expira": "' + b"9" * 65 + b'"}'
     async with client_over(scripted_dgii(token, 200, b"{}"), signer, clock, sleeps).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError) as raised:
-            await dgii.result(T, "a")
+            await dgii.result(WHO, T, "a")
     told = f"{raised.value} {raised.value!r} {raised.value.__cause__} {raised.value.__cause__!r}"
     assert secret.decode() not in told
     assert "unreadable" in told
@@ -706,7 +757,7 @@ async def test_an_answer_is_decompressed_once_and_bounded_as_it_expands(
 
     async with client_over(httpx.MockTransport(handler), signer, clock, sleeps).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="track_ids: unreadable"):
-            await dgii.track_ids(T, ISSUER, FIRST)
+            await dgii.track_ids(WHO, T, ISSUER, FIRST)
 
 
 @pytest.mark.parametrize(
@@ -719,7 +770,7 @@ async def test_an_answer_plain_or_gzipped_is_read(
         return seeded(request.url.path) or reply(200, body, {"Content-Encoding": encoding})
 
     async with client_over(httpx.MockTransport(handler), signer, clock, sleeps).opened() as dgii:
-        assert await dgii.track_ids(T, ISSUER, FIRST) == ()
+        assert await dgii.track_ids(WHO, T, ISSUER, FIRST) == ()
 
 
 def test_an_answer_read_whole_is_bounded_too() -> None:
@@ -738,7 +789,7 @@ async def test_track_ids_are_ordered_by_when_dgii_received_them(
         b' {"trackId": "d", "fechaRecepcion": "2026-10-13T12:00:00"}]'
     )
     async with client_over(scripted_dgii(GOOD_TOKEN, 200, answer), signer, clock, sleeps).opened() as dgii:
-        found = await dgii.track_ids(T, ISSUER, FIRST)
+        found = await dgii.track_ids(WHO, T, ISSUER, FIRST)
     assert found is not None
     assert tuple(each.track_id for each in found) == ("a", "b", "c", "d")
     assert found[0].received_at == datetime(2026, 10, 13, 13, 15, tzinfo=UTC)
@@ -750,7 +801,7 @@ async def test_a_broken_answer_to_a_query_is_retried_then_a_failure(
     broken = BreaksAfterSending(httpx.ASGITransport(app=fake.app), "consultaresultado")
     async with client_over(broken, signer, clock, sleeps).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="broken"):
-            await dgii.result(T, "a")
+            await dgii.result(WHO, T, "a")
     assert sleeps == [0.2, 0.5]
 
 
@@ -768,10 +819,10 @@ async def test_every_attempt_has_a_time_limit(
     quick = DgiiTimeouts(connect=0.5, total=0.5)
     async with client_over(httpx.MockTransport(stalls), signer, clock, sleeps, quick).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="result: broken"):
-            await dgii.result(T, "a")
+            await dgii.result(WHO, T, "a")
         assert sleeps == [0.2, 0.5]
         with pytest.raises(OutcomeUnknownError, match="broken"):
-            await dgii.submit_ecf(T, ISSUER, FIRST, b"<ECF/>")
+            await dgii.submit_ecf(WHO, T, ISSUER, FIRST, b"<ECF/>")
     assert sleeps == [0.2, 0.5]
 
 
@@ -785,9 +836,9 @@ async def test_every_call_has_an_overall_deadline(
     tight = DgiiTimeouts(connect=5, total=5, call=0.1)
     async with client_over(httpx.MockTransport(stalls), signer, clock, sleeps, tight).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="result: timed_out"):
-            await dgii.result(T, "a")
+            await dgii.result(WHO, T, "a")
         with pytest.raises(AuthorityUnavailableError, match="reception: timed_out"):
-            await dgii.submit_ecf(T, ISSUER, FIRST, b"<ECF/>")
+            await dgii.submit_ecf(WHO, T, ISSUER, FIRST, b"<ECF/>")
     assert sleeps == []
 
 
@@ -800,12 +851,12 @@ async def test_no_retry_is_waited_for_past_the_deadline(
     tight = DgiiTimeouts(connect=5, total=5, call=0.15)
     async with client_over(httpx.MockTransport(handler), signer, clock, sleeps, tight).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="result: server_error"):
-            await dgii.result(T, "a")
+            await dgii.result(WHO, T, "a")
     assert sleeps == []
 
 
 @final
-class SlowSigner(XmlSigner):
+class SlowSigner(SignerPort):
     """Signs seeds slowly, as a signer process that takes its time."""
 
     __slots__ = ("_inner",)
@@ -814,13 +865,17 @@ class SlowSigner(XmlSigner):
         self._inner = inner
 
     @override
-    async def sign_document(self, document: bytes, *, signed_at: datetime, reference: str) -> bytes:
-        return await self._inner.sign_document(document, signed_at=signed_at, reference=reference)
+    async def sign_xml(self, call: SystemCall, request: XmlToSign) -> Signed:
+        raise AssertionError  # authentication signs seeds only
 
     @override
-    async def sign_seed(self, seed: bytes, *, audience: str) -> bytes:
+    async def sign_seed(self, call: SystemCall, request: SeedToSign) -> Signed:
         await asyncio.sleep(60)
-        return await self._inner.sign_seed(seed, audience=audience)
+        return await self._inner.sign_seed(call, request)
+
+    @override
+    async def certificate_validity(self, call: SystemCall, tenant: Tenant) -> CertificateValidity | None:
+        raise AssertionError  # the client never asks
 
 
 async def test_waiting_for_a_token_ends_with_the_deadline(
@@ -836,7 +891,9 @@ async def test_waiting_for_a_token_ends_with_the_deadline(
     slow = SlowSigner(signer)
     async with client_over(httpx.MockTransport(handler), slow, clock, sleeps, tight).opened() as dgii:
         first, second = await asyncio.gather(
-            dgii.result(T, "a"), dgii.submit_ecf(T, ISSUER, FIRST, b"<ECF/>"), return_exceptions=True
+            dgii.result(WHO, T, "a"),
+            dgii.submit_ecf(WHO, T, ISSUER, FIRST, b"<ECF/>"),
+            return_exceptions=True,
         )
         assert sleeps == []
     assert isinstance(first, AuthorityUnavailableError)
@@ -854,15 +911,15 @@ async def test_a_token_expiry_without_a_zone_is_read_as_utc(
     async with client_over(
         scripted_dgii(naive, 200, b'{"codigo": 0}'), signer, clock, sleeps
     ).opened() as dgii:
-        assert (await dgii.result(T, "a")).code == 0
-        assert (await dgii.result(T, "b")).code == 0
+        assert (await dgii.result(WHO, T, "a")).code == 0
+        assert (await dgii.result(WHO, T, "b")).code == 0
 
 
 async def test_a_buyer_missing_from_the_directory_is_none(
     signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
 ) -> None:
     async with client_over(scripted_dgii(GOOD_TOKEN, 200, b"[]"), signer, clock, sleeps).opened() as dgii:
-        assert await dgii.directory(T, "131098193") is None
+        assert await dgii.directory(WHO, T, "131098193") is None
 
 
 async def test_dgii_unreachable_and_a_client_not_opened_are_failures(
@@ -874,13 +931,13 @@ async def test_dgii_unreachable_and_a_client_not_opened_are_failures(
 
     async with client_over(httpx.MockTransport(refuse), signer, clock, sleeps).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="unreachable"):
-            await dgii.result(T, "a")
+            await dgii.result(WHO, T, "a")
     with pytest.raises(AuthorityUnavailableError, match="not_open"):
-        await dgii.result(T, "a")
+        await dgii.result(WHO, T, "a")
 
 
 async def test_the_directory_names_testecf_s_simulator(dgii: DgiiClient) -> None:
-    entry = await dgii.directory(T, "131098193")
+    entry = await dgii.directory(WHO, T, "131098193")
     assert entry is not None
     assert (entry.reception, entry.authentication) == (
         "https://ecf.fake.test/testecf/emisorreceptor",
@@ -895,21 +952,26 @@ OTHER_ENTRY: Final = b'[{"rnc": "101850043", "urlRecepcion": "https://a.example.
 @pytest.mark.parametrize(
     ("listed", "found"),
     [
-        (OTHER_ENTRY, None),
+        (OTHER_ENTRY, ("101850043", "https://a.example.com")),
         (
-            OTHER_ENTRY[:-1] + b', {"rnc": "131098193", "urlRecepcion": "https://b.example.com"}]',
-            "https://b.example.com",
+            OTHER_ENTRY[:-1] + b', {"rnc": " 131098193 ", "urlRecepcion": "https://b.example.com"}]',
+            ("131098193", "https://b.example.com"),
         ),
         (b"[]", None),
     ],
     ids=["another-rnc", "ours-second", "none"],
 )
-async def test_the_directory_answers_only_with_the_entry_of_the_rnc_asked_about(
-    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float], listed: bytes, found: str | None
+async def test_the_directory_answers_the_entry_of_the_rnc_asked_about_or_says_whose_it_is(
+    signer: KeyPairSigner,
+    clock: ManualClock,
+    sleeps: list[float],
+    listed: bytes,
+    found: tuple[str, str] | None,
 ) -> None:
+    # An entry naming another taxpayer is told as such (its rnc): whoever sends compares it first.
     async with client_over(scripted_dgii(GOOD_TOKEN, 200, listed), signer, clock, sleeps).opened() as dgii:
-        entry = await dgii.directory(T, "131098193")
-    assert (None if entry is None else entry.reception) == found
+        entry = await dgii.directory(WHO, T, "131098193")
+    assert (None if entry is None else (entry.rnc, entry.reception)) == found
 
 
 async def test_a_document_is_not_sent_with_less_time_left_than_an_attempt_may_take(
@@ -924,10 +986,10 @@ async def test_a_document_is_not_sent_with_less_time_left_than_an_attempt_may_ta
     short = DgiiTimeouts(connect=5, total=5, call=1)
     async with client_over(httpx.MockTransport(handler), signer, clock, sleeps, short).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="reception: timed_out"):
-            await dgii.submit_ecf(T, ISSUER, FIRST, b"<ECF/>")
+            await dgii.submit_ecf(WHO, T, ISSUER, FIRST, b"<ECF/>")
         with pytest.raises(AuthorityUnavailableError, match="rfce: timed_out"):
-            await dgii.submit_rfce(T, ISSUER, FIRST, b"<RFCE/>")
-        assert (await dgii.result(T, "a")).code == 0
+            await dgii.submit_rfce(WHO, T, ISSUER, FIRST, b"<RFCE/>")
+        assert (await dgii.result(WHO, T, "a")).code == 0
     assert sent == ["semilla", "validarsemilla", "estado"]
 
 
@@ -946,7 +1008,7 @@ async def test_a_document_refused_401_is_not_sent_again_once_too_little_time_is_
     tight = DgiiTimeouts(connect=5, total=2, call=2.5)
     async with client_over(httpx.MockTransport(handler), signer, clock, sleeps, tight).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="reception: timed_out"):
-            await dgii.submit_ecf(T, ISSUER, FIRST, b"<ECF/>")
+            await dgii.submit_ecf(WHO, T, ISSUER, FIRST, b"<ECF/>")
     assert sent.count("facturaselectronicas") == 1
 
 
@@ -955,12 +1017,12 @@ async def test_a_result_names_its_e_ncf_as_either_spelling_and_an_overlong_one_i
 ) -> None:
     lower = b'{"codigo": 1, "rnc": "101850043", "encf": "E310000000001"}'
     async with client_over(scripted_dgii(GOOD_TOKEN, 200, lower), signer, clock, sleeps).opened() as dgii:
-        answer = await dgii.result(T, "a")
+        answer = await dgii.result(WHO, T, "a")
     assert (answer.rnc, answer.encf) == (ISSUER, "E310000000001")
     overlong = b'{"codigo": 1, "eNCF": "E3100000000011"}'
     async with client_over(scripted_dgii(GOOD_TOKEN, 200, overlong), signer, clock, sleeps).opened() as dgii:
         with pytest.raises(AuthorityUnavailableError, match="result: unreadable"):
-            await dgii.result(T, "a")
+            await dgii.result(WHO, T, "a")
 
 
 async def test_a_client_is_ready_for_an_environment_only_open_and_on_hosts_that_may_serve_it(
@@ -998,9 +1060,9 @@ async def test_a_client_is_ready_only_when_every_host_the_environment_uses_may_s
 
 
 def test_a_client_s_longest_attempt_at_sending_is_its_per_attempt_limit(signer: KeyPairSigner) -> None:
-    network = outbound_over(None)
-    assert DgiiClient(signer, http=network).attempt_limit() == DEFAULT_TIMEOUTS.total
-    assert DgiiClient(signer, http=network, timeouts=DgiiTimeouts(total=42.0)).attempt_limit() == 42.0
+    network, documents = outbound_over(None), DocumentSigner(signer)
+    assert DgiiClient(documents, http=network).attempt_limit() == DEFAULT_TIMEOUTS.total
+    assert DgiiClient(documents, http=network, timeouts=DgiiTimeouts(total=42.0)).attempt_limit() == 42.0
 
 
 @pytest.mark.parametrize("service", ["submit", "rfce"])
@@ -1018,8 +1080,8 @@ async def test_dgii_is_called_through_the_channel_s_outbound_client_named_dgii(
 ) -> None:
     telemetry = Telemetry.unexported("do-ecf-v1")
     http = outbound_over(httpx.ASGITransport(app=fake.app), telemetry=telemetry)
-    async with DgiiClient(signer, http=http, hosts=FAKE_HOSTS, clock=clock).opened() as dgii:
-        await dgii.submit_ecf(T, ISSUER, FIRST, await signed_ecf(signer))
+    async with DgiiClient(DocumentSigner(signer), http=http, hosts=FAKE_HOSTS, clock=clock).opened() as dgii:
+        await dgii.submit_ecf(WHO, T, ISSUER, FIRST, await signed_ecf(signer))
     seen = {
         (sample.labels["client"], sample.labels["outcome"]): sample.value
         for metric in telemetry.registry.collect()
@@ -1028,3 +1090,322 @@ async def test_dgii_is_called_through_the_channel_s_outbound_client_named_dgii(
         if sample.name.endswith("_count")
     }
     assert seen == {("dgii", "2xx"): 3}  # the seed, its validation, the submission
+
+
+# -- One client for every company; RFCE query, range voids, approvals; services by environment ------------
+
+
+OTHER: Final = replace(
+    SIGNING_AS, company=CompanyId(UUID("0199e3a0-0000-7000-8000-0000000000b2")), reason="do-ecf-v1.other"
+)
+"""A second issuing company of the same organization."""
+
+
+async def test_two_companies_get_a_token_each_from_a_seed_each_signs(
+    signer: KeyPairSigner, fake: FakeDgii, clock: ManualClock, sleeps: list[float]
+) -> None:
+    recording = seed_signer(signer)
+    counting = Counting(httpx.ASGITransport(app=fake.app))
+    async with client_over(counting, recording, clock, sleeps).opened() as dgii:
+        for _ in range(2):
+            await dgii.result(WHO, T, "a")
+            await dgii.result(OTHER, T, "a")
+    assert counting.paths.count(SEED_PATH) == 2
+    assert [call.tenant for call in recording.calls] == [WHO.tenant, OTHER.tenant]
+    assert len(set(fake.state.dgii.issued())) == 2
+
+
+async def test_a_token_dgii_refuses_is_renewed_for_its_company_only(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
+) -> None:
+    issued: list[str] = []
+    used: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/semilla"):
+            return reply(200, SEED)
+        if request.url.path.endswith("validarsemilla"):
+            issued.append(f"t{len(issued) + 1}")
+            return reply(200, b'{"token": "' + issued[-1].encode() + b'", "expira": "2099-12-31T00:00:00Z"}')
+        token = request.headers["authorization"].removeprefix("Bearer ")
+        used.append(token)
+        return reply(401) if token == "t1" and used.count("t1") == 2 else reply(200, b'{"codigo": 0}')
+
+    recording = seed_signer(signer)
+    async with client_over(httpx.MockTransport(handler), recording, clock, sleeps).opened() as dgii:
+        await dgii.result(WHO, T, "a")
+        await dgii.result(OTHER, T, "a")
+        await dgii.result(WHO, T, "b")
+        await dgii.result(OTHER, T, "b")
+    assert issued == ["t1", "t2", "t3"]
+    assert used == ["t1", "t2", "t1", "t3", "t2"]
+    assert [call.tenant for call in recording.calls] == [WHO.tenant, OTHER.tenant, WHO.tenant]
+
+
+async def signed_summary(signer: KeyPairSigner) -> tuple[str, bytes]:
+    draft = consumer_invoice()
+    return "dcp79q", signer.sign(rfce.render(draft, compute_totals(draft), security_code="dcp79q"))
+
+
+@dataclass(frozen=True, slots=True)
+class Queried:
+    """An RFCE the fake decided ``status``: ``consultarfce`` answers ``code``, which maps to ``state``."""
+
+    status: Status
+    code: RfceQueryCode
+    state: EcfState
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        Queried(Status.ACCEPTED, RfceQueryCode.ACCEPTED, EcfState.ACCEPTED),
+        Queried(
+            Status.ACCEPTED_CONDITIONALLY,
+            RfceQueryCode.ACCEPTED_CONDITIONALLY,
+            EcfState.ACCEPTED_CONDITIONALLY,
+        ),
+        Queried(Status.REJECTED, RfceQueryCode.REJECTED, EcfState.REJECTED),
+    ],
+    ids=["accepted", "accepted-conditionally", "rejected"],
+)
+async def test_an_rfce_sent_is_asked_about_on_the_fc_host_and_mapped_by_consultarfce_s_codes(
+    dgii: DgiiClient, signer: KeyPairSigner, fake: FakeDgii, case: Queried
+) -> None:
+    fake.script.default = Scripted(status=case.status)
+    security, summary = await signed_summary(signer)
+    draft = consumer_invoice()
+    await dgii.submit_rfce(WHO, T, ISSUER, draft.encf, summary)
+    answer = await dgii.rfce_status(WHO, T, ISSUER, draft.encf, security)
+    outcome = decide(
+        answer.code,
+        sequence_used=answer.sequence_used,
+        messages=answer.messages,
+        service=DgiiService.RFCE_QUERY,
+    )
+    assert (outcome.code, outcome.state, outcome.final) == (case.code, case.state, True)
+    assert (answer.rnc, answer.encf) == (ISSUER, str(draft.encf))
+    assert fake.received[-1].host == "fc.fake.test"
+
+
+async def test_consultarfce_is_asked_on_dgii_s_fc_host(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
+) -> None:
+    asked: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append((request.url.host, request.url.path))
+        return seeded(request.url.path) or reply(200, b'{"codigo": "0"}')
+
+    async with client_over(httpx.MockTransport(handler), signer, clock, sleeps).opened() as dgii:
+        await dgii.rfce_status(WHO, T, ISSUER, Encf(EcfType.CONSUMER_INVOICE, 9), "abc123")
+    assert asked[-1] == ("fc.fake.test", "/testecf/consultarfce/api/consultas/consulta")
+    assert {host for host, _ in asked[:-1]} == {"ecf.fake.test"}  # the token is the ecf host's
+
+
+async def test_an_rfce_dgii_has_not_recorded_is_no_encontrado_and_not_final(
+    dgii: DgiiClient, fake: FakeDgii
+) -> None:
+    sent = len(fake.received)
+    answer = await dgii.rfce_status(WHO, T, ISSUER, Encf(EcfType.CONSUMER_INVOICE, 9), "abc123")
+    outcome = decide(
+        answer.code,
+        sequence_used=answer.sequence_used,
+        messages=answer.messages,
+        service=DgiiService.RFCE_QUERY,
+    )
+    assert (outcome.code, outcome.state, outcome.final) == (
+        RfceQueryCode.NOT_FOUND,
+        EcfState.OUTCOME_UNKNOWN,
+        False,
+    )
+    assert len(fake.received) == sent  # asking sends nothing
+
+
+def signed_anecf(signer: KeyPairSigner) -> bytes:
+    voided = (VoidedRange(EcfType.CREDIT_INVOICE, 51, 100),)
+    return signer.sign(render_anecf(issuer_rnc=ISSUER, ranges=voided, at=SIGNED_AT))
+
+
+def signed_acecf(signer: KeyPairSigner) -> bytes:
+    approval = CommercialApproval(
+        issuer_rnc=ISSUER,
+        buyer_rnc="131098193",
+        encf=FIRST,
+        issued_on=date(2026, 10, 13),
+        total=Decimal("4887.58"),
+        approved=True,
+        reason=None,
+        at=SIGNED_AT,
+    )
+    return signer.sign(render_acecf(approval))
+
+
+async def test_a_signed_anecf_voids_its_ranges_once(
+    dgii: DgiiClient, signer: KeyPairSigner, fake: FakeDgii
+) -> None:
+    anecf = signed_anecf(signer)
+    answer = await dgii.void_ranges(WHO, T, anecf)
+    assert isinstance(answer, Answer)
+    assert (answer.code, answer.rnc, answer.sequence_used) == (1, ISSUER, None)
+    assert fake.state.voids == [anecf]
+    unsigned = render_anecf(
+        issuer_rnc=ISSUER, ranges=(VoidedRange(EcfType.CREDIT_INVOICE, 1, 1),), at=SIGNED_AT
+    )
+    refused = await dgii.void_ranges(WHO, T, unsigned)
+    assert isinstance(refused, Refused)
+
+
+async def test_a_buyer_s_signed_acecf_reaches_dgii(
+    dgii: DgiiClient, signer: KeyPairSigner, fake: FakeDgii
+) -> None:
+    acecf = signed_acecf(signer)
+    acknowledged = await dgii.commercial_approval(WHO, T, acecf)
+    assert acknowledged == Acknowledged("Aprobado", (DgiiMessage("", "Aprobación comercial recibida"),))
+    assert fake.state.dgii_approvals == [acecf]
+    assert isinstance(await dgii.commercial_approval(WHO, T, b"<ACECF/>"), Refused)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        MayHaveTaken(500, b"", "void", "server_error"),
+        MayHaveTaken(200, b"not json", "void", "unreadable"),
+        MayHaveTaken(200, b'{"codigo": "x"}', "void", "unreadable"),
+        MayHaveTaken(404, b"", "approval", "undocumented"),
+        MayHaveTaken(200, b'{"estado": ' + b'"x"' * 2 + b"}", "approval", "unreadable"),
+        MayHaveTaken(200, b'{"mensaje": ["recibido"]}', "approval", "unreadable"),
+    ],
+    ids=[
+        "void-500",
+        "void-not-json",
+        "void-code-not-a-number",
+        "approval-404",
+        "approval-not-json",
+        "approval-without-state",
+    ],
+)
+async def test_a_void_or_an_approval_dgii_may_have_taken_has_an_unknown_outcome(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float], case: MayHaveTaken
+) -> None:
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.url.path)
+        return seeded(request.url.path) or reply(case.status, case.answer)
+
+    async with client_over(httpx.MockTransport(handler), signer, clock, sleeps).opened() as dgii:
+        with pytest.raises(OutcomeUnknownError, match=case.reason):
+            await call(dgii, case.service)
+    assert len(sent) == len(("seed", "validation", "the document, once"))
+
+
+async def test_void_messages_are_read_as_text_or_as_dgii_s_message_objects(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
+) -> None:
+    answer = b'{"rnc": "101850043", "codigo": "2", "mensajes": ["rango usado", {"codigo": 7, "valor": "x"}]}'
+    async with client_over(scripted_dgii(GOOD_TOKEN, 200, answer), signer, clock, sleeps).opened() as dgii:
+        voided = await dgii.void_ranges(WHO, T, b"<ANECF/>")
+    assert voided == Answer(
+        code=2,
+        messages=(DgiiMessage("", "rango usado"), DgiiMessage("7", "x")),
+        sequence_used=None,
+        rnc=ISSUER,
+    )
+
+
+@pytest.mark.parametrize("service", ["void", "track_ids", "directory"])
+async def test_what_certecf_does_not_publish_is_refused_before_anything_is_sent(
+    signer: KeyPairSigner, fake: FakeDgii, clock: ManualClock, sleeps: list[float], service: str
+) -> None:
+    counting = Counting(httpx.ASGITransport(app=fake.app))
+    recording = seed_signer(signer)
+    async with client_over(counting, recording, clock, sleeps).opened() as dgii:
+        with pytest.raises(ServiceNotInEnvironmentError):
+            await call(dgii, service, Environment.CERTECF)
+    assert (counting.paths, recording.calls) == ([], [])
+
+
+async def test_a_call_whose_deadline_s_timer_fires_a_clock_tick_early_is_still_timed_out(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # asyncio runs a timer due within a clock resolution of now (Windows: about 16 ms): which limit ended an
+    # attempt is the one asyncio armed, never what the clock reads once it has. The resolution is widened and
+    # the server wakes once inside the window, so the deadline's timer fires before the deadline.
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "_clock_resolution", 0.25)
+    cancelled_at: list[float] = []
+
+    async def wakes_then_stalls(request: httpx.Request) -> httpx.Response:
+        if (answer := seeded(request.url.path)) is not None:
+            return answer
+        try:
+            await asyncio.sleep(0.2)
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled_at.append(loop.time())
+            raise
+        return reply(200, b"{}")
+
+    tight = DgiiTimeouts(connect=5, total=5, call=0.3)
+    async with client_over(
+        httpx.MockTransport(wakes_then_stalls), signer, clock, sleeps, tight
+    ).opened() as dgii:
+        earliest_deadline = loop.time() + tight.call
+        with pytest.raises(AuthorityUnavailableError, match="result: timed_out"):
+            await dgii.result(WHO, T, "a")
+    assert sleeps == []
+    # The timer fired before the deadline: reading the clock (the old rule) would have said "broken".
+    [fired] = cancelled_at
+    assert fired < earliest_deadline
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class Logging:
+    """What the platform's logging reads of an app's settings: everything, as text."""
+
+    environment: str = "test"
+    log_level: str = "DEBUG"
+    log_format: LogFormat = LogFormat.CONSOLE
+
+
+async def test_no_log_line_and_no_error_names_a_tax_id(
+    capsys: pytest.CaptureFixture[str],
+    signer: KeyPairSigner,
+    fake: FakeDgii,
+    clock: ManualClock,
+    sleeps: list[float],
+) -> None:
+    """The platform's logging is configured once ``capsys`` holds stdout: every line written is captured."""
+    told: list[str] = []
+    # signxml (the fake's second opinion, a test dependency the channel never loads) logs whole documents at
+    # DEBUG: the fake checks with the channel's own verifier alone here.
+    fake.state.check = VerifierCheck(trusted=None)
+    with restored_logging():
+        configure_logging(Logging(), service="ledger-worker")
+        logging.getLogger("ledger_country_do").debug("logging reaches the capture")
+        async with client_over(httpx.ASGITransport(app=fake.app), signer, clock, sleeps).opened() as dgii:
+            await dgii.submit_ecf(WHO, T, ISSUER, FIRST, await signed_ecf(signer))
+            await dgii.track_ids(WHO, T, ISSUER, FIRST)
+            await dgii.rfce_status(WHO, T, ISSUER, Encf(EcfType.CONSUMER_INVOICE, 9), "abc123")
+            await dgii.directory(WHO, T, "131098193")
+            for service, environment in (
+                ("track_ids", Environment.CERTECF),
+                ("directory", Environment.CERTECF),
+                ("submit", Environment.ECF),
+            ):
+                with pytest.raises(EcfError) as raised:
+                    await call(dgii, service, environment)
+                told += [str(raised.value), repr(raised.value)]
+        fake.script.outage = -1
+        async with client_over(httpx.ASGITransport(app=fake.app), signer, clock, sleeps).opened() as dgii:
+            for service in ("track_ids", "submit"):
+                with pytest.raises(EcfError) as raised:
+                    await call(dgii, service)
+                told += [str(raised.value), repr(raised.value)]
+    out = capsys.readouterr().out
+    assert "logging reaches the capture" in out
+    assert [
+        tax_id for tax_id in (ISSUER, "131098193") if tax_id in out or any(tax_id in each for each in told)
+    ] == []

@@ -8,12 +8,16 @@ never guessed. Validation errors never repeat their input (``hide_input_in_error
 not fit must not put the token in an error.
 """
 
-from typing import ClassVar
+from typing import Annotated, ClassVar
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 BEARER_ALPHABET = r"^[A-Za-z0-9._~+/=-]+$"
 """What a bearer token is made of (RFC 6750's ``b64token``): nothing that could break out of its header."""
+
+
+type _Text = Annotated[str, Field(max_length=2000)]
+"""A message DGII gives as bare text."""
 
 
 class _Answer(BaseModel):
@@ -54,6 +58,28 @@ class ResultAnswer(_Answer):
     sequence_used: bool | None = Field(default=None, alias="secuenciaUtilizada")
     rnc: str | None = Field(default=None, max_length=11)
     encf: str | None = Field(default=None, validation_alias=AliasChoices("eNCF", "encf"), max_length=13)
+
+
+class VoidAnswer(_Answer):
+    """``anularrango``: ``{rnc, codigo, nombre, mensajes}``.
+
+    DGII's code is read as a number, its messages as text or as ``{codigo, valor}``: DT-DGII's shape as the
+    integration notes record it, to be checked on TesteCF (Task 29).
+    """
+
+    code: int = Field(alias="codigo")
+    rnc: str | None = Field(default=None, max_length=11)
+    messages: list[_Text | MessageAnswer] = Field(
+        default_factory=list[_Text | MessageAnswer], alias="mensajes", max_length=200
+    )
+
+
+class ApprovalAnswer(_Answer):
+    """``aprobacioncomercial`` to DGII: ``{mensaje: [...], estado}``, as the integration notes record it."""
+
+    state: str = Field(alias="estado", max_length=256)
+    """Required: an answer without it is not the one recorded, so its outcome is unknown (until TesteCF)."""
+    messages: list[_Text] = Field(default_factory=list[_Text], alias="mensaje", max_length=200)
 
 
 class TrackIdAnswer(_Answer):
