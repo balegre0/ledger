@@ -12,14 +12,19 @@ Every client role (``api``, ``worker``, ``receiver``) reaches it over gRPC: give
 own token (``LEDGER_SIGNER_ADDRESS``, ``LEDGER_SIGNER_TOKEN_<ROLE>``), it binds one ``SignerClient`` as
 ``SignerApi`` and ``SignerPort`` and hands it as a resource (its channel opened at start, closed at stop). It
 reads its own role's token, never another caller's. Without either, it binds the stand-ins answering
-``signer_unavailable`` and logs ``signer.not_configured`` once: nothing fails at the start (Decision 13). No
-client role hands a readiness check: no app's readiness depends on the signer (spec §3.7); none hands a
-consumer or a job (only the signer's role runs them). ``migrate`` runs its revisions.
+``signer_unavailable`` and logs ``signer.not_configured`` once: nothing fails at the start (Decision 13).
+``api`` mounts ``/v1/certificates`` either way, over the client or the stand-in (whose routes answer 503),
+asking identity's API what a caller may do in a company. No client role hands a readiness check: no app's
+readiness depends on the signer (spec §3.7); none hands a consumer or a job (only the signer's role runs
+them). ``migrate`` runs its revisions.
 """
 
 from typing import Final
 
+lazy from fastapi import APIRouter
+
 from ledger_fiscal_kit.ports import SIGNER_PORT
+from ledger_identity.api import IDENTITY_API
 from ledger_platform.events.consumers import ConsumerSpec
 from ledger_platform.grpc.server import ServerOptions
 from ledger_platform.jobs.maintenance import maintenance_jobs
@@ -27,12 +32,15 @@ from ledger_platform.jobs.outcomes import JobSpec
 from ledger_platform.runtime import Module, ModuleParts
 from ledger_signer._manifest import MANIFEST
 from ledger_signer.adapters.grpc.client import SignerClient
+from ledger_signer.adapters.http.router import Routes, router
+from ledger_signer.adapters.identity import IdentityPermissions
 from ledger_signer.adapters.postgres.schema import MIGRATIONS, migrations
 from ledger_signer.adapters.settings import SignerSettings
 from ledger_signer.adapters.unavailable import UnavailableSigner
 from ledger_signer.api import SIGNER_API
 lazy from ledger_platform.runtime import ModuleContext
 lazy from ledger_signer.adapters.grpc.server import SignerServer
+lazy from ledger_signer.adapters.http.service import CertificateService
 lazy from ledger_signer.adapters.serving import (
     build,
     caller_tokens,
@@ -57,6 +65,14 @@ def _client(settings: SignerSettings, caller: Caller) -> SignerClient | None:
     return SignerClient(
         address, token, deadline=settings.deadline_seconds, import_deadline=settings.import_deadline_seconds
     )
+
+
+def _routers(context: ModuleContext, service: CertificateService) -> tuple[APIRouter, ...]:
+    """``/v1/certificates`` over ``service`` in ``api``; no other role mounts them."""
+    if context.role != "api":
+        return ()
+    permissions = IdentityPermissions(context.apis.get(IDENTITY_API))
+    return (router(Routes.build(authentication=context.auth, permissions=permissions, service=service)),)
 
 
 def _signer(context: ModuleContext) -> ModuleParts:
@@ -97,6 +113,7 @@ def assemble(context: ModuleContext) -> ModuleParts:
                 return ModuleParts(
                     api=SIGNER_API.bind(client),
                     provides=(SIGNER_PORT.bind(client),),
+                    routers=_routers(context, client),
                     resources=(client,),
                     migrations=migrations(),
                 )
@@ -107,6 +124,7 @@ def assemble(context: ModuleContext) -> ModuleParts:
     return ModuleParts(
         api=SIGNER_API.bind(unavailable),
         provides=(SIGNER_PORT.bind(unavailable),),
+        routers=_routers(context, unavailable),
         migrations=migrations(),
     )
 

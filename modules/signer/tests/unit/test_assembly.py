@@ -20,6 +20,7 @@ lazy from pathlib import Path
 
 import grpc
 import pytest
+from fastapi.routing import APIRoute
 from prometheus_client import CollectorRegistry
 from pydantic import SecretStr
 
@@ -47,13 +48,23 @@ from ledger_signer.adapters.postgres.schema import MIGRATIONS
 from ledger_signer.adapters.serving import KmsKeyFileMissingError
 from ledger_signer.adapters.settings import SignerSettings
 from ledger_signer.adapters.unavailable import UnavailableSigner
-from ledger_signer.api import SIGNER_API
+from ledger_signer.api import SIGNER_API, CertificateId
 from ledger_signer.application.facade import SignerFacade
+from ledger_signer.application.importing import ImportRequest
+from ledger_signer.application.ports import Secret
 from ledger_signer.assembly import MODULE
 lazy from ledger_kernel.errors import LedgerError
 lazy from ledger_platform.runtime import AppRole, ModuleContext, ModuleParts
 lazy from ledger_platform.runtime.keys import Binding
 
+ROUTES: Final = [
+    ("POST", "/v1/certificates"),
+    ("POST", "/v1/certificates/remote"),
+    ("GET", "/v1/certificates"),
+    ("GET", "/v1/certificates/{certificate_id}"),
+    ("DELETE", "/v1/certificates/{certificate_id}"),
+]
+"""What ``api`` mounts of signer, whether it reaches the signer or not."""
 URL: Final = "postgresql+psycopg://ledger_app:x@127.0.0.1:1/ledger"
 TOKENS: Final = {
     "api": "api-token-0123456789abcdefghijklmnopqrstuv",
@@ -176,6 +187,17 @@ def configure(monkeypatch: pytest.MonkeyPatch, address: str | None, *callers: st
         monkeypatch.setenv(f"LEDGER_SIGNER_TOKEN_{caller.upper()}", TOKENS[caller])
 
 
+def routes_of(parts: ModuleParts) -> list[tuple[str, str]]:
+    """The routes signer hands an app: each method and path."""
+    return [
+        (method, route.path)
+        for router in parts.routers
+        for route in router.routes
+        if isinstance(route, APIRoute)
+        for method in sorted(route.methods or ())
+    ]
+
+
 def bound(binding: Binding | None) -> object:
     """What ``binding`` binds; there must be one."""
     assert binding is not None
@@ -210,6 +232,7 @@ async def test_a_configured_client_role_binds_one_client_with_its_own_token(
     assert (parts.consumers, parts.jobs, dict(parts.checks)) == ((), (), {})  # nothing of the signer's own
     assert [member.relay_only for member in app.members if member.name == "signer"] == [True]
     assert "signer.not_configured" not in capsys.readouterr().out
+    assert routes_of(parts) == (ROUTES if role == "api" else [])
     async with AsyncExitStack() as resources:
         for resource in parts.resources:
             _ = await resources.enter_async_context(resource)
@@ -235,6 +258,7 @@ async def test_an_unconfigured_client_role_binds_the_stand_ins_and_says_so_once(
     assert isinstance(stand_in, UnavailableSigner)
     assert [(binding.name, binding.value) for binding in parts.provides] == [(SIGNER_PORT.name, stand_in)]
     assert (parts.consumers, parts.jobs, dict(parts.checks), parts.resources) == ((), (), {}, ())
+    assert routes_of(parts) == []
     [line] = [line for line in capsys.readouterr().out.splitlines() if "signer.not_configured" in line]
     assert "warning" in line
     assert "role=worker" in line
@@ -367,6 +391,33 @@ async def test_the_unbound_port_answers_signer_unavailable() -> None:
         await stand_in.certificate_validity(CALL, TENANT)
     with pytest.raises(SignerUnavailableError):
         await stand_in.certificates(CALL, TENANT.company, Mode.TEST)
+    request = ImportRequest(tenant=TENANT, modes=frozenset({Mode.TEST}), idempotency_key="k")
+    with pytest.raises(SignerUnavailableError):
+        await stand_in.describe(CALL, TENANT, include_retired=True)
+    with pytest.raises(SignerUnavailableError):
+        await stand_in.retire(CALL, TENANT, CertificateId(new_id()))
+    read: list[bytes] = []
+    with pytest.raises(SignerUnavailableError):
+        await stand_in.import_local(CALL, request, Secret("password"), unread(read))
+    with pytest.raises(SignerUnavailableError):
+        await stand_in.import_remote(CALL, request, Secret("credential"))
+    assert read == []  # the bundle was left unread
+
+
+async def unread(read: list[bytes]) -> AsyncGenerator[bytes]:
+    """A bundle that records being read in ``read``."""
+    read.append(b"bundle")
+    yield b"bundle"
+
+
+@pytest.mark.parametrize("address", [None, "signer:50051"], ids=["unconfigured", "configured"])
+async def test_api_mounts_the_certificates_whether_or_not_it_reaches_the_signer(
+    recorded: Recorded, monkeypatch: pytest.MonkeyPatch, address: str | None
+) -> None:
+    """Unconfigured, each route answers 503 ``signer_unavailable`` (Decision 13): the document is the same."""
+    configure(monkeypatch, address, "api")
+    _, parts = await assembled(recorded, "api")
+    assert routes_of(parts) == ROUTES
 
 
 _PROBE: Final = """

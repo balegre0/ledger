@@ -70,6 +70,7 @@ from ledger_signer.adapters.grpc.codec import (
     ImportHeaderFirstError,
     ImportTooSlowError,
 )
+from ledger_signer.adapters.http.service import CertificateService
 from ledger_signer.adapters.settings import MAX_DEADLINE_SECONDS
 from ledger_signer.api import BackendKind, BackendNotOfferedError, CertificateNotFoundError, SignerApi
 from ledger_signer.application.facade import port_error
@@ -233,7 +234,7 @@ def _asked(error: RemoteError) -> LedgerError | None:
 
 
 @final
-class SignerClient(SignerPort, SignerApi):
+class SignerClient(SignerPort, SignerApi, CertificateService):
     """The signer, reached over gRPC with one caller's token (see the module)."""
 
     __slots__ = ("_address", "_channel", "_deadline", "_import_deadline", "_stub", "_token")
@@ -371,6 +372,7 @@ class SignerClient(SignerPort, SignerApi):
             raise InvalidValueError(field="call.scope", requirement="an organization or company scope")
         return await self.describe(call, Tenant(scope.organization, company, mode), include_retired=False)
 
+    @override
     @facade
     async def describe(
         self, call: Call | SystemCall, tenant: Tenant, *, include_retired: bool
@@ -381,6 +383,7 @@ class SignerClient(SignerPort, SignerApi):
         answer = await _mapped(sent, _asked)
         return tuple(codec.certificate_view(certificate) for certificate in answer.certificates)
 
+    @override
     @facade
     async def retire(
         self, call: Call | SystemCall, company: Tenant, certificate: CertificateId
@@ -391,6 +394,7 @@ class SignerClient(SignerPort, SignerApi):
         answer = await _mapped(sent, _asked)
         return codec.certificate_view(answer.certificate)
 
+    @override
     @facade
     async def import_local(
         self, call: Call | SystemCall, request: ImportRequest, password: Secret, bundle: AsyncIterable[bytes]
@@ -400,6 +404,7 @@ class SignerClient(SignerPort, SignerApi):
             call, BackendKind.LOCAL, partial(codec.local_header, call, request, password), bundle
         )
 
+    @override
     @facade
     async def import_remote(
         self, call: Call | SystemCall, request: ImportRequest, credential: Secret

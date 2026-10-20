@@ -33,6 +33,7 @@ MANIFEST: Final = PackageManifest.model_validate(
             "python": [
                 "alembic>=1.20.0",
                 "cryptography>=50.0.2",
+                "fastapi>=0.143.0",
                 "grpcio>=1.84.0",
                 "prometheus-client>=0.26.0",
                 "protobuf>=7.36.2",
@@ -40,6 +41,7 @@ MANIFEST: Final = PackageManifest.model_validate(
                 "pydantic>=2.14.1",
                 "pydantic-settings>=2.15.0",
                 "sqlalchemy>=2.1.4",
+                "starlette>=1.7.0",
             ],
             "test": [
                 "signxml>=5.1.0",

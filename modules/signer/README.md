@@ -39,6 +39,17 @@ ADR 0010; plan `docs/superpowers/plans/2026-10-19-v2-m2b-signer.md`).
   `receiver`) bind the gRPC client ([`adapters/grpc/client.py`](src/ledger_signer/adapters/grpc/client.py)) with
   their own token, or, unconfigured, stand-ins answering `signer_unavailable` (`signer.not_configured`); no
   client role's readiness calls the signer. Messages map to DTOs in one place, `adapters/grpc/codec.py`.
+- HTTP (`adapters/http`, mounted by `api` over the client or the stand-ins): `POST /v1/certificates` (the
+  PKCS#12 bundle as the raw `application/x-pkcs12` body, at most 2 MiB, streamed to `ImportCertificate` as it
+  arrives and never parsed by the api; its password in `Ledger-Certificate-Password`; `?modes=` repeatable),
+  `POST /v1/certificates/remote` (an entity's credential), `GET /v1/certificates` (`include_retired`, one
+  page), `GET` and `DELETE /v1/certificates/{crt_…}` (among the certificates of the request's mode; a delete
+  retires for every mode). Every route asserts the caller's role in the `Ledger-Company` (identity's API) before
+  calling the signer, which trusts the company and actor it is sent. `Idempotency-Key` passes through to the
+  signer, which keeps it (one operation, *import*, for both routes; a retry needs the manage permission still).
+  The signer's refusals keep their codes (`problems.py`): its `INVALID` family 422, conflicts 409,
+  `certificate_not_found` 404, a bundle past 2 MiB 413, one too slow 408, the signer out of reach 503 with
+  `Retry-After: 5`; our own client's stream defects and unmapped answers 500 `internal`.
 - Service (`adapters/grpc/server.py`, put together by `adapters/serving.py`): in the `signer` role the
   assembly checks every caller's token (present, 32+ visible ASCII characters, none shared, a `_PREVIOUS` one
   only beside a current one), the local-file KMS (`LEDGER_SIGNER_KMS_KEY_FILE` named, `local`/`test` only) and

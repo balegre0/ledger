@@ -69,6 +69,7 @@ from ledger_signer.adapters.grpc.codec import (
     ImportHeaderFirstError,
     ImportTooSlowError,
 )
+from ledger_signer.adapters.http.router import BodyIncompleteError
 from ledger_signer.adapters.serving import SignerWorkUnreadableError
 from ledger_signer.api import (
     BackendKind,
@@ -676,8 +677,9 @@ SIGNATURE_ONLY: Final = frozenset(
     }
 )
 """The signer's refusals no API call answers: a signature's, mapped to the port's errors by ``port_error``."""
-UNANSWERED: Final = frozenset({SignerWorkUnreadableError.code})
-"""The signer's refusals no call answers at all: a job's or an event's it cannot read (they end it dead)."""
+UNANSWERED: Final = frozenset({SignerWorkUnreadableError.code, BodyIncompleteError.code})
+"""The refusals no call of the signer answers: a job's or an event's it cannot read (they end it dead), and
+the api's own refusal of a request whose body never ended (no call was made)."""
 
 
 def declared(base: type[LedgerError]) -> Iterator[type[LedgerError]]:
