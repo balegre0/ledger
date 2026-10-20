@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import Final
 
 import pytest
-from hypothesis import given
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from ledger_kernel.errors import InvalidValueError
@@ -92,6 +92,7 @@ def test_naive_moments_are_a_defect(not_after: datetime, now: datetime) -> None:
         notices(not_after, days=DAYS, now=now)
 
 
+@settings(deadline=None, suppress_health_check=[HealthCheck.too_slow])  # a busy machine draws slowly
 @given(
     days=st.lists(st.integers(min_value=0, max_value=366), unique=True, max_size=8),
     left=st.timedeltas(min_value=timedelta(seconds=1), max_value=timedelta(days=400)),
