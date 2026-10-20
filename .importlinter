@@ -422,8 +422,6 @@ forbidden_modules =
     testcontainers
     tzdata
     xmlschema
-ignore_imports =
-    ledger_fiscal_kit.** -> **
 
 [importlinter:contract:modules-never-import-countries]
 name = Modules never import countries

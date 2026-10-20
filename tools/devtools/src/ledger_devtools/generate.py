@@ -75,8 +75,6 @@ _CHANNEL_LAYERS: Final = ("adapters", "application", "domain")
 """A channel's layers, top to bottom (§4.6 contract 10)."""
 _CHANNEL_PURE: Final = ("application", "domain")
 """A channel's layers that know no third party (§4.6 contract 11)."""
-_KIT: Final = "ledger_fiscal_kit"
-"""The fiscal contract a channel's pure layers may import (§4.6 contract 1)."""
 _BARE_KEY: Final = re.compile(r"[A-Za-z0-9_-]+", re.ASCII)
 _PYTEST_PLUGIN: Final = ("ledger", "ledger_testing.plugin")
 """The shared pytest plugin's entry point (group ``pytest11``): the package named ``testing`` declares it."""
@@ -460,11 +458,7 @@ def _channels(facts: _Facts, country: Package) -> tuple[str, ...]:
 def _channel_contracts(facts: _Facts, country: Package) -> Iterator[str | None]:
     """Each channel of ``country`` is layered, and its domain and use cases know no third party."""
     root = facts.workspace.root / country.source / "channels"
-    allowed = {country.import_name, "ledger_kernel", _KIT}
-    # The kit is the contract a channel implements; what it imports itself (the platform's call and codec, the
-    # validation of its JSON form) its own declared edges govern. Its edges are left out of this contract only:
-    # a channel's domain importing the platform or a third party directly is still refused.
-    through_kit = [("ignore_imports", [f"{_KIT}.** -> **"])] if _KIT in facts.roots else []
+    allowed = {country.import_name, "ledger_kernel", "ledger_fiscal_kit"}
     for channel in _channels(facts, country):
         container = f"{country.import_name}.channels.{channel}"
         present = [layer for layer in _CHANNEL_LAYERS if (root / channel / layer).is_dir()]
@@ -482,7 +476,6 @@ def _channel_contracts(facts: _Facts, country: Package) -> Iterator[str | None]:
             "forbidden",
             ("source_modules", [f"{container}.{layer}" for layer in _CHANNEL_PURE if layer in present]),
             ("forbidden_modules", sorted({*facts.third_party, *facts.roots} - allowed)),
-            *through_kit,
         )
 
 

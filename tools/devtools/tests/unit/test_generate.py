@@ -522,20 +522,6 @@ def test_a_country_s_channels_on_disk_are_layered_and_pure(tree: Path, write: Wr
     assert {"    lxml", "    ledger_platform", "    ledger_identity"} <= set(forbidden)
     assert not {"    ledger_kernel", "    ledger_country_do"} & set(forbidden)
     assert "notes" not in text
-    assert "ignore_imports" not in pure
-
-
-def test_a_channel_reaches_what_fiscal_kit_imports_only_through_the_kit(tree: Path, write: Writer) -> None:
-    # The kit is the contract a channel implements: what it imports itself (the platform's call and codec, the
-    # validation of its JSON form) is its own declared edges' business, not the channel's domain's.
-    source = write("countries/do", COUNTRY, ("regime", "channels"))
-    write("packages/fiscal-kit", FISCAL_KIT, ())
-    (source / "channels/ecf_v1/domain").mkdir(parents=True)
-    text = importlinter_text(Workspace.load(tree))
-    pure = text.split("[importlinter:contract:do-channel-ecf_v1-is-pure]\n", 1)[1].split("\n\n", 1)[0]
-    assert pure.endswith("ignore_imports =\n    ledger_fiscal_kit.** -> **")
-    forbidden = pure.split("forbidden_modules =\n", 1)[1].split("ignore_imports", 1)[0].splitlines()
-    assert "    ledger_fiscal_kit" not in forbidden
 
 
 def test_targets_cover_init_sql_and_the_openapi_document_of_each_module_the_api_mounts(
