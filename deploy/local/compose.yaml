@@ -27,7 +27,8 @@
 # and the worker's probes and metrics on 127.0.0.1:${LEDGER_WORKER_PORT:-8101} (8000 is another project's on this
 # machine). Each runs one Granian worker (scale by replicas); Granian kills one still stopping after 30 s, so
 # compose waits 40 s before its own kill.
-# The profile `zitadel` adds a local identity provider (zitadel/README.md).
+# The profile `zitadel` adds a local identity provider (zitadel/README.md); the profile `localstack` adds an S3
+# with object lock for the archive's s3 backend (ledger.env says how to point the apps at it).
 name: ledger
 
 x-ledger: &ledger
@@ -131,6 +132,34 @@ services:
       start_period: 20s
     depends_on:
       postgres: {condition: service_healthy}
+
+  localstack:
+    # S3 with object lock, optional: `docker compose --profile localstack up -d --wait localstack`. The pinned
+    # image (images.toml: the last LocalStack that starts without an auth token) runs S3 alone; at its first
+    # start localstack/init-s3.sh makes the bucket `ledger-archive` with object lock and a ten-year default
+    # retention in compliance mode, as production's is made. On the host it answers on
+    # 127.0.0.1:${LEDGER_LOCALSTACK_PORT:-4566}, in this network as http://localstack:4566. It keeps nothing
+    # past its container, and takes any credentials (the apps sign with AWS_ACCESS_KEY_ID=test and
+    # AWS_SECRET_ACCESS_KEY=test, which are no secret). Nothing here is required by default.
+    profiles: [localstack]
+    image: localstack/localstack:4.14.0@sha256:3ebc37595918b8accb852f8048fef2aff047d465167edd655528065b07bc364a
+    environment:
+      SERVICES: s3
+    ports: ["127.0.0.1:${LEDGER_LOCALSTACK_PORT:-4566}:4566"]
+    volumes:
+      - ./localstack/init-s3.sh:/etc/localstack/init/ready.d/init-s3.sh:ro
+    healthcheck:
+      # Healthy once the init script has run and the bucket has object lock enabled, not merely once S3 answers.
+      test:
+        - CMD-SHELL
+        - >-
+          curl -sf http://127.0.0.1:4566/_localstack/init/ready | grep -q '"completed": true'
+          && awslocal s3api get-object-lock-configuration --bucket ledger-archive
+          | grep -q '"ObjectLockEnabled": "Enabled"'
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
 
 volumes:
   postgres: {}

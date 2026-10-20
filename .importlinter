@@ -39,6 +39,8 @@ source_modules =
     ledger_kernel
 forbidden_modules =
     alembic
+    boto3
+    botocore
     cryptography
     fastapi
     google
@@ -66,6 +68,7 @@ forbidden_modules =
     starlette
     structlog
     testcontainers
+    types_boto3_s3
     tzdata
     xdist
     xmlschema
@@ -357,6 +360,8 @@ source_modules =
     ledger_fiscal_kit.status
 forbidden_modules =
     alembic
+    boto3
+    botocore
     cryptography
     fastapi
     google
@@ -394,6 +399,7 @@ forbidden_modules =
     starlette
     structlog
     testcontainers
+    types_boto3_s3
     tzdata
     xmlschema
 
@@ -404,6 +410,8 @@ source_modules =
     ledger_country_do.regime
 forbidden_modules =
     alembic
+    boto3
+    botocore
     cryptography
     fastapi
     google
@@ -442,6 +450,7 @@ forbidden_modules =
     starlette
     structlog
     testcontainers
+    types_boto3_s3
     tzdata
     xmlschema
 
@@ -464,6 +473,8 @@ source_modules =
     ledger_country_do.channels.ecf_v1.domain
 forbidden_modules =
     alembic
+    boto3
+    botocore
     cryptography
     fastapi
     google
@@ -500,6 +511,7 @@ forbidden_modules =
     starlette
     structlog
     testcontainers
+    types_boto3_s3
     tzdata
     xmlschema
 
@@ -567,6 +579,8 @@ source_modules =
     ledger_fiscal.events
 forbidden_modules =
     alembic
+    boto3
+    botocore
     cryptography
     fastapi
     google
@@ -604,6 +618,7 @@ forbidden_modules =
     starlette
     structlog
     testcontainers
+    types_boto3_s3
     tzdata
     xmlschema
 
@@ -614,6 +629,8 @@ source_modules =
     ledger_fiscal.application
 forbidden_modules =
     alembic
+    boto3
+    botocore
     cryptography
     fastapi
     google
@@ -641,6 +658,7 @@ forbidden_modules =
     starlette
     structlog
     testcontainers
+    types_boto3_s3
     tzdata
     xmlschema
 allow_indirect_imports = True
@@ -687,6 +705,8 @@ source_modules =
     ledger_identity.events
 forbidden_modules =
     alembic
+    boto3
+    botocore
     cryptography
     fastapi
     google
@@ -724,6 +744,7 @@ forbidden_modules =
     starlette
     structlog
     testcontainers
+    types_boto3_s3
     tzdata
     xmlschema
 
@@ -734,6 +755,8 @@ source_modules =
     ledger_identity.application
 forbidden_modules =
     alembic
+    boto3
+    botocore
     cryptography
     fastapi
     google
@@ -761,6 +784,7 @@ forbidden_modules =
     starlette
     structlog
     testcontainers
+    types_boto3_s3
     tzdata
     xmlschema
 allow_indirect_imports = True
@@ -807,6 +831,8 @@ source_modules =
     ledger_invoicing.events
 forbidden_modules =
     alembic
+    boto3
+    botocore
     cryptography
     fastapi
     google
@@ -844,6 +870,7 @@ forbidden_modules =
     starlette
     structlog
     testcontainers
+    types_boto3_s3
     tzdata
     xmlschema
 
@@ -854,6 +881,8 @@ source_modules =
     ledger_invoicing.application
 forbidden_modules =
     alembic
+    boto3
+    botocore
     cryptography
     fastapi
     google
@@ -881,6 +910,7 @@ forbidden_modules =
     starlette
     structlog
     testcontainers
+    types_boto3_s3
     tzdata
     xmlschema
 allow_indirect_imports = True
@@ -927,6 +957,8 @@ source_modules =
     ledger_signer.events
 forbidden_modules =
     alembic
+    boto3
+    botocore
     cryptography
     fastapi
     google
@@ -964,6 +996,7 @@ forbidden_modules =
     starlette
     structlog
     testcontainers
+    types_boto3_s3
     tzdata
     xmlschema
 
@@ -974,6 +1007,8 @@ source_modules =
     ledger_signer.application
 forbidden_modules =
     alembic
+    boto3
+    botocore
     cryptography
     fastapi
     google
@@ -1001,6 +1036,7 @@ forbidden_modules =
     starlette
     structlog
     testcontainers
+    types_boto3_s3
     tzdata
     xmlschema
 allow_indirect_imports = True

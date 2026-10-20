@@ -18,6 +18,7 @@ from ledger_platform.blobs.archive import (
     archive_store,
 )
 from ledger_platform.blobs.files import FileImmutableStore
+from ledger_platform.blobs.s3 import S3ImmutableStore
 from ledger_platform.blobs.store import (
     BlobDigestMismatchError,
     BlobNotFoundError,
@@ -25,6 +26,7 @@ from ledger_platform.blobs.store import (
     ImmutableStore,
     ObjectConflictError,
 )
+from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.config.settings import Settings
 from ledger_platform.runtime.archiving import StoreArchive, archive_of, years_after
 from ledger_platform.runtime.facade import require_facades
@@ -177,3 +179,25 @@ def test_the_settings_choose_the_store(tmp_path: Path) -> None:
     pathless = bare.model_copy(update={"archive_backend": "file"})  # past Settings' own validation
     with pytest.raises(InvalidValueError, match=r"settings\.archive_path must be set for the file backend"):
         archive_store(pathless)
+
+
+def test_the_settings_choose_the_s3_store() -> None:
+    bare = Settings(environment="test", database_url=SecretStr(URL))
+    s3 = bare.model_copy(
+        update={
+            "archive_backend": "s3",
+            "archive_bucket": "ledger-archive",
+            "archive_region": "us-east-1",
+            "archive_endpoint_url": "http://127.0.0.1:4566",
+        }
+    )
+    store = archive_store(s3)
+    assert isinstance(store, S3ImmutableStore)
+    assert store.bucket == "ledger-archive"
+    assert isinstance(archive_of(s3, clock=clock), StoreArchive)
+    for missing in ("archive_bucket", "archive_region"):
+        incomplete = s3.model_copy(update={missing: None})  # past Settings' own validation
+        with pytest.raises(
+            InvalidOptionError, match=f"archive option {missing} must be set for the s3 backend"
+        ):
+            archive_store(incomplete)
