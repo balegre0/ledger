@@ -1,20 +1,22 @@
 import hashlib
+import inspect
 import re
 from dataclasses import replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Final, final, override
 from uuid import UUID
+lazy from datetime import date
 
 import pytest
 
 from ledger_fiscal_kit.ports import (
-    ARCHIVE_KINDS,
     ARCHIVE_PORT,
     COMPANY_DIRECTORY,
     MAX_SEED_BYTES,
     SIGNER_PORT,
     ArchiveDigestMismatchError,
     ArchivedObject,
+    ArchiveObjectMissingError,
     ArchivePort,
     ArchiveUnavailableError,
     CertificateValidity,
@@ -33,13 +35,14 @@ from ledger_fiscal_kit.ports import (
     archive_key,
     is_audience,
 )
-from ledger_kernel.access import Permission, Principal, PrincipalKind, SubjectId
 from ledger_kernel.errors import ErrorKind, InvalidValueError
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Mode, Tenant
+from ledger_platform.auth.access import PermissionSource
 from ledger_platform.runtime.calls import SystemCall
 from ledger_platform.runtime.keys import BindingTypeError
+lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_kernel.errors import LedgerError
 
 TENANT: Final = Tenant(
@@ -221,22 +224,21 @@ RECEIVING: Final = ReceivingCompany(
     legal_name="Ferretería Duarte SRL",
     tax_id=RNC,
 )
-READ_RANGES: Final = Permission("do_ecf.ranges.read")
 
 
 @final
 class Directory(CompanyDirectory):
-    """A directory of one company, whose members may read its ranges."""
+    """A directory, as far as its key can tell: what it answers is never asked."""
 
     @override
     async def permissions(self, principal: Principal, company: CompanyId) -> frozenset[Permission]:
-        return frozenset({READ_RANGES}) if company == TENANT.company else frozenset()
+        return frozenset()
 
     @override
     async def receiving_company(
         self, call: SystemCall, *, tax_id: TaxId, channel: str, environment: str
     ) -> ReceivingCompany | None:
-        return RECEIVING if (tax_id, channel, environment) == (RNC, "do-ecf-v1", "testecf") else None
+        return None
 
     @override
     async def company(self, call: SystemCall, company: CompanyId) -> ReceivingCompany:
@@ -245,74 +247,63 @@ class Directory(CompanyDirectory):
 
 @final
 class Shelf(ArchivePort):
-    """An archive in a dictionary: enough to be recognized by the key."""
-
-    def __init__(self) -> None:
-        self.objects: dict[str, bytes] = {}
-        self.kept: dict[str, tuple[date, str]] = {}
+    """An archive, as far as its key can tell: what it answers is never asked."""
 
     @override
     async def put_once(
         self, key: str, content: bytes, *, retain_until: date, media_type: str
     ) -> ArchivedObject:
-        self.objects.setdefault(key, content)
-        self.kept.setdefault(key, (retain_until, media_type))
-        return ArchivedObject(key=key, sha256=hashlib.sha256(content).digest(), size=len(content))
+        return ArchivedObject(key=f"{key}@{retain_until}", sha256=bytes(32), size=len(content))
 
     @override
     async def get(self, key: str, *, sha256: bytes) -> bytes:
-        content = self.objects[key]
-        if hashlib.sha256(content).digest() != sha256:
-            raise ArchiveDigestMismatchError
-        return content
+        return b""
 
 
-async def test_a_company_directory_is_recognized_by_its_key_and_is_a_permission_source() -> None:
+def keyword_only(member: object) -> list[str]:
+    """The keyword-only parameters of ``member``, a callable, in order."""
+    assert callable(member)
+    parameters = inspect.signature(member).parameters.values()
+    return [parameter.name for parameter in parameters if parameter.kind is inspect.Parameter.KEYWORD_ONLY]
+
+
+def test_a_company_directory_is_recognized_by_its_key_and_is_a_permission_source() -> None:
     directory = Directory()
     assert COMPANY_DIRECTORY.name == "CompanyDirectory"
     assert COMPANY_DIRECTORY.take(directory) is directory
+    assert PermissionSource in type(directory).__mro__
     with pytest.raises(BindingTypeError):
         COMPANY_DIRECTORY.take(Echo())
-    call = SystemCall(reason="test", scope=None)
-    found = await directory.receiving_company(call, tax_id=RNC, channel="do-ecf-v1", environment="testecf")
-    assert found is RECEIVING
-    assert await directory.receiving_company(call, tax_id=RNC, channel="do-ecf-v1", environment="ecf") is None
-    assert (await directory.company(call, TENANT.company)).tenant == TENANT
-    owner = Principal(
-        subject=SubjectId("owner"),
-        organization=TENANT.organization,
-        provider_organization="zitadel-org",
-        kind=PrincipalKind.HUMAN,
-    )
-    assert await directory.permissions(owner, TENANT.company) == {READ_RANGES}
-    assert await directory.permissions(owner, CompanyId(CERTIFICATE)) == frozenset()
+    assert CompanyDirectory.__abstractmethods__ == {"permissions", "receiving_company", "company"}
+    assert keyword_only(directory.receiving_company) == ["tax_id", "channel", "environment"]
+    assert keyword_only(directory.company) == []
 
 
 def test_a_receiving_company_shows_neither_its_name_nor_its_tax_id() -> None:
     shown = repr(RECEIVING)
     assert "Duarte" not in shown
     assert "101850043" not in shown
-    assert RECEIVING.legal_name == "Ferretería Duarte SRL"
-    assert RECEIVING.tax_id == RNC
+    assert (RECEIVING.legal_name, RECEIVING.tax_id, RECEIVING.tenant) == (
+        "Ferretería Duarte SRL",
+        RNC,
+        TENANT,
+    )
 
 
-async def test_an_archive_is_recognized_by_its_key() -> None:
+def test_an_archive_is_recognized_by_its_key() -> None:
     shelf = Shelf()
     assert ARCHIVE_PORT.name == "ArchivePort"
     assert ARCHIVE_PORT.take(shelf) is shelf
     with pytest.raises(BindingTypeError):
         ARCHIVE_PORT.take(Directory())
-    stored = await shelf.put_once(
-        "k", DOCUMENT, retain_until=date(2036, 10, 19), media_type="application/xml"
-    )
-    assert (stored.key, stored.size) == ("k", len(DOCUMENT))
-    assert shelf.kept["k"] == (date(2036, 10, 19), "application/xml")
-    assert await shelf.get("k", sha256=stored.sha256) == DOCUMENT
-    with pytest.raises(ArchiveDigestMismatchError):
-        await shelf.get("k", sha256=bytes(32))
+    assert ArchivePort.__abstractmethods__ == {"put_once", "get"}
+    assert keyword_only(shelf.put_once) == ["retain_until", "media_type"]
+    assert keyword_only(shelf.get) == ["sha256"]
 
 
 def test_an_archived_object_names_a_sha256_and_a_size() -> None:
+    stored = ArchivedObject(key="k", sha256=bytes(32), size=0)
+    assert (stored.key, stored.sha256, stored.size) == ("k", bytes(32), 0)
     with pytest.raises(
         InvalidValueError, match=r"archived_object.sha256 must be a SHA-256 digest \(32 bytes\)"
     ):
@@ -330,25 +321,31 @@ def test_an_archive_key_names_where_the_bytes_belong_and_what_they_are() -> None
         channel="do-ecf-v1", tenant=live, kind="arecf-refused", content=b"", extension="xml"
     )
     assert receipt.startswith(f"do-ecf-v1/live/{TENANT.organization}/{TENANT.company}/arecf-refused/")
-    assert {
-        "ecf",
-        "rfce",
-        "anecf",
-        "acecf",
-        "arecf",
-        "arecf-refused",
-        "received",
-        "representation",
-    } == ARCHIVE_KINDS
+
+
+@pytest.mark.parametrize("kind", ["ecf", "representation", "a", "x" * 32, "arecf-refused", "folio2"])
+def test_a_kind_is_a_plain_lower_case_word(kind: str) -> None:
+    key = archive_key(channel="do-ecf-v1", tenant=TENANT, kind=kind, content=DOCUMENT, extension="xml")
+    assert f"/{kind}/" in key
+
+
+KIND_RULE: Final = "archive_key.kind must be 1 to 32 lower-case letters, digits or hyphens, led by a letter"
+EXTENSION_RULE: Final = "archive_key.extension must be 1 to 8 lower-case letters or digits"
 
 
 @pytest.mark.parametrize(
     ("channel", "kind", "extension", "rule"),
     [
-        ("do-ecf-v1", "invoice", "xml", "archive_key.kind must be one of the archive's kinds"),
+        ("do-ecf-v1", "../ecf", "xml", KIND_RULE),
+        ("do-ecf-v1", "ecf/..", "xml", KIND_RULE),
+        ("do-ecf-v1", "", "xml", KIND_RULE),
+        ("do-ecf-v1", "Ecf", "xml", KIND_RULE),
+        ("do-ecf-v1", "-ecf", "xml", KIND_RULE),
+        ("do-ecf-v1", "x" * 33, "xml", KIND_RULE),
         ("../etc", "ecf", "xml", "archive_key.channel must be a channel key"),
-        ("do-ecf-v1", "ecf", "x/ml", "archive_key.extension must be 1 to 8 lower-case letters or digits"),
-        ("do-ecf-v1", "ecf", "", "archive_key.extension must be 1 to 8 lower-case letters or digits"),
+        ("do-ecf-v1/..", "ecf", "xml", "archive_key.channel must be a channel key"),
+        ("do-ecf-v1", "ecf", "x/ml", EXTENSION_RULE),
+        ("do-ecf-v1", "ecf", "", EXTENSION_RULE),
     ],
 )
 def test_an_archive_key_is_built_from_known_parts_only(
@@ -369,6 +366,7 @@ def test_an_archive_key_belongs_to_a_mode() -> None:
     [
         (ArchiveUnavailableError(), ErrorKind.UNAVAILABLE, "archive_unavailable"),
         (ArchiveDigestMismatchError(), ErrorKind.INTERNAL, "archive_digest_mismatch"),
+        (ArchiveObjectMissingError(), ErrorKind.INTERNAL, "archive_object_missing"),
     ],
 )
 def test_the_archive_s_errors_have_stable_kinds_and_codes(

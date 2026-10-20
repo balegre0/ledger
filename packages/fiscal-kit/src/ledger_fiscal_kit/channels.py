@@ -12,6 +12,7 @@ authority's number and messages (verbatim, within the kit's bounds) and details 
 same update is the payload of the kit's ``fiscal_channel.document.updated`` (``events``).
 """
 
+import copy
 import re
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass, field
@@ -19,7 +20,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Final, NewType, Protocol, final, runtime_checkable
 from uuid import UUID
-lazy from collections.abc import Collection, Iterable, Mapping, Sequence
+lazy from collections.abc import Iterable, Mapping, Sequence
 lazy from datetime import date, datetime, timedelta
 
 from ledger_fiscal_kit.status import MAX_MESSAGE_CODE, MAX_MESSAGE_TEXT, MAX_MESSAGES
@@ -54,7 +55,7 @@ class ChannelDef:
     environments: tuple[str, ...]
     """The authority's environments it may submit to (``testecf``, ``certecf``, ``ecf``)."""
     live_environments: tuple[str, ...]
-    """Those of ``environments`` a live document may go to: the others are the authority's test ones."""
+    """Those of ``environments`` that serve live documents (``mode_of``): the others serve test ones only."""
     document_kinds: tuple[DocumentKind, ...]
     directions: tuple[Direction, ...]
     fields: tuple[FieldDef, ...]
@@ -100,10 +101,22 @@ class ChannelDef:
         """Whether the channel issues documents of ``kind`` in ``direction``."""
         return kind in self.document_kinds and direction in self.directions
 
+    def mode_of(self, environment: str) -> Mode:
+        """The mode ``environment`` serves: live for a live environment, test for the authority's others.
+
+        ``InvalidValueError`` for an environment the channel does not have: a caller that reads one from
+        outside (an enrollment request, the receiver's path) checks ``environments`` first.
+        """
+        if environment not in self.environments:
+            raise InvalidValueError(field="channel_def.environment", requirement="one of the channel's")
+        return Mode.LIVE if environment in self.live_environments else Mode.TEST
+
     def allows(self, environment: str, mode: Mode) -> bool:
-        """Whether a document of ``mode`` may go to ``environment``: a live one to a live environment only."""
-        allowed: Collection[str] = self.live_environments if mode is Mode.LIVE else self.environments
-        return environment in allowed
+        """Whether a document of ``mode`` may go to ``environment``: one of the channel's, of that mode.
+
+        A live document goes to a live environment only, and a test document never does.
+        """
+        return environment in self.environments and self.mode_of(environment) is mode
 
 
 @final
@@ -168,7 +181,8 @@ class StatusUpdate:
     messages: tuple[AuthorityMessage, ...]
     """At most ``MAX_MESSAGES``, each within the kit's bounds (``status.kept``)."""
     details: Mapping[str, JsonValue] = field(hash=False)
-    """Under the regime's key (``{"do": {"encf": ..., "security_code": ...}}``); a read-only copy."""
+    """Under the regime's key (``{"do": {"encf": ..., "security_code": ...}}``): a deep copy, read-only at
+    its top level."""
     occurred_at: datetime
 
     def __post_init__(self) -> None:
@@ -180,7 +194,7 @@ class StatusUpdate:
             )
         if self.occurred_at.utcoffset() is None:
             raise InvalidValueError(field="status_update.occurred_at", requirement="an aware datetime")
-        object.__setattr__(self, "details", MappingProxyType(dict(self.details)))
+        object.__setattr__(self, "details", MappingProxyType(copy.deepcopy(dict(self.details))))
 
 
 @final

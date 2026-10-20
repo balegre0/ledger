@@ -39,6 +39,7 @@ from ledger_kernel.errors import (
 )
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.access import PermissionSource
+from ledger_platform.config.manifest import CHANNEL_KEY
 from ledger_platform.runtime.keys import Key
 lazy from ledger_kernel.ids import CompanyId, OrganizationId
 lazy from ledger_kernel.tax_ids import TaxId
@@ -50,14 +51,11 @@ MAX_SEED_BYTES: Final = 16 * 1024
 _REFERENCE: Final = re.compile(r"[A-Za-z0-9._:-]{1,64}")
 _AUDIENCE: Final = re.compile(r"[A-Za-z0-9.:\[\]-]{1,253}")
 _CODE: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
-_CHANNEL: Final = re.compile(r"[a-z]{2}-[a-z0-9]+-v[0-9]+")
+_CHANNEL: Final = re.compile(CHANNEL_KEY)
+_KIND: Final = re.compile(r"[a-z][a-z0-9-]{0,31}")
 _EXTENSION: Final = re.compile(r"[a-z0-9]{1,8}")
-_SHA256_BYTES: Final = 32
-ARCHIVE_KINDS: Final = frozenset(
-    {"ecf", "rfce", "anecf", "acecf", "arecf", "arecf-refused", "received", "representation"}
-)
-"""What an archived object may be: a signed document, its summary, a void, a commercial approval, a receipt
-(refused or not), a document received, a printed representation."""
+SHA256_BYTES: Final = 32
+"""The size of a SHA-256 digest: what an archived object's ``sha256`` and ``ArchivePort.get``'s take."""
 
 
 class SignatureProfile(StrEnum):
@@ -285,7 +283,10 @@ class CompanyDirectory(PermissionSource, Protocol, metaclass=ABCMeta):
 
     @abstractmethod
     async def company(self, call: SystemCall, company: CompanyId) -> ReceivingCompany:
-        """``company`` of the call's organization, in the call's mode (``CompanyNotFoundError`` if none)."""
+        """``company`` of the call's organization, in the call's mode.
+
+        ``ledger_kernel.access.CompanyNotFoundError`` when the organization has no such company.
+        """
 
 
 def is_company_directory(value: object) -> TypeIs[CompanyDirectory]:
@@ -307,7 +308,7 @@ class ArchivedObject:
     size: int
 
     def __post_init__(self) -> None:
-        if len(self.sha256) != _SHA256_BYTES:
+        if len(self.sha256) != SHA256_BYTES:
             raise InvalidValueError(field="archived_object.sha256", requirement="a SHA-256 digest (32 bytes)")
         if self.size < 0:
             raise InvalidValueError(field="archived_object.size", requirement="0 or more")
@@ -317,6 +318,17 @@ class ArchivedObject:
 class ArchivePort(Protocol, metaclass=ABCMeta):
     """Write-once storage kept until a retention date (see the module).
 
+    The contract every implementation keeps (the platform's stores prove it with their own tests):
+
+    - an object is never overwritten nor deleted before its retention date;
+    - ``put_once`` on a key that holds the same bytes answers the stored object and changes nothing: another
+      ``retain_until`` neither extends nor shortens the retention it was stored with;
+    - ``put_once`` on a key that holds other bytes raises ``ArchiveDigestMismatchError`` (a key names its
+      bytes' digest, ``archive_key``: other bytes under it are a defect or a tampering);
+    - ``get`` on a key that holds nothing raises ``ArchiveObjectMissingError``; a ``sha256`` that is not
+      ``SHA256_BYTES`` long is refused (``InvalidValueError``) before the archive is asked;
+    - ``ArchiveUnavailableError`` when the archive could not be reached: the same call may succeed later.
+
     The methods are abstract so that they need no body: a ``...`` is a statement no test could reach.
     """
 
@@ -324,11 +336,7 @@ class ArchivePort(Protocol, metaclass=ABCMeta):
     async def put_once(
         self, key: str, content: bytes, *, retain_until: date, media_type: str
     ) -> ArchivedObject:
-        """Store ``content`` under ``key`` until ``retain_until``, never to be changed or deleted before.
-
-        A key that holds the same bytes already answers the stored object; ``ArchiveUnavailableError`` when
-        the archive could not be reached (the same call may succeed later).
-        """
+        """Store ``content`` under ``key`` until ``retain_until``, never to be changed or deleted before."""
 
     @abstractmethod
     async def get(self, key: str, *, sha256: bytes) -> bytes:
@@ -347,7 +355,8 @@ ARCHIVE_PORT: Final = Key("ArchivePort", is_archive_port)
 def archive_key(*, channel: str, tenant: Tenant, kind: str, content: bytes, extension: str) -> str:
     """``<channel>/<mode>/<organization>/<company>/<kind>/<sha256 hex>.<extension>``: where ``content`` goes.
 
-    ``tenant`` is the company in its mode the object belongs to; ``kind`` is one of ``ARCHIVE_KINDS``. The
+    ``tenant`` is the company in its mode the object belongs to; ``kind`` is the channel's word for what the
+    object is (DO's ``ArchiveKind``: ``ecf``, ``arecf-refused``...), a path segment and nothing more. The
     same bytes of one kind for one company in one mode always get one key.
     """
     mode = tenant.mode
@@ -355,8 +364,11 @@ def archive_key(*, channel: str, tenant: Tenant, kind: str, content: bytes, exte
         raise InvalidValueError(field="archive_key.tenant", requirement="a tenant in a mode")
     if _CHANNEL.fullmatch(channel) is None:
         raise InvalidValueError(field="archive_key.channel", requirement="a channel key")
-    if kind not in ARCHIVE_KINDS:
-        raise InvalidValueError(field="archive_key.kind", requirement="one of the archive's kinds")
+    if _KIND.fullmatch(kind) is None:
+        raise InvalidValueError(
+            field="archive_key.kind",
+            requirement="1 to 32 lower-case letters, digits or hyphens, led by a letter",
+        )
     if _EXTENSION.fullmatch(extension) is None:
         raise InvalidValueError(
             field="archive_key.extension", requirement="1 to 8 lower-case letters or digits"
@@ -381,3 +393,12 @@ class ArchiveDigestMismatchError(LedgerError):
 
     def __init__(self) -> None:
         super().__init__("an archived object's bytes do not match the digest recorded for them")
+
+
+class ArchiveObjectMissingError(LedgerError):
+    """An object the archive was asked for is not there: what PostgreSQL recorded was never stored."""
+
+    code: ClassVar[str] = "archive_object_missing"
+
+    def __init__(self) -> None:
+        super().__init__("an archived object is missing")

@@ -1,5 +1,6 @@
 """Channels as fiscal sees them: their definition, the registry over the assembled ones, what they answer."""
 
+import inspect
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from typing import Final, final, override
@@ -36,11 +37,11 @@ from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.regimes import Direction, DocumentKind, FieldDef, FieldKind, Locale, RegimeKey, Source
 from ledger_kernel.tenancy import Mode
 from ledger_platform.config.manifest import ChannelEntry
-from ledger_platform.runtime.calls import SystemCall
 from ledger_platform.runtime.contexts import AssembledChannels, ChannelsNotAssembledError, ChannelUnknownError
 from ledger_platform.runtime.keys import BindingTypeError
 lazy from ledger_fiscal_kit.drafts import FiscalDraft
 lazy from ledger_platform.data.codec import JsonValue
+lazy from ledger_platform.runtime.calls import SystemCall
 
 ORGANIZATION: Final = OrganizationId(UUID("0199e3a0-0000-7000-8000-000000000001"))
 COMPANY: Final = CompanyId(UUID("0199e3a0-0000-7000-8000-000000000002"))
@@ -85,10 +86,7 @@ UPDATE: Final = StatusUpdate(
 
 @final
 class Stub(Channel):
-    """A channel that answers what a test needs and records what it was asked."""
-
-    def __init__(self) -> None:
-        self.resumed: list[ResumeReason] = []
+    """A channel, as far as the registry can tell: what it answers is never asked."""
 
     @property
     @override
@@ -97,7 +95,7 @@ class Stub(Channel):
 
     @override
     async def requirements(self, call: SystemCall, state: EnrollmentState) -> Requirements:
-        return Requirements(currently_due=() if state.active else ("do_ecf.range",))
+        return Requirements(currently_due=())
 
     @override
     async def check(self, call: SystemCall, draft: FiscalDraft) -> Sequence[Objection]:
@@ -109,15 +107,15 @@ class Stub(Channel):
 
     @override
     async def status(self, call: SystemCall, document: DocumentRef) -> StatusUpdate | None:
-        return UPDATE if document == UPDATE.document else None
+        return None
 
     @override
     async def resume(self, call: SystemCall, company: CompanyId, reason: ResumeReason) -> None:
-        self.resumed.append(reason)
+        return None
 
     @override
     async def representation(self, call: SystemCall, document: DocumentRef) -> Representation:
-        return Representation(media_type="application/pdf", content=b"%PDF-1.7", filename="E310000000001.pdf")
+        return Representation(media_type="application/pdf", content=b"", filename="a.pdf")
 
 
 def assembled(**channels: object) -> AssembledChannels:
@@ -152,12 +150,22 @@ def test_a_definition_s_labels_cannot_be_changed_by_whoever_built_it() -> None:
     assert definition.labels == {Locale("es"): "e-CF"}
 
 
-def test_a_live_mode_uses_the_live_environments_only() -> None:
-    assert DEFINITION.allows("ecf", Mode.TEST)
-    assert DEFINITION.allows("testecf", Mode.TEST)
+def test_an_environment_implies_its_mode() -> None:
+    assert DEFINITION.mode_of("ecf") is Mode.LIVE
+    assert DEFINITION.mode_of("testecf") is Mode.TEST
+    assert DEFINITION.mode_of("certecf") is Mode.TEST
+    with pytest.raises(InvalidValueError, match=r"channel_def.environment must be one of the channel's"):
+        DEFINITION.mode_of("sandbox")
+
+
+def test_a_mode_uses_the_environments_of_its_own_mode_only() -> None:
     assert DEFINITION.allows("ecf", Mode.LIVE)
+    assert not DEFINITION.allows("ecf", Mode.TEST)
+    assert DEFINITION.allows("testecf", Mode.TEST)
+    assert DEFINITION.allows("certecf", Mode.TEST)
     assert not DEFINITION.allows("testecf", Mode.LIVE)
     assert not DEFINITION.allows("sandbox", Mode.TEST)
+    assert not DEFINITION.allows("sandbox", Mode.LIVE)
 
 
 def test_a_definition_covers_its_kinds_and_directions() -> None:
@@ -184,12 +192,31 @@ def test_a_definition_ends_after_it_starts() -> None:
     assert replace(DEFINITION, valid_until=None).valid_until is None
 
 
-async def test_the_registry_answers_the_assembled_channels() -> None:
+def test_the_registry_answers_the_assembled_channels() -> None:
     channel = Stub()
     registry = ChannelRegistry(assembled(do_ecf_v1=channel))
     assert registry.get("do-ecf-v1") is channel
+    assert registry.get("do-ecf-v1").definition is DEFINITION
     assert registry.all() == (channel,)
-    call = SystemCall(reason="test", scope=None)
+
+
+def test_a_channel_s_members_take_a_system_call_and_issue_names_its_budget() -> None:
+    channel = Stub()
+    members = (
+        channel.requirements,
+        channel.check,
+        channel.issue,
+        channel.status,
+        channel.resume,
+        channel.representation,
+    )
+    assert {member.__name__ for member in members} | {"definition"} == Channel.__abstractmethods__
+    assert all(next(iter(inspect.signature(member).parameters)) == "call" for member in members)
+    budget = inspect.signature(channel.issue).parameters["sign_within"]
+    assert budget.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_an_enrollment_state_names_whose_enrollment_it_is() -> None:
     state = EnrollmentState(
         enrollment=EnrollmentId(UUID("0199e3a0-0000-7000-8000-000000000009")),
         organization=ORGANIZATION,
@@ -198,8 +225,6 @@ async def test_the_registry_answers_the_assembled_channels() -> None:
         environment="testecf",
         active=False,
     )
-    assert (await channel.requirements(call, state)).currently_due == ("do_ecf.range",)
-    assert (await channel.requirements(call, replace(state, active=True))).disabled_reason is None
     assert (state.enrollment, state.organization, state.company, state.mode, state.environment) == (
         UUID("0199e3a0-0000-7000-8000-000000000009"),
         ORGANIZATION,
@@ -207,13 +232,9 @@ async def test_the_registry_answers_the_assembled_channels() -> None:
         Mode.TEST,
         "testecf",
     )
-    assert await channel.status(call, DOCUMENT) is UPDATE
-    assert await channel.status(call, DocumentRef(UUID(int=0))) is None
-    await channel.resume(call, COMPANY, ResumeReason.RANGE_REGISTERED)
-    assert channel.resumed == [ResumeReason.RANGE_REGISTERED]
-    printed = await channel.representation(call, DOCUMENT)
-    assert (printed.media_type, printed.filename) == ("application/pdf", "E310000000001.pdf")
-    assert printed.content.startswith(b"%PDF")
+    assert not state.active
+    requirements = Requirements(currently_due=("do_ecf.range",))
+    assert (requirements.currently_due, requirements.disabled_reason) == (("do_ecf.range",), None)
 
 
 def test_what_is_not_a_channel_is_refused_by_the_registry() -> None:
@@ -263,10 +284,12 @@ def test_an_issued_answer_says_whether_it_signed() -> None:
 
 
 def test_a_status_update_keeps_its_details_from_whoever_built_it() -> None:
-    details: dict[str, JsonValue] = {"do": {"encf": "E310000000001"}}
+    nested: dict[str, JsonValue] = {"encf": "E310000000001"}
+    details: dict[str, JsonValue] = {"do": nested, "other": 1}
     update = replace(UPDATE, details=details)
-    details["do"] = None
-    assert update.details == {"do": {"encf": "E310000000001"}}
+    details["other"] = None
+    nested["encf"] = "E310000000002"
+    assert update.details == {"do": {"encf": "E310000000001"}, "other": 1}
     assert (update.state, update.status, update.severity) == (
         "accepted",
         FiscalStatus.ACCEPTED,
@@ -297,3 +320,8 @@ def test_a_status_update_is_versioned_and_dated() -> None:
 def test_a_representation_shows_no_content() -> None:
     printed = Representation(media_type="application/pdf", content=b"%PDF-1.7 secret", filename="a.pdf")
     assert "secret" not in repr(printed)
+    assert (printed.media_type, printed.filename, printed.content[:4]) == (
+        "application/pdf",
+        "a.pdf",
+        b"%PDF",
+    )

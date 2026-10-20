@@ -134,6 +134,15 @@ def test_another_event_is_not_read_as_a_document_update() -> None:
         DocumentUpdated.read(newer)
 
 
+def test_keys_a_newer_producer_adds_are_ignored() -> None:
+    event = DocumentUpdated.of(TENANT, UPDATE)
+    published = raw(event)
+    update = published.payload["update"]
+    assert isinstance(update, dict)
+    extended = replace(published, payload={"update": update | {"later": 1}, "trace": "x"})
+    assert DocumentUpdated.read(extended) == event
+
+
 def test_a_payload_that_is_not_an_update_is_refused() -> None:
     broken = replace(raw(DocumentUpdated.of(TENANT, UPDATE)), payload={"update": "accepted"})
     with pytest.raises(
