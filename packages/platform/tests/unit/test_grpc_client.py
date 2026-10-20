@@ -12,6 +12,7 @@ from ledger_kernel.errors import ErrorKind, NotFoundError, truncate
 from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.grpc.client import (
     ERROR_CODE_KEY,
+    INTERNAL_CODE,
     MAX_DEADLINE,
     REMOTE_CODE_LIMIT,
     RemoteConflictError,
@@ -311,3 +312,46 @@ async def test_a_streamed_request_has_a_bounded_deadline(
         await call_stream_unary(
             upload_call, parts(b"hello"), rpc=UPLOAD, deadline=deadline, metadata=METADATA
         )
+
+
+class SourceFailedError(Exception):
+    """What a request stream's own source raises: never grpc's to swallow."""
+
+
+async def failing(*sent: bytes) -> AsyncGenerator[bytes]:
+    for part in sent:
+        yield part
+    raise SourceFailedError
+
+
+async def test_a_request_stream_whose_source_fails_raises_the_source_s_error(
+    upload_call: grpc.aio.StreamUnaryMultiCallable[bytes, bytes],
+) -> None:
+    """grpc would cancel the call and drop the error (a ``CancelledError`` here); the caller gets its own."""
+    with pytest.raises(SourceFailedError) as caught:
+        await call_stream_unary(upload_call, failing(b"he", b"llo"), rpc=UPLOAD, metadata=METADATA)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+
+
+async def test_a_request_stream_whose_source_fails_at_once_raises_the_source_s_error(
+    upload_call: grpc.aio.StreamUnaryMultiCallable[bytes, bytes],
+) -> None:
+    with pytest.raises(SourceFailedError):
+        await call_stream_unary(upload_call, failing(), rpc=UPLOAD, metadata=METADATA)
+
+
+async def test_a_streamed_call_whose_caller_is_cancelled_is_cancelled(
+    upload_call: grpc.aio.StreamUnaryMultiCallable[bytes, bytes],
+) -> None:
+    sending = asyncio.create_task(
+        call_stream_unary(upload_call, parts(b"sl", b"ow"), rpc=UPLOAD, deadline=5.0, metadata=METADATA)
+    )
+    await asyncio.sleep(0.2)
+    _ = sending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await sending
+
+
+def test_the_code_of_a_defect_is_shared_by_servers_and_clients() -> None:
+    assert INTERNAL_CODE == "internal"
