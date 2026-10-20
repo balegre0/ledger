@@ -3,13 +3,14 @@
 [project]
 name = "ledger-fiscal-kit"
 version = "0.1.0"
-description = "What the fiscal module, the channels and the signer must agree on: ports and hardened XML."
+description = "What the fiscal module, the channels and the signer must agree on: channels, drafts, statuses, numbering, ports, events and hardened XML."
 requires-python = ">=3.15"
 dependencies = [
     "ledger-kernel",
     "ledger-platform",
     "cryptography>=50.0.2",
     "lxml>=6.1.3",
+    "pydantic>=2.14.1",
 ]
 
 [tool.uv.sources]

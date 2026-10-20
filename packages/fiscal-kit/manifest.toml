@@ -1,10 +1,10 @@
 [package]
 name = "fiscal-kit"
 kind = "package"
-summary = "What the fiscal module, the channels and the signer must agree on: ports and hardened XML."
+summary = "What the fiscal module, the channels and the signer must agree on: channels, drafts, statuses, numbering, ports, events and hardened XML."
 owners = ["@balegre0"]
 
 [dependencies]
 packages = ["kernel", "platform"]
-python = ["cryptography>=50.0.2", "lxml>=6.1.3"]
+python = ["cryptography>=50.0.2", "lxml>=6.1.3", "pydantic>=2.14.1"]
 test = ["signxml>=5.1.0", "types-lxml>=2026.2.16"]

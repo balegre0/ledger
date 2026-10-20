@@ -1,14 +1,27 @@
+import hashlib
+import inspect
+import re
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Final, final, override
 from uuid import UUID
+lazy from datetime import date
 
 import pytest
 
 from ledger_fiscal_kit.ports import (
+    ARCHIVE_PORT,
+    COMPANY_DIRECTORY,
     MAX_SEED_BYTES,
     SIGNER_PORT,
+    ArchiveDigestMismatchError,
+    ArchivedObject,
+    ArchiveObjectMissingError,
+    ArchivePort,
+    ArchiveUnavailableError,
     CertificateValidity,
+    CompanyDirectory,
+    ReceivingCompany,
     SeedToSign,
     SignatureProfile,
     SignatureRefusedError,
@@ -19,13 +32,17 @@ from ledger_fiscal_kit.ports import (
     SigningCertificateNotValidError,
     SigningClockSkewError,
     XmlToSign,
+    archive_key,
     is_audience,
 )
 from ledger_kernel.errors import ErrorKind, InvalidValueError
 from ledger_kernel.ids import CompanyId, OrganizationId
+from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Mode, Tenant
+from ledger_platform.auth.access import PermissionSource
 from ledger_platform.runtime.calls import SystemCall
 from ledger_platform.runtime.keys import BindingTypeError
+lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_kernel.errors import LedgerError
 
 TENANT: Final = Tenant(
@@ -185,3 +202,175 @@ def test_a_refusal_keeps_the_signer_s_code_as_its_reason() -> None:
     assert "xml_document_unsignable" in str(refused)
     with pytest.raises(InvalidValueError, match=r"signature_refused.reason must be a snake_case code"):
         SignatureRefusedError("Bearer s3cr3t <ECF/>")
+
+
+def test_a_validity_covers_both_its_ends() -> None:
+    validity = CertificateValidity(
+        certificate=CERTIFICATE, not_before=SIGNED_AT, not_after=SIGNED_AT + timedelta(days=365)
+    )
+    assert validity.covers(SIGNED_AT)
+    assert validity.covers(validity.not_after)
+    assert not validity.covers(SIGNED_AT - timedelta(microseconds=1))
+    assert not validity.covers(validity.not_after + timedelta(microseconds=1))
+    with pytest.raises(InvalidValueError, match=r"certificate_validity.covers must be an aware datetime"):
+        validity.covers(SIGNED_AT.replace(tzinfo=None))
+
+
+RNC: Final = TaxId(TaxIdScheme("do.rnc"), "101850043")
+RECEIVING: Final = ReceivingCompany(
+    organization=TENANT.organization,
+    company=TENANT.company,
+    mode=Mode.TEST,
+    legal_name="Ferretería Duarte SRL",
+    tax_id=RNC,
+)
+
+
+@final
+class Directory(CompanyDirectory):
+    """A directory, as far as its key can tell: what it answers is never asked."""
+
+    @override
+    async def permissions(self, principal: Principal, company: CompanyId) -> frozenset[Permission]:
+        return frozenset()
+
+    @override
+    async def receiving_company(
+        self, call: SystemCall, *, tax_id: TaxId, channel: str, environment: str
+    ) -> ReceivingCompany | None:
+        return None
+
+    @override
+    async def company(self, call: SystemCall, company: CompanyId) -> ReceivingCompany:
+        return RECEIVING
+
+
+@final
+class Shelf(ArchivePort):
+    """An archive, as far as its key can tell: what it answers is never asked."""
+
+    @override
+    async def put_once(
+        self, key: str, content: bytes, *, retain_until: date, media_type: str
+    ) -> ArchivedObject:
+        return ArchivedObject(key=f"{key}@{retain_until}", sha256=bytes(32), size=len(content))
+
+    @override
+    async def get(self, key: str, *, sha256: bytes) -> bytes:
+        return b""
+
+
+def keyword_only(member: object) -> list[str]:
+    """The keyword-only parameters of ``member``, a callable, in order."""
+    assert callable(member)
+    parameters = inspect.signature(member).parameters.values()
+    return [parameter.name for parameter in parameters if parameter.kind is inspect.Parameter.KEYWORD_ONLY]
+
+
+def test_a_company_directory_is_recognized_by_its_key_and_is_a_permission_source() -> None:
+    directory = Directory()
+    assert COMPANY_DIRECTORY.name == "CompanyDirectory"
+    assert COMPANY_DIRECTORY.take(directory) is directory
+    assert PermissionSource in type(directory).__mro__
+    with pytest.raises(BindingTypeError):
+        COMPANY_DIRECTORY.take(Echo())
+    assert CompanyDirectory.__abstractmethods__ == {"permissions", "receiving_company", "company"}
+    assert keyword_only(directory.receiving_company) == ["tax_id", "channel", "environment"]
+    assert keyword_only(directory.company) == []
+
+
+def test_a_receiving_company_shows_neither_its_name_nor_its_tax_id() -> None:
+    shown = repr(RECEIVING)
+    assert "Duarte" not in shown
+    assert "101850043" not in shown
+    assert (RECEIVING.legal_name, RECEIVING.tax_id, RECEIVING.tenant) == (
+        "Ferretería Duarte SRL",
+        RNC,
+        TENANT,
+    )
+
+
+def test_an_archive_is_recognized_by_its_key() -> None:
+    shelf = Shelf()
+    assert ARCHIVE_PORT.name == "ArchivePort"
+    assert ARCHIVE_PORT.take(shelf) is shelf
+    with pytest.raises(BindingTypeError):
+        ARCHIVE_PORT.take(Directory())
+    assert ArchivePort.__abstractmethods__ == {"put_once", "get"}
+    assert keyword_only(shelf.put_once) == ["retain_until", "media_type"]
+    assert keyword_only(shelf.get) == ["sha256"]
+
+
+def test_an_archived_object_names_a_sha256_and_a_size() -> None:
+    stored = ArchivedObject(key="k", sha256=bytes(32), size=0)
+    assert (stored.key, stored.sha256, stored.size) == ("k", bytes(32), 0)
+    with pytest.raises(
+        InvalidValueError, match=r"archived_object.sha256 must be a SHA-256 digest \(32 bytes\)"
+    ):
+        ArchivedObject(key="k", sha256=b"short", size=0)
+    with pytest.raises(InvalidValueError, match=r"archived_object.size must be 0 or more"):
+        ArchivedObject(key="k", sha256=bytes(32), size=-1)
+
+
+def test_an_archive_key_names_where_the_bytes_belong_and_what_they_are() -> None:
+    digest = hashlib.sha256(DOCUMENT).hexdigest()
+    key = archive_key(channel="do-ecf-v1", tenant=TENANT, kind="ecf", content=DOCUMENT, extension="xml")
+    assert key == f"do-ecf-v1/test/{TENANT.organization}/{TENANT.company}/ecf/{digest}.xml"
+    live = replace(TENANT, mode=Mode.LIVE)
+    receipt = archive_key(
+        channel="do-ecf-v1", tenant=live, kind="arecf-refused", content=b"", extension="xml"
+    )
+    assert receipt.startswith(f"do-ecf-v1/live/{TENANT.organization}/{TENANT.company}/arecf-refused/")
+
+
+@pytest.mark.parametrize("kind", ["ecf", "representation", "a", "x" * 32, "arecf-refused", "folio2"])
+def test_a_kind_is_a_plain_lower_case_word(kind: str) -> None:
+    key = archive_key(channel="do-ecf-v1", tenant=TENANT, kind=kind, content=DOCUMENT, extension="xml")
+    assert f"/{kind}/" in key
+
+
+KIND_RULE: Final = "archive_key.kind must be 1 to 32 lower-case letters, digits or hyphens, led by a letter"
+EXTENSION_RULE: Final = "archive_key.extension must be 1 to 8 lower-case letters or digits"
+
+
+@pytest.mark.parametrize(
+    ("channel", "kind", "extension", "rule"),
+    [
+        ("do-ecf-v1", "../ecf", "xml", KIND_RULE),
+        ("do-ecf-v1", "ecf/..", "xml", KIND_RULE),
+        ("do-ecf-v1", "", "xml", KIND_RULE),
+        ("do-ecf-v1", "Ecf", "xml", KIND_RULE),
+        ("do-ecf-v1", "-ecf", "xml", KIND_RULE),
+        ("do-ecf-v1", "x" * 33, "xml", KIND_RULE),
+        ("../etc", "ecf", "xml", "archive_key.channel must be a channel key"),
+        ("do-ecf-v1/..", "ecf", "xml", "archive_key.channel must be a channel key"),
+        ("do-ecf-v1", "ecf", "x/ml", EXTENSION_RULE),
+        ("do-ecf-v1", "ecf", "", EXTENSION_RULE),
+    ],
+)
+def test_an_archive_key_is_built_from_known_parts_only(
+    channel: str, kind: str, extension: str, rule: str
+) -> None:
+    with pytest.raises(InvalidValueError, match=re.escape(rule)):
+        archive_key(channel=channel, tenant=TENANT, kind=kind, content=DOCUMENT, extension=extension)
+
+
+def test_an_archive_key_belongs_to_a_mode() -> None:
+    shared = Tenant(TENANT.organization, TENANT.company, None)
+    with pytest.raises(InvalidValueError, match=r"archive_key.tenant must be a tenant in a mode"):
+        archive_key(channel="do-ecf-v1", tenant=shared, kind="ecf", content=DOCUMENT, extension="xml")
+
+
+@pytest.mark.parametrize(
+    ("error", "kind", "code"),
+    [
+        (ArchiveUnavailableError(), ErrorKind.UNAVAILABLE, "archive_unavailable"),
+        (ArchiveDigestMismatchError(), ErrorKind.INTERNAL, "archive_digest_mismatch"),
+        (ArchiveObjectMissingError(), ErrorKind.INTERNAL, "archive_object_missing"),
+    ],
+)
+def test_the_archive_s_errors_have_stable_kinds_and_codes(
+    error: LedgerError, kind: ErrorKind, code: str
+) -> None:
+    assert (error.kind, error.code) == (kind, code)
+    assert str(error)

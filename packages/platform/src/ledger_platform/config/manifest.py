@@ -33,6 +33,8 @@ from ledger_kernel.events import parse_event_type
 from ledger_kernel.ids import parse_id_prefix
 from ledger_platform.config.names import is_schema_name
 
+CHANNEL_KEY: Final = r"^[a-z]{2}-[a-z0-9]+-v[0-9]+$"
+"""A channel's key, ``<cc>-<name>-v<n>``: its manifest entry's, and what fiscal-kit builds paths from."""
 type AppRole = Literal["api", "worker", "signer", "receiver", "migrate"]
 """What an app process runs (§3.3)."""
 type Tier = Literal["bronze", "silver", "gold"]
@@ -381,7 +383,7 @@ class RegimeEntry(_Section):
 class ChannelEntry(_Section):
     """``[[channels]]``: treated like a module by devtools (schema, roles, grants, routing)."""
 
-    key: str = Field(pattern=r"^[a-z]{2}-[a-z0-9]+-v[0-9]+$")
+    key: str = Field(pattern=CHANNEL_KEY)
     entry_point: ObjectPath
     """The ``ChannelPack``: its manifest entry, the regime it serves and its assembly."""
     schema_name: SchemaName = Field(alias="schema")
