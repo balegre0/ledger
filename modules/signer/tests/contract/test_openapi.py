@@ -41,15 +41,10 @@ class Answer(TypedDict, total=False):
     headers: dict[str, dict[str, object]]
 
 
-class Body(TypedDict):
-    content: dict[str, object]
-
-
 class Operation(TypedDict, total=False):
     parameters: list[Parameter]
     security: list[dict[str, list[str]]]
     responses: dict[str, Answer]
-    requestBody: Body
 
 
 class Document(TypedDict):
@@ -60,6 +55,14 @@ class Document(TypedDict):
 DOCUMENT: Final = TypeAdapter(Document)
 ANY_DOCUMENT: Final = TypeAdapter(dict[str, object])
 PATHS: Final = TypeAdapter(dict[str, object])
+
+
+def member(value: object, *names: str) -> dict[str, object]:
+    """The object ``names`` lead to in the JSON object ``value``, one member at a time."""
+    found = PATHS.validate_python(value)
+    for name in names:
+        found = PATHS.validate_python(found[name])
+    return found
 
 
 def app() -> FastAPI:
@@ -108,9 +111,8 @@ def test_the_document_holds_signer_s_five_operations_each_in_a_mode_and_a_compan
 
 def test_an_import_documents_its_raw_bundle_its_password_header_and_its_limits() -> None:
     upload = document()["paths"]["/v1/certificates"]["post"]
-    body = upload.get("requestBody")
-    assert body is not None
-    assert list(body["content"]) == [PKCS12]
+    content = member(app().openapi(), "paths", "/v1/certificates", "post", "requestBody", "content")
+    assert list(content) == [PKCS12]
     assert {"name": UNLOCK_HEADER, "in": "header", "required": True} in upload.get("parameters", [])
     assert {"408", "413", "415"} <= set(upload.get("responses", {}))
     remote = document()["paths"]["/v1/certificates/remote"]["post"]
