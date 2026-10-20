@@ -8,8 +8,8 @@ settings = true                      # LEDGER_SIGNER_*
 [dependencies]
 packages = ["kernel", "platform", "fiscal-kit"]
 modules = ["identity"]               # its events only (company deactivations): never its API
-python = ["alembic>=1.20.0", "grpcio>=1.84.0", "protobuf>=7.36.2", "pydantic>=2.14.1",
-          "pydantic-settings>=2.15.0", "sqlalchemy>=2.1.4"]  # + cryptography with custody, fastapi with HTTP
+python = ["alembic>=1.20.0", "cryptography>=50.0.2", "grpcio>=1.84.0", "protobuf>=7.36.2", "psycopg>=3.3.6",
+          "pydantic>=2.14.1", "pydantic-settings>=2.15.0", "sqlalchemy>=2.1.4"]  # + fastapi with HTTP
 test = ["signxml>=5.1.0", "types-protobuf>=7.35.1.20260906"]
 
 [data]

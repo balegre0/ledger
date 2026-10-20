@@ -933,12 +933,14 @@ version = "0.1.0"
 source = { editable = "modules/signer" }
 dependencies = [
     { name = "alembic" },
+    { name = "cryptography" },
     { name = "grpcio" },
     { name = "ledger-fiscal-kit" },
     { name = "ledger-identity" },
     { name = "ledger-kernel" },
     { name = "ledger-platform" },
     { name = "protobuf" },
+    { name = "psycopg" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "sqlalchemy" },
@@ -947,12 +949,14 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.20.0" },
+    { name = "cryptography", specifier = ">=50.0.2" },
     { name = "grpcio", specifier = ">=1.84.0" },
     { name = "ledger-fiscal-kit", editable = "packages/fiscal-kit" },
     { name = "ledger-identity", editable = "modules/identity" },
     { name = "ledger-kernel", editable = "packages/kernel" },
     { name = "ledger-platform", editable = "packages/platform" },
     { name = "protobuf", specifier = ">=7.36.2" },
+    { name = "psycopg", specifier = ">=3.3.6" },
     { name = "pydantic", specifier = ">=2.14.1" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
     { name = "sqlalchemy", specifier = ">=2.1.4" },

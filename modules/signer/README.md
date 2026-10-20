@@ -23,5 +23,13 @@ ADR 0010; plan `docs/superpowers/plans/2026-10-19-v2-m2b-signer.md`).
   same certificate (under another idempotency key) therefore retires the old row and adds an identical one, with
   the same fingerprint.
 - Custody (`adapters/custody`) is the only code that touches key material; only the signer's app may import it
-  (import-linter's `signer-custody` contracts).
+  (import-linter's `signer-custody` contracts). A key (PKCS#8) or an entity's credential is sealed with
+  AES-256-GCM under a data key of its own, bound to its certificate, company and organization as associated
+  data; the KMS wraps the data key under the same context and unwraps it for every signature (no cache).
+  Backends: `local` (the key in custody) and `remote` (a certification entity signs the SHA-256 of
+  `SignedInfo`, never the document). The local-file KMS (`kms_local.py`) is for `local` and `test` only; a
+  certificate its issuer signed with SHA-1 or MD5 may not sign.
+- State (`adapters/postgres`): `PgUnits` and `bind(uow)` give the use cases their unit (certificates, events,
+  audit rows, jobs and import keys over the platform's `Idempotency`, route `grpc ImportCertificate`); the
+  partial unique indexes' refusal is `ActiveCertificateTakenError` at the statement or at the commit.
 - Assembly: `assembly.py` (`MODULE`, entry point `ledger.modules: signer`).
