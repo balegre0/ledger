@@ -51,6 +51,7 @@ ledger-app-worker = { workspace = true }
 ledger-country-do = { workspace = true }
 ledger-country-do-testing = { workspace = true }
 ledger-devtools = { workspace = true }
+ledger-fiscal = { workspace = true }
 ledger-fiscal-kit = { workspace = true }
 ledger-identity = { workspace = true }
 ledger-invoicing = { workspace = true }
@@ -67,6 +68,7 @@ known-first-party = [
     "ledger_country_do",
     "ledger_country_do_testing",
     "ledger_devtools",
+    "ledger_fiscal",
     "ledger_fiscal_kit",
     "ledger_identity",
     "ledger_invoicing",
@@ -133,7 +135,8 @@ all([subprocess.run(["deptry", f"{directory}/src", "--config", f"{directory}/pyp
 # coverage (its data file named after it). A package with an integration suite of four files or more spreads it
 # over four workers (the packages share the machine); for the others, starting workers (and the PostgreSQL server
 # xdist's controller starts for them) costs more than it saves. LEDGER_TEST_JOBS is the runner's alone: it is
-# taken out of the tests' environment, where Settings refuses any LEDGER_* name it does not know.
+# taken out of the tests' environment, where Settings refuses any LEDGER_* name it does not know. Hypothesis runs
+# its `ci` profile (the root conftest.py) unless HYPOTHESIS_PROFILE names another.
 [tool.poe.tasks.test]
 help = "Each package's tests with its own 100 % branch coverage, LEDGER_TEST_JOBS packages at a time"
 imports = ["concurrent.futures", "glob", "os", "subprocess"]
@@ -155,7 +158,8 @@ expr = """
     ],
     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
     env={name: value for name, value in os.environ.items() if name != "LEDGER_TEST_JOBS"}
-    | {"COVERAGE_FILE": f".coverage.{directory.replace('/', '-')}"},
+    | {"COVERAGE_FILE": f".coverage.{directory.replace('/', '-')}"}
+    | {"HYPOTHESIS_PROFILE": os.environ.get("HYPOTHESIS_PROFILE") or "ci"},
 )))
 """
 

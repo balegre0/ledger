@@ -1,0 +1,39 @@
+[package]
+name = "fiscal"
+kind = "module"
+summary = "Enrollments in fiscal channels, routing of commercial documents to them, and their status mirror."
+owners = ["@balegre0"]
+
+[dependencies]
+packages = ["kernel", "platform", "fiscal-kit"]
+modules = ["identity"]
+python = ["alembic>=1.20.0", "fastapi>=0.143.0", "pydantic>=2.14.1", "sqlalchemy>=2.1.4"]
+
+[data]
+schema = "fiscal"
+
+[[ids]]
+prefix = "enr"
+resource = "enrollment"
+
+[[permissions]]
+code = "fiscal.enrollments.read"
+summary = "See the company's enrollments in fiscal channels and what each still requires."
+roles = ["owner", "admin", "accountant", "issuer", "viewer"]
+
+[[permissions]]
+code = "fiscal.enrollments.manage"
+summary = "Enroll the company in a fiscal channel, or disable an enrollment."
+roles = ["owner", "admin"]
+
+[[events.publishes]]
+type = "fiscal.enrollment.changed"
+version = 1
+public = "enrollment.updated"
+
+[extension_points]
+provides = ["CompanyDirectory"]  # fiscal-kit's, to channels: companies by tax id, and their permissions
+
+[http]
+mounted_in = ["api"]
+prefixes = ["/v1/fiscal"]

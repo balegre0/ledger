@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Annotated, ClassVar, Final, Literal, NotRequired, TypedDict, final, override
 from uuid import UUID
-lazy from collections.abc import AsyncGenerator, MutableMapping
+lazy from collections.abc import AsyncGenerator, Mapping, MutableMapping
 
 import httpx
 import pytest
@@ -59,6 +59,20 @@ class MissingItemError(NotFoundError):
 
     def __init__(self, item: int) -> None:
         super().__init__(f"item {item} does not exist")
+
+
+class TakenItemError(ConflictError):
+    """A conflict that names, in a member of its own, the item that holds what was asked for."""
+
+    code: ClassVar[str] = "item_taken"
+
+    def __init__(self, holder: int) -> None:
+        super().__init__(f"item {holder} holds this name already")
+        self.holder: Final = holder
+
+    def problem_members(self) -> Mapping[str, str]:
+        """``existing_id``, and a standard member that must not replace the problem's own."""
+        return {"existing_id": f"itm_{self.holder}", "code": "replaced"}
 
 
 class BrokenInvariantError(LedgerError):
@@ -171,6 +185,8 @@ ERRORS: dict[str, type[LedgerError]] = {
 async def read_item(item_id: int) -> dict[str, int]:
     if item_id == 404:
         raise MissingItemError(item_id)
+    if item_id == 409:
+        raise TakenItemError(7)
     return {"id": item_id}
 
 
@@ -587,6 +603,20 @@ async def test_a_ledger_error_is_a_problem_document(client: httpx.AsyncClient) -
         "status": 404,
         "code": "missing_item",
         "detail": "item 404 does not exist",
+    }
+
+
+async def test_an_error_adds_its_own_members_to_its_problem_never_in_place_of_the_standard_ones(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.get("/items/409")
+    assert named(response) == {
+        "type": "urn:ledger:error:item_taken",
+        "title": "Conflict",
+        "status": 409,
+        "code": "item_taken",
+        "detail": "item 7 holds this name already",
+        "existing_id": "itm_7",
     }
 
 
