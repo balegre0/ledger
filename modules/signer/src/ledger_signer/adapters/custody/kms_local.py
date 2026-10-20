@@ -36,7 +36,7 @@ _KEY_ID_BYTES: Final = 8
 _OWNER_ONLY: Final = 0o600
 _CREATE: Final = os.O_WRONLY | os.O_CREAT | os.O_EXCL | (os.O_BINARY if sys.platform == "win32" else 0)
 """A new file only (never one that exists), written as bytes (Windows translates line ends otherwise)."""
-_ALLOWED: Final[frozenset[Environment]] = frozenset({"local", "test"})
+ACCEPTED_IN: Final[frozenset[Environment]] = frozenset({"local", "test"})
 """Where a key in a file is acceptable: a laptop and the tests (the other environments hold real keys)."""
 _TEMPORARY_BYTES: Final = 8
 
@@ -101,7 +101,7 @@ class LocalFileKms(KeyManagement):
     __slots__ = ("_master", "key_id")
 
     def __init__(self, path: Path, *, environment: Environment) -> None:
-        if environment not in _ALLOWED:
+        if environment not in ACCEPTED_IN:
             raise KmsLocalRefusedError
         master = _master(path, environment)
         self._master = AESGCM(master)

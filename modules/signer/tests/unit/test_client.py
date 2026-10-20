@@ -64,7 +64,12 @@ from ledger_signer.adapters.grpc.client import (
     SignerDefectError,
     SignerTokenRefusedError,
 )
-from ledger_signer.adapters.grpc.server import ImportChunksUnexpectedError, ImportHeaderFirstError
+from ledger_signer.adapters.grpc.codec import (
+    ImportChunksUnexpectedError,
+    ImportHeaderFirstError,
+    ImportTooSlowError,
+)
+from ledger_signer.adapters.serving import SignerWorkUnreadableError
 from ledger_signer.api import (
     BackendKind,
     BackendNotOfferedError,
@@ -590,6 +595,7 @@ IMPORT_REFUSALS: Final[tuple[LedgerError, ...]] = (
     ImportTooLargeError(),
     ImportHeaderFirstError(),
     ImportChunksUnexpectedError(),
+    ImportTooSlowError(),
     InvalidIdempotencyKeyError(),
     IdempotencyKeyReusedError(),
     IdempotencyKeyInUseError(),
@@ -670,6 +676,8 @@ SIGNATURE_ONLY: Final = frozenset(
     }
 )
 """The signer's refusals no API call answers: a signature's, mapped to the port's errors by ``port_error``."""
+UNANSWERED: Final = frozenset({SignerWorkUnreadableError.code})
+"""The signer's refusals no call answers at all: a job's or an event's it cannot read (they end it dead)."""
 
 
 def declared(base: type[LedgerError]) -> Iterator[type[LedgerError]]:
@@ -685,7 +693,7 @@ def test_every_refusal_the_signer_declares_is_mapped_or_known_to_be_a_signature_
     codes = {
         error.code for base in (InvalidInputError, ConflictError, NotFoundError) for error in declared(base)
     }
-    assert codes - SIGNATURE_ONLY - frozenset(API_REFUSALS) == set()
+    assert codes - SIGNATURE_ONLY - UNANSWERED - frozenset(API_REFUSALS) == set()
     assert SIGNATURE_ONLY.isdisjoint(API_REFUSALS)
     assert {error.code for error in IMPORT_REFUSALS} | {CertificateNotFoundError.code} == set(API_REFUSALS)
 

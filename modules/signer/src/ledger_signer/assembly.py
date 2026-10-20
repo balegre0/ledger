@@ -5,7 +5,8 @@ gRPC service, its consumer, its jobs and its schedules. There it checks its call
 anything starts (``adapters.serving``), binds its facade as ``SignerApi`` and ``SignerPort``, hands the gRPC
 server as a resource (``LEDGER_SIGNER_GRPC_PORT``, traced by the app's tracer), the consumer
 ``signer.company_deactivations``, the jobs ``signer.expiry_notice`` and its own purges, and the readiness
-checks ``grpc`` (the service serves) and ``kms`` (the KMS answers).
+checks ``grpc`` (the service serves) and ``kms`` (the KMS answers). What only the signer's role uses is
+imported lazily: in any other role custody is never loaded, not even its modules.
 
 Every client role (``api``, ``worker``, ``receiver``) reaches it over gRPC: given the signer's address and its
 own token (``LEDGER_SIGNER_ADDRESS``, ``LEDGER_SIGNER_TOKEN_<ROLE>``), it binds one ``SignerClient`` as
@@ -26,21 +27,22 @@ from ledger_platform.jobs.outcomes import JobSpec
 from ledger_platform.runtime import Module, ModuleParts
 from ledger_signer._manifest import MANIFEST
 from ledger_signer.adapters.grpc.client import SignerClient
-from ledger_signer.adapters.grpc.server import SignerServer
 from ledger_signer.adapters.postgres.schema import MIGRATIONS, migrations
-from ledger_signer.adapters.serving import (
-    build,
-    caller_tokens,
-    expiry_notices,
-    local_kms,
-    retire_deactivated,
-)
 from ledger_signer.adapters.settings import SignerSettings
 from ledger_signer.adapters.unavailable import UnavailableSigner
 from ledger_signer.api import SIGNER_API
-from ledger_signer.application.notices import EXPIRY_NOTICE
 lazy from ledger_platform.runtime import ModuleContext
+lazy from ledger_signer.adapters.grpc.server import SignerServer
+lazy from ledger_signer.adapters.serving import (
+    build,
+    caller_tokens,
+    expiry_notices,
+    grpc_port,
+    local_kms,
+    retire_deactivated,
+)
 lazy from ledger_signer.adapters.settings import Caller
+lazy from ledger_signer.application.notices import EXPIRY_NOTICE
 
 COMPANY_DEACTIVATIONS: Final = "signer.company_deactivations"
 PURGES: Final = ("signer.purge_idempotency_keys", "signer.purge_done_jobs")
@@ -65,7 +67,7 @@ def _signer(context: ModuleContext) -> ModuleParts:
     signer = build(context.database, settings=settings, kms=kms, entity=None, clock=context.clock)
     server = SignerServer(
         signer.servicer,
-        port=settings.grpc_port,
+        port=grpc_port(settings, context.environment),
         registry=context.telemetry.registry,
         callers=callers,
         options=ServerOptions(tracer=context.telemetry.tracer),

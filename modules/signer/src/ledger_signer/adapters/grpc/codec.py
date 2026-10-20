@@ -11,11 +11,15 @@ What comes off the wire is checked as our own code's output (``InvalidValueError
 enumeration's ``UNSPECIFIED`` (proto3's default, what a message that never set it holds) or a number the
 contract does not name is refused, never read as a default; an id must be a UUID as ``str`` writes it; a
 certificate's fingerprint must be a SHA-256, its modes distinct (one at least while active), its moments
-must be set (an unset ``Timestamp`` reads as 1970). Moments are aware UTC both ways: a naive one is never
-sent. Messages name the field, never the value: a password or a credential travels in a header.
+must be set (an unset ``Timestamp`` reads as 1970) and within what a ``datetime`` holds. Moments are aware UTC
+both ways: a naive one is never sent. Messages name the field, never the value: a password or a credential
+travels in a header.
+
+The refusals of an import stream's shape (header first, a remote import's header alone, a stream that does not
+end in time) are here too: the server raises them, the client builds them back (``client.API_REFUSALS``).
 """
 
-from typing import Final
+from typing import ClassVar, Final
 from uuid import UUID
 lazy from collections.abc import Iterable, Mapping
 lazy from datetime import UTC, datetime
@@ -23,7 +27,7 @@ lazy from datetime import UTC, datetime
 from google.protobuf.timestamp_pb2 import Timestamp
 
 from ledger_fiscal_kit.ports import SignatureProfile, Signed
-from ledger_kernel.errors import InvalidValueError
+from ledger_kernel.errors import InvalidInputError, InvalidValueError
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tenancy import Mode
 from ledger_platform.runtime.calls import actor_of
@@ -71,6 +75,33 @@ _STATUSES: Final[Mapping[CertificateStatus, signer_pb2.CertificateStatus.ValueTy
 _PROFILES: Final[Mapping[SignatureProfile, signer_pb2.SignatureProfile.ValueType]] = {
     SignatureProfile.XMLDSIG_ENVELOPED_RSA_SHA256: signer_pb2.SIGNATURE_PROFILE_XMLDSIG_ENVELOPED_RSA_SHA256,
 }
+
+
+class ImportHeaderFirstError(InvalidInputError):
+    """An import whose stream does not start with its header, or names a header twice."""
+
+    code: ClassVar[str] = "signer_import_header_first"
+
+    def __init__(self) -> None:
+        super().__init__("an import sends its header first and once, then its bundle's chunks")
+
+
+class ImportChunksUnexpectedError(InvalidInputError):
+    """A remote import that sent chunks: its header is the whole request."""
+
+    code: ClassVar[str] = "signer_import_chunks_unexpected"
+
+    def __init__(self) -> None:
+        super().__init__("a remote import is its header alone")
+
+
+class ImportTooSlowError(InvalidInputError):
+    """An import whose stream did not end in the time the signer waits for one (a stream held open)."""
+
+    code: ClassVar[str] = "signer_import_too_slow"
+
+    def __init__(self) -> None:
+        super().__init__("an import's stream did not end in time")
 
 
 def _invalid(*, field: str, requirement: str) -> InvalidValueError:
@@ -140,15 +171,18 @@ def timestamp(moment: datetime) -> Timestamp:
     return stamp
 
 
-def moment_of(stamp: Timestamp) -> datetime:
-    """The moment ``stamp`` holds, aware in UTC."""
-    return stamp.ToDatetime(tzinfo=UTC)
+def moment_of(stamp: Timestamp, field: str = "moment") -> datetime:
+    """The moment ``stamp`` holds, aware in UTC; one a ``datetime`` cannot hold is refused as ``field``."""
+    try:
+        return stamp.ToDatetime(tzinfo=UTC)
+    except ValueError:
+        raise _invalid(field=field, requirement="a moment in range") from None
 
 
 def _required_moment(stamp: Timestamp, field: str, *, present: bool) -> datetime:
     if not present:
         raise _invalid(field=field, requirement="set")
-    return moment_of(stamp)
+    return moment_of(stamp, field)
 
 
 def id_of(text: str, field: str) -> UUID:
@@ -248,7 +282,11 @@ def certificate_view(message: signer_pb2.Certificate) -> CertificateView:
         installed_at=_required_moment(
             message.installed_at, "certificate.installed_at", present=message.HasField("installed_at")
         ),
-        retired_at=moment_of(message.retired_at) if message.HasField("retired_at") else None,
+        retired_at=(
+            moment_of(message.retired_at, "certificate.retired_at")
+            if message.HasField("retired_at")
+            else None
+        ),
         retired_reason=message.retired_reason or None,
         version=message.version,
     )

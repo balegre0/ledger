@@ -51,7 +51,8 @@ from ledger_signer.adapters.custody.kms_local import MASTER_KEY_BYTES
 from ledger_signer.adapters.grpc import codec
 from ledger_signer.adapters.grpc._generated.v1 import signer_pb2, signer_pb2_grpc
 from ledger_signer.adapters.grpc.client import SignerClient, SignerDefectError
-from ledger_signer.adapters.grpc.server import ImportHeaderFirstError, SignerServer
+from ledger_signer.adapters.grpc.codec import ImportHeaderFirstError
+from ledger_signer.adapters.grpc.server import SignerServer
 from ledger_signer.application.importing import MAX_BUNDLE_BYTES, ImportRequest, ImportTooLargeError
 from ledger_signer.application.ports import BundleUnreadableError, Secret
 from ledger_signer.domain.errors import ClockSkewError, NotCoveredError
@@ -59,6 +60,8 @@ from ledger_testing.database import signer_url
 from ledger_testing.modules import app_settings
 from ledger_testing.pki import Authority, bundle, distinguished_name
 from ledger_testing.waiting import eventually
+lazy from ledger_platform.config.settings import Settings
+lazy from ledger_platform.runtime.registries import Discover
 lazy from ledger_signer.api import CertificateView
 lazy from ledger_testing.issuer import LocalIssuer
 lazy from ledger_testing.modules import ModuleUnderTest
@@ -134,21 +137,37 @@ def key_file(tmp_path: Path) -> Path:
     return path
 
 
+@final
+@dataclass(frozen=True, slots=True)
+class Deployment:
+    """What the signer's app is made of: its settings (``LEDGER_SIGNER_*`` set) and the packages it finds."""
+
+    settings: Settings
+    discover: Discover
+
+
 @pytest.fixture
-async def signer(
+def deployment(
     migrated: WorkerDatabase,
     local_issuer: LocalIssuer,
     module_under_test: ModuleUnderTest,
     monkeypatch: pytest.MonkeyPatch,
     key_file: Path,
-) -> AsyncGenerator[Running]:
+) -> Deployment:
+    """Every caller's token, the KMS's key, any free port, and the database as ``ledger_signer``."""
     for caller, token in TOKENS.items():
         monkeypatch.setenv(f"LEDGER_SIGNER_TOKEN_{caller.upper()}", token)
     monkeypatch.setenv("LEDGER_SIGNER_KMS_KEY_FILE", str(key_file))
     monkeypatch.setenv("LEDGER_SIGNER_GRPC_PORT", "0")
     url = signer_url(migrated)
     settings = app_settings(database_url=url, direct_url=url, issuer=local_issuer)
-    app = App("signer", settings=settings, discover=module_under_test.discovering())
+    return Deployment(settings, module_under_test.discovering())
+
+
+@asynccontextmanager
+async def started(deployment: Deployment) -> AsyncGenerator[Running]:
+    """The signer's app, made now (its log handler writes to this moment's ``sys.stdout``) and started."""
+    app = App("signer", settings=deployment.settings, discover=deployment.discover)
     served: FastAPI = app.asgi()
     async with served.router.lifespan_context(served):
         [server] = [
@@ -160,6 +179,12 @@ async def signer(
         transport = httpx.ASGITransport(app=served)
         async with httpx.AsyncClient(transport=transport, base_url="http://ledger.test") as probes:
             yield Running(app, f"127.0.0.1:{server.port}", probes)
+
+
+@pytest.fixture
+async def signer(deployment: Deployment) -> AsyncGenerator[Running]:
+    async with started(deployment) as running:
+        yield running
 
 
 @asynccontextmanager
@@ -303,7 +328,7 @@ async def test_import_is_idempotent_and_twins_wait(
 
 
 def sent(caller: str) -> tuple[tuple[str, str], ...]:
-    return call_metadata(SecretStr(TOKENS[caller]), call_id="raw-1")
+    return call_metadata(SecretStr(TOKENS[caller]), call_id="call-1")  # call_for's
 
 
 async def stream(
@@ -539,12 +564,26 @@ async def test_the_signer_purges_its_own_keys_and_done_jobs(signer: Running, adm
 
 
 async def test_secrets_never_leave(
-    api: SignerClient,
-    worker: SignerClient,
-    admin: AsyncConnection,
-    holder: Issued,
-    capsys: pytest.CaptureFixture[str],
+    deployment: Deployment, admin: AsyncConnection, holder: Issued, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The app is made inside the test, once ``capsys`` holds ``sys.stdout``: its log lines are captured."""
+    async with (
+        started(deployment) as running,
+        client(running, "api") as api,
+        client(running, "worker") as worker,
+    ):
+        logged = await secrets_kept(api, worker, admin, holder)
+    seen = [capsys.readouterr().out, *logged]
+    assert "grpc.caller_refused" in seen[0]
+    assert "grpc.unhandled_error" in seen[0]
+    assert "InsufficientPrivilege" in seen[0]  # the defect's traceback, rendered
+    assert [text for text in seen if any(secret in text for secret in SENTINELS)] == []
+
+
+async def secrets_kept(
+    api: SignerClient, worker: SignerClient, admin: AsyncConnection, holder: Issued
+) -> list[str]:
+    """A refused import, an import, a signature, a refused caller and a defect: what each left behind."""
     tenant = a_company()
     with pytest.raises(BundleUnreadableError) as unreadable:
         await api.import_local(
@@ -552,6 +591,14 @@ async def test_secrets_never_leave(
         )
     _ = await imported(api, tenant, holder, "import-0003")
     _ = await worker.sign_xml(call_for(tenant), document(tenant, datetime.now(UTC)))
+    with pytest.raises(RemoteDefectError):  # the guard logs it: proof the capture sees the app's lines
+        await imported(worker, tenant, holder, "import-0004")
+    await admin.execute("REVOKE INSERT ON signer.audit_events FROM signer_rw")
+    try:
+        with pytest.raises(SignerDefectError):  # a defect: logged with its traceback rendered
+            await worker.sign_xml(call_for(tenant), document(tenant, datetime.now(UTC)))
+    finally:
+        await admin.execute("GRANT INSERT ON signer.audit_events TO signer_rw")
     stored: Sequence[tuple[object, ...]] = [
         *await rows(
             admin, "SELECT detail::text FROM signer.audit_events WHERE company_id = %s", tenant.company
@@ -563,7 +610,6 @@ async def test_secrets_never_leave(
         ),
     ]
     [(sealed,)] = await rows(admin, "SELECT sealed FROM signer.custody WHERE company_id = %s", tenant.company)
-    seen = [capsys.readouterr().out, str(unreadable.value), *(str(row) for row in stored)]
     assert isinstance(sealed, bytes)
     assert all(secret.encode() not in sealed for secret in SENTINELS)
-    assert [text for text in seen if any(secret in text for secret in SENTINELS)] == []
+    return [str(unreadable.value), *(str(row) for row in stored)]

@@ -60,7 +60,11 @@ NOW: Final = datetime(2026, 10, 19, 12, tzinfo=UTC)
 PASSWORD: Final = "PASSWORD-SENTINEL"
 DOCUMENT: Final = b"<Document><Reference>DOCUMENT-SENTINEL</Reference></Document>"
 RULES: Final = SignerRules(
-    backends=frozenset(BackendKind), skew=timedelta(seconds=300), concurrency=2, notice_days=(30, 7, 0)
+    backends=frozenset(BackendKind),
+    skew=timedelta(seconds=300),
+    concurrency=2,
+    import_concurrency=2,
+    notice_days=(30, 7, 0),
 )
 TEST: Final = frozenset({Mode.TEST})
 OUTBOX: Final = "SELECT type FROM signer.outbox WHERE company_id = %s ORDER BY type"

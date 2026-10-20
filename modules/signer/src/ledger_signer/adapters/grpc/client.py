@@ -65,7 +65,11 @@ from ledger_platform.runtime.calls import actor_of
 from ledger_platform.runtime.facade import facade
 from ledger_signer.adapters.grpc import codec
 from ledger_signer.adapters.grpc._generated.v1 import signer_pb2, signer_pb2_grpc
-from ledger_signer.adapters.grpc.server import ImportChunksUnexpectedError, ImportHeaderFirstError
+from ledger_signer.adapters.grpc.codec import (
+    ImportChunksUnexpectedError,
+    ImportHeaderFirstError,
+    ImportTooSlowError,
+)
 from ledger_signer.adapters.settings import MAX_DEADLINE_SECONDS
 from ledger_signer.api import BackendKind, BackendNotOfferedError, CertificateNotFoundError, SignerApi
 from ledger_signer.application.facade import port_error
@@ -164,6 +168,7 @@ API_REFUSALS: Final[Mapping[str, Refusal]] = {
             ImportTooLargeError,
             ImportHeaderFirstError,
             ImportChunksUnexpectedError,
+            ImportTooSlowError,
             InvalidIdempotencyKeyError,
             IdempotencyKeyReusedError,
             IdempotencyKeyInUseError,

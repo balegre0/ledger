@@ -79,6 +79,9 @@ class SignerSettings(PackageSettings):
     certificate must stay valid (Decision 5)."""
     signing_concurrency: Annotated[int, Field(ge=1, le=64)] = 4
     """Signatures computed at once (the RSA work runs in threads, bounded by this)."""
+    import_concurrency: Annotated[int, Field(ge=1, le=16)] = 2
+    """Bundles opened (or credentials admitted) at once, apart from the signatures: a bundle's key derivation
+    is CPU work in a thread."""
     expiry_notice_days: Annotated[tuple[Annotated[int, Field(ge=0, le=366)], ...], NoDecode] = (
         30,
         14,

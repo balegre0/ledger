@@ -1,8 +1,9 @@
 """``ledger.signer.v1.SignerService`` over the use cases, served behind the platform's guard (spec §3.7).
 
 Each method reads its request with the codec (a field that does not read is ``grpc_request_malformed``: our
-callers' defect, said without the value), acts for the call's actor and call id (``acting_as``: the audit
-names who asked, as the api or the worker forwarded it) and answers with the codec; a signature names its
+callers' defect, said without the value, as is a call id the request and the call's metadata do not both
+name), acts for the call's actor and call id (``acting_as``: the audit names who asked, as the api or the
+worker forwarded it) and answers with the codec; a signature names its
 caller too (``current_caller``, as the guard admitted it). The use cases' errors cross as they are: the
 platform answers each with the status of its kind and its code (``grpc.server``), a defect (custody damaged
 or tampered with, a KMS that refuses) as ``INTERNAL`` saying no more.
@@ -10,9 +11,10 @@ or tampered with, a KMS that refuses) as ``INTERNAL`` saying no more.
 An import streams: its header first (anything else first, or a header again, is
 ``signer_import_header_first``), then, for a bundle, its chunks, kept in memory up to ``MAX_BUNDLE_BYTES``
 (past it ``signer_import_too_large``, nothing more read); a remote import is its header alone (a chunk after
-it is ``signer_import_chunks_unexpected``). Nothing is admitted, sealed or kept until the stream has ended
-well. The password and the credential go from the header to custody as ``Secret`` values, never into a log,
-a span or an answer.
+it is ``signer_import_chunks_unexpected``); a stream that has not ended within ``import_seconds`` (held open,
+or trickling empty chunks) is ``signer_import_too_slow``. The stream's refusals are the codec's. Nothing is
+admitted, sealed or kept until the stream has ended well. The password and the credential go from the
+header to custody as ``Secret`` values, never into a log, a span or an answer.
 
 ``CALLER_METHODS`` is the allowlists (plan Decision 12): the api imports, describes and retires; the worker
 and the receiver sign and describe. ``SignerServer`` is the resource the signer's app opens: the service on
@@ -21,22 +23,30 @@ serves. No gRPC health service is registered: the signer's probes are HTTP, and 
 unauthenticated health call anyway.
 """
 
-from contextlib import AsyncExitStack
+import asyncio
+from contextlib import AsyncExitStack, asynccontextmanager
 from functools import partial
 from typing import ClassVar, Final, Self, final, override
-lazy from collections.abc import AsyncIterator, Callable, Mapping
+lazy from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 lazy from types import TracebackType
 
 import grpc
 lazy from prometheus_client import CollectorRegistry
 
-from ledger_kernel.errors import InvalidInputError, InvalidValueError, LedgerError
+from ledger_kernel.errors import InvalidValueError, LedgerError
 from ledger_platform.data.audit import acting_as
 from ledger_platform.grpc import MalformedRequestError, current_caller, serve_grpc
+from ledger_platform.grpc.metadata import call_id_of
 from ledger_signer.adapters.grpc import codec
 from ledger_signer.adapters.grpc._generated.v1 import signer_pb2, signer_pb2_grpc
+from ledger_signer.adapters.grpc.codec import (
+    ImportChunksUnexpectedError,
+    ImportHeaderFirstError,
+    ImportTooSlowError,
+)
 from ledger_signer.application.importing import MAX_BUNDLE_BYTES, ImportTooLargeError
 from ledger_signer.application.ports import Secret
+lazy from ledger_platform.data.audit import Actor
 lazy from ledger_platform.grpc import CallerTokens
 lazy from ledger_platform.grpc.server import ServerOptions
 lazy from ledger_signer.adapters.settings import Caller
@@ -58,24 +68,6 @@ _HEADER: Final = "header"
 _CHUNK: Final = "chunk"
 
 
-class ImportHeaderFirstError(InvalidInputError):
-    """An import whose stream does not start with its header, or names a header twice."""
-
-    code: ClassVar[str] = "signer_import_header_first"
-
-    def __init__(self) -> None:
-        super().__init__("an import sends its header first and once, then its bundle's chunks")
-
-
-class ImportChunksUnexpectedError(InvalidInputError):
-    """A remote import that sent chunks: its header is the whole request."""
-
-    code: ClassVar[str] = "signer_import_chunks_unexpected"
-
-    def __init__(self) -> None:
-        super().__init__("a remote import is its header alone")
-
-
 class SignerNotServingError(LedgerError):
     """The signer's gRPC service asked for while it does not serve (not yet started, or stopped)."""
 
@@ -83,6 +75,18 @@ class SignerNotServingError(LedgerError):
 
     def __init__(self) -> None:
         super().__init__("the signer's gRPC service is not serving")
+
+
+def _actor[Request, Response](call: signer_pb2.CallContext, context: Context[Request, Response]) -> Actor:
+    """Who acts in the call: the actor ``call`` names, in the call id the call's metadata names too.
+
+    A call id the metadata does not repeat is malformed: the logs (the guard's, by the metadata) and the
+    audit (by the request) would name two calls.
+    """
+    actor = _read(partial(codec.call_actor, call))
+    if call_id_of(tuple(context.invocation_metadata() or ())) != actor.call_id:
+        raise MalformedRequestError
+    return actor
 
 
 def _read[T](read: Callable[[], T]) -> T:
@@ -107,9 +111,9 @@ async def _bundle(requests: AsyncIterator[signer_pb2.ImportCertificateRequest]) 
     async for request in requests:
         if request.WhichOneof("part") != _CHUNK:
             raise ImportHeaderFirstError
-        bundle += request.chunk
-        if len(bundle) > MAX_BUNDLE_BYTES:
+        if len(bundle) + len(request.chunk) > MAX_BUNDLE_BYTES:
             raise ImportTooLargeError
+        bundle += request.chunk
     return bytes(bundle)
 
 
@@ -123,15 +127,31 @@ async def _nothing_after(requests: AsyncIterator[signer_pb2.ImportCertificateReq
 class SignerServicer(signer_pb2_grpc.SignerServiceServicer):
     """The signer's service over its use cases (see the module)."""
 
-    __slots__ = ("_describing", "_importing", "_retiring", "_signing")
+    __slots__ = ("_describing", "_import_seconds", "_importing", "_retiring", "_signing")
 
     def __init__(
-        self, *, importing: Importing, describing: Describing, retiring: Retiring, signing: Signing
+        self,
+        *,
+        importing: Importing,
+        describing: Describing,
+        retiring: Retiring,
+        signing: Signing,
+        import_seconds: float,
     ) -> None:
         self._importing = importing
         self._describing = describing
         self._retiring = retiring
         self._signing = signing
+        self._import_seconds = import_seconds
+
+    @asynccontextmanager
+    async def _reading_in_time(self) -> AsyncGenerator[None]:
+        """An import's stream read within ``import_seconds``, or ``ImportTooSlowError``."""
+        try:
+            async with asyncio.timeout(self._import_seconds):
+                yield
+        except TimeoutError:
+            raise ImportTooSlowError from None
 
     @override
     async def ImportCertificate(
@@ -139,21 +159,25 @@ class SignerServicer(signer_pb2_grpc.SignerServiceServicer):
         request_iterator: AsyncIterator[signer_pb2.ImportCertificateRequest],
         context: Context[signer_pb2.ImportCertificateRequest, signer_pb2.ImportCertificateResponse],
     ) -> signer_pb2.ImportCertificateResponse:
-        del context
-        header = await _header(request_iterator)
-        actor = _read(partial(codec.call_actor, header.call))
-        request = _read(partial(codec.import_request, header))
-        outcome: ImportOutcome
-        with acting_as(actor):
+        async with self._reading_in_time():
+            header = await _header(request_iterator)
+            actor = _actor(header.call, context)
+            request = _read(partial(codec.import_request, header))
+            bundle: bytes | None
             match header.WhichOneof("source"):
                 case "local":
                     bundle = await _bundle(request_iterator)
-                    outcome = await self._importing.local(request, bundle, Secret(header.local.password))
                 case "remote":
                     await _nothing_after(request_iterator)
-                    outcome = await self._importing.remote(request, Secret(header.remote.credential))
+                    bundle = None
                 case _:
                     raise MalformedRequestError
+        outcome: ImportOutcome
+        with acting_as(actor):
+            if bundle is None:
+                outcome = await self._importing.remote(request, Secret(header.remote.credential))
+            else:
+                outcome = await self._importing.local(request, bundle, Secret(header.local.password))
         return codec.import_response(outcome)
 
     @override
@@ -162,8 +186,7 @@ class SignerServicer(signer_pb2_grpc.SignerServiceServicer):
         request: signer_pb2.DescribeCertificatesRequest,
         context: Context[signer_pb2.DescribeCertificatesRequest, signer_pb2.DescribeCertificatesResponse],
     ) -> signer_pb2.DescribeCertificatesResponse:
-        del context
-        actor = _read(partial(codec.call_actor, request.call))
+        actor = _actor(request.call, context)
         tenant = _read(partial(codec.described, request))
         with acting_as(actor):
             views = await self._describing.certificates(tenant, include_retired=request.include_retired)
@@ -177,8 +200,7 @@ class SignerServicer(signer_pb2_grpc.SignerServiceServicer):
         request: signer_pb2.RetireCertificateRequest,
         context: Context[signer_pb2.RetireCertificateRequest, signer_pb2.RetireCertificateResponse],
     ) -> signer_pb2.RetireCertificateResponse:
-        del context
-        actor = _read(partial(codec.call_actor, request.call))
+        actor = _actor(request.call, context)
         company, certificate = _read(partial(codec.retirement, request))
         with acting_as(actor):
             view = await self._retiring.retire(company, certificate)
@@ -190,8 +212,7 @@ class SignerServicer(signer_pb2_grpc.SignerServiceServicer):
         request: signer_pb2.SignXmlRequest,
         context: Context[signer_pb2.SignXmlRequest, signer_pb2.SignXmlResponse],
     ) -> signer_pb2.SignXmlResponse:
-        del context
-        actor = _read(partial(codec.call_actor, request.call))
+        actor = _actor(request.call, context)
         document = _read(partial(codec.xml_to_sign, request))
         with acting_as(actor):
             signed = await self._signing.sign_xml(current_caller(), document)
@@ -205,8 +226,7 @@ class SignerServicer(signer_pb2_grpc.SignerServiceServicer):
         request: signer_pb2.SignSeedRequest,
         context: Context[signer_pb2.SignSeedRequest, signer_pb2.SignSeedResponse],
     ) -> signer_pb2.SignSeedResponse:
-        del context
-        actor = _read(partial(codec.call_actor, request.call))
+        actor = _actor(request.call, context)
         seed = _read(partial(codec.seed_to_sign, request))
         with acting_as(actor):
             signed = await self._signing.sign_seed(current_caller(), seed)

@@ -7,6 +7,7 @@ their codes, a damaged custody as a defect saying no more; and no password, cred
 log line, a span, an audit row, an event or an answer (Review Focus 3).
 """
 
+import asyncio
 import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -40,16 +41,19 @@ from ledger_platform.grpc import (
 )
 from ledger_platform.grpc.client import INTERNAL_CODE, RemoteDefectError
 from ledger_platform.grpc.guard import MethodNotAllowedError
-from ledger_platform.grpc.metadata import call_metadata
+from ledger_platform.grpc.metadata import CALL_ID_KEY, call_metadata
 from ledger_platform.grpc.server import ServerOptions
 from ledger_platform.runtime.calls import SystemCall
 from ledger_signer.adapters.grpc import codec
 from ledger_signer.adapters.grpc._generated.v1 import signer_pb2, signer_pb2_grpc
 from ledger_signer.adapters.grpc.client import SignerClient, SignerDefectError
-from ledger_signer.adapters.grpc.server import (
-    CALLER_METHODS,
+from ledger_signer.adapters.grpc.codec import (
     ImportChunksUnexpectedError,
     ImportHeaderFirstError,
+    ImportTooSlowError,
+)
+from ledger_signer.adapters.grpc.server import (
+    CALLER_METHODS,
     SignerNotServingError,
     SignerServer,
     SignerServicer,
@@ -91,6 +95,8 @@ PROFILE: Final = SignatureProfile.XMLDSIG_ENVELOPED_RSA_SHA256
 REQUEST: Final = ImportRequest(tenant=IN_TEST, modes=frozenset({Mode.TEST}), idempotency_key="import-0001")
 CHUNK: Final = 64 * 1024
 DEADLINE: Final = 5.0
+IMPORT_SECONDS: Final = 0.5
+"""How long the service waits for an import's stream to end, in these tests."""
 NOW: Final = datetime(2026, 10, 19, 12, tzinfo=UTC)
 
 
@@ -148,13 +154,18 @@ def callers() -> CallerTokens:
 def servicer(units: SignerUnits, custody: Custody, clock: Clock) -> SignerServicer:
     """The service over the stand-ins, offering both backends."""
     rules = SignerRules(
-        backends=frozenset(BackendKind), skew=timedelta(seconds=300), concurrency=2, notice_days=(30, 7)
+        backends=frozenset(BackendKind),
+        skew=timedelta(seconds=300),
+        concurrency=2,
+        import_concurrency=2,
+        notice_days=(30, 7),
     )
     return SignerServicer(
         importing=Importing(units=units, custody=custody, rules=rules, clock=clock),
         describing=Describing(units),
         retiring=Retiring(units),
         signing=Signing(units=units, custody=custody, rules=rules, clock=clock),
+        import_seconds=IMPORT_SECONDS,
     )
 
 
@@ -213,9 +224,9 @@ async def stub(served: Served) -> AsyncGenerator[SignerServiceAsyncStub]:
         yield signer_pb2_grpc.SignerServiceStub(channel)
 
 
-def sent(caller: str) -> tuple[tuple[str, str], ...]:
-    """What a call of ``caller`` carries: its token and a call id."""
-    return call_metadata(SecretStr(TOKENS[caller]), call_id="raw-1")
+def sent(caller: str, call_id: str = CALL.call_id) -> tuple[tuple[str, str], ...]:
+    """What a call of ``caller`` carries: its token and a call id (``CALL``'s unless told otherwise)."""
+    return call_metadata(SecretStr(TOKENS[caller]), call_id=call_id)
 
 
 async def parts_of(data: bytes, size: int = CHUNK) -> AsyncGenerator[bytes]:
@@ -535,3 +546,59 @@ async def test_the_server_says_where_it_serves_only_while_it_serves(servicer: Si
         _ = server.port
     assert all(token not in repr(server) for token in TOKENS.values())
     await server.__aexit__(None, None, None)  # stopping a stopped server does nothing
+
+
+async def held_open(
+    *requests: signer_pb2.ImportCertificateRequest,
+) -> AsyncGenerator[signer_pb2.ImportCertificateRequest]:
+    """``requests``, then the stream held open past the service's patience, sending empty chunks."""
+    for request in requests:
+        yield request
+    for _ in range(20):
+        await asyncio.sleep(IMPORT_SECONDS / 5)
+        yield chunk(b"")
+
+
+async def test_an_import_held_open_is_refused_once_the_service_stops_waiting(
+    stub: SignerServiceAsyncStub, units: Store
+) -> None:
+    with pytest.raises(RemoteError) as caught:
+        await call_stream_unary(
+            stub.ImportCertificate,
+            held_open(local()),
+            rpc=codec.IMPORT,
+            deadline=DEADLINE,
+            metadata=sent("api"),
+        )
+    assert (caught.value.status, caught.value.remote_code) == (
+        grpc.StatusCode.INVALID_ARGUMENT,
+        ImportTooSlowError.code,
+    )
+    assert units.rows == {}
+
+
+async def test_a_bundle_at_its_limit_is_read_and_one_byte_more_is_refused(
+    stub: SignerServiceAsyncStub,
+) -> None:
+    whole = [chunk(bytes(CHUNK)) for _ in range(MAX_BUNDLE_BYTES // CHUNK)]
+    at_limit = await refused_import(stub, local(), *whole)
+    over = await refused_import(stub, local(), *whole, chunk(b"\0"))
+    assert (at_limit.remote_code, over.remote_code) == (BundleUnreadableError.code, ImportTooLargeError.code)
+
+
+@pytest.mark.parametrize("call_id", ["another-call", None], ids=["another", "none"])
+async def test_a_call_naming_another_call_id_than_its_metadata_is_malformed(
+    stub: SignerServiceAsyncStub, call_id: str | None
+) -> None:
+    metadata = sent("worker", call_id or "x")
+    if call_id is None:
+        metadata = tuple(item for item in metadata if item[0] != CALL_ID_KEY)
+    with pytest.raises(RemoteError) as caught:
+        await call_unary(
+            stub.SignXml,
+            codec.xml_request(CALL, document(NOW)),
+            rpc=codec.SIGN_XML,
+            deadline=DEADLINE,
+            metadata=metadata,
+        )
+    assert caught.value.remote_code == MalformedRequestError.code

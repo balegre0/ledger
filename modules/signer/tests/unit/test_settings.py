@@ -32,6 +32,7 @@ def clean(monkeypatch: pytest.MonkeyPatch) -> None:
         "KMS_KEY_FILE",
         "SIGNING_SKEW_SECONDS",
         "SIGNING_CONCURRENCY",
+        "IMPORT_CONCURRENCY",
         "EXPIRY_NOTICE_DAYS",
     ):
         monkeypatch.delenv(f"LEDGER_SIGNER_{name}", raising=False)
@@ -50,7 +51,11 @@ def test_the_section_reads_its_own_prefix_and_defaults_to_a_client_without_a_sig
         "local-file",
         None,
     )
-    assert (settings.signing_skew_seconds, settings.signing_concurrency) == (300, 4)
+    assert (settings.signing_skew_seconds, settings.signing_concurrency, settings.import_concurrency) == (
+        300,
+        4,
+        2,
+    )
     assert settings.expiry_notice_days == (30, 14, 7, 1, 0)
 
 

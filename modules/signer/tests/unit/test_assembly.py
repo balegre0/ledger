@@ -10,6 +10,8 @@ hands its gRPC server, consumer, jobs and checks, and refuses to start without i
 
 import dataclasses
 import os
+import subprocess
+import sys
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from typing import Final
@@ -365,3 +367,28 @@ async def test_the_unbound_port_answers_signer_unavailable() -> None:
         await stand_in.certificate_validity(CALL, TENANT)
     with pytest.raises(SignerUnavailableError):
         await stand_in.certificates(CALL, TENANT.company, Mode.TEST)
+
+
+_PROBE: Final = """
+import sys
+import ledger_signer.assembly as assembly
+{touch}
+print(" ".join(sorted(name for name in sys.modules if name.startswith("ledger_signer.adapters.custody"))))
+"""
+
+
+def custody_loaded(touch: str) -> list[str]:
+    """The custody modules a fresh interpreter holds once it imported the assembly and ran ``touch``."""
+    found = subprocess.run(
+        [sys.executable, "-c", _PROBE.format(touch=touch)], capture_output=True, text=True, check=True
+    )
+    return found.stdout.split()
+
+
+def test_a_client_role_never_loads_custody() -> None:
+    """Custody is the signer's own: the api, the worker and the receiver import the assembly without it."""
+    assert custody_loaded("assert assembly.MODULE.manifest.package.name == 'signer'") == []
+
+
+def test_the_probe_sees_custody_once_the_signer_s_role_reaches_for_it() -> None:
+    assert "ledger_signer.adapters.custody.kms_local" in custody_loaded("assert assembly.local_kms")

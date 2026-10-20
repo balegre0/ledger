@@ -431,3 +431,21 @@ def test_what_an_import_s_key_keeps_never_changes() -> None:
     assert codec.import_outcome(
         signer_pb2.ImportCertificateResponse.FromString(bytes.fromhex(GOLDEN_HEX))
     ) == (ImportOutcome(view=GOLDEN_VIEW, replayed=False))
+
+
+def test_a_moment_out_of_range_is_refused_by_its_field() -> None:
+    sent = codec.xml_request(
+        CALL,
+        XmlToSign(tenant=TENANT, profile=PROFILE, document=b"<a/>", signed_at=AT, reference="E310000000001"),
+    )
+    sent.signed_at.seconds = 253402300800  # 10000-01-01: past what a datetime holds
+    with pytest.raises(InvalidValueError, match=r"^signer\.sign_xml\.signed_at must be a moment in range$"):
+        codec.xml_to_sign(sent)
+
+
+def test_the_stream_s_refusals_are_the_codec_s() -> None:
+    assert (
+        codec.ImportHeaderFirstError.code,
+        codec.ImportChunksUnexpectedError.code,
+        codec.ImportTooSlowError.code,
+    ) == ("signer_import_header_first", "signer_import_chunks_unexpected", "signer_import_too_slow")
