@@ -35,6 +35,7 @@ from urllib.parse import urlsplit
 lazy from collections.abc import Awaitable, Callable, Sequence
 
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError
+lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.seeds import SeedSigned
 
 type Address = IPv4Address | IPv6Address
 type Resolve = Callable[[str, int], Awaitable[Sequence[Address]]]
@@ -63,6 +64,8 @@ class BuyerEndpointRefusedError(EcfInvalidError):
     code: ClassVar[str] = "do_ecf_buyer_endpoint_refused"
 
     def __init__(self, reason: str) -> None:
+        self.seeds: tuple[SeedSigned, ...] = ()
+        """The seeds signed for the exchange before the refusal, for the caller to audit."""
         super().__init__(f"a buyer's endpoint from DGII's directory is refused: {reason}")
 
 

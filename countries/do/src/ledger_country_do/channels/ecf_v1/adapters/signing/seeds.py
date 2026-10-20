@@ -3,7 +3,7 @@
 DGII's services and a buyer's receiver authenticate an emitter by a seed it signs, a ``SemillaModel`` holding
 ``valor`` then ``fecha``. The signature is fiscal-kit's profile (``ledger_fiscal_kit.xml.dsig``), made by
 whoever holds the key; the seed's shape is DGII's, so the channel checks it, read hardened, before it hands
-the seed over to be signed (``require_seed``, called by every ``XmlSigner.sign_seed``).
+the seed over to be signed (``require_seed``, called by ``DocumentSigner.seed`` before the port).
 """
 
 from typing import ClassVar, Final

@@ -51,8 +51,9 @@ Carried from the reviews of Tasks 8-13 (recorded in the spike's progress ledger,
 - **Recovering a parked document** is by hand in the spike: `consultatrackids` for an e-CF, `consultarfce`
   for an RFCE (whose `codigo` 0 means pending, not final). v2-M3 automates it, and must not reuse a released
   e-NCF within `RECEIPT_TOLERANCE` of its last reception (or must exclude earlier attempts' track ids).
-- **The buyer-seed audit log** (`ledger_country_do.audit.buyer_seeds`) names a buyer's RNC or cédula, personal
-  data: v2-M4 sends it to a dedicated audit sink.
-- **A refused receipt is not kept**: when an ARECF fails its checks (signature, schema, trust), the CLI reports
-  the refusal but the receipt's bytes are not written. Settling F15 from a refusal relies on the error's
-  reason; v2-M4's delivery archives refused receipts.
+- **The buyer-seed audit** (v2-M3b Task 15): the log line is gone; the buyer client returns each seed signed
+  (`SeedSigned`: buyer, endpoint host, time) and the delivery job audits it in `do_ecf.audit_events` with the
+  buyer masked (Decision 20). Buyer authentication is a per-company switch, off by default (Decision 19).
+- **A refused receipt is kept apart**: an ARECF that fails its checks (signature, schema, trust) comes back as
+  `ReceiptRefused` with its bytes; the CLI writes it as `<RNC><e-NCF>.arecf-refused.xml`, the delivery job
+  archives it (`arecf-refused`) and never retries.

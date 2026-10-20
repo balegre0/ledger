@@ -43,7 +43,12 @@ from cryptography import x509
 from cryptography.x509.oid import NameOID
 lazy import httpx
 
-from ledger_country_do.channels.ecf_v1.adapters.buyers.client import BuyerClient, Delivered
+from ledger_country_do.channels.ecf_v1.adapters.buyers.client import (
+    BuyerClient,
+    DeliveryDocument,
+    NotApplicable,
+    ReceiptRefused,
+)
 from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import system_resolve
 from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
 from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts
@@ -534,15 +539,26 @@ async def _delivered(signed: Signed, trust: CounterpartyTrust, context: _Run) ->
         clock=context.wiring.clock,
     )
     try:
+        # The draft's rules name the buyer of every document delivered in full; a missing one is refused.
+        document = DeliveryDocument(
+            issuer_rnc=draft.issuer.rnc, buyer_rnc=draft.buyer.rnc or "", encf=draft.encf
+        )
         async with buyers.opened() as opened:
-            delivery = await opened.deliver(SPIKE_AS, settings.environment, draft, signed.signed_ecf)
+            delivery = await opened.deliver(
+                SPIKE_AS, settings.environment, document, signed.signed_ecf, authenticate=True
+            )
     except _REPORTED as error:
         _say(out, f"buyer: {error.code}: {error}")
         return _NOT_ACCEPTED
-    if not isinstance(delivery, Delivered):
+    stem = f"{settings.issuer.rnc}{draft.encf}"
+    if isinstance(delivery, NotApplicable):
         _say(out, f"buyer: not applicable: {delivery.reason}")
         return 0
-    path = _write(settings.out / f"{settings.issuer.rnc}{draft.encf}.arecf.xml", delivery.arecf)
+    if isinstance(delivery, ReceiptRefused):
+        _say(out, f"buyer: receipt refused: {delivery.reason}")
+        _say(out, f"written: {_write(settings.out / f'{stem}.arecf-refused.xml', delivery.arecf)}")
+        return _NOT_ACCEPTED
+    path = _write(settings.out / f"{stem}.arecf.xml", delivery.arecf)
     state = "received" if delivery.received else f"not received (reason {delivery.reason})"
     _say(out, f"buyer: {state}; receipt certificate identity: {_identity(delivery.certificate)}")
     _say(out, f"written: {path}")
