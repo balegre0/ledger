@@ -58,6 +58,7 @@ from ledger_platform.runtime.assembly import (
     MigrationsMissingError,
     ModuleCycleError,
     ModuleMissingError,
+    PortReservedError,
     SchemaMissingError,
 )
 from ledger_platform.runtime.contexts import (
@@ -72,7 +73,6 @@ from ledger_platform.runtime.facade import UnguardedFacadeError, facade
 from ledger_platform.runtime.keys import (
     Binding,
     BindingMissingError,
-    DuplicateBindingError,
     Key,
     UndeclaredDependencyError,
 )
@@ -1199,5 +1199,8 @@ def test_no_module_provides_the_archive_the_app_binds(tmp_path: Path) -> None:
 
     filed = SETTINGS.model_copy(update={"archive_backend": "file", "archive_path": tmp_path})
     provider = module("alpha", providing, '[extension_points]\nprovides = ["ArchivePort"]\n')
-    with pytest.raises(DuplicateBindingError, match="'ArchivePort'"):
-        archived(filed, provider)
+    for settings in (filed, SETTINGS):  # configured or not, the archive is the app's alone
+        with pytest.raises(
+            PortReservedError, match="'alpha' provides port 'ArchivePort', which the app binds"
+        ):
+            archived(settings, provider)

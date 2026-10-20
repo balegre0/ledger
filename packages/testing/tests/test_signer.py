@@ -15,11 +15,13 @@ from ledger_fiscal_kit.ports import (
     CertificateValidity,
     SeedToSign,
     SignatureProfile,
+    SignatureRefusedError,
     Signed,
     SignerPort,
     SignerUnavailableError,
     SigningCertificateMissingError,
     SigningCertificateNotValidError,
+    SigningClockSkewError,
     XmlToSign,
 )
 from ledger_kernel.errors import InvalidValueError
@@ -82,8 +84,16 @@ async def test_a_document_is_signed_by_the_function_given_and_the_call_recorded(
     assert isinstance(signer, SignerPort)
 
 
+def at_signing() -> datetime:
+    return SIGNED_AT
+
+
+def after_expiry() -> datetime:
+    return datetime(2027, 2, 1, tzinfo=UTC)
+
+
 async def test_a_seed_is_signed_by_its_own_function_and_its_audience_recorded() -> None:
-    signer = TestSigner(sign_seed=signed, validity=VALIDITY)
+    signer = TestSigner(sign_seed=signed, validity=VALIDITY, clock=at_signing)
     assert (await signer.sign_seed(CALL, seed())).document == b"<SemillaModel/><Signature/>"
     assert signer.calls == [SignCall(tenant=TENANT, profile=PROFILE, audience="ecf.dgii.gov.do")]
 
@@ -95,14 +105,19 @@ async def test_by_default_it_signs_nothing_and_its_certificate_serves_any_moment
     assert await signer.certificate_validity(CALL, TENANT) == DEFAULT_VALIDITY
 
 
-async def test_it_is_unavailable_for_as_many_calls_as_told() -> None:
-    signer = TestSigner(unavailable_for=2)
+async def test_it_fails_with_the_errors_it_is_given_one_call_each_in_order() -> None:
+    refused = SignatureRefusedError("xml_document_signed")
+    signer = TestSigner(failures=[SignerUnavailableError(), refused, SigningClockSkewError()])
     with pytest.raises(SignerUnavailableError):
         await signer.sign_xml(CALL, document("E310000000001"))
-    with pytest.raises(SignerUnavailableError):
+    with pytest.raises(SignatureRefusedError) as caught:
         await signer.certificate_validity(CALL, TENANT)
+    assert caught.value is refused
+    with pytest.raises(SigningClockSkewError):
+        await signer.sign_seed(CALL, seed())
     assert (await signer.sign_xml(CALL, document("E310000000002"))).document == b"<ECF/>"
-    assert [call.reference for call in signer.calls] == ["E310000000001", "E310000000002"]  # every request
+    references = [call.reference for call in signer.calls]
+    assert references == ["E310000000001", None, "E310000000002"]  # every signing request
 
 
 async def test_without_a_certificate_it_signs_nothing() -> None:
@@ -118,6 +133,12 @@ async def test_a_document_signed_outside_its_certificate_s_validity_is_refused()
     signer = TestSigner(validity=VALIDITY)
     with pytest.raises(SigningCertificateNotValidError):
         await signer.sign_xml(CALL, document(signed_at=datetime(2027, 1, 2, tzinfo=UTC)))
+
+
+async def test_a_seed_is_refused_when_its_certificate_does_not_cover_the_signer_s_clock() -> None:
+    signer = TestSigner(validity=VALIDITY, clock=after_expiry)
+    with pytest.raises(SigningCertificateNotValidError):
+        await signer.sign_seed(CALL, seed())
 
 
 async def test_a_validity_is_asked_for_a_tenant_in_a_mode() -> None:

@@ -204,6 +204,15 @@ class IsolatedPartsError(LedgerError):
         )
 
 
+class PortReservedError(LedgerError):
+    """A module that provides a port the app binds itself (the archive): a defect of the module."""
+
+    code: ClassVar[str] = "port_reserved"
+
+    def __init__(self, module: str, port: str) -> None:
+        super().__init__(f"{module!r} provides port {port!r}, which the app binds: no module may provide it")
+
+
 class CronScheduleError(LedgerError):
     """A ``cron`` schedule: refused until a schedule needs one (Decision 15)."""
 
@@ -464,7 +473,7 @@ class _Assembly:
         self._extensions = ChainDirectory("extension")
         self._ports = Directory("port")
         self._channels = AssembledChannels()
-        if shared.archive is not None:  # the platform's own port: a module that provides one too is refused
+        if shared.archive is not None:  # the app's own port: no module provides it (``PortReservedError``)
             self._ports.add(
                 Binding(ARCHIVE_PORT_NAME, shared.archive),
                 by=PLATFORM,
@@ -480,6 +489,8 @@ class _Assembly:
         """
         shared, manifest = self._shared, module.manifest
         name, isolated_in = manifest.package.name, manifest.isolated_in
+        if ARCHIVE_PORT_NAME in manifest.extension_points.provides:  # configured or not, it is the app's
+            raise PortReservedError(name, ARCHIVE_PORT_NAME)
         database = self._bound[_schema_of(manifest)]
         own = isolated_in == shared.role
         relayed_from = None if own else isolated_in  # the role it is isolated in, when that is another

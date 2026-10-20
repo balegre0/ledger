@@ -42,6 +42,7 @@ from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.auth.access import PermissionSource
+from ledger_platform.blobs.archive import ARCHIVE_PORT_NAME
 from ledger_platform.blobs.files import FileImmutableStore
 from ledger_platform.runtime.archiving import StoreArchive
 from ledger_platform.runtime.calls import SystemCall
@@ -296,7 +297,7 @@ def test_a_receiving_company_shows_neither_its_name_nor_its_tax_id() -> None:
 
 def test_an_archive_is_recognized_by_its_key() -> None:
     shelf = Shelf()
-    assert ARCHIVE_PORT.name == "ArchivePort"
+    assert ARCHIVE_PORT.name == ARCHIVE_PORT_NAME == "ArchivePort"  # the name the app binds it under
     assert ARCHIVE_PORT.take(shelf) is shelf
     with pytest.raises(BindingTypeError):
         ARCHIVE_PORT.take(Directory())

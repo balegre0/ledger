@@ -41,6 +41,7 @@ from ledger_kernel.errors import (
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.access import PermissionSource
 from ledger_platform.blobs.archive import (
+    ARCHIVE_PORT_NAME,
     SHA256_BYTES,
     ArchiveDigestMismatchError,
     ArchivedObject,
@@ -357,7 +358,11 @@ class ArchivePort(Protocol, metaclass=ABCMeta):
     async def put_once(
         self, key: str, content: bytes, *, retain_until: date, media_type: str
     ) -> ArchivedObject:
-        """Store ``content`` under ``key`` until ``retain_until``, never to be changed or deleted before."""
+        """Store ``content`` under ``key``, never to be changed or deleted before ``retain_until``.
+
+        The retention is at least ``retain_until``: an archive may keep an object longer (the app's keeps
+        none less than its configured legal minimum), never shorter.
+        """
 
     @abstractmethod
     async def get(self, key: str, *, sha256: bytes) -> bytes:
@@ -369,7 +374,7 @@ def is_archive_port(value: object) -> TypeIs[ArchivePort]:
     return isinstance(value, ArchivePort)
 
 
-ARCHIVE_PORT: Final = Key("ArchivePort", is_archive_port)
+ARCHIVE_PORT: Final = Key(ARCHIVE_PORT_NAME, is_archive_port)
 """``ArchivePort`` under its name: how the app binds it and how a channel reads it."""
 
 

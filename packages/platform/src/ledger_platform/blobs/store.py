@@ -6,9 +6,12 @@ embed their bytes' digest, so other bytes under one are a defect or a tampering)
 nothing is deleted before its retention date: no method deletes. ``get`` reads bytes back only against the
 SHA-256 the caller recorded for them.
 
-Keys are plain relative paths: segments of lower-case letters, digits, ``.``, ``_`` and ``-``, each led by a
-letter or a digit, joined by ``/``, at most ``MAX_KEY`` characters, never ``..``. A key can neither climb out
-of a store's root nor name a backend's own files (a file store keeps its sidecars under names led by a dot).
+Keys are plain relative paths: segments of lower-case letters, digits, ``.``, ``_`` and ``-``, each led and
+ended by a letter or a digit, joined by ``/``, at most ``MAX_KEY`` characters, never ``..``, no segment named
+as a device on Windows (``con``, ``prn``, ``aux``, ``nul``, ``com0``-``com9``, ``lpt0``-``lpt9``, whatever its
+extension). A key can neither climb out of a store's root, nor name a backend's own files (a file store keeps
+its sidecars under names led by a dot), nor be one name on a file system and another (Windows drops a trailing
+dot, so ``a/b.`` would be ``a/b``).
 A key or a digest that breaks the rules is a defect of the code that built it (``InvalidValueError``).
 """
 
@@ -24,16 +27,33 @@ from ledger_kernel.errors import InvalidValueError, LedgerError, UnavailableErro
 MAX_KEY: Final = 512
 SHA256_BYTES: Final = 32
 """The size of a SHA-256 digest: what a stored object's ``sha256`` and ``get``'s take."""
-KEY_PATTERN: Final = re.compile(r"[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*", re.ASCII)
+SEGMENT: Final = r"[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?"
+KEY_PATTERN: Final = re.compile(rf"{SEGMENT}(?:/{SEGMENT})*", re.ASCII)
+DEVICE_NAMES: Final = frozenset(
+    {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        *(f"com{digit}" for digit in range(10)),
+        *(f"lpt{digit}" for digit in range(10)),
+    }
+)
+"""Names Windows reserves for devices, with any extension: a file so named cannot be made there."""
 _KEY_RULE: Final = (
-    f"at most {MAX_KEY} characters: segments of a-z 0-9 . _ -, each led by a letter or a digit, "
-    "joined by /, never .."
+    f"at most {MAX_KEY} characters: segments of a-z 0-9 . _ -, each led and ended by a letter or a digit, "
+    "joined by /, never .., none a device name"
 )
 
 
 def require_key(key: str) -> None:
     """Refuse a key that breaks the rules (see the module)."""
-    if len(key) > MAX_KEY or ".." in key or KEY_PATTERN.fullmatch(key) is None:
+    if (
+        len(key) > MAX_KEY
+        or ".." in key
+        or KEY_PATTERN.fullmatch(key) is None
+        or any(segment.split(".", 1)[0] in DEVICE_NAMES for segment in key.split("/"))
+    ):
         raise InvalidValueError(field="blob.key", requirement=_KEY_RULE)
 
 
@@ -94,7 +114,11 @@ class ImmutableStore(Protocol, metaclass=ABCMeta):
 
     @abstractmethod
     async def retained_until(self, key: str) -> date:
-        """The day the object under ``key`` is kept until, as it was first stored (``BlobNotFoundError``)."""
+        """The day the object under ``key`` is kept until, as it was first stored.
+
+        ``BlobNotFoundError`` when the key holds no object; ``BlobRecordCorruptError`` when the record
+        cannot be read; ``BlobStoreUnavailableError`` when the store cannot be reached.
+        """
 
 
 class ObjectConflictError(LedgerError):
@@ -122,6 +146,15 @@ class BlobDigestMismatchError(LedgerError):
 
     def __init__(self) -> None:
         super().__init__("the stored bytes do not match the digest recorded for them")
+
+
+class BlobRecordCorruptError(LedgerError):
+    """What a store records beside an object (its retention) cannot be read: a defect or a tampering."""
+
+    code: ClassVar[str] = "blob_record_corrupt"
+
+    def __init__(self) -> None:
+        super().__init__("the store's record of an object cannot be read")
 
 
 class BlobStoreUnavailableError(UnavailableError):

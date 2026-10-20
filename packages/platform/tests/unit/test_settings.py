@@ -466,3 +466,26 @@ def test_the_retention_is_one_to_a_hundred_years(monkeypatch: pytest.MonkeyPatch
     with pytest.raises(ValidationError) as caught:
         Settings()
     assert problems(caught.value) == {"archive_retention_years"}
+
+
+@pytest.mark.parametrize("environment_name", ["staging", "production"])
+def test_beyond_a_laptop_the_archive_keeps_what_the_law_requires(
+    monkeypatch: pytest.MonkeyPatch, environment_name: str
+) -> None:
+    """Ten years (Código Tributario art. 50 h) at least; a laptop or a test may keep less."""
+    environment(
+        monkeypatch,
+        {
+            **REQUIRED,
+            "LEDGER_ENVIRONMENT": environment_name,
+            "LEDGER_TOKEN_KIND_CLAIM_REQUIRED": "true",
+            "LEDGER_ARCHIVE_RETENTION_YEARS": "9",
+        },
+    )
+    with pytest.raises(ValidationError, match="archive_retention_years must be at least 10"):
+        Settings()
+    monkeypatch.setenv("LEDGER_ARCHIVE_RETENTION_YEARS", "10")
+    assert Settings().archive_retention_years == 10
+    monkeypatch.setenv("LEDGER_ENVIRONMENT", "local")
+    monkeypatch.setenv("LEDGER_ARCHIVE_RETENTION_YEARS", "1")
+    assert Settings().archive_retention_years == 1

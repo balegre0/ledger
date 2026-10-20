@@ -4,15 +4,18 @@ The testing package imports no country (contract 13), so ``TestSigner`` signs no
 ``sign`` and ``sign_seed`` (the DO pack's tests, a real enveloped signature from
 ``ledger_country_do_testing``'s key in the process; by default the bytes unchanged). It answers as the signer
 does: a request whose tenant has no certificate is ``SigningCertificateMissingError``, a document stating a
-moment its certificate does not cover ``SigningCertificateNotValidError``, and while ``unavailable_for``
-calls remain each call is ``SignerUnavailableError``. Every signing request is recorded (``calls``), the
-refused ones too: what a test asserts is what the signer was asked.
+moment its certificate does not cover ``SigningCertificateNotValidError``, a seed signed when its certificate
+does not cover the signer's clock (``clock``) too; and each call first raises the next of ``failures``, in
+order, while any remain (``SignerUnavailableError``, ``SignatureRefusedError``, ``SigningClockSkewError``,
+...). Every signing request is recorded (``calls``), the refused ones too: what a test asserts is what the
+signer was asked.
 
 ``with_test_signer`` puts a test signer in an app: the installed module that provides ``SignerPort`` (the
 signer module, whose stand-in answers ``signer_unavailable`` outside its own process) is assembled as usual,
 and its port is the test's.
 """
 
+from collections import deque
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import ClassVar, Final, final, override
@@ -24,15 +27,16 @@ from ledger_fiscal_kit.ports import (
     CertificateValidity,
     Signed,
     SignerPort,
-    SignerUnavailableError,
     SigningCertificateMissingError,
     SigningCertificateNotValidError,
 )
+from ledger_kernel.clock import utc_now
 from ledger_kernel.errors import InvalidValueError, LedgerError
 from ledger_platform.runtime.facade import facade
 from ledger_platform.runtime.packs import installed_modules
 from ledger_platform.runtime.registries import MODULES, Discovered
 lazy from ledger_fiscal_kit.ports import SeedToSign, SignatureProfile, XmlToSign
+lazy from ledger_kernel.clock import Clock
 lazy from ledger_kernel.tenancy import Tenant
 lazy from ledger_platform.runtime.calls import SystemCall
 lazy from ledger_platform.runtime.contexts import Module, ModuleContext, ModuleParts
@@ -79,7 +83,7 @@ class TestSigner(SignerPort):
 
     __test__: ClassVar[bool] = False
     """Not a test class, whatever pytest makes of its name."""
-    __slots__ = ("_sign", "_sign_seed", "_unavailable", "_validity", "calls")
+    __slots__ = ("_clock", "_failures", "_sign", "_sign_seed", "_validity", "calls")
 
     def __init__(
         self,
@@ -87,12 +91,14 @@ class TestSigner(SignerPort):
         sign: Callable[[bytes], bytes] = _unchanged,
         sign_seed: Callable[[bytes], bytes] = _unchanged,
         validity: CertificateValidity | None = DEFAULT_VALIDITY,
-        unavailable_for: int = 0,
+        failures: Sequence[LedgerError] = (),
+        clock: Clock = utc_now,
     ) -> None:
         self._sign = sign
         self._sign_seed = sign_seed
         self._validity = validity
-        self._unavailable = unavailable_for
+        self._failures = deque(failures)
+        self._clock = clock
         self.calls: list[SignCall] = []
         """Every signing request, in order, refused ones too."""
 
@@ -112,6 +118,8 @@ class TestSigner(SignerPort):
         del call
         self._record(SignCall(tenant=request.tenant, profile=request.profile, audience=request.audience))
         validity = self._certificate()
+        if not validity.covers(self._clock()):
+            raise SigningCertificateNotValidError
         return Signed(document=self._sign_seed(request.seed), certificate=validity.certificate)
 
     @facade
@@ -128,9 +136,8 @@ class TestSigner(SignerPort):
         self._reach()
 
     def _reach(self) -> None:
-        if self._unavailable > 0:
-            self._unavailable -= 1
-            raise SignerUnavailableError
+        if self._failures:
+            raise self._failures.popleft()
 
     def _certificate(self) -> CertificateValidity:
         if self._validity is None:

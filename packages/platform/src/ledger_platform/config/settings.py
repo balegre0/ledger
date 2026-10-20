@@ -104,6 +104,8 @@ An ordinary alias, not a ``type`` statement: the verifier reads its values at ru
 value of a ``type`` alias is typed ``Any``, which the type checkers refuse."""
 
 _HTTPS_ENVIRONMENTS: Final = frozenset({"staging", "production"})
+LEGAL_RETENTION_YEARS: Final = 10
+"""The least the legal archive keeps an object in staging and production (Código Tributario art. 50 h)."""
 
 
 class _InsecureKeysUrlError(ValueError):
@@ -134,6 +136,14 @@ class _FileArchiveInProductionError(ValueError):
         super().__init__(
             "archive_backend file is refused in production: its legal archive is s3 (object lock)"
         )
+
+
+class _ShortRetentionError(ValueError):
+    """Beyond a laptop the archive keeps what the law requires: ten years (Código Tributario art. 50 h)."""
+
+    def __init__(self) -> None:
+        years = LEGAL_RETENTION_YEARS
+        super().__init__(f"archive_retention_years must be at least {years} in staging and production")
 
 
 class _ClosedSettings(BaseSettings):
@@ -236,14 +246,14 @@ class Settings(_ClosedSettings):
     """Whether every token must carry the signed ``urn:ledger:principal_kind`` (an Action of the identity
     provider adds it): required in staging and production, optional on a laptop and in tests."""
     archive_backend: Literal["file"] | None = None
-    """Where the legal archive is (§6.8): ``file`` (a directory: local runs, tests, certification work;
-    refused in production) or none, and then no archive is bound and a channel that reads one does not start.
-    The S3 object-lock store arrives with production's archive (v2-M3b Task 16)."""
+    """Where the legal archive is (§6.8): ``file`` (a directory: local runs, tests, certification work,
+    staging included; refused in production) or none, and then no archive is bound and a channel that reads
+    one does not start. The S3 object-lock store arrives with production's archive (v2-M3b Task 16)."""
     archive_path: Path | None = None
     """The file archive's directory, absolute (required by ``file``)."""
     archive_retention_years: Annotated[int, Field(ge=1, le=100)] = 10
     """The least an archived object is kept, from the day it is stored: ten years by the Código Tributario
-    (art. 50 h)."""
+    (art. 50 h), and never less in staging and production; a laptop or a test may keep less."""
 
     @field_validator("database_url", "database_direct_url")
     @classmethod
@@ -275,6 +285,13 @@ class Settings(_ClosedSettings):
             self.archive_path is None or not self.archive_path.is_absolute()
         ):
             raise _ArchivePathError
+        return self
+
+    @model_validator(mode="after")
+    def require_the_legal_retention_beyond_a_laptop(self) -> Self:
+        """Refuse a retention shorter than the law's in staging and production."""
+        if self.environment in _HTTPS_ENVIRONMENTS and self.archive_retention_years < LEGAL_RETENTION_YEARS:
+            raise _ShortRetentionError
         return self
 
     @model_validator(mode="after")
