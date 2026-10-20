@@ -2,7 +2,7 @@ import psycopg
 import pytest
 
 from ledger_testing.containers import libpq_url
-from ledger_testing.postgres import TEMPLATE, PostgresServer, Template, clone, ensure_template
+from ledger_testing.postgres import TEMPLATE, PostgresServer, Template, clone, ensure_template, server_wide
 lazy from ledger_testing.postgres import WorkerDatabase
 
 
@@ -120,3 +120,15 @@ def test_truncate_empties_the_named_schemas_but_keeps_what_it_must(worker_databa
 
 def test_the_default_template_is_named_for_the_repository() -> None:
     assert TEMPLATE == "ledger_template"
+
+
+def test_server_wide_statements_hold_the_lock_template_builds_and_clones_take(
+    postgres: PostgresServer,
+) -> None:
+    held = "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = %s AND granted"
+    with server_wide(postgres) as admin:
+        (pid,) = admin.execute("SELECT pg_backend_pid()").fetchone() or (0,)
+        with psycopg.connect(postgres.libpq(), autocommit=True) as other:
+            assert other.execute(held, (pid,)).fetchone() == (1,)
+    with psycopg.connect(postgres.libpq(), autocommit=True) as other:
+        assert other.execute(held, (pid,)).fetchone() == (0,)
