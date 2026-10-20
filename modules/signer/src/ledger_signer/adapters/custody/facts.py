@@ -1,14 +1,21 @@
 """What custody reads of a certificate for the domain to decide on (``CertificateFacts``): no secret in it.
 
 ``may_sign`` is fiscal-kit's rule of what may sign (``dsig.signing_problem``: no authority, a key usage that
-allows a signature), and one more: the certificate's issuer did not sign it with SHA-1 or MD5, whose
-collisions let whoever forges one make a certificate that names anyone. Such a certificate is refused at its
-import as one that may not sign (``certificate_not_for_signing``).
+allows a signature), and one more: the certificate's issuer signed it with a SHA-2 hash (RSA PKCS#1 v1.5 or
+ECDSA over SHA-224 to SHA-512, or RSASSA-PSS over one of them). Anything else (SHA-1, MD5, MD4, MD2, PSS over
+another hash, an algorithm the library does not know) is refused at the import as a certificate that may not
+sign (``certificate_not_for_signing``): a weak hash lets whoever forges a collision make a certificate that
+names anyone.
+
+This is a deliberate stopgap, decided at the review of v2-M2b Task 10: it looks at the one certificate only.
+Validating its path to an accepted certification authority (each signature in the chain, its algorithms,
+revocation) is deferred (spec §10, v2-M5); this rule goes when that check exists (see Task 15's notes).
 """
 
 from typing import Final
 
 from cryptography import x509
+from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import SignatureAlgorithmOID
@@ -16,16 +23,31 @@ from cryptography.x509.oid import SignatureAlgorithmOID
 from ledger_fiscal_kit.xml import dsig
 from ledger_signer.domain.certificates import CertificateFacts
 
-BROKEN_SIGNATURES: Final = frozenset(
+SHA2_SIGNATURES: Final = frozenset(
     {
-        SignatureAlgorithmOID.RSA_WITH_MD5,
-        SignatureAlgorithmOID.RSA_WITH_SHA1,
-        x509.ObjectIdentifier("1.3.14.3.2.29"),  # sha1WithRSASignature, OIW's older name for it
-        SignatureAlgorithmOID.ECDSA_WITH_SHA1,
-        SignatureAlgorithmOID.DSA_WITH_SHA1,
+        SignatureAlgorithmOID.RSA_WITH_SHA224,
+        SignatureAlgorithmOID.RSA_WITH_SHA256,
+        SignatureAlgorithmOID.RSA_WITH_SHA384,
+        SignatureAlgorithmOID.RSA_WITH_SHA512,
+        SignatureAlgorithmOID.ECDSA_WITH_SHA224,
+        SignatureAlgorithmOID.ECDSA_WITH_SHA256,
+        SignatureAlgorithmOID.ECDSA_WITH_SHA384,
+        SignatureAlgorithmOID.ECDSA_WITH_SHA512,
     }
 )
-"""The algorithms an issuer may not have signed a certificate with: SHA-1's and MD5's."""
+"""The algorithms an issuer may have signed a certificate with, besides RSASSA-PSS over a SHA-2 hash."""
+_SHA2: Final = (hashes.SHA224, hashes.SHA256, hashes.SHA384, hashes.SHA512)
+
+
+def _signed_with_sha2(certificate: x509.Certificate) -> bool:
+    """Whether ``certificate``'s issuer signed it with a SHA-2 hash (see the module: a stopgap)."""
+    algorithm = certificate.signature_algorithm_oid
+    if algorithm != SignatureAlgorithmOID.RSASSA_PSS:
+        return algorithm in SHA2_SIGNATURES
+    try:
+        return isinstance(certificate.signature_hash_algorithm, _SHA2)
+    except UnsupportedAlgorithm:  # a hash the library does not know is no SHA-2 hash
+        return False
 
 
 def _is_authority(certificate: x509.Certificate) -> bool:
@@ -53,8 +75,7 @@ def facts_of(certificate: x509.Certificate, *, matches_key: bool) -> Certificate
         not_before=certificate.not_valid_before_utc,
         not_after=certificate.not_valid_after_utc,
         rsa_bits=public.key_size if isinstance(public, rsa.RSAPublicKey) else None,
-        may_sign=dsig.signing_problem(certificate) is None
-        and certificate.signature_algorithm_oid not in BROKEN_SIGNATURES,
+        may_sign=dsig.signing_problem(certificate) is None and _signed_with_sha2(certificate),
         is_authority=_is_authority(certificate),
         matches_key=matches_key,
     )

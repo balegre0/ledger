@@ -7,6 +7,7 @@ its master key; it creates its key file (readable by its owner alone) only in ``
 import os
 import stat
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from typing import Final
 lazy from collections.abc import Callable, Mapping
 lazy from pathlib import Path
@@ -29,6 +30,7 @@ lazy from ledger_signer.application.ports import DataKey
 CONTEXT: Final = {"purpose": "signer.custody", "organization": "o", "company": "c", "certificate": "1"}
 OTHER: Final = {**CONTEXT, "certificate": "2"}
 OTHERS_MAY_NOT: Final = 0o077
+STARTERS: Final = 8
 
 type Tamper = Callable[[DataKey], tuple[bytes, str, Mapping[str, str]]]
 """What an unwrap is given instead of what the data key was wrapped with: bytes, key id, context."""
@@ -136,3 +138,30 @@ def test_it_shows_no_key(key_file: Path) -> None:
     kms = LocalFileKms(key_file, environment="test")
     assert key_file.read_bytes().hex() not in repr(kms)
     assert str(key_file) not in repr(kms)
+
+
+@pytest.mark.parametrize("environment", ["local", "test"])
+@pytest.mark.parametrize("where", ["missing directory", "a directory"])
+def test_a_key_file_that_cannot_be_made_or_read_is_refused_without_its_path(
+    tmp_path: Path, environment: Environment, where: str
+) -> None:
+    path = tmp_path / "absent" / "master.key" if where == "missing directory" else tmp_path
+    with pytest.raises(KmsKeyFileError) as caught:
+        LocalFileKms(path, environment=environment)
+    error = caught.value
+    assert str(tmp_path) not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None or error.__suppress_context__
+
+
+def started(path: Path) -> str:
+    """The key id a starter in ``local`` reads, making the key file if it is first."""
+    return LocalFileKms(path, environment="local").key_id
+
+
+def test_starters_racing_to_make_the_key_file_all_use_the_one_kept(tmp_path: Path) -> None:
+    path = tmp_path / "master.key"
+    with ThreadPoolExecutor(STARTERS) as pool:
+        key_ids = set(pool.map(started, [path] * STARTERS))
+    assert key_ids == {LocalFileKms(path, environment="test").key_id}
+    assert [entry.name for entry in tmp_path.iterdir()] == ["master.key"]  # no temporary file left behind

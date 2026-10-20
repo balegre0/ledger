@@ -43,6 +43,11 @@ QUOTED: Final = re.compile(r"'([^']*)'")
 COMMANDS: Final = ("delete", "insert", "select", "update")
 PRIVILEGES: Final = ("SELECT", "INSERT", "UPDATE", "DELETE")
 GRANTED: Final = TypeAdapter(bool)
+COLUMN: Final = TypeAdapter(str)
+UPDATABLE_COLUMNS: Final = (
+    "SELECT column_name FROM information_schema.column_privileges WHERE grantee = 'signer_rw'"
+    " AND table_schema = 'signer' AND table_name = 'certificates' AND privilege_type = 'UPDATE'"
+)
 
 
 def superuser(worker: WorkerDatabase) -> str:
@@ -182,6 +187,15 @@ async def test_the_signer_s_role_reads_and_writes_only_what_its_repositories_nee
             if row is not None and GRANTED.validate_python(row[0]):
                 granted.setdefault(name, set()).add(privilege)
     assert granted == {
-        "certificates": {"SELECT", "INSERT", "UPDATE"},
+        "certificates": {"SELECT", "INSERT"},  # UPDATE by column only: see below
         "custody": {"SELECT", "INSERT", "DELETE"},
     }
+
+
+async def test_the_signer_s_role_updates_only_what_a_certificate_s_life_changes(
+    admin: psycopg.AsyncConnection,
+) -> None:
+    """Its modes, status, retirement and version: never its certificate, subject, validity or owner."""
+    answer = await admin.execute(UPDATABLE_COLUMNS)
+    columns = {COLUMN.validate_python(row[0]) for row in await answer.fetchall()}
+    assert columns == {"serves_test", "serves_live", "status", "retired_at", "retired_reason", "version"}

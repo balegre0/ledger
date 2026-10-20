@@ -9,6 +9,7 @@ derivation): custody calls it in a thread.
 
 from typing import Final
 
+from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import pkcs12
 lazy from cryptography import x509
@@ -26,7 +27,7 @@ def open_bundle(bundle: bytes, password: Secret) -> tuple[rsa.RSAPrivateKey, x50
         raise BundleUnreadableError
     try:
         opened = pkcs12.load_pkcs12(bundle, password.reveal().encode())
-    except ValueError:
+    except ValueError, UnsupportedAlgorithm:  # an algorithm the library lacks is a bundle it cannot open
         raise BundleUnreadableError from None
     key, certificate = opened.key, opened.cert
     if not isinstance(key, rsa.RSAPrivateKey) or certificate is None:

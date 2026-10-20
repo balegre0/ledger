@@ -17,7 +17,7 @@ from typing import ClassVar, final
 from cryptography import x509
 
 from ledger_kernel.errors import LedgerError
-from ledger_signer.adapters.custody.envelope import sealed, unsealed
+from ledger_signer.adapters.custody.envelope import ENTITY_CREDENTIAL, sealed, unsealed
 from ledger_signer.adapters.custody.facts import facts_of
 from ledger_signer.application.ports import Admitted
 lazy from ledger_fiscal_kit.xml.dsig import Prepared
@@ -60,13 +60,15 @@ class RemoteBackend:
         except ValueError:
             raise EntityAnswerInvalidError from None
         facts = facts_of(certificate, matches_key=True)  # the entity's certificate is the key's by definition
-        return Admitted(facts=facts, material=await sealed(self._kms, plain, seal_for))
+        return Admitted(
+            facts=facts, material=await sealed(self._kms, plain, seal_for, kind=ENTITY_CREDENTIAL)
+        )
 
     async def sign(
         self, material: SealedMaterial, *, prepared: Prepared, certificate_der: bytes, seal_for: SealContext
     ) -> bytes:
         """``prepared``'s document signed by the entity with the credential ``material`` seals."""
-        credential = await unsealed(self._kms, material, seal_for)
+        credential = await unsealed(self._kms, material, seal_for, kind=ENTITY_CREDENTIAL)
         value = await self._entity.sign_digest(credential, hashlib.sha256(prepared.to_sign).digest())
         return await asyncio.to_thread(
             prepared.complete, value, x509.load_der_x509_certificate(certificate_der)

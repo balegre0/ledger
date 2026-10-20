@@ -11,9 +11,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Final
 
 import pytest
-from psycopg.errors import UniqueViolation
-from sqlalchemy import insert
-from sqlalchemy.exc import IntegrityError
+from psycopg.errors import InsufficientPrivilege, UniqueViolation
+from sqlalchemy import insert, update
+from sqlalchemy.exc import IntegrityError, ProgrammingError
 lazy from psycopg import AsyncConnection
 
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
@@ -274,3 +274,21 @@ async def test_a_unit_scoped_to_nobody_has_no_signer_view(module_database: Bound
         with pytest.raises(SignerUnitUnscopedError) as caught:
             bind(uow)
     assert caught.value.code == "signer_unit_unscoped"
+
+
+async def test_a_certificate_s_identity_cannot_be_rewritten(module_database: BoundDatabase) -> None:
+    """Defence in depth: the role updates only the columns a certificate's life changes."""
+    owner = a_company()
+    with pytest.raises(ProgrammingError) as caught:
+        await rewritten(module_database, owner)
+    assert isinstance(caught.value.orig, InsufficientPrivilege)
+
+
+async def rewritten(module_database: BoundDatabase, owner: Tenant) -> None:
+    """An attempt to give ``owner``'s certificates another key's certificate."""
+    async with module_database.unit(owner) as uow:
+        await uow.connection.execute(
+            update(CertificateRecord)
+            .where(CertificateRecord.company_id == owner.company)
+            .values(certificate_der=b"another certificate")
+        )

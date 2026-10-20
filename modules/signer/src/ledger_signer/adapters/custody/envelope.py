@@ -8,11 +8,14 @@ another key) is ``CustodyTamperedError``, without the library's words.
 
 ``sealed`` and ``unsealed`` are the two halves custody uses: a fresh data key per secret, asked of the KMS
 under the secret's context, and its plaintext dropped once it has sealed; to open, the KMS unwraps it again,
-every time (no cache, plan Decision 18).
+every time (no cache, plan Decision 18). Their associated data also names the kind of material sealed (a
+private key or an entity's credential): a key is never opened as a credential, so it can never be sent to a
+certification entity, nor a credential parsed as a key; a mismatch is ``CustodyTamperedError`` before anything
+leaves the process.
 """
 
 import os
-from typing import ClassVar, Final
+from typing import ClassVar, Final, Literal
 lazy from collections.abc import Mapping
 
 from cryptography.exceptions import InvalidTag
@@ -30,6 +33,13 @@ seals one secret here)."""
 TAG_BYTES: Final = 16
 """GCM's tag: the bytes after the ciphertext."""
 _LENGTH_BYTES: Final = 8
+_MATERIAL: Final = "material"
+"""The associated data's entry naming the kind of material (the KMS's context does not hold it)."""
+
+type MaterialKind = Literal["pkcs8-rsa", "entity-credential"]
+"""What a sealed secret is: a private key (PKCS#8, the local backend) or an entity's credential (remote)."""
+PRIVATE_KEY: Final[MaterialKind] = "pkcs8-rsa"
+ENTITY_CREDENTIAL: Final[MaterialKind] = "entity-credential"
 
 
 class CustodyTamperedError(LedgerError):
@@ -70,19 +80,30 @@ def unseal(sealed: bytes, data_key: bytes, associated: bytes) -> bytes:
         raise CustodyTamperedError from None
 
 
-async def sealed(kms: KeyManagement, plaintext: bytes, seal_for: SealContext) -> SealedMaterial:
-    """``plaintext`` sealed under a new data key the KMS wrapped for ``seal_for``."""
+def _associated(context: Mapping[str, str], kind: MaterialKind) -> bytes:
+    return associated_data({**context, _MATERIAL: kind})
+
+
+async def sealed(
+    kms: KeyManagement, plaintext: bytes, seal_for: SealContext, *, kind: MaterialKind
+) -> SealedMaterial:
+    """``plaintext``, a secret of ``kind``, sealed under a new data key the KMS wrapped for ``seal_for``."""
     context = seal_for.context()
     data_key = await kms.new_data_key(context)
     return SealedMaterial(
-        sealed=seal(plaintext, data_key.plaintext, associated_data(context)),
+        sealed=seal(plaintext, data_key.plaintext, _associated(context, kind)),
         wrapped_data_key=data_key.wrapped,
         kms_key_id=data_key.key_id,
     )
 
 
-async def unsealed(kms: KeyManagement, material: SealedMaterial, seal_for: SealContext) -> bytes:
-    """What ``material`` sealed for ``seal_for``, its data key unwrapped by the KMS for this call alone."""
+async def unsealed(
+    kms: KeyManagement, material: SealedMaterial, seal_for: SealContext, *, kind: MaterialKind
+) -> bytes:
+    """The secret of ``kind`` that ``material`` sealed for ``seal_for``, its data key unwrapped for this call.
+
+    ``CustodyTamperedError`` when ``material`` holds another kind of secret.
+    """
     context = seal_for.context()
     data_key = await kms.unwrap(material.wrapped_data_key, key_id=material.kms_key_id, context=context)
-    return unseal(material.sealed, data_key, associated_data(context))
+    return unseal(material.sealed, data_key, _associated(context, kind))

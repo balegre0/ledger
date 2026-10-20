@@ -3,8 +3,9 @@
 Its role is granted no more than the repositories need.
 ``certificates`` holds a certificate's public part, ``custody`` its sealed material; both are a company's
 (scope ``company``: a certificate is shared by its company's modes). A certificate is retired, never deleted
-(``signer_rw`` loses ``DELETE`` on it); its sealed material is written once and deleted when it is retired
-(``signer_rw`` loses ``UPDATE`` on it). Every type, word and constraint is spelled out (a revision records
+(``signer_rw`` loses ``DELETE`` on it) and updated only in the columns its life changes (``UPDATE`` by
+column); its sealed material is written once and deleted when it is retired (``signer_rw`` loses ``UPDATE``
+on it). Every type, word and constraint is spelled out (a revision records
 what was done and must not move with the models); the tests keep the models equal to it.
 """
 
@@ -23,6 +24,9 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 S: Final = "signer"
+_MUTABLE: Final = ("serves_test", "serves_live", "status", "retired_at", "retired_reason", "version")
+"""What a certificate's life changes: its modes, its status and retirement, its version. Never the
+certificate, its holder, its validity or its owner (defence in depth: a signing role cannot rewrite them)."""
 
 
 def _moment(name: str, *, nullable: bool = False) -> sa.Column[datetime]:
@@ -104,7 +108,8 @@ def upgrade() -> None:
     for name in ("certificates", "custody"):
         for statement in policy(f"{S}.{name}", RlsScope.COMPANY):
             op.execute(statement)
-    op.execute('REVOKE DELETE ON "signer".certificates FROM "signer_rw"')
+    op.execute('REVOKE DELETE, UPDATE ON "signer".certificates FROM "signer_rw"')
+    op.execute(f'GRANT UPDATE ({", ".join(_MUTABLE)}) ON "signer".certificates TO "signer_rw"')
     op.execute('REVOKE UPDATE ON "signer".custody FROM "signer_rw"')
 
 

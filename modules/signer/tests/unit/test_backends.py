@@ -29,7 +29,7 @@ from ledger_signer.adapters.custody.backends import (
     EntityAnswerInvalidError,
     EntityNotConfiguredError,
 )
-from ledger_signer.adapters.custody.envelope import sealed
+from ledger_signer.adapters.custody.envelope import PRIVATE_KEY, CustodyTamperedError, sealed
 from ledger_signer.adapters.custody.kms_local import MASTER_KEY_BYTES, LocalFileKms
 from ledger_signer.application.ports import (
     BundleUnreadableError,
@@ -95,11 +95,12 @@ class CountingKms(KeyManagement, Protocol):
 
 
 class RecordingEntity(CertificationEntity, Protocol):
-    """The stand-in entity: its switches, and the digests it signed."""
+    """The stand-in entity: its switches, the credentials it received and the digests it signed."""
 
     available: bool
     refusing: bool
     digests: list[bytes]
+    received: list[bytes]
 
 
 @final
@@ -191,25 +192,36 @@ async def test_a_key_that_does_not_sign_for_the_certificate_is_custody_damaged(
         await sign(backends, admitted, BackendKind.LOCAL, context, der(entity_holder.certificate))
 
 
-async def test_a_sealed_credential_taken_for_a_key_is_custody_damaged(
-    backends: Backends, holder: Issued
-) -> None:
+async def test_a_sealed_credential_taken_for_a_key_does_not_open(backends: Backends, holder: Issued) -> None:
     context = a_context()
     admitted = await backends.admit_remote(Secret(CREDENTIAL), seal_for=context)
-    with pytest.raises(dsig.NotAnRsaKeyError) as caught:
+    with pytest.raises(CustodyTamperedError):  # the kind of material is bound to its sealed bytes
         await sign(backends, admitted, BackendKind.LOCAL, context, der(holder.certificate))
-    assert caught.value.__cause__ is None  # the parser's message stays behind
 
 
-async def test_a_sealed_key_of_another_kind_is_custody_damaged(
-    backends: Backends, kms: KeyManagement, holder: Issued
+async def test_a_sealed_key_taken_for_a_credential_never_reaches_the_entity(
+    backends: Backends, entity: RecordingEntity, holder: Issued
+) -> None:
+    context = a_context()
+    admitted = await backends.admit_local(
+        bundle(holder, password=PASSWORD), Secret(PASSWORD), seal_for=context
+    )
+    with pytest.raises(CustodyTamperedError):
+        await sign(backends, admitted, BackendKind.REMOTE, context, der(holder.certificate))
+    assert entity.received == []
+    assert entity.digests == []
+
+
+@pytest.mark.parametrize("kind", ["elliptic", "garbage"])
+async def test_a_sealed_key_that_is_no_rsa_key_is_custody_damaged(
+    backends: Backends, kms: KeyManagement, holder: Issued, kind: str
 ) -> None:
     context = a_context()
     elliptic = ec_key().private_bytes(
         serialization.Encoding.DER, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
     )
-    material = await sealed(kms, elliptic, context)
-    with pytest.raises(dsig.NotAnRsaKeyError):
+    material = await sealed(kms, elliptic if kind == "elliptic" else b"no key", context, kind=PRIVATE_KEY)
+    with pytest.raises(dsig.NotAnRsaKeyError) as caught:
         await backends.sign(
             material,
             backend=BackendKind.LOCAL,
@@ -217,6 +229,7 @@ async def test_a_sealed_key_of_another_kind_is_custody_damaged(
             certificate_der=der(holder.certificate),
             seal_for=context,
         )
+    assert caught.value.__cause__ is None  # the parser's message stays behind
 
 
 async def test_a_credential_is_sealed_and_the_entity_signs_a_digest(
@@ -232,6 +245,7 @@ async def test_a_credential_is_sealed_and_the_entity_signs_a_digest(
     signed = await sign(backends, admitted, BackendKind.REMOTE, context, facts.der)
     verified(signed, entity_holder.certificate)
     assert kms.unwraps == before + 1
+    assert entity.received == [CREDENTIAL.encode()] * 2  # unsealed as it was given: admitted, then signed
     (digest,) = entity.digests
     assert len(digest) == DIGEST_BYTES
     signed_info = dsig.prepare(DOCUMENT).to_sign

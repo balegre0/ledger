@@ -7,6 +7,7 @@ which); a bundle without an RSA key and its certificate is incomplete; one over 
 from typing import Final
 
 import pytest
+from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import NoEncryption, pkcs12
 from cryptography.x509.oid import NameOID
@@ -79,3 +80,19 @@ def test_a_bundle_without_its_key_or_certificate_is_incomplete(holder: Issued, m
     with pytest.raises(BundleIncompleteError) as caught:
         open_bundle(content, Secret(""))
     assert caught.value.code == "certificate_bundle_incomplete"
+
+
+def test_a_bundle_sealed_with_an_algorithm_the_library_lacks_gets_the_same_answer(
+    holder: Issued, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    message = f"{PASSWORD}: an algorithm the library lacks"
+
+    def unsupported(data: bytes, password: bytes | None) -> pkcs12.PKCS12KeyAndCertificates:
+        del data, password
+        raise UnsupportedAlgorithm(message)
+
+    monkeypatch.setattr(pkcs12, "load_pkcs12", unsupported)
+    with pytest.raises(BundleUnreadableError) as caught:
+        open_bundle(bundle(holder), Secret(PASSWORD))
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__

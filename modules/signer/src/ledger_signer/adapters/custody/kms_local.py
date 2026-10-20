@@ -3,17 +3,19 @@
 It honours the ``KeyManagement`` contract as far as a file can: a data key is wrapped with AES-256-GCM under
 the master key, the encryption context as associated data, so it unwraps under that context only; the key id
 names the master key (``local:`` and the first 8 bytes of its SHA-256, in hexadecimal), and an unwrap for
-another is refused. What a file cannot give (a workload identity, a log of every use, rotation) is why
-``staging`` and ``production`` refuse it (``KmsLocalRefusedError``).
+another is refused. What a file cannot give (a workload identity, a log of every use, rotation) is why only
+``local`` and ``test`` accept it; every other environment refuses it (``KmsLocalRefusedError``).
 
 The key file holds the 32 bytes of the master key. In ``local`` it is created when it is missing, readable
-and writable by its owner alone (where the file system keeps POSIX modes); anywhere else it must exist. An
-existing file is never replaced. Neither its content nor its path appears in an error, a log line or a
+and writable by its owner alone where the file system keeps POSIX modes (on Windows its directory's access
+control list protects it); in ``test`` it must exist. An existing file is never replaced; one that cannot be
+made or read is ``KmsKeyFileError``. Neither its content nor its path appears in an error, a log line or a
 ``repr``.
 """
 
 import hashlib
 import os
+import secrets
 import sys
 from typing import ClassVar, Final, final, override
 lazy from collections.abc import Mapping
@@ -34,7 +36,9 @@ _KEY_ID_BYTES: Final = 8
 _OWNER_ONLY: Final = 0o600
 _CREATE: Final = os.O_WRONLY | os.O_CREAT | os.O_EXCL | (os.O_BINARY if sys.platform == "win32" else 0)
 """A new file only (never one that exists), written as bytes (Windows translates line ends otherwise)."""
-_REFUSED: Final[frozenset[Environment]] = frozenset({"staging", "production"})
+_ALLOWED: Final[frozenset[Environment]] = frozenset({"local", "test"})
+"""Where a key in a file is acceptable: a laptop and the tests (the other environments hold real keys)."""
+_TEMPORARY_BYTES: Final = 8
 
 
 class KmsLocalRefusedError(LedgerError):
@@ -47,7 +51,7 @@ class KmsLocalRefusedError(LedgerError):
 
 
 class KmsKeyFileError(LedgerError):
-    """The local-file KMS's key file is missing (outside ``local``) or holds no 256-bit key."""
+    """The local-file KMS's key file cannot be made or read, or holds no 256-bit key (never said where)."""
 
     code: ClassVar[str] = "kms_key_file_unusable"
 
@@ -56,13 +60,26 @@ class KmsKeyFileError(LedgerError):
 
 
 def _create(path: Path) -> None:
-    """A new key file at ``path``, its owner's alone; one that exists (made meanwhile, or before) is kept."""
+    """A new key file at ``path``, its owner's alone; one that exists (made meanwhile, or before) is kept.
+
+    Crash-safe: the key is written to a temporary file of its own in the same directory, made to disk, then
+    linked to ``path``, which never names a file holding less than a whole key. Of starters racing, the first
+    link wins and every other keeps it.
+    """
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(_TEMPORARY_BYTES)}.tmp")
     try:
-        descriptor = os.open(path, _CREATE, _OWNER_ONLY)
-    except FileExistsError:
-        return
-    with os.fdopen(descriptor, "wb") as file:
-        file.write(os.urandom(MASTER_KEY_BYTES))
+        descriptor = os.open(temporary, _CREATE, _OWNER_ONLY)
+        with os.fdopen(descriptor, "wb") as file:
+            file.write(os.urandom(MASTER_KEY_BYTES))
+            file.flush()
+            os.fsync(file.fileno())
+        os.link(temporary, path)
+    except FileExistsError:  # another starter's key is there first: it is the one kept
+        pass
+    except OSError:
+        raise KmsKeyFileError from None
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _master(path: Path, environment: Environment) -> bytes:
@@ -70,7 +87,7 @@ def _master(path: Path, environment: Environment) -> bytes:
         _create(path)
     try:
         master = path.read_bytes()
-    except FileNotFoundError:
+    except OSError:  # missing, a directory, unreadable: never said which, nor where
         raise KmsKeyFileError from None
     if len(master) != MASTER_KEY_BYTES:
         raise KmsKeyFileError
@@ -84,7 +101,7 @@ class LocalFileKms(KeyManagement):
     __slots__ = ("_master", "key_id")
 
     def __init__(self, path: Path, *, environment: Environment) -> None:
-        if environment in _REFUSED:
+        if environment not in _ALLOWED:
             raise KmsLocalRefusedError
         master = _master(path, environment)
         self._master = AESGCM(master)

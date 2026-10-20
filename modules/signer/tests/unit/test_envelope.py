@@ -12,7 +12,9 @@ from ledger_kernel.errors import ErrorKind, InvalidValueError
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_signer.adapters.custody.envelope import (
     DATA_KEY_BYTES,
+    ENTITY_CREDENTIAL,
     NONCE_BYTES,
+    PRIVATE_KEY,
     CustodyTamperedError,
     associated_data,
     seal,
@@ -101,9 +103,11 @@ def test_associated_data_is_the_sorted_length_prefixed_context() -> None:
 
 async def test_a_secret_is_sealed_under_a_fresh_data_key_the_kms_wrapped(kms: KeyManagement) -> None:
     context = a_context()
-    material = await sealed(kms, SECRET, context)
+    material = await sealed(kms, SECRET, context, kind=PRIVATE_KEY)
     assert SECRET not in material.sealed
     assert material.kms_key_id == "memory:1"
-    assert await unsealed(kms, material, context) == SECRET
-    again = await sealed(kms, SECRET, context)
+    assert await unsealed(kms, material, context, kind=PRIVATE_KEY) == SECRET
+    with pytest.raises(CustodyTamperedError):  # a key is never opened as a credential, nor the reverse
+        await unsealed(kms, material, context, kind=ENTITY_CREDENTIAL)
+    again = await sealed(kms, SECRET, context, kind=PRIVATE_KEY)
     assert again.wrapped_data_key != material.wrapped_data_key  # one data key per seal

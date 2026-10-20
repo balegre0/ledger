@@ -6,8 +6,9 @@ certificate. Signing unwraps the data key for this signature alone, opens the ke
 CPU work (the bundle's key derivation, loading and using the key, completing the document) runs in a thread,
 never on the event loop; the use case bounds how many at once.
 
-Sealed material that is no RSA key (a credential sealed for the remote backend, or bytes custody never
-sealed) is ``dsig.NotAnRsaKeyError`` raised from nothing: custody is damaged, as the signing use case says.
+Sealed material that is not a private key (a credential sealed for the remote backend) does not open
+(``CustodyTamperedError``); a private key that is no RSA key is ``dsig.NotAnRsaKeyError`` raised from nothing:
+custody is damaged either way, as the signing use case says.
 """
 
 import asyncio
@@ -18,7 +19,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from ledger_fiscal_kit.xml import dsig
-from ledger_signer.adapters.custody.envelope import sealed, unsealed
+from ledger_signer.adapters.custody.envelope import PRIVATE_KEY, sealed, unsealed
 from ledger_signer.adapters.custody.facts import facts_of, is_its_key
 from ledger_signer.adapters.custody.pkcs12 import open_bundle
 from ledger_signer.application.ports import Admitted
@@ -60,11 +61,11 @@ class LocalBackend:
     async def admit(self, bundle: bytes, password: Secret, *, seal_for: SealContext) -> Admitted:
         """The facts of ``bundle``'s certificate, and its key sealed for ``seal_for``."""
         plain, facts = await asyncio.to_thread(_opened, bundle, password)
-        return Admitted(facts=facts, material=await sealed(self._kms, plain, seal_for))
+        return Admitted(facts=facts, material=await sealed(self._kms, plain, seal_for, kind=PRIVATE_KEY))
 
     async def sign(
         self, material: SealedMaterial, *, prepared: Prepared, certificate_der: bytes, seal_for: SealContext
     ) -> bytes:
         """``prepared``'s document signed with the key ``material`` seals."""
-        key_der = await unsealed(self._kms, material, seal_for)
+        key_der = await unsealed(self._kms, material, seal_for, kind=PRIVATE_KEY)
         return await asyncio.to_thread(_signed, key_der, prepared, certificate_der)

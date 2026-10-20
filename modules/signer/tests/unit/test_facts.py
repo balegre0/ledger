@@ -1,7 +1,7 @@
 """What custody reads of a certificate for the domain to decide on: no secret, every fact ``admit`` needs.
 
-A certificate its issuer signed with SHA-1 or MD5 may not sign: whoever can forge such a signature can make a
-certificate that names anyone.
+A certificate its issuer signed with anything but a SHA-2 hash (SHA-1, MD5, MD4, MD2, or PSS over another
+hash) may not sign: whoever can forge such a signature can make a certificate that names anyone.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -10,7 +10,7 @@ from typing import Final
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.x509.oid import NameOID, SignatureAlgorithmOID
 
 from ledger_signer.adapters.custody.facts import facts_of, is_its_key
@@ -24,8 +24,14 @@ SHA256_WITH_RSA: Final = bytes.fromhex("06092a864886f70d01010b")
 WEAK: Final = {
     "sha1": bytes.fromhex("06092a864886f70d010105"),
     "md5": bytes.fromhex("06092a864886f70d010104"),
+    "md4": bytes.fromhex("06092a864886f70d010103"),
+    "md2": bytes.fromhex("06092a864886f70d010102"),
 }
-"""The DER of the OIDs sha1WithRSAEncryption and md5WithRSAEncryption: the same length as SHA-256's."""
+"""The DER of the OIDs of RSA with SHA-1, MD5, MD4 and MD2: the same length as SHA-256's."""
+SHA256: Final = bytes.fromhex("0609608648016503040201")
+"""The DER of the OID of SHA-256, as RSASSA-PSS's parameters name it (its hash and MGF1's)."""
+PSS_HASHES: Final = {"sha3-256": SHA256[:-1] + b"\b", "unknown": SHA256[:-1] + b"c"}
+"""The same OID's arc ending in 8 (SHA3-256, not SHA-2) and in 99 (no hash at all)."""
 
 
 def signed_with(certificate: x509.Certificate, algorithm: bytes) -> x509.Certificate:
@@ -113,11 +119,46 @@ def test_a_certificate_of_another_kind_of_key_has_no_rsa_size(authority: Authori
 @pytest.mark.parametrize("algorithm", list(WEAK.values()), ids=list(WEAK))
 def test_a_certificate_signed_with_a_broken_hash_may_not_sign(holder: Issued, algorithm: bytes) -> None:
     weak = signed_with(holder.certificate, algorithm)
-    assert weak.signature_algorithm_oid in {
-        SignatureAlgorithmOID.RSA_WITH_SHA1,
-        SignatureAlgorithmOID.RSA_WITH_MD5,
+    assert weak.signature_algorithm_oid not in {
+        SignatureAlgorithmOID.RSA_WITH_SHA256,
+        SignatureAlgorithmOID.RSASSA_PSS,
     }
     assert not facts_of(weak, matches_key=True).may_sign
+
+
+def pss_signed(authority: Authority, holder: Issued) -> x509.Certificate:
+    """``holder``'s certificate as ``authority`` would issue it signed with RSASSA-PSS over SHA-256."""
+    certificate = holder.certificate
+    return (
+        x509.CertificateBuilder()
+        .subject_name(certificate.subject)
+        .issuer_name(authority.certificate.subject)
+        .public_key(certificate.public_key())
+        .serial_number(certificate.serial_number)
+        .not_valid_before(certificate.not_valid_before_utc)
+        .not_valid_after(certificate.not_valid_after_utc)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(certificate.extensions.get_extension_for_class(x509.KeyUsage).value, critical=True)
+        .sign(
+            authority.issued.key,
+            hashes.SHA256(),
+            rsa_padding=padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=32),
+        )
+    )
+
+
+def test_a_certificate_signed_with_pss_over_sha_256_may_sign(authority: Authority, holder: Issued) -> None:
+    assert facts_of(pss_signed(authority, holder), matches_key=True).may_sign
+
+
+@pytest.mark.parametrize("hash_oid", list(PSS_HASHES.values()), ids=list(PSS_HASHES))
+def test_a_certificate_signed_with_pss_over_another_hash_may_not_sign(
+    authority: Authority, holder: Issued, hash_oid: bytes
+) -> None:
+    der = pss_signed(authority, holder).public_bytes(serialization.Encoding.DER)
+    assert der.count(SHA256) == 4  # PSS's hash and MGF1's, in the signed part and around the signature
+    other = x509.load_der_x509_certificate(der.replace(SHA256, hash_oid))
+    assert not facts_of(other, matches_key=True).may_sign
 
 
 def test_the_key_of_a_certificate_is_its_own(
