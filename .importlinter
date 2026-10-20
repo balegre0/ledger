@@ -1025,6 +1025,23 @@ source_modules =
 forbidden_modules =
     ledger_signer.adapters.custody
 
+[importlinter:contract:signer-http-holds-no-key]
+name = signer's HTTP adapter reaches no custody, even indirectly
+type = forbidden
+source_modules =
+    ledger_signer.adapters.http
+forbidden_modules =
+    ledger_signer.adapters.custody
+
+[importlinter:contract:signer-http-opens-no-key]
+name = signer's HTTP adapter imports no cryptography itself (its use cases' types may)
+type = forbidden
+source_modules =
+    ledger_signer.adapters.http
+forbidden_modules =
+    cryptography
+allow_indirect_imports = True
+
 [importlinter:contract:production-never-imports-test-tooling]
 name = Production code never imports test tooling
 type = forbidden

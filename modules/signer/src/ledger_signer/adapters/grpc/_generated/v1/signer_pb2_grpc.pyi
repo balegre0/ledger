@@ -47,7 +47,9 @@ class SignerServiceStub:
     DescribeCertificates: _grpc.UnaryUnaryMultiCallable[_signer_pb2.DescribeCertificatesRequest, _signer_pb2.DescribeCertificatesResponse]
     """The company's certificates serving a mode, active first."""
     RetireCertificate: _grpc.UnaryUnaryMultiCallable[_signer_pb2.RetireCertificateRequest, _signer_pb2.RetireCertificateResponse]
-    """Retires a certificate for every mode; retiring a retired one answers it unchanged."""
+    """Retires a certificate for every mode; retiring a retired one answers it unchanged. A request in test mode
+    never retires a certificate that serves live (FAILED_PRECONDITION certificate_serves_live).
+    """
     SignXml: _grpc.UnaryUnaryMultiCallable[_signer_pb2.SignXmlRequest, _signer_pb2.SignXmlResponse]
     """Signs a document (enveloped signature, the root's last child) with the active certificate of the company
     and mode, once the signature is audited.
@@ -73,7 +75,9 @@ class SignerServiceAsyncStub(SignerServiceStub):
     DescribeCertificates: _aio.UnaryUnaryMultiCallable[_signer_pb2.DescribeCertificatesRequest, _signer_pb2.DescribeCertificatesResponse]  # type: ignore[assignment]
     """The company's certificates serving a mode, active first."""
     RetireCertificate: _aio.UnaryUnaryMultiCallable[_signer_pb2.RetireCertificateRequest, _signer_pb2.RetireCertificateResponse]  # type: ignore[assignment]
-    """Retires a certificate for every mode; retiring a retired one answers it unchanged."""
+    """Retires a certificate for every mode; retiring a retired one answers it unchanged. A request in test mode
+    never retires a certificate that serves live (FAILED_PRECONDITION certificate_serves_live).
+    """
     SignXml: _aio.UnaryUnaryMultiCallable[_signer_pb2.SignXmlRequest, _signer_pb2.SignXmlResponse]  # type: ignore[assignment]
     """Signs a document (enveloped signature, the root's last child) with the active certificate of the company
     and mode, once the signature is audited.
@@ -114,7 +118,9 @@ class SignerServiceServicer(metaclass=_abc_1.ABCMeta):
         request: _signer_pb2.RetireCertificateRequest,
         context: _ServicerContext,
     ) -> _typing.Union[_signer_pb2.RetireCertificateResponse, _abc.Awaitable[_signer_pb2.RetireCertificateResponse]]:
-        """Retires a certificate for every mode; retiring a retired one answers it unchanged."""
+        """Retires a certificate for every mode; retiring a retired one answers it unchanged. A request in test mode
+        never retires a certificate that serves live (FAILED_PRECONDITION certificate_serves_live).
+        """
 
     @_abc_1.abstractmethod
     def SignXml(

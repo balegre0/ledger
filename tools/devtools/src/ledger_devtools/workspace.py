@@ -28,6 +28,10 @@ MODULE_LAYERS: Final = ("assembly", "adapters", "application", "api", "domain", 
 CUSTODY: Final = "adapters.custody"
 """What a module isolated in a role holds key material in: only the module and the apps of its role reach it
 (§4.6 contract 12, ADR 0010)."""
+HTTP_ADAPTER: Final = "adapters.http"
+"""Where a module's routes live: an isolated module's forward secrets to its role, never opening them."""
+KEY_LIBRARY: Final = "cryptography"
+"""What opens key material (PKCS#12, keys): no isolated module's HTTP adapter may reach it."""
 _NESTED_DEPTH: Final = 3
 """``countries/<cc>/testing``."""
 

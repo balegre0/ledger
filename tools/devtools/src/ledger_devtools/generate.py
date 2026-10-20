@@ -19,7 +19,7 @@ from ledger_devtools.protos import generated as grpc_code
 from ledger_devtools.roles import role_grants_path, role_grants_text
 from ledger_devtools.root import ROOT_PYPROJECT, root_text
 from ledger_devtools.sql import init_sql_text
-from ledger_devtools.workspace import CUSTODY, MANIFEST_GLOBS, MODULE_LAYERS
+from ledger_devtools.workspace import CUSTODY, HTTP_ADAPTER, KEY_LIBRARY, MANIFEST_GLOBS, MODULE_LAYERS
 from ledger_platform.config.manifest import PackageKind
 from ledger_platform.config.names import PLATFORM
 from ledger_platform.config.settings import SETTINGS_GROUP
@@ -613,6 +613,24 @@ def _custody_contracts(facts: _Facts) -> Iterator[str | None]:
             "forbidden",
             ("source_modules", sorted(serving)),
             ("forbidden_modules", custody),
+            ("allow_indirect_imports", "True"),
+        )
+        if module.manifest.http is None:
+            continue
+        http = [f"{module.import_name}.{HTTP_ADAPTER}"]  # its routes forward secrets to its role unread
+        yield _contract(
+            f"{module.name}-http-holds-no-key",
+            f"{module.name}'s HTTP adapter reaches no custody, even indirectly",
+            "forbidden",
+            ("source_modules", http),
+            ("forbidden_modules", custody),
+        )
+        yield _contract(
+            f"{module.name}-http-opens-no-key",
+            f"{module.name}'s HTTP adapter imports no {KEY_LIBRARY} itself (its use cases' types may)",
+            "forbidden",
+            ("source_modules", http),
+            ("forbidden_modules", [KEY_LIBRARY]),
             ("allow_indirect_imports", "True"),
         )
 

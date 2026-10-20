@@ -359,9 +359,12 @@ def describe_request(
 def retire_request(
     call: Call | SystemCall, company: Tenant, certificate: CertificateId
 ) -> signer_pb2.RetireCertificateRequest:
-    """The retirement of ``certificate`` of ``company``, for every mode: no mode is sent."""
+    """The retirement of ``certificate`` of ``company`` for every mode, asked in the request's mode."""
     return signer_pb2.RetireCertificateRequest(
-        call=call_context(call), company=_tenant_company(company), certificate_id=str(certificate)
+        call=call_context(call),
+        company=_tenant_company(company),
+        certificate_id=str(certificate),
+        mode=_tenant_mode(company),
     )
 
 
@@ -438,8 +441,8 @@ def described(message: signer_pb2.DescribeCertificatesRequest) -> Tenant:
 
 
 def retirement(message: signer_pb2.RetireCertificateRequest) -> tuple[Tenant, CertificateId]:
-    """The company (no mode: a retirement is for every mode) and the certificate ``message`` retires."""
-    company = _tenant_of(message.company, None, "retire")
+    """The company in the request's mode, and the certificate ``message`` retires (for every mode)."""
+    company = _tenant_of(message.company, message.mode, "retire")
     return company, CertificateId(id_of(message.certificate_id, "retire.certificate_id"))
 
 

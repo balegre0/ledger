@@ -2,24 +2,34 @@
 
 What the other modules and the HTTP edge see of a certificate is its view (``view_of``): its public part,
 never its key. A retirement is audited and announced once; retiring a retired certificate answers it as it is,
-with nothing recorded (``RetireCertificate`` is naturally idempotent).
+with nothing recorded (``RetireCertificate`` is naturally idempotent). A retirement is asked in a mode: one
+asked in test mode never stops a certificate that serves live (``certificate_serves_live``; ADR 0007, a
+test-mode credential is safe to hand out), one asked in live mode may retire any.
 """
 
-from typing import Final, final
+from typing import ClassVar, Final, final
 lazy from collections.abc import Sequence
 
-from ledger_kernel.errors import InvalidValueError
-from ledger_kernel.tenancy import Mode
+from ledger_kernel.errors import ConflictError, InvalidValueError
+from ledger_kernel.tenancy import Mode, Tenant
 from ledger_signer.api import CertificateNotFoundError, CertificateView
 from ledger_signer.domain.certificates import RetiredReason
 from ledger_signer.events import CertificateRetired
 lazy from ledger_kernel.ids import CompanyId
-lazy from ledger_kernel.tenancy import Tenant
 lazy from ledger_signer.application.ports import SignerUnit, SignerUnits
 lazy from ledger_signer.domain.certificates import Certificate, CertificateId
 
 _MODES: Final = tuple(Mode)
 """The modes in one order, for every list of them."""
+
+
+class CertificateServesLiveError(ConflictError):
+    """A retirement asked in test mode of a certificate that serves live: only a live request may stop it."""
+
+    code: ClassVar[str] = "certificate_serves_live"
+
+    def __init__(self) -> None:
+        super().__init__("the certificate serves live mode: retire it with a live-mode request")
 
 
 def view_of(certificate: Certificate) -> CertificateView:
@@ -142,18 +152,22 @@ class Retiring:
         self._units = units
 
     async def retire(self, company: Tenant, certificate: CertificateId) -> CertificateView:
-        """``certificate`` of ``company`` (a tenant without a mode) retired, or as it is when it was already.
+        """``certificate`` of ``company`` retired for every mode, or as it is when it was already.
 
-        ``CertificateNotFoundError`` when the company has no such certificate.
+        ``company`` is the company in the request's mode. ``CertificateNotFoundError`` when the company has no
+        such certificate; ``CertificateServesLiveError`` when a test-mode request names an active certificate
+        that serves live.
         """
-        if company.mode is not None:
-            raise InvalidValueError(field="retiring.company", requirement="a company's tenant without a mode")
-        async with self._units.unit(company) as unit:
+        mode = require_mode("retiring", company)
+        owner = Tenant(company.organization, company.company, None)
+        async with self._units.unit(owner) as unit:
             found = await unit.certificates.get(company.company, certificate, for_update=True)
             if found is None:
                 raise CertificateNotFoundError
             if not found.is_active:
                 return view_of(found)
+            if mode is Mode.TEST and Mode.LIVE in found.modes:
+                raise CertificateServesLiveError
             return view_of(await _retire(unit, found, RetiredReason.RETIRED))
 
 

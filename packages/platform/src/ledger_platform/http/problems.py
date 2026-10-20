@@ -10,7 +10,9 @@ client raises a ``LedgerError``, whose message is built inside its class.
 
 A ``LedgerError`` answers the status of its kind (§9.6), except a ``BadRequestError``: a request the HTTP
 layer refuses before reading its body (a missing ``Ledger-Mode``, say) answers 400, its kind still
-``INVALID``.
+``INVALID``; and an error that names its own answer (``ProblemAnswer``: a rate limit's 429, a dependency's
+503 with ``Retry-After``, a 408), which keeps its kind for everything but its status and headers. A defect
+(``INTERNAL``) answers 500 ``internal`` whatever it names.
 
 A problem names its request (``request_id``, and the ``Request-Id`` header): the id of the trace the request
 is part of (``current_request_id``). A request outside any trace has none.
@@ -37,7 +39,6 @@ lazy from fastapi import FastAPI, Request
 
 from ledger_kernel.errors import ErrorKind, InvalidInputError, LedgerError, described, truncate
 from ledger_platform.http.metrics import declared_route
-from ledger_platform.http.rate import RateLimitedError
 from ledger_platform.http.request_fields import remembered
 from ledger_platform.observability.logs import MAX_ISSUES, location_of
 lazy from ledger_platform.data.codec import JsonValue
@@ -50,6 +51,8 @@ INTERNAL_CODE: Final = "internal"
 _STANDARD: Final = {status.value: status for status in HTTPStatus}
 _STANDARD_MEMBERS: Final = frozenset({"type", "title", "status", "code", "detail", "request_id"})
 """What every problem holds: no member of an error's own replaces one."""
+_OWN_HEADERS: Final = frozenset({"content-type", "content-length", REQUEST_ID_HEADER.lower()})
+"""What every problem's answer sets itself: no header of an error's own replaces one."""
 _CODES: Final[Mapping[int, str]] = {
     HTTPStatus.BAD_REQUEST: "bad_request",
     HTTPStatus.UNAUTHORIZED: "unauthenticated",
@@ -123,6 +126,26 @@ class ProblemMembers(Protocol, metaclass=ABCMeta):
         """The members the problem adds, by name."""
 
 
+@runtime_checkable
+class ProblemAnswer(Protocol, metaclass=ABCMeta):
+    """A ``LedgerError`` answered with a status and headers of its own rather than its kind's (§9.6).
+
+    For what the kind table cannot say: a rate limit (429 and ``Retry-After``), a dependency to try again
+    later (503 and ``Retry-After``), a body that did not arrive in time (408). The status must be a client's
+    or a server's error (one below 400 is answered as the defect it is). A header the problem sets itself
+    (``Content-Type``, ``Content-Length``, ``Request-Id``) is never replaced. The methods are abstract so that
+    they need no body.
+    """
+
+    @abstractmethod
+    def problem_status(self) -> HTTPStatus:
+        """The status the problem is answered with."""
+
+    @abstractmethod
+    def problem_headers(self) -> Mapping[str, str]:
+        """The headers the answer carries besides the problem's own, by name."""
+
+
 class Problem(BaseModel):
     """An RFC 9457 problem document: what every failure answers. A code may add members of its own."""
 
@@ -152,13 +175,18 @@ class PayloadTooLargeError(InvalidInputError):
 
 
 def status_of(error: LedgerError) -> HTTPStatus:
-    """400 for a ``BadRequestError``, 413 for a body too large, 429 for a rate limit, else by kind (§9.6)."""
+    """400 for a ``BadRequestError``, 413 for a body too large, the status an error names, else by kind.
+
+    A defect (``INTERNAL``) is a 500 whatever it names, and so is an error naming a status below 400: no
+    refusal succeeds.
+    """
     if isinstance(error, BadRequestError):
         return HTTPStatus.BAD_REQUEST
     if isinstance(error, PayloadTooLargeError):
         return HTTPStatus.CONTENT_TOO_LARGE
-    if isinstance(error, RateLimitedError):
-        return HTTPStatus.TOO_MANY_REQUESTS
+    if isinstance(error, ProblemAnswer) and error.kind is not ErrorKind.INTERNAL:
+        named = error.problem_status()
+        return named if named >= HTTPStatus.BAD_REQUEST else HTTPStatus.INTERNAL_SERVER_ERROR
     return _STATUS[error.kind]
 
 
@@ -226,7 +254,7 @@ def _problem(
         body["detail"] = detail
     if extra is not None:
         body.update({name: value for name, value in extra.items() if name not in _STANDARD_MEMBERS})
-    answered = dict(headers or {})
+    answered = {name: value for name, value in (headers or {}).items() if name.lower() not in _OWN_HEADERS}
     request_id = current_request_id()
     if request_id is not None:
         body["request_id"] = answered[REQUEST_ID_HEADER] = request_id
@@ -307,13 +335,13 @@ def install_problem_handlers(app: FastAPI, *, route_of: RouteOf = declared_route
     @app.exception_handler(LedgerError)
     async def ledger_error(request: Request, error: LedgerError) -> JSONResponse:
         status = status_of(error)
-        if error.kind is ErrorKind.INTERNAL:
+        if status == HTTPStatus.INTERNAL_SERVER_ERROR:  # a defect, or an error naming no error's status
             # A defect of ours: the client gets what any bug gets, the log gets the code and the message.
             _report_defect(request, error, error.code, route_of)
             return _problem(status, INTERNAL_CODE)
         challenge = _challenge(error.code) if error.kind is ErrorKind.UNAUTHENTICATED else None
-        if isinstance(error, RateLimitedError):
-            challenge = {"Retry-After": str(error.retry_after)}
+        if isinstance(error, ProblemAnswer):
+            challenge = error.problem_headers()
         members = error.problem_members() if isinstance(error, ProblemMembers) else None
         return _problem(status, error.code, detail=str(error) or None, extra=members, headers=challenge)
 

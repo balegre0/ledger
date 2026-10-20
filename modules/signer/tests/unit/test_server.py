@@ -382,7 +382,7 @@ async def test_certificates_are_described_and_retired_as_the_call_s_actor(
 ) -> None:
     certificate = await installed(api, holder)
     [described] = await api.describe(CALL, IN_TEST, include_retired=False)
-    retired = await api.retire(CALL, OWNER, described.id)
+    retired = await api.retire(CALL, IN_TEST, described.id)
     assert described.id == retired.id == certificate
     assert (retired.status, retired.retired_reason) == (CertificateStatus.RETIRED, "retired")
     assert await api.describe(CALL, IN_TEST, include_retired=False) == ()
@@ -508,7 +508,11 @@ async def test_secrets_and_documents_never_leave(
     served: Served, clients: Clients, units: Store, custody: Damageable, holder: Issued
 ) -> None:
     api, worker = clients.api, clients.worker
-    live = ImportRequest(tenant=IN_TEST, modes=frozenset({Mode.LIVE}), idempotency_key="import-0002")
+    live = ImportRequest(
+        tenant=Tenant(ORGANIZATION, COMPANY, Mode.LIVE),
+        modes=frozenset({Mode.LIVE}),
+        idempotency_key="import-0002",
+    )
     errors: list[BaseException] = []
     with capture_logs() as logs:
         with pytest.raises(BundleUnreadableError) as unreadable:

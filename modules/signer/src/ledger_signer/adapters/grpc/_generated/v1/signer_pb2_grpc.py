@@ -92,7 +92,8 @@ class SignerServiceServicer:
         raise NotImplementedError('Method not implemented!')
 
     def RetireCertificate(self, request, context):
-        """Retires a certificate for every mode; retiring a retired one answers it unchanged.
+        """Retires a certificate for every mode; retiring a retired one answers it unchanged. A request in test mode
+        never retires a certificate that serves live (FAILED_PRECONDITION certificate_serves_live).
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
