@@ -79,8 +79,15 @@ class RequirementsView(_Shape):
         description="What the company must still provide, in the channel's words."
     )
     disabled_reason: str | None = Field(
-        description="Why the channel cannot serve the company, or why the enrollment was disabled."
+        description="Why the channel could not serve the company, in its words; null when nothing stopped it."
     )
+
+
+class DisabledView(_Shape):
+    """Why and when the enrollment was disabled."""
+
+    reason: str
+    at: datetime
 
 
 class EnrollmentView(_Shape):
@@ -93,6 +100,7 @@ class EnrollmentView(_Shape):
     environment: str
     status: Literal["pending", "active", "disabled"]
     requirements: RequirementsView
+    disabled: DisabledView | None = Field(description="Set once the enrollment is disabled, for good.")
     version: int
     created_at: datetime
     updated_at: datetime
@@ -100,6 +108,7 @@ class EnrollmentView(_Shape):
     @classmethod
     def of(cls, enrollment: Enrollment) -> Self:
         """The view of ``enrollment``."""
+        disablement = enrollment.disablement
         return cls(
             id=enrollment_ref(enrollment.id),
             livemode=enrollment.mode is Mode.LIVE,
@@ -107,8 +116,11 @@ class EnrollmentView(_Shape):
             environment=enrollment.environment,
             status=enrollment.status.value,
             requirements=RequirementsView(
-                currently_due=list(enrollment.currently_due), disabled_reason=enrollment.disabled_reason
+                currently_due=list(enrollment.currently_due), disabled_reason=enrollment.requirements_reason
             ),
+            disabled=None
+            if disablement is None
+            else DisabledView(reason=disablement.reason, at=disablement.at),
             version=enrollment.version,
             created_at=enrollment.created_at,
             updated_at=enrollment.updated_at,

@@ -73,3 +73,21 @@ class InvalidDisableReasonError(InvalidInputError):
 
     def __init__(self, limit: int) -> None:
         super().__init__(f"reason must be 1 to {limit} printable characters once white space is collapsed")
+
+
+class ChannelNotForJurisdictionError(InvalidInputError):
+    """A channel of a regime that does not govern the company's jurisdiction."""
+
+    code: ClassVar[str] = "fiscal_channel_not_for_jurisdiction"
+
+    def __init__(self) -> None:
+        super().__init__("the channel serves a regime that does not govern the company's jurisdiction")
+
+
+class ChannelNotInForceError(InvalidInputError):
+    """A channel before its first day or after its last, as its regime counts days."""
+
+    code: ClassVar[str] = "fiscal_channel_not_in_force"
+
+    def __init__(self) -> None:
+        super().__init__("the channel is not in force today")

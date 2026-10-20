@@ -33,7 +33,11 @@ class EnrollmentView:
     environment: str
     status: EnrollmentStatusName
     currently_due: tuple[str, ...]
+    requirements_reason: str | None
+    """Why the channel could not serve the company at the last review, in its words."""
     disabled_reason: str | None
+    """The client's, once disabled."""
+    disabled_at: datetime | None
     version: int
     updated_at: datetime
 

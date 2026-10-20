@@ -27,7 +27,9 @@ def view(enrollment: Enrollment) -> EnrollmentView:
         environment=enrollment.environment,
         status=enrollment.status.value,
         currently_due=enrollment.currently_due,
-        disabled_reason=enrollment.disabled_reason,
+        requirements_reason=enrollment.requirements_reason,
+        disabled_reason=None if enrollment.disablement is None else enrollment.disablement.reason,
+        disabled_at=None if enrollment.disablement is None else enrollment.disablement.at,
         version=enrollment.version,
         updated_at=enrollment.updated_at,
     )

@@ -7,9 +7,9 @@ company, and the channel its enrollments are on.
 
 No real channel is assembled here (the Dominican one assembles in Task 17): the ``api`` app is served with one
 channel, ``FakeChannel`` (key ``do-fake-v1``, of the installed ``do`` regime, environments ``testecf``,
-``certecf`` and the live ``ecf``), whatever channels are installed. A test sets what it requires (``due``)
-and reads the questions it was asked (``asked``). Its schema is never touched: the fake opens no unit, and
-nothing in these tests asks the app's readiness.
+``certecf`` and the live ``ecf``), whatever channels are installed. A test sets what it requires (``due``),
+what it is (``defined``) or how asking it fails (``failure``), and reads the questions it was asked
+(``asked``). Its schema is never touched: the fake opens no unit, and nothing here asks the app's readiness.
 """
 
 from datetime import date
@@ -96,22 +96,28 @@ class UnusedChannelMethodError(LedgerError):
 class FakeChannel(Channel):
     """A channel that requires what its test sets, and remembers what it was asked (see the module)."""
 
-    __slots__ = ("asked", "due")
+    __slots__ = ("asked", "defined", "due", "failure")
 
     def __init__(self) -> None:
         self.due = Requirements(currently_due=("do_ecf.range",))
         """What it answers it requires, until a test changes it."""
         self.asked: list[tuple[SystemCall, EnrollmentState]] = []
-        """Every question of its requirements, in order."""
+        """Every question of its requirements, in order (failed ones too)."""
+        self.defined = DEFINITION
+        """What it is, until a test changes it (its dates, say)."""
+        self.failure: LedgerError | None = None
+        """What asking its requirements raises, when a test sets it."""
 
     @property
     @override
     def definition(self) -> ChannelDef:
-        return DEFINITION
+        return self.defined
 
     @override
     async def requirements(self, call: SystemCall, state: EnrollmentState) -> Requirements:
         self.asked.append((call, state))
+        if self.failure is not None:
+            raise self.failure
         return self.due
 
     @override

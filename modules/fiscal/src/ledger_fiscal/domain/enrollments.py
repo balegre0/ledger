@@ -78,6 +78,15 @@ class Asked:
 
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
+class Disabled:
+    """Why and when an enrollment was disabled: the client's reason (``parse_reason``'s)."""
+
+    reason: str
+    at: datetime
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Enrollment:
     """A company's enrollment in one mode on one channel and environment (see the module)."""
 
@@ -90,9 +99,12 @@ class Enrollment:
     """Fixed for its life: changing environment is disabling it and enrolling again."""
     status: EnrollmentStatus
     currently_due: tuple[str, ...]
-    """What its channel required at its last review; empty once disabled."""
-    disabled_reason: str | None
-    """The channel's reason at its last review, or the client's once disabled (required then)."""
+    """What its channel required at its last review (kept as it was once disabled)."""
+    requirements_reason: str | None
+    """Why its channel could not serve the company at its last review, in the channel's words (its
+    ``Requirements.disabled_reason``); ``None`` when nothing stopped it."""
+    disablement: Disabled | None = None
+    """Why and when the client disabled it: set exactly when its status is ``disabled``."""
     version: int
     """From 1, one more at each change."""
     created_at: datetime
@@ -103,13 +115,14 @@ class Enrollment:
             raise InvalidValueError(field="enrollment.version", requirement="1 or more")
         if self.updated_at < self.created_at:
             raise InvalidValueError(field="enrollment.updated_at", requirement="no earlier than created_at")
-        if self.status is EnrollmentStatus.DISABLED:
-            if self.disabled_reason is None:
-                raise InvalidValueError(
-                    field="enrollment.disabled_reason", requirement="a reason once disabled"
-                )
-            if self.currently_due:
-                raise InvalidValueError(field="enrollment.currently_due", requirement="nothing once disabled")
+        if (self.status is EnrollmentStatus.DISABLED) != (self.disablement is not None):
+            raise InvalidValueError(
+                field="enrollment.disablement", requirement="recorded exactly when disabled"
+            )
+        if self.disablement is not None and self.disablement.at < self.created_at:
+            raise InvalidValueError(
+                field="enrollment.disablement.at", requirement="no earlier than created_at"
+            )
 
     @classmethod
     def enroll(cls, asked: Asked, *, requirements: Due, now: datetime) -> Enrollment:
@@ -130,7 +143,7 @@ class Enrollment:
             environment=asked.environment,
             status=EnrollmentStatus.PENDING,
             currently_due=requirements.currently_due,
-            disabled_reason=requirements.disabled_reason,
+            requirements_reason=requirements.disabled_reason,
             version=1,
             created_at=now,
             updated_at=now,
@@ -165,27 +178,29 @@ class Enrollment:
         if (status, requirements.currently_due, requirements.disabled_reason) == (
             self.status,
             self.currently_due,
-            self.disabled_reason,
+            self.requirements_reason,
         ):
             return self
         return replace(
             self,
             status=status,
             currently_due=requirements.currently_due,
-            disabled_reason=requirements.disabled_reason,
+            requirements_reason=requirements.disabled_reason,
             version=self.version + 1,
             updated_at=now,
         )
 
     def disabled(self, reason: str, *, now: datetime) -> Enrollment:
-        """The enrollment disabled for ``reason`` (``parse_reason``'s); itself when it is disabled already."""
+        """The enrollment disabled for ``reason`` (``parse_reason``'s); itself when it is disabled already.
+
+        What its last review left (``currently_due``, ``requirements_reason``) stays as it was.
+        """
         if self.status is EnrollmentStatus.DISABLED:
             return self
         return replace(
             self,
             status=EnrollmentStatus.DISABLED,
-            currently_due=(),
-            disabled_reason=reason,
+            disablement=Disabled(reason=reason, at=now),
             version=self.version + 1,
             updated_at=now,
         )

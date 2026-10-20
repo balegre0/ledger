@@ -2,16 +2,24 @@
 
 A channel is asked what an enrollment requires outside any unit (rule 13: it opens its own), with a
 ``SystemCall`` scoped to the enrollment's tenant; what it answers is applied in a unit that locks the
-enrollment. Enrolling is prepared first (the channel and environment checked, the requirements read) and
-then applied in the unit the request's ``Idempotency-Key`` is claimed in, so that a retry replays the first
-answer and a failure keeps nothing. Every change is audited and announced (``fiscal.enrollment.changed``).
+enrollment. Enrolling is prepared first (the channel in force today where its regime keeps its days, of a
+regime that governs the company's jurisdiction, the environment of the request's mode, the requirements
+read) and then applied in the unit the request's ``Idempotency-Key`` is claimed in, so that a retry replays
+the first answer and a failure keeps nothing. Every change is audited and announced
+(``fiscal.enrollment.changed``).
+
+A review whose channel cannot answer now (``UnavailableError``) answers the enrollment as kept; one that
+another review overtook while the channel was asked answers the other's result and keeps nothing.
 """
 
 from dataclasses import dataclass
 from typing import Final, final
+from zoneinfo import ZoneInfo
 
 from ledger_fiscal.domain.enrollments import Asked, Enrollment, EnrollmentId, EnrollmentStatus
 from ledger_fiscal.domain.errors import (
+    ChannelNotForJurisdictionError,
+    ChannelNotInForceError,
     ChannelNotInstalledError,
     EnrollmentExistsError,
     EnrollmentNotFoundError,
@@ -21,15 +29,20 @@ from ledger_fiscal.domain.errors import (
 from ledger_fiscal.events import EnrollmentChanged
 from ledger_fiscal_kit.channels import EnrollmentId as ChannelEnrollmentId
 from ledger_fiscal_kit.channels import EnrollmentState
-from ledger_kernel.errors import InvalidValueError
+from ledger_kernel.errors import InvalidValueError, UnavailableError
 from ledger_kernel.ids import new_id
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.runtime.calls import SystemCall
 from ledger_platform.runtime.contexts import ChannelUnknownError
 lazy from ledger_fiscal.application.ports import AuditAction, FiscalUnit, FiscalUnits
-lazy from ledger_fiscal_kit.channels import Channel, ChannelRegistry, Requirements
+lazy from ledger_fiscal_kit.channels import Channel, ChannelDef, ChannelRegistry, Requirements
+lazy from ledger_identity.api import IdentityApi
+lazy from ledger_kernel.clock import Clock
+lazy from ledger_kernel.jurisdiction import Jurisdiction
 lazy from ledger_kernel.pagination import Page, PageRequest
+lazy from ledger_kernel.tenancy import Mode
 lazy from ledger_platform.runtime.calls import Call
+lazy from ledger_platform.runtime.registries import Regimes
 
 REQUIREMENTS_REASON: Final = "fiscal:requirements"
 """The reason of the system call a channel is asked an enrollment's requirements in."""
@@ -44,12 +57,17 @@ def live_evidence(enrollment: Enrollment) -> bool:
     return False
 
 
-def tenant_of(call: Call) -> Tenant:
-    """The company and mode a request acts in; a call scoped otherwise is a defect of its route."""
+def tenant_of(call: Call) -> tuple[Tenant, Mode]:
+    """The company a request acts in, and its mode; a call scoped otherwise is a defect of its route."""
     scope = call.scope
     if not isinstance(scope, Tenant) or scope.mode is None:
         raise InvalidValueError(field="call.scope", requirement="a company in a mode")
-    return scope
+    return scope, scope.mode
+
+
+def governs(regime: Jurisdiction, company: Jurisdiction) -> bool:
+    """Whether a regime of ``regime`` governs a company of ``company``: its country, its subdivision."""
+    return regime.country == company.country and regime.subdivision in {None, company.subdivision}
 
 
 def _state(enrollment: Enrollment) -> EnrollmentState:
@@ -91,11 +109,30 @@ class Prepared:
 class Enrolling:
     """fiscal's use cases on enrollments."""
 
-    __slots__ = ("_channels", "_units")
+    __slots__ = ("_channels", "_clock", "_identity", "_regimes", "_units")
 
-    def __init__(self, units: FiscalUnits, channels: ChannelRegistry) -> None:
+    def __init__(
+        self,
+        units: FiscalUnits,
+        channels: ChannelRegistry,
+        *,
+        identity: IdentityApi,
+        regimes: Regimes,
+        clock: Clock,
+    ) -> None:
         self._units = units
         self._channels = channels
+        self._identity = identity
+        self._regimes = regimes
+        self._clock = clock
+
+    def _in_force(self, definition: ChannelDef) -> bool:
+        """Whether ``definition`` is in force today, as its regime keeps days (both ends included)."""
+        zone = ZoneInfo(self._regimes.get(definition.regime).time_zone)
+        today = self._clock().astimezone(zone).date()
+        return definition.valid_from <= today and (
+            definition.valid_until is None or today <= definition.valid_until
+        )
 
     def _channel(self, key: str) -> Channel | None:
         try:
@@ -111,19 +148,24 @@ class Enrolling:
     async def prepare(self, call: Call, *, channel: str, environment: str) -> Prepared:
         """``channel`` and ``environment`` checked for the call's mode, and what the channel requires now.
 
-        ``ChannelNotInstalledError``, ``EnvironmentUnknownError``, ``EnvironmentNotAllowedError`` (an
-        environment of the other mode, in either mode).
+        ``ChannelNotInstalledError``, ``ChannelNotInForceError``, ``EnvironmentUnknownError``,
+        ``EnvironmentNotAllowedError`` (an environment of the other mode, in either mode),
+        ``ChannelNotForJurisdictionError`` (identity says where the company is).
         """
-        tenant = tenant_of(call)
+        tenant, mode = tenant_of(call)
         found = self._channel(channel)
         if found is None:
             raise ChannelNotInstalledError
         definition = found.definition
+        if not self._in_force(definition):
+            raise ChannelNotInForceError
         if environment not in definition.environments:
             raise EnvironmentUnknownError
-        mode = tenant.mode
-        if mode is None or not definition.allows(environment, mode):
+        if not definition.allows(environment, mode):
             raise EnvironmentNotAllowedError
+        company = await self._identity.company(call, tenant.company)
+        if not governs(self._regimes.get(definition.regime).jurisdiction, company.jurisdiction):
+            raise ChannelNotForJurisdictionError
         enrollment = EnrollmentId(new_id())
         state = EnrollmentState(
             enrollment=ChannelEnrollmentId(enrollment),
@@ -150,9 +192,10 @@ class Enrolling:
     async def review(self, call: Call, enrollment: EnrollmentId) -> Enrollment:
         """The enrollment with what its channel requires now, kept if that changed it (Decision 31).
 
-        A disabled enrollment, or one whose channel is no longer installed, is answered as kept.
+        A disabled enrollment, one whose channel is no longer installed, or one whose channel cannot answer
+        now, is answered as kept; one another review overtook meanwhile, as that review left it.
         """
-        tenant = tenant_of(call)
+        tenant, _ = tenant_of(call)
         async with self._units.unit(tenant) as unit:
             found = await unit.enrollments.get(enrollment)
         if found is None:
@@ -160,11 +203,16 @@ class Enrolling:
         channel = self._channel(found.channel)
         if found.status is EnrollmentStatus.DISABLED or channel is None:
             return found
-        requirements = await self._requirements(call, channel, _state(found))
+        try:
+            requirements = await self._requirements(call, channel, _state(found))
+        except UnavailableError:
+            return found
         async with self._units.unit(tenant) as unit:
             current = await unit.enrollments.locked(enrollment)
             if current is None:  # read a moment ago in this tenant: never deleted, so a defect
                 raise EnrollmentNotFoundError
+            if current.version != found.version:  # another review (or a disabling) won meanwhile
+                return current
             reviewed = current.reviewed(requirements, live_evidence=live_evidence(current), now=unit.now)
             if reviewed is not current:
                 await unit.enrollments.update(reviewed, version=current.version)
@@ -185,5 +233,6 @@ class Enrolling:
 
     async def page(self, call: Call, request: PageRequest) -> Page[Enrollment]:
         """The enrollments of the call's company and mode, as kept, in id order."""
-        async with self._units.unit(tenant_of(call)) as unit:
+        tenant, _ = tenant_of(call)
+        async with self._units.unit(tenant) as unit:
             return await unit.enrollments.page(request)

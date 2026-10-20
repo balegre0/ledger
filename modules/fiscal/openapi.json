@@ -19,6 +19,27 @@
         "title": "DisableBody",
         "type": "object"
       },
+      "DisabledView": {
+        "additionalProperties": false,
+        "description": "Why and when the enrollment was disabled.",
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "at"
+        ],
+        "title": "DisabledView",
+        "type": "object"
+      },
       "EnrollmentRef": {
         "pattern": "^enr_[0-7][0-9a-hjkmnp-tv-z]{25}$",
         "type": "string"
@@ -35,6 +56,17 @@
             "format": "date-time",
             "title": "Created At",
             "type": "string"
+          },
+          "disabled": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DisabledView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set once the enrollment is disabled, for good."
           },
           "environment": {
             "title": "Environment",
@@ -82,6 +114,7 @@
           "environment",
           "status",
           "requirements",
+          "disabled",
           "version",
           "created_at",
           "updated_at"
@@ -187,7 +220,7 @@
                 "type": "null"
               }
             ],
-            "description": "Why the channel cannot serve the company, or why the enrollment was disabled.",
+            "description": "Why the channel could not serve the company, in its words; null when nothing stopped it.",
             "title": "Disabled Reason"
           }
         },

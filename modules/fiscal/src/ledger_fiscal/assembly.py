@@ -30,8 +30,9 @@ def assemble(context: ModuleContext) -> ModuleParts:
     """The routes ``api`` mounts, the migrations ``migrate`` runs, fiscal's API and its directory."""
     units = PgUnits(context.database)
     channels = ChannelRegistry(context.channels)  # read at call time: filled once the channels assembled
-    directory = FiscalDirectory(identity=context.apis.get(IDENTITY_API), units=units, channels=channels)
-    enrolling = Enrolling(units, channels)
+    identity = context.apis.get(IDENTITY_API)
+    enrolling = Enrolling(units, channels, identity=identity, regimes=context.regimes, clock=context.clock)
+    directory = FiscalDirectory(identity=identity, units=units, channels=channels)
     api = ApiContext.build(
         database=context.database,
         authentication=context.auth,

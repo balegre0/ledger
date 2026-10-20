@@ -1,10 +1,13 @@
 """``Enrollments`` over one transaction (SQLAlchemy Core).
 
 The repository is bound to its unit's tenant (a company in a mode) and names it in every statement;
-row-level security enforces it again (§2). Adding uses ``ON CONFLICT DO NOTHING`` against the partial unique
-index of one enrollment not disabled per company, mode and channel, and reads the outcome from ``RETURNING``:
-a taken channel is an answer (its holder), not an exception to parse. An enrollment of another tenant handed
-to it is refused before any statement (``ForeignTenantError``). A list is read in its page's direction.
+row-level security enforces it again (§2). Adding is one statement against the partial unique index of one
+enrollment not disabled per company, mode and channel: ``ON CONFLICT DO UPDATE`` with no change locks the row
+that holds the channel and returns it, so a taken channel is an answer (its holder) and never a race (a holder
+disabled meanwhile no longer conflicts: PostgreSQL inserts then). An update names the version it replaces and
+must find it (``EnrollmentMovedError`` otherwise: its caller holds the row's lock). An enrollment of another
+tenant handed to it is refused before any statement (``ForeignTenantError``). A list is read in its page's
+direction.
 """
 
 from typing import ClassVar, Final, final, override
@@ -20,7 +23,7 @@ lazy from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ledger_fiscal.adapters.postgres.tables import EnrollmentRecord
 from ledger_fiscal.application.ports import Enrollments
-from ledger_fiscal.domain.enrollments import Enrollment, EnrollmentId, EnrollmentStatus
+from ledger_fiscal.domain.enrollments import Disabled, Enrollment, EnrollmentId, EnrollmentStatus
 from ledger_kernel.errors import LedgerError
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.pagination import page_of
@@ -40,12 +43,45 @@ _ENROLLMENT: Final = select(
     EnrollmentRecord.environment,
     EnrollmentRecord.status,
     EnrollmentRecord.currently_due,
+    EnrollmentRecord.requirements_reason,
     EnrollmentRecord.disabled_reason,
+    EnrollmentRecord.disabled_at,
     EnrollmentRecord.version,
     EnrollmentRecord.created_at,
     EnrollmentRecord.updated_at,
 )
-type _Row = Row[UUID, UUID, UUID, str, str, str, str, list[str], str | None, int, datetime, datetime]
+type _Query = Select[
+    UUID,
+    UUID,
+    UUID,
+    str,
+    str,
+    str,
+    str,
+    list[str],
+    str | None,
+    str | None,
+    datetime | None,
+    int,
+    datetime,
+    datetime,
+]
+type _Row = Row[
+    UUID,
+    UUID,
+    UUID,
+    str,
+    str,
+    str,
+    str,
+    list[str],
+    str | None,
+    str | None,
+    datetime | None,
+    int,
+    datetime,
+    datetime,
+]
 
 
 class ForeignTenantError(LedgerError):
@@ -55,6 +91,15 @@ class ForeignTenantError(LedgerError):
 
     def __init__(self) -> None:
         super().__init__("a unit keeps the enrollments of its own company and mode only")
+
+
+class EnrollmentMovedError(LedgerError):
+    """An update of a version the row no longer holds: its caller did not hold the row's lock (a defect)."""
+
+    code: ClassVar[str] = "fiscal_enrollment_moved"
+
+    def __init__(self) -> None:
+        super().__init__("the enrollment is no longer at the version the update replaces")
 
 
 def _enrollment(row: _Row) -> Enrollment:
@@ -67,11 +112,18 @@ def _enrollment(row: _Row) -> Enrollment:
         environment,
         status,
         due,
-        reason,
+        requirements_reason,
+        disabled_reason,
+        disabled_at,
         version,
         created_at,
         updated_at,
     ) = row
+    disablement = (
+        None
+        if disabled_reason is None or disabled_at is None
+        else Disabled(reason=disabled_reason, at=disabled_at)
+    )
     return Enrollment(
         id=EnrollmentId(identifier),
         organization=OrganizationId(organization),
@@ -81,11 +133,26 @@ def _enrollment(row: _Row) -> Enrollment:
         environment=environment,
         status=EnrollmentStatus(status),
         currently_due=_DUE.validate_python(due),
-        disabled_reason=reason,
+        requirements_reason=requirements_reason,
+        disablement=disablement,
         version=version,
         created_at=created_at,
         updated_at=updated_at,
     )
+
+
+def _changing(enrollment: Enrollment) -> dict[str, object]:
+    """The columns an enrollment's life changes, as ``enrollment`` holds them."""
+    disablement = enrollment.disablement
+    return {
+        "status": enrollment.status.value,
+        "currently_due": list(enrollment.currently_due),
+        "requirements_reason": enrollment.requirements_reason,
+        "disabled_reason": None if disablement is None else disablement.reason,
+        "disabled_at": None if disablement is None else disablement.at,
+        "version": enrollment.version,
+        "updated_at": enrollment.updated_at,
+    }
 
 
 @final
@@ -107,56 +174,37 @@ class PgEnrollments(Enrollments):
             EnrollmentRecord.mode == self._mode.value,
         )
 
-    def _selected(
-        self,
-    ) -> Select[UUID, UUID, UUID, str, str, str, str, list[str], str | None, int, datetime, datetime]:
+    def _selected(self) -> _Query:
         return _ENROLLMENT.where(*self._mine())
 
     def _require_own(self, enrollment: Enrollment) -> None:
         if enrollment.tenant != self._tenant:
             raise ForeignTenantError
 
-    async def _one(
-        self,
-        statement: Select[
-            UUID, UUID, UUID, str, str, str, str, list[str], str | None, int, datetime, datetime
-        ],
-    ) -> Enrollment | None:
+    async def _one(self, statement: _Query) -> Enrollment | None:
         row = (await self._connection.execute(statement)).first()
         return None if row is None else _enrollment(row)
 
     @override
     async def add(self, enrollment: Enrollment) -> EnrollmentId | None:
         self._require_own(enrollment)
-        added = (
-            insert(EnrollmentRecord)
-            .values(
-                organization_id=enrollment.organization,
-                company_id=enrollment.company,
-                mode=enrollment.mode.value,
-                id=enrollment.id,
-                channel=enrollment.channel,
-                environment=enrollment.environment,
-                status=enrollment.status.value,
-                currently_due=list(enrollment.currently_due),
-                disabled_reason=enrollment.disabled_reason,
-                version=enrollment.version,
-                created_at=enrollment.created_at,
-                updated_at=enrollment.updated_at,
-            )
-            .on_conflict_do_nothing(
-                index_elements=("company_id", "mode", "channel"), index_where=text("status <> 'disabled'")
-            )
-            .returning(EnrollmentRecord.id)
+        fresh = insert(EnrollmentRecord).values(
+            organization_id=enrollment.organization,
+            company_id=enrollment.company,
+            mode=enrollment.mode.value,
+            id=enrollment.id,
+            channel=enrollment.channel,
+            environment=enrollment.environment,
+            created_at=enrollment.created_at,
+            **_changing(enrollment),
         )
-        if (await self._connection.execute(added)).first() is not None:
-            return None
-        holder = select(EnrollmentRecord.id).where(
-            *self._mine(),
-            EnrollmentRecord.channel == enrollment.channel,
-            EnrollmentRecord.status != EnrollmentStatus.DISABLED.value,
-        )
-        return EnrollmentId((await self._connection.execute(holder)).scalar_one())
+        claimed = fresh.on_conflict_do_update(
+            index_elements=("company_id", "mode", "channel"),
+            index_where=text("status <> 'disabled'"),
+            set_={"version": EnrollmentRecord.version},  # no change: it locks the holder, to return it
+        ).returning(EnrollmentRecord.id)
+        holder = EnrollmentId((await self._connection.execute(claimed)).scalar_one())
+        return None if holder == enrollment.id else holder
 
     @override
     async def get(self, enrollment: EnrollmentId) -> Enrollment | None:
@@ -169,17 +217,13 @@ class PgEnrollments(Enrollments):
     @override
     async def update(self, enrollment: Enrollment, *, version: int) -> None:
         self._require_own(enrollment)
-        await self._connection.execute(
+        changed = await self._connection.execute(
             update(EnrollmentRecord)
             .where(*self._mine(), EnrollmentRecord.id == enrollment.id, EnrollmentRecord.version == version)
-            .values(
-                status=enrollment.status.value,
-                currently_due=list(enrollment.currently_due),
-                disabled_reason=enrollment.disabled_reason,
-                version=enrollment.version,
-                updated_at=enrollment.updated_at,
-            )
+            .values(**_changing(enrollment))
         )
+        if changed.rowcount != 1:
+            raise EnrollmentMovedError
 
     @override
     async def on(self, channel: str, environment: str) -> Enrollment | None:

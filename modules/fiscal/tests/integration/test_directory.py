@@ -11,6 +11,7 @@ lazy import httpx
 
 from ledger_fiscal.adapters.postgres.unit import PgUnits
 from ledger_fiscal.application.directory import FiscalDirectory
+from ledger_fiscal.application.facade import FiscalFacade
 from ledger_fiscal_kit.channels import ChannelRegistry
 from ledger_fiscal_kit.ports import is_company_directory
 from ledger_identity.adapters.postgres.unit import PgUnits as IdentityUnits
@@ -22,9 +23,11 @@ from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Mode, OrganizationScope, Tenant
 from ledger_platform.runtime.calls import SystemCall
 from ledger_platform.runtime.contexts import AssembledChannels
+from ledger_platform.runtime.facade import UnitOpenError
 from ledger_testing.api import TestPrincipal, created, document
 lazy from ledger_fiscal_kit.channels import Channel
 lazy from ledger_fiscal_kit.ports import ReceivingCompany
+lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.runtime.app import App
 lazy from ledger_testing.issuer import LocalIssuer
 
@@ -166,3 +169,26 @@ async def test_a_company_of_the_call_s_organization_is_named_with_its_primary_ta
     )
     allowed = await directory.permissions(principal, found.company)
     assert parse_permission("fiscal.enrollments.manage") in allowed
+
+
+async def test_neither_the_directory_nor_the_api_may_be_called_inside_a_unit(
+    directory: FiscalDirectory, module_database: BoundDatabase
+) -> None:
+    """Rule 13: a channel or a module holding a transaction must not call across into fiscal."""
+    tenant = Tenant(OrganizationId(new_id()), CompanyId(new_id()), Mode.TEST)
+    principal = Principal(
+        subject=SubjectId("2001"),
+        organization=tenant.organization,
+        provider_organization="1001",
+        kind=PrincipalKind.HUMAN,
+    )
+    api = FiscalFacade(PgUnits(module_database))
+    async with module_database.unit(tenant):
+        with pytest.raises(UnitOpenError):
+            await directory.receiving_company(SYSTEM, tax_id=RNC, channel=FAKE, environment="testecf")
+        with pytest.raises(UnitOpenError):
+            await directory.company(SystemCall(reason="test", scope=tenant), tenant.company)
+        with pytest.raises(UnitOpenError):
+            await directory.permissions(principal, tenant.company)
+        with pytest.raises(UnitOpenError):
+            await api.enrollments(SystemCall(reason="test", scope=tenant), tenant.company, Mode.TEST)

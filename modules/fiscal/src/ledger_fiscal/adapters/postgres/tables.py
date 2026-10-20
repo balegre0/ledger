@@ -2,7 +2,8 @@
 
 ``enrollments`` holds a company's enrollments in one mode (row-level security scope ``tenant``): one that is
 not disabled per company, mode and channel (§7.6, a partial unique index), each with what its channel required
-at its last review. Every table is in schema ``fiscal`` (§6.2).
+at its last review (``currently_due``, ``requirements_reason``) and, once disabled, the client's reason and
+when (``disabled_reason``, ``disabled_at``, set exactly then). Every table is in schema ``fiscal`` (§6.2).
 """
 
 from datetime import datetime
@@ -41,7 +42,10 @@ class EnrollmentRecord(FiscalTable):
         _one_of("status", EnrollmentStatus, name="ck_enrollments_status"),
         CheckConstraint("version > 0", name="ck_enrollments_version"),
         CheckConstraint(
-            "status <> 'disabled' OR (disabled_reason IS NOT NULL AND cardinality(currently_due) = 0)",
+            (
+                "(status = 'disabled') = (disabled_at IS NOT NULL AND disabled_reason IS NOT NULL)"
+                " AND (disabled_at IS NULL) = (disabled_reason IS NULL)"
+            ),
             name="ck_enrollments_disabled",
         ),
         Index(
@@ -62,7 +66,11 @@ class EnrollmentRecord(FiscalTable):
     environment: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text)
     currently_due: Mapped[list[str]] = mapped_column(ARRAY(Text))
+    requirements_reason: Mapped[str | None] = mapped_column(Text)
+    """The channel's ``disabled_reason`` at the last review."""
     disabled_reason: Mapped[str | None] = mapped_column(Text)
+    """The client's, once disabled."""
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     version: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

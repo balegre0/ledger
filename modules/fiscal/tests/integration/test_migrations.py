@@ -98,8 +98,9 @@ def test_the_check_constraints_are_the_models_and_allow_exactly_the_domain_s_wor
     }
     assert checks["ck_enrollments_version"] == "CHECK ((version > 0))"
     assert checks["ck_enrollments_disabled"] == (
-        "CHECK (((status <> 'disabled'::text) OR ((disabled_reason IS NOT NULL)"
-        " AND (cardinality(currently_due) = 0))))"
+        "CHECK ((((status = 'disabled'::text) = "
+        "((disabled_at IS NOT NULL) AND (disabled_reason IS NOT NULL)))"
+        " AND ((disabled_at IS NULL) = (disabled_reason IS NULL))))"
     )
 
 

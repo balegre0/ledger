@@ -36,7 +36,9 @@ def upgrade() -> None:
         sa.Column("environment", sa.Text(), nullable=False),
         sa.Column("status", sa.Text(), nullable=False),
         sa.Column("currently_due", postgresql.ARRAY(sa.Text()), nullable=False),
+        sa.Column("requirements_reason", sa.Text(), nullable=True),
         sa.Column("disabled_reason", sa.Text(), nullable=True),
+        sa.Column("disabled_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("version", sa.BigInteger(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
@@ -45,7 +47,10 @@ def upgrade() -> None:
         sa.CheckConstraint("status IN ('pending', 'active', 'disabled')", name="ck_enrollments_status"),
         sa.CheckConstraint("version > 0", name="ck_enrollments_version"),
         sa.CheckConstraint(
-            "status <> 'disabled' OR (disabled_reason IS NOT NULL AND cardinality(currently_due) = 0)",
+            (
+                "(status = 'disabled') = (disabled_at IS NOT NULL AND disabled_reason IS NOT NULL)"
+                " AND (disabled_at IS NULL) = (disabled_reason IS NULL)"
+            ),
             name="ck_enrollments_disabled",
         ),
         schema=S,

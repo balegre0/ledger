@@ -63,7 +63,7 @@ class FiscalDirectory(CompanyDirectory):
             return None
         mode = definition.mode_of(environment)
         company = await self._identity.company_by_tax_id(call, tax_id)
-        if company is None:
+        if company is None or not company.active:  # one deactivated meanwhile is read as inactive
             return None
         async with self._units.unit(Tenant(company.organization, company.id, mode)) as unit:
             enrolled = await unit.enrollments.on(channel, environment)
@@ -72,6 +72,10 @@ class FiscalDirectory(CompanyDirectory):
     @override
     @facade
     async def company(self, call: SystemCall, company: CompanyId) -> ReceivingCompany:
+        """``company`` of the call's organization, named in the call's mode.
+
+        identity reads the call's organization only: another's company is ``CompanyNotFoundError``.
+        """
         scope = call.scope
         if not isinstance(scope, Tenant) or scope.mode is None:
             raise InvalidValueError(field="call.scope", requirement="a company's tenant in a mode")

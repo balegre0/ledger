@@ -12,6 +12,7 @@ import pytest
 from ledger_fiscal.domain.enrollments import (
     MAX_REASON,
     Asked,
+    Disabled,
     Enrollment,
     EnrollmentId,
     EnrollmentStatus,
@@ -61,7 +62,7 @@ def test_a_new_enrollment_waits_for_what_its_channel_requires() -> None:
         1,
     )
     assert (enrollment.created_at, enrollment.updated_at, enrollment.tenant) == (NOW, NOW, TENANT)
-    assert enrollment.disabled_reason is None
+    assert (enrollment.requirements_reason, enrollment.disablement) == (None, None)
 
 
 def test_a_new_test_enrollment_its_channel_requires_nothing_of_is_active_at_once() -> None:
@@ -83,7 +84,7 @@ def test_a_test_enrollment_activates_once_nothing_is_due() -> None:
 
 def test_a_channel_s_disabled_reason_keeps_it_pending() -> None:
     pending = enrolled(Due((), "do_ecf.rnc_not_authorized"))
-    assert (pending.status, pending.disabled_reason) == (
+    assert (pending.status, pending.requirements_reason) == (
         EnrollmentStatus.PENDING,
         "do_ecf.rnc_not_authorized",
     )
@@ -110,14 +111,18 @@ def test_an_active_enrollment_stays_active_when_something_is_due_again() -> None
 
 
 def test_a_disabled_enrollment_is_final_and_disabling_it_again_changes_nothing() -> None:
-    pending = enrolled(Due(("do_ecf.range",)))
+    pending = enrolled(Due(("do_ecf.range",), "do_ecf.rnc_not_authorized"))
     disabled = pending.disabled("Moving to production", now=LATER)
-    assert (disabled.status, disabled.currently_due, disabled.disabled_reason, disabled.version) == (
+    assert (disabled.status, disabled.disablement, disabled.version, disabled.updated_at) == (
         EnrollmentStatus.DISABLED,
-        (),
-        "Moving to production",
+        Disabled(reason="Moving to production", at=LATER),
         2,
+        LATER,
     )
+    assert (disabled.currently_due, disabled.requirements_reason) == (
+        ("do_ecf.range",),
+        "do_ecf.rnc_not_authorized",
+    )  # what the last review left: the channel's words, beside the client's
     assert disabled.active is False
     assert disabled.reviewed(NOTHING_DUE, live_evidence=True, now=LATER) is disabled
     assert disabled.disabled("Another reason", now=LATER) is disabled
@@ -136,12 +141,20 @@ def _unversioned(found: Enrollment) -> Enrollment:
     return replace(found, version=0)
 
 
-def _disabled_for_nothing(found: Enrollment) -> Enrollment:
+def _disabled_unrecorded(found: Enrollment) -> Enrollment:
     return replace(found, status=EnrollmentStatus.DISABLED)
 
 
-def _disabled_but_due(found: Enrollment) -> Enrollment:
-    return replace(found, status=EnrollmentStatus.DISABLED, disabled_reason="x", currently_due=("a",))
+def _pending_but_disabled(found: Enrollment) -> Enrollment:
+    return replace(found, disablement=Disabled(reason="x", at=NOW))
+
+
+def _disabled_before_created(found: Enrollment) -> Enrollment:
+    return replace(
+        found,
+        status=EnrollmentStatus.DISABLED,
+        disablement=Disabled(reason="x", at=NOW - timedelta(seconds=1)),
+    )
 
 
 def _updated_before_created(found: Enrollment) -> Enrollment:
@@ -152,8 +165,9 @@ def _updated_before_created(found: Enrollment) -> Enrollment:
     ("broken", "field"),
     [
         (_unversioned, "enrollment.version"),
-        (_disabled_for_nothing, "enrollment.disabled_reason"),
-        (_disabled_but_due, "enrollment.currently_due"),
+        (_disabled_unrecorded, "enrollment.disablement"),
+        (_pending_but_disabled, "enrollment.disablement"),
+        (_disabled_before_created, "enrollment.disablement.at"),
         (_updated_before_created, "enrollment.updated_at"),
     ],
 )

@@ -13,7 +13,11 @@ from psycopg.errors import CheckViolation, InsufficientPrivilege, UniqueViolatio
 from sqlalchemy import func, insert, select
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 
-from ledger_fiscal.adapters.postgres.repositories.enrollments import ForeignTenantError, PgEnrollments
+from ledger_fiscal.adapters.postgres.repositories.enrollments import (
+    EnrollmentMovedError,
+    ForeignTenantError,
+    PgEnrollments,
+)
 from ledger_fiscal.adapters.postgres.tables import EnrollmentRecord
 from ledger_fiscal.adapters.postgres.unit import bind
 from ledger_fiscal.domain.enrollments import Asked, Enrollment, EnrollmentId
@@ -87,7 +91,9 @@ async def test_a_unit_cannot_write_an_enrollment_of_another_tenant(
         "environment": victim.environment,
         "status": "pending",
         "currently_due": [],
+        "requirements_reason": None,
         "disabled_reason": None,
+        "disabled_at": None,
         "version": 1,
         "created_at": NOW,
         "updated_at": NOW,
@@ -125,6 +131,7 @@ async def test_the_index_and_checks_hold_whatever_the_repository_does(module_dat
 
 
 def _row(tenant: Tenant, *, status: str = "pending") -> dict[str, object]:
+    """A row of ``tenant``; a disabled one is dated but has no reason (the check refuses it)."""
     return {
         "organization_id": tenant.organization,
         "company_id": tenant.company,
@@ -134,7 +141,9 @@ def _row(tenant: Tenant, *, status: str = "pending") -> dict[str, object]:
         "environment": "testecf",
         "status": status,
         "currently_due": [],
+        "requirements_reason": None,
         "disabled_reason": None,
+        "disabled_at": NOW if status == "disabled" else None,
         "version": 1,
         "created_at": NOW,
         "updated_at": NOW,
@@ -172,6 +181,17 @@ async def test_an_enrollment_of_another_tenant_is_refused_before_any_statement(
             await enrollments.add(stranger)
         with pytest.raises(ForeignTenantError):
             await enrollments.update(stranger, version=1)
+
+
+async def test_an_update_of_a_version_that_moved_on_is_a_defect(module_database: BoundDatabase) -> None:
+    tenant = a_tenant()
+    enrollment = new(tenant)
+    await kept(module_database, enrollment)
+    with pytest.raises(EnrollmentMovedError):
+        async with module_database.unit(tenant) as unit:
+            await bind(unit).enrollments.update(enrollment.disabled("Gone", now=NOW), version=7)
+    async with module_database.unit(tenant) as unit:
+        assert await bind(unit).enrollments.get(enrollment.id) == enrollment  # nothing kept
 
 
 async def test_a_unit_without_a_company_in_a_mode_has_no_fiscal_view(module_database: BoundDatabase) -> None:
