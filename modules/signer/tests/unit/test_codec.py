@@ -17,6 +17,7 @@ from ledger_fiscal_kit.ports import SeedToSign, SignatureProfile, Signed, XmlToS
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.tenancy import Mode, Tenant
+from ledger_platform.data.audit import Actor
 from ledger_platform.runtime.calls import SystemCall
 from ledger_signer.adapters.grpc import codec
 from ledger_signer.adapters.grpc._generated.v1 import signer_pb2
@@ -263,6 +264,86 @@ def test_an_import_s_header_carries_its_source_and_never_shows_it() -> None:
         str(COMPANY),
     )
     assert local.call.actor == "system:ecf_emission"
+
+
+def test_the_server_reads_what_the_client_sends() -> None:
+    document = XmlToSign(
+        tenant=TENANT, profile=PROFILE, document=b"<a/>", signed_at=AT, reference="E310000000001"
+    )
+    seed = SeedToSign(tenant=TENANT, profile=PROFILE, seed=b"<s/>", audience="ecf.dgii.gov.do:443")
+    retirement = codec.retire_request(CALL, Tenant(ORGANIZATION, COMPANY, None), ACTIVE.id)
+    assert codec.xml_to_sign(codec.xml_request(CALL, document)) == document
+    assert codec.seed_to_sign(codec.seed_request(CALL, seed)) == seed
+    assert codec.described(codec.describe_request(CALL, TENANT, include_retired=False)) == TENANT
+    assert codec.retirement(retirement) == (Tenant(ORGANIZATION, COMPANY, None), ACTIVE.id)
+    assert codec.import_request(codec.local_header(CALL, REQUEST, Secret("p"))) == REQUEST
+    assert codec.call_actor(codec.call_context(CALL)) == Actor("system:ecf_emission", "call-1")
+
+
+def test_an_import_may_ask_for_both_modes_but_names_each_once() -> None:
+    both = dataclasses.replace(REQUEST, modes=frozenset(Mode))
+    assert codec.import_request(codec.remote_header(CALL, both, Secret("c"))) == both
+    header = codec.remote_header(CALL, REQUEST, Secret("c"))
+    header.modes.append(signer_pb2.MODE_LIVE)
+    with pytest.raises(InvalidValueError, match=r"^signer\.import_header\.modes must be"):
+        codec.import_request(header)
+    header.ClearField("modes")
+    with pytest.raises(InvalidValueError, match=r"^import_request\.modes must be one mode or both$"):
+        codec.import_request(header)
+
+
+def unset_moment(message: signer_pb2.SignXmlRequest) -> None:
+    message.ClearField("signed_at")
+
+
+def unspecified_mode(message: signer_pb2.SignXmlRequest) -> None:
+    message.mode = signer_pb2.MODE_UNSPECIFIED
+
+
+def unspecified_profile(message: signer_pb2.SignXmlRequest) -> None:
+    message.profile = signer_pb2.SIGNATURE_PROFILE_UNSPECIFIED
+
+
+def no_company(message: signer_pb2.SignXmlRequest) -> None:
+    message.ClearField("company")
+
+
+def bad_reference(message: signer_pb2.SignXmlRequest) -> None:
+    message.reference = "not a reference"
+
+
+@pytest.mark.parametrize(
+    ("damage", "field"),
+    [
+        (unset_moment, r"signer\.sign_xml\.signed_at"),
+        (unspecified_mode, r"signer\.sign_xml\.mode"),
+        (unspecified_profile, r"signer\.profile"),
+        (no_company, r"signer\.sign_xml\.company\.organization_id"),
+        (bad_reference, r"xml_to_sign\.reference"),
+    ],
+    ids=["unset moment", "unspecified mode", "unspecified profile", "no company", "bad reference"],
+)
+def test_a_request_the_server_cannot_read_is_refused_by_its_field(
+    damage: Callable[[signer_pb2.SignXmlRequest], None], field: str
+) -> None:
+    sent = codec.xml_request(
+        CALL,
+        XmlToSign(tenant=TENANT, profile=PROFILE, document=b"<a/>", signed_at=AT, reference="E310000000001"),
+    )
+    damage(sent)
+    with pytest.raises(InvalidValueError, match=f"^{field} must be"):
+        codec.xml_to_sign(sent)
+
+
+@pytest.mark.parametrize(
+    ("call_id", "actor"),
+    [("", "system:x"), ("call-1", ""), ("c" * 256, "system:x"), ("call-1", "a" * 256)],
+    ids=["no call id", "no actor", "call id too long", "actor too long"],
+)
+def test_a_call_without_an_actor_or_a_call_id_is_refused(call_id: str, actor: str) -> None:
+    refusal = r"^signer\.call\.(call_id|actor) must be 1 to 255 characters$"
+    with pytest.raises(InvalidValueError, match=refusal):
+        codec.call_actor(signer_pb2.CallContext(call_id=call_id, actor=actor))
 
 
 def test_the_methods_are_named_as_the_generated_descriptor_names_them() -> None:

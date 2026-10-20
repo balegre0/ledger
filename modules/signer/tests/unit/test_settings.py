@@ -153,6 +153,21 @@ def test_token_of_names_each_caller(monkeypatch: pytest.MonkeyPatch) -> None:
     ]
 
 
+def test_tokens_of_a_caller_are_its_current_then_its_previous_and_none_without_a_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LEDGER_SIGNER_TOKEN_API", TOKEN)
+    monkeypatch.setenv("LEDGER_SIGNER_TOKEN_API_PREVIOUS", TOKEN + "-old")
+    monkeypatch.setenv("LEDGER_SIGNER_TOKEN_WORKER", WORKER_TOKEN)
+    monkeypatch.setenv("LEDGER_SIGNER_TOKEN_RECEIVER_PREVIOUS", RECEIVER_TOKEN)
+    settings = SignerSettings()
+    tokens = {
+        caller: [token.get_secret_value() for token in settings.tokens_of(caller)]
+        for caller in ("api", "worker", "receiver")
+    }
+    assert tokens == {"api": [TOKEN, TOKEN + "-old"], "worker": [WORKER_TOKEN], "receiver": []}
+
+
 def test_the_signer_s_own_settings_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LEDGER_SIGNER_ADDRESS", "signer:50051")
     monkeypatch.setenv("LEDGER_SIGNER_GRPC_PORT", "50052")
@@ -169,3 +184,16 @@ def test_a_variable_under_the_prefix_that_is_no_setting_is_refused(monkeypatch: 
         SignerSettings()
     assert WORKER_TOKEN not in str(caught.value)
     assert [location[0].upper() for location in problems(caught)] == ["LEDGER_SIGNER_TOKEN_PRINTER"]
+
+
+@pytest.mark.parametrize("port", ["0", "65535"])
+def test_the_grpc_port_may_be_zero_for_any_free_one(monkeypatch: pytest.MonkeyPatch, port: str) -> None:
+    monkeypatch.setenv("LEDGER_SIGNER_GRPC_PORT", port)
+    assert SignerSettings().grpc_port == int(port)
+
+
+@pytest.mark.parametrize("port", ["-1", "65536"])
+def test_a_grpc_port_outside_the_range_is_refused(monkeypatch: pytest.MonkeyPatch, port: str) -> None:
+    monkeypatch.setenv("LEDGER_SIGNER_GRPC_PORT", port)
+    with pytest.raises(ValidationError):
+        SignerSettings()

@@ -64,8 +64,8 @@ class SignerSettings(PackageSettings):
     """The api's token being replaced, accepted by the signer alone until the rotation ends."""
     token_worker_previous: SecretStr | None = None
     token_receiver_previous: SecretStr | None = None
-    grpc_port: Annotated[int, Field(ge=1, le=65535)] = 50051
-    """The port the signer serves gRPC on: never published on a host."""
+    grpc_port: Annotated[int, Field(ge=0, le=65535)] = 50051
+    """The port the signer serves gRPC on: never published on a host. ``0``: any free one (the tests')."""
     backends: Annotated[frozenset[BackendName], NoDecode, Field(min_length=1)] = frozenset({"local"})
     """The signing backends this deployment offers; an import for another is refused."""
     kms: Literal["local-file"] = "local-file"
@@ -112,3 +112,21 @@ class SignerSettings(PackageSettings):
             case _:
                 assert_type(caller, Literal["receiver"])
                 return self.token_receiver
+
+    def tokens_of(self, caller: Caller) -> tuple[SecretStr, ...]:
+        """The tokens the signer accepts from ``caller``: its current one, then the one it replaces.
+
+        None without a current token: a previous one alone is no rotation, and the signer refuses to start.
+        """
+        current = self.token_of(caller)
+        if current is None:
+            return ()
+        match caller:
+            case "api":
+                previous = self.token_api_previous
+            case "worker":
+                previous = self.token_worker_previous
+            case _:
+                assert_type(caller, Literal["receiver"])
+                previous = self.token_receiver_previous
+        return (current,) if previous is None else (current, previous)

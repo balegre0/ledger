@@ -64,6 +64,7 @@ from ledger_signer.adapters.grpc.client import (
     SignerDefectError,
     SignerTokenRefusedError,
 )
+from ledger_signer.adapters.grpc.server import ImportChunksUnexpectedError, ImportHeaderFirstError
 from ledger_signer.api import (
     BackendKind,
     BackendNotOfferedError,
@@ -587,6 +588,8 @@ IMPORT_REFUSALS: Final[tuple[LedgerError, ...]] = (
     BundleIncompleteError(),
     BackendNotOfferedError(BackendKind.REMOTE),
     ImportTooLargeError(),
+    ImportHeaderFirstError(),
+    ImportChunksUnexpectedError(),
     InvalidIdempotencyKeyError(),
     IdempotencyKeyReusedError(),
     IdempotencyKeyInUseError(),

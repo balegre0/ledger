@@ -33,6 +33,7 @@ from ledger_signer.application.ports import ImportOutcome
 from ledger_signer.domain.certificates import FINGERPRINT_BYTES
 lazy from ledger_fiscal_kit.ports import SeedToSign, XmlToSign
 lazy from ledger_kernel.tenancy import Tenant
+lazy from ledger_platform.data.audit import Actor
 lazy from ledger_platform.runtime.calls import Call, SystemCall
 lazy from ledger_signer.application.importing import ImportRequest
 lazy from ledger_signer.application.ports import Secret
@@ -53,6 +54,8 @@ SIGN_SEED: Final = _method("SignSeed")
 """The methods' full names: what a call names (``RemoteError.rpc``) and what an allowlist names."""
 _OWNER: Final = "signer"
 """What the fields of this module's errors are named under."""
+MAX_CALL_TEXT: Final = 255
+"""The longest actor or call id a call may name (what the audit keeps of who acted)."""
 _MODES: Final[Mapping[Mode, signer_pb2.Mode.ValueType]] = {
     Mode.TEST: signer_pb2.MODE_TEST,
     Mode.LIVE: signer_pb2.MODE_LIVE,
@@ -352,3 +355,64 @@ def seed_request(call: Call | SystemCall, request: SeedToSign) -> signer_pb2.Sig
 def signed_of(document: bytes, certificate_id: str) -> Signed:
     """A signed document (or seed) and the certificate the signer says made it."""
     return Signed(document=document, certificate=id_of(certificate_id, "signed.certificate_id"))
+
+
+def call_actor(context: signer_pb2.CallContext) -> Actor:
+    """Who acts in the call ``context`` names, for the signer's audit: its actor and its call id, both set."""
+    for field, value in (("call_id", context.call_id), ("actor", context.actor)):
+        if not 0 < len(value) <= MAX_CALL_TEXT:
+            raise _invalid(field=f"call.{field}", requirement=f"1 to {MAX_CALL_TEXT} characters")
+    return Actor(context.actor, context.call_id)
+
+
+def _tenant_of(company: signer_pb2.Company, mode: signer_pb2.Mode.ValueType | None, field: str) -> Tenant:
+    """The tenant ``company`` names, in the mode ``mode`` names (``None``: a company's, in no mode)."""
+    organization, company_id = _company_of(company, f"{field}.company")
+    return Tenant(organization, company_id, None if mode is None else mode_of(mode, f"{field}.mode"))
+
+
+def xml_to_sign(message: signer_pb2.SignXmlRequest) -> XmlToSign:
+    """The document ``message`` asks to sign: its tenant, profile, moment (set) and reference."""
+    return XmlToSign(
+        tenant=_tenant_of(message.company, message.mode, "sign_xml"),
+        profile=profile_of(message.profile),
+        document=message.document,
+        signed_at=_required_moment(
+            message.signed_at, "sign_xml.signed_at", present=message.HasField("signed_at")
+        ),
+        reference=message.reference,
+    )
+
+
+def seed_to_sign(message: signer_pb2.SignSeedRequest) -> SeedToSign:
+    """The seed ``message`` asks to sign: its tenant, profile and audience."""
+    return SeedToSign(
+        tenant=_tenant_of(message.company, message.mode, "sign_seed"),
+        profile=profile_of(message.profile),
+        seed=message.seed,
+        audience=message.audience,
+    )
+
+
+def described(message: signer_pb2.DescribeCertificatesRequest) -> Tenant:
+    """The tenant (in a mode) whose certificates ``message`` asks for."""
+    return _tenant_of(message.company, message.mode, "describe")
+
+
+def retirement(message: signer_pb2.RetireCertificateRequest) -> tuple[Tenant, CertificateId]:
+    """The company (no mode: a retirement is for every mode) and the certificate ``message`` retires."""
+    company = _tenant_of(message.company, None, "retire")
+    return company, CertificateId(id_of(message.certificate_id, "retire.certificate_id"))
+
+
+def import_request(header: signer_pb2.ImportHeader) -> ImportRequest:
+    """The import ``header`` asks for: its tenant in the request's mode, the modes (each once) and its key."""
+    wires = list(header.modes)
+    modes = frozenset(mode_of(wire, "import_header.modes") for wire in wires)
+    if len(modes) != len(wires):
+        raise _invalid(field="import_header.modes", requirement="each mode named once")
+    return ImportRequest(
+        tenant=_tenant_of(header.company, header.mode, "import_header"),
+        modes=modes,
+        idempotency_key=header.idempotency_key,
+    )

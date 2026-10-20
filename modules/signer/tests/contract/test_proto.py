@@ -7,6 +7,7 @@ the names the generated descriptor holds.
 from typing import Final
 
 from ledger_signer.adapters.grpc._generated.v1 import signer_pb2, signer_pb2_grpc
+from ledger_signer.adapters.grpc.server import CALLER_METHODS
 
 SERVICE: Final = "/ledger.signer.v1.SignerService/"
 IMPORT: Final = SERVICE + "ImportCertificate"
@@ -36,6 +37,10 @@ def test_the_service_s_five_methods_by_full_name_are_those_the_allowlists_name()
     methods = frozenset(f"/{service.full_name}/{method.name}" for method in service.methods)
     assert methods == {IMPORT, DESCRIBE, RETIRE, SIGN_XML, SIGN_SEED}
     assert frozenset().union(*ALLOWLISTS.values()) == methods
+
+
+def test_the_server_s_allowlists_are_these() -> None:
+    assert CALLER_METHODS == ALLOWLISTS
 
 
 def test_only_the_import_streams_its_requests() -> None:

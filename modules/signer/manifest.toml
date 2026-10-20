@@ -8,8 +8,9 @@ settings = true                      # LEDGER_SIGNER_*
 [dependencies]
 packages = ["kernel", "platform", "fiscal-kit"]
 modules = ["identity"]               # its events only (company deactivations): never its API
-python = ["alembic>=1.20.0", "cryptography>=50.0.2", "grpcio>=1.84.0", "protobuf>=7.36.2", "psycopg>=3.3.6",
-          "pydantic>=2.14.1", "pydantic-settings>=2.15.0", "sqlalchemy>=2.1.4"]  # + fastapi with HTTP
+python = ["alembic>=1.20.0", "cryptography>=50.0.2", "grpcio>=1.84.0", "prometheus-client>=0.26.0",
+          "protobuf>=7.36.2", "psycopg>=3.3.6", "pydantic>=2.14.1", "pydantic-settings>=2.15.0",
+          "sqlalchemy>=2.1.4"]  # + fastapi with HTTP
 test = ["signxml>=5.1.0", "types-protobuf>=7.35.1.20260906"]
 
 [data]
@@ -42,6 +43,32 @@ version = 1
 type = "signer.certificate.expiring"
 version = 1
 public = "certificate.expiring"
+
+[[events.consumes]]
+consumer = "signer.company_deactivations"
+types = ["identity.company.deactivated"]
+
+[[jobs]]
+kind = "signer.expiry_notice"
+max_attempts = 20
+
+[[jobs]]
+kind = "signer.purge_idempotency_keys"
+concurrency = 1
+
+[[jobs]]
+kind = "signer.purge_done_jobs"
+concurrency = 1
+
+[[schedules]]
+name = "signer.purge_idempotency_keys"
+every = "1h"
+enqueues = "signer.purge_idempotency_keys"
+
+[[schedules]]
+name = "signer.purge_done_jobs"
+every = "24h"
+enqueues = "signer.purge_done_jobs"
 
 [extension_points]
 provides = ["SignerPort"]            # fiscal-kit's, to channels

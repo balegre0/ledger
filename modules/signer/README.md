@@ -39,3 +39,14 @@ ADR 0010; plan `docs/superpowers/plans/2026-10-19-v2-m2b-signer.md`).
   `receiver`) bind the gRPC client ([`adapters/grpc/client.py`](src/ledger_signer/adapters/grpc/client.py)) with
   their own token, or, unconfigured, stand-ins answering `signer_unavailable` (`signer.not_configured`); no
   client role's readiness calls the signer. Messages map to DTOs in one place, `adapters/grpc/codec.py`.
+- Service (`adapters/grpc/server.py`, put together by `adapters/serving.py`): in the `signer` role the
+  assembly checks every caller's token (present, 32+ visible ASCII characters, none shared, a `_PREVIOUS` one
+  only beside a current one), the local-file KMS (`LEDGER_SIGNER_KMS_KEY_FILE` named, `local`/`test` only) and
+  the backends (`remote` needs a certification entity, none exists yet: `entity_not_configured`), then serves
+  `SignerService` on `LEDGER_SIGNER_GRPC_PORT` behind the platform's guard (allowlists `CALLER_METHODS`: api
+  imports, describes and retires; worker and receiver sign and describe), binds its facade as `SignerPort` and
+  `SignerApi`, consumes `identity.company.deactivated` (`signer.company_deactivations`: every active
+  certificate retired `company_deactivated` in the inbox row's unit), runs `signer.expiry_notice` jobs and its
+  own purges, and is ready when the service serves (`signer:grpc`) and the KMS answers (`signer:kms`). An
+  import streams its header first, then at most 2 MiB of bundle; each call acts as the actor its caller
+  forwarded, and a signature is audited with the caller the guard admitted.
