@@ -13,7 +13,7 @@ Python 3.15 · uv workspace · strictly typed in two checkers · zero suppressio
 | `packages/` | `kernel` (the shared vocabulary, standard library only), `platform` (the chassis), `testing` (test tooling, dev-only) |
 | `modules/` | Business modules, each in its own PostgreSQL schema and role: `identity` |
 | `countries/` | Country packs: `do` (regime `do`, the e-CF channel) and its dev-only `do/testing` |
-| `apps/` | The deployables: `api`, `worker`, `migrate`; they compose the installed modules and hold no business code |
+| `apps/` | The deployables: `api`, `worker`, `signer`, `migrate`; they compose the installed modules and hold no business code |
 | `contracts/` | Wire contracts (buf); protos arrive with the signer |
 | `tools/devtools` | `ledger-devtools`: checks the manifests and generates what follows from them |
 | `deploy/` | The image (`docker/ledger.Dockerfile`) and the local stack (`local/`) |
@@ -52,21 +52,33 @@ the local stack from it.
 ## Run locally
 
 ```bash
-docker compose -f deploy/local/compose.yaml up -d --build --wait   # postgres, migrate, api, worker
-docker compose -f deploy/local/compose.yaml down -v                 # stop and delete the data
+sh deploy/local/signer/tokens.sh                                    # once: the signer's callers' tokens (git ignores them)
+docker compose -f deploy/local/compose.yaml up -d --build --wait   # postgres, migrate, api, worker, signer
+docker compose -f deploy/local/compose.yaml down -v                 # stop and delete the data (and the signer's KMS key)
 ```
 
 | | Host address |
 |---|---|
 | api | `http://127.0.0.1:8100` (`LEDGER_API_PORT`) |
 | worker (probes, metrics) | `http://127.0.0.1:8101` (`LEDGER_WORKER_PORT`) |
+| signer (probes, metrics) | `http://127.0.0.1:8102` (`LEDGER_SIGNER_PORT`) |
 | PostgreSQL 18.6 | `127.0.0.1:5432` (`LEDGER_POSTGRES_PORT`), database `ledger`, login `ledger_app` |
 
-Port 8000 is never used on the host. `/livez` and `/readyz` answer on both apps. To call the api with real
+Port 8000 is never used on the host. `/livez` and `/readyz` answer on every app. To call the api with real
 tokens, start the local Zitadel (compose profile `zitadel`): [deploy/local/zitadel/README.md](deploy/local/zitadel/README.md);
 a stack started under its own project (`-p <name>`) gives its scripts the same `COMPOSE_PROJECT_NAME`.
 An app run on the host takes `LEDGER_*` variables (see `deploy/local/compose.yaml`'s header) and sets
 `LEDGER_HTTP_PORT=8101` for the worker (8100, the api's, is the default).
+
+The signer (ADR 0010) holds the certificates and signs, in a container of its own: the login `ledger_signer`,
+the only one that enters the schema `signer`, and a gRPC service on `signer:50051`, on the internal network
+`signer` beside its callers and never published on the host (it has no gRPC health service: it is probed over
+HTTP). The api and the worker call it with a token each; `deploy/local/signer/tokens.sh` writes three random ones
+(api, worker, receiver) into `deploy/local/signer/.local/`, the signer reads all three and each caller only its
+own (`--new` replaces them: recreate the api, the worker and the signer). Neither caller's readiness depends on
+the signer: without it the certificate routes answer 503 `signer_unavailable`. Its KMS is a key file in the volume
+`signer-kms`, refused outside the environments `local` and `test`, so the signer runs nowhere but here and in the
+tests yet. [docs/runbooks/signer/](docs/runbooks/signer/) has the rest.
 
 The api holds every credential to a rate of its own, per replica, behind the ingress's limit (spec §10):
 `LEDGER_RATE_LIMIT_PER_SECOND` (default 50) and `LEDGER_RATE_LIMIT_BURST` (default 100, the requests it may make

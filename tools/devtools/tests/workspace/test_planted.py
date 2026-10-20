@@ -190,31 +190,14 @@ def test_a_role_isolates_one_module_at_most(repository: Path, capsys: pytest.Cap
         assert problem in capsys.readouterr().out
 
 
-SIGNER_APP: Final = """[package]
-name = "signing"
-kind = "app"
-summary = "An app planted by a test: the signer's role."
-owners = ["@o"]
-
-[dependencies]
-packages = ["platform"]
-
-[app]
-script = "ledger-signing"
-role = "signer"
-"""
 PLANTED_DOCSTRING: Final = '"""Planted."""\n'
 CUSTODY_KEY: Final = f"{PLANTED_DOCSTRING}\nfrom ledger_signer.adapters.custody.keys import KEY\n"
 """Code importing a key of the signer's custody."""
 PLANTED_FILES: Final = {
     "modules/signer/src/ledger_signer/adapters/custody/keys.py": f'{PLANTED_DOCSTRING}\nKEY = "k"\n',
-    "apps/signing/manifest.toml": SIGNER_APP,
-    "apps/signing/src/ledger_app_signing/__init__.py": PLANTED_DOCSTRING,
-    "apps/signing/src/ledger_app_signing/main.py": f"{PLANTED_DOCSTRING}\nimport ledger_platform.runtime\n",
 }
-"""A key in the workspace's own signer custody, and an app of its role (it imports the platform alone, as the
-real one will: the runtime assembles the module). Named ``signing``: an app named like the module it runs
-collides in devtools' lookups by name (to be settled with the real ``apps/signer``)."""
+"""A key in the workspace's own signer custody, which its app (``apps/signer``, named like the module: see
+``test_an_app_named_like_a_module_is_a_package_of_its_own``) reaches through the runtime alone."""
 LEAKS: Final = {
     "apps/api/src/ledger_app_api/leak.py": "import ledger_signer.adapters.custody.keys\n",
     "packages/testing/src/ledger_testing/leak.py": "from ledger_signer.adapters.custody import keys\n",

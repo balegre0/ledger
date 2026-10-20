@@ -6,6 +6,7 @@ requires-python = ">=3.15"
 members = [
     "ledger-app-api",
     "ledger-app-migrate",
+    "ledger-app-signer",
     "ledger-app-worker",
     "ledger-country-do",
     "ledger-country-do-testing",
@@ -708,6 +709,17 @@ requires-dist = [{ name = "ledger-platform", editable = "packages/platform" }]
 name = "ledger-app-migrate"
 version = "0.1.0"
 source = { editable = "apps/migrate" }
+dependencies = [
+    { name = "ledger-platform" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "ledger-platform", editable = "packages/platform" }]
+
+[[package]]
+name = "ledger-app-signer"
+version = "0.1.0"
+source = { editable = "apps/signer" }
 dependencies = [
     { name = "ledger-platform" },
 ]

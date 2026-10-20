@@ -14,6 +14,7 @@ dist/
 htmlcov/
 .env
 deploy/local/zitadel/.local/
+deploy/local/signer/.local/
 
 # DGII spike: the owner's certificate and password file, spike outputs (docs/runbooks/do/testecf-spike.md)
 /.dgii/

@@ -71,12 +71,6 @@ def test_the_worker_factory_builds_the_worker_app_without_connecting() -> None:
     assert not any(path.startswith("/v1/") for path in paths(app))
 
 
-def distribution_version(distribution: str) -> str:
-    """``importlib.metadata.version`` of the signer's app, which comes with a later task."""
-    del distribution
-    return "1.2.3"
-
-
 @pytest.mark.usefixtures("environment")
 def test_the_signer_factory_builds_the_signer_app_without_connecting(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -90,9 +84,8 @@ def test_the_signer_factory_builds_the_signer_app_without_connecting(
     key_file = tmp_path / "kms.key"
     key_file.write_bytes(bytes(range(32)))
     monkeypatch.setenv("LEDGER_SIGNER_KMS_KEY_FILE", str(key_file))
-    monkeypatch.setattr(serving, "version", distribution_version)
     app = serving.signer()
-    assert (app.title, app.version) == ("ledger-signer", "1.2.3")
+    assert (app.title, app.version) == ("ledger-signer", version("ledger-app-signer"))
     assert {"/livez", "/readyz", "/metrics"} <= paths(app)
     assert not any(path.startswith("/v1/") for path in paths(app))
 
@@ -103,7 +96,6 @@ def test_an_app_that_listens_without_a_direct_url_does_not_start(
     monkeypatch: pytest.MonkeyPatch, role: serving.ServedRole
 ) -> None:
     monkeypatch.delenv("LEDGER_DATABASE_DIRECT_URL")
-    monkeypatch.setattr(serving, "version", distribution_version)
     factory = {"worker": serving.worker, "signer": serving.signer}[role]
     with pytest.raises(DirectUrlMissingError, match=role):
         factory()
