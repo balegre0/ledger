@@ -37,8 +37,11 @@ class DgiiTimeouts:
     """A call's deadline: its token, every attempt, the waits between them."""
 
     def outbound(self) -> OutboundTimeouts:
-        """What an outbound client waits by: to connect, and per attempt (the call's deadline is ours)."""
-        return OutboundTimeouts(connect=self.connect, total=self.total)
+        """What an outbound client waits by: ``connect``; each step and an attempt's head within ``total``.
+
+        The call's deadline, and each body's time and size, stay the channel's own (``bounded``).
+        """
+        return OutboundTimeouts(connect=self.connect, each=self.total, deadline=self.total)
 
 
 DEFAULT_TIMEOUTS: Final = DgiiTimeouts()

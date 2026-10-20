@@ -45,10 +45,17 @@ def gauge(registry: CollectorRegistry | None, name: str, documentation: str, lab
     return found
 
 
-def histogram(registry: CollectorRegistry, name: str, documentation: str, labels: Sequence[str]) -> Histogram:
-    """The histogram ``name`` of ``registry`` (the default buckets), made on first use."""
+def histogram(
+    registry: CollectorRegistry,
+    name: str,
+    documentation: str,
+    labels: Sequence[str],
+    *,
+    buckets: Sequence[float],
+) -> Histogram:
+    """The histogram ``name`` of ``registry`` with ``buckets`` (upper bounds), made on first use."""
     made = _HISTOGRAMS.setdefault(registry, {})
     found = made.get(name)
     if found is None:
-        found = made[name] = Histogram(name, documentation, labels, registry=registry)
+        found = made[name] = Histogram(name, documentation, labels, registry=registry, buckets=buckets)
     return found

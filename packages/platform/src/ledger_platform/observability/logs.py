@@ -49,6 +49,9 @@ from ledger_platform.config.settings import LogFormat
 WITHHELD: Final = "(message withheld: it can quote values)"
 """What a log says in place of the message of an error of the database."""
 MAX_ISSUES: Final = 20
+QUIETED: Final = ("httpx", "httpcore")
+"""Loggers held to WARNING: httpx logs every request's full URL (paths and queries carry tax ids) at INFO,
+httpcore every step of it at DEBUG."""
 """How many problems of a validation error a log or a problem names; the rest are counted."""
 _LOCATION_PART: Final = 40
 """A location names fields, but a key a client chose is a field name too: it is cut at this length."""
@@ -328,3 +331,5 @@ def configure_logging(settings: LogSettings, *, service: str) -> None:
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(settings.log_level)
+    for name in QUIETED:
+        logging.getLogger(name).setLevel(logging.WARNING)

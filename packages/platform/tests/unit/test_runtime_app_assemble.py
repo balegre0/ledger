@@ -1237,7 +1237,9 @@ async def test_a_channel_is_given_the_app_s_authentication_and_its_outbound_http
     assert context.auth is module_auth[0]
     assert isinstance(context.http, OutboundHttp)
     assert not context.http.replaced("party")  # an app's clients call the network
-    async with context.http.client("party", timeouts=OutboundTimeouts(connect=1.0, total=2.0)) as client:
+    async with context.http.client(
+        "party", timeouts=OutboundTimeouts(connect=1.0, each=2.0, deadline=2.0)
+    ) as client:
         assert not client.follow_redirects
 
 
