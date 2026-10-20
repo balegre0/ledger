@@ -89,7 +89,8 @@ from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import INBOUND,
 from ledger_country_do.channels.ecf_v1.adapters.xml.inbound import read_inbound_arecf
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError, EcfUnavailableError
 from ledger_country_do.channels.ecf_v1.domain.exchanges import require_tax_id
-from ledger_kernel.errors import InvalidInputError
+from ledger_fiscal_kit.xml.hardened import XmlDocumentError
+from ledger_fiscal_kit.xml.schemas import SchemaViolationError
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import Endpoint, Resolve
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.directory import DirectoryLookup
 lazy from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
@@ -260,10 +261,11 @@ class BuyerOptions(TypedDict, total=False):
 @final
 @dataclass(slots=True)
 class _Exchange:
-    """One delivery or approval under way: whom for, until when, the seeds it has signed."""
+    """One delivery or approval under way: whom for, whether it may authenticate, until when, its seeds."""
 
     who: SigningAs
     counterparty: str
+    authenticate: bool
     deadline: float
     seeds: list[SeedSigned] = field(default_factory=list[SeedSigned])
 
@@ -370,20 +372,26 @@ class BuyerClient:
     ) -> tuple[int, bytes | None]:
         """``document`` posted to ``step`` with ``token`` if any: the status and bounded body.
 
-        A 401 to a document sent without a token (authentication off) is ``BuyerRequiresAuthenticationError``.
+        A 401 to a document sent without a token because authentication is switched off is
+        ``BuyerRequiresAuthenticationError``; with it on (the counterparty publishing no authentication URL),
+        a 401 is no switch's to mend: ``BuyerUnavailableError``, as any other status the caller refuses.
         """
         headers = {"Accept": step.accept} | ({} if token is None else {"Authorization": f"Bearer {token}"})
         status, body = await self._status(exchange, at, step, headers=headers, document=document)
-        if status == _UNAUTHORIZED and token is None:
+        if status == _UNAUTHORIZED and token is None and not exchange.authenticate:
             raise BuyerRequiresAuthenticationError(step.name)
         return status, body
 
     async def _token(self, exchange: _Exchange, at: Endpoint) -> str:
-        """A token from ``at``: its seed signed as the issuing company (recorded), then exchanged."""
+        """A token from ``at``: its seed signed as the issuing company (recorded), then exchanged.
+
+        Signing, too, ends with the exchange's deadline (a signer that takes too long: unavailable).
+        """
         seed = await self._body(exchange, at, _SEED, headers={"Accept": _SEED.accept})
         try:
-            signed = await self._signer.seed(exchange.who, seed, audience=at.authority)
-        except EcfInvalidError as error:
+            async with asyncio.timeout_at(exchange.deadline):
+                signed = await self._signer.seed(exchange.who, seed, audience=at.authority)
+        except (EcfInvalidError, TimeoutError) as error:
             raise BuyerUnavailableError(_SEED.name) from error
         exchange.seeds.append(
             SeedSigned(buyer=exchange.counterparty, endpoint_host=at.host, at=self._clock())
@@ -410,17 +418,16 @@ class BuyerClient:
             return NotApplicable("entry_names_another_rnc")
         return entry
 
-    async def _authorized(
-        self, exchange: _Exchange, entry: DirectoryEntry, *, authenticate: bool
-    ) -> str | None:
+    async def _authorized(self, exchange: _Exchange, entry: DirectoryEntry) -> str | None:
         """A bearer token for the document's request when authentication is switched on and published."""
-        at = None if not authenticate or entry.authentication is None else endpoint(entry.authentication)
+        published = entry.authentication
+        at = None if not exchange.authenticate or published is None else endpoint(published)
         return None if at is None else await self._token(exchange, at)
 
-    def _exchange(self, who: SigningAs, counterparty: str) -> _Exchange:
+    def _exchange(self, who: SigningAs, counterparty: str, *, authenticate: bool) -> _Exchange:
         self._opened()
         deadline = asyncio.get_running_loop().time() + self._timeouts.call
-        return _Exchange(who=who, counterparty=counterparty, deadline=deadline)
+        return _Exchange(who=who, counterparty=counterparty, authenticate=authenticate, deadline=deadline)
 
     async def deliver(
         self,
@@ -436,9 +443,9 @@ class BuyerClient:
         if isinstance(found, NotApplicable):
             return found
         reception = endpoint(found.reception)
-        exchange = self._exchange(who, document.buyer_rnc)
+        exchange = self._exchange(who, document.buyer_rnc, authenticate=authenticate)
         try:
-            token = await self._authorized(exchange, found, authenticate=authenticate)
+            token = await self._authorized(exchange, found)
             named = (f"{document.issuer_rnc}{document.encf}.xml", signed)
             arecf = _read(*await self._posted(exchange, reception, _RECEPTION, token, named), _RECEPTION)
         except (BuyerUnavailableError, BuyerEndpointRefusedError) as error:
@@ -447,7 +454,7 @@ class BuyerClient:
         seeds = tuple(exchange.seeds)
         try:
             return self._receipt(arecf, document, seeds, received_at=self._clock())
-        except InvalidInputError as refused:
+        except (EcfInvalidError, XmlDocumentError, SchemaViolationError) as refused:
             return ReceiptRefused(arecf=arecf, reason=refused.code, seeds=seeds)
 
     def _receipt(
@@ -496,9 +503,9 @@ class BuyerClient:
         if isinstance(found, NotApplicable):
             return found
         service = endpoint(found.approval)
-        exchange = self._exchange(who, emitter_rnc)
+        exchange = self._exchange(who, emitter_rnc, authenticate=authenticate)
         try:
-            token = await self._authorized(exchange, found, authenticate=authenticate)
+            token = await self._authorized(exchange, found)
             status, _ = await self._posted(exchange, service, _APPROVAL, token, (ACECF_FILE, signed_acecf))
             refused = _refused(status, _APPROVAL)
         except (BuyerUnavailableError, BuyerEndpointRefusedError) as error:

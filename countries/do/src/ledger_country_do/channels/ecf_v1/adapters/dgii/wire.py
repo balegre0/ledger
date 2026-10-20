@@ -77,7 +77,8 @@ class VoidAnswer(_Answer):
 class ApprovalAnswer(_Answer):
     """``aprobacioncomercial`` to DGII: ``{mensaje: [...], estado}``, as the integration notes record it."""
 
-    state: str = Field(default="", alias="estado", max_length=256)
+    state: str = Field(alias="estado", max_length=256)
+    """Required: an answer without it is not the one recorded, so its outcome is unknown (until TesteCF)."""
     messages: list[_Text] = Field(default_factory=list[_Text], alias="mensaje", max_length=200)
 
 

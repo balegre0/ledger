@@ -142,3 +142,79 @@ async def test_its_own_clock_is_monotonic_time() -> None:
 def test_a_cache_holds_one_answer_at_least() -> None:
     with pytest.raises(InvalidValueError, match=r"directory_cache\.capacity must be at least 1"):
         DirectoryCache(Directory().lookup, capacity=0)
+
+
+async def test_an_entry_naming_another_taxpayer_is_kept_only_an_hour() -> None:
+    async def another(who: SigningAs, environment: Environment, rnc: str) -> DirectoryEntry | None:
+        asked.append(rnc)
+        del who, environment
+        return DirectoryEntry("OTRO", "101850043", "https://otro.example.com", "", None)
+
+    asked: list[str] = []
+    moment = Moment()
+    cache = DirectoryCache(another, moment)
+    await cache.entry(SIGNING_AS, T, BUYER)
+    moment.now += HOUR - 1
+    await cache.entry(SIGNING_AS, T, BUYER)
+    moment.now += 1
+    await cache.entry(SIGNING_AS, T, BUYER)
+    assert asked == [BUYER, BUYER]
+
+
+@final
+class Gated:
+    """A directory that answers once ``release`` is set, counting its questions."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.asked = 0
+        self.failing = False
+
+    async def lookup(self, who: SigningAs, environment: Environment, rnc: str) -> DirectoryEntry | None:
+        del who, environment
+        self.asked += 1
+        await self.release.wait()
+        if self.failing:
+            raise AuthorityUnavailableError(Failure.SERVER_ERROR, "directory")
+        return DirectoryEntry("COMPRADOR", rnc, f"https://{rnc}.example.com", "", None)
+
+
+async def test_concurrent_lookups_of_one_rnc_ask_dgii_once() -> None:
+    gated = Gated()
+    cache = DirectoryCache(gated.lookup, Moment())
+    waiting = [asyncio.create_task(cache.entry(SIGNING_AS, T, BUYER)) for _ in range(3)]
+    other = asyncio.create_task(cache.entry(SIGNING_AS, T, "101850043"))
+    await asyncio.sleep(0)
+    gated.release.set()
+    found = await asyncio.gather(*waiting)
+    assert {entry.rnc for entry in found if entry is not None} == {BUYER}
+    assert (await other) is not None
+    assert gated.asked == 2
+
+
+async def test_a_waiter_cancelled_leaves_the_lookup_to_the_others() -> None:
+    gated = Gated()
+    cache = DirectoryCache(gated.lookup, Moment())
+    first = asyncio.create_task(cache.entry(SIGNING_AS, T, BUYER))
+    second = asyncio.create_task(cache.entry(SIGNING_AS, T, BUYER))
+    await asyncio.sleep(0)
+    first.cancel()
+    gated.release.set()
+    assert (await second) is not None
+    assert first.cancelled()
+    assert await cache.entry(SIGNING_AS, T, BUYER) is not None  # kept: asked of DGII once
+    assert gated.asked == 1
+
+
+async def test_every_waiter_of_a_failed_lookup_fails_and_the_next_asks_again() -> None:
+    gated = Gated()
+    gated.failing = True
+    cache = DirectoryCache(gated.lookup, Moment())
+    waiting = [asyncio.create_task(cache.entry(SIGNING_AS, T, BUYER)) for _ in range(2)]
+    await asyncio.sleep(0)
+    gated.release.set()
+    failed = await asyncio.gather(*waiting, return_exceptions=True)
+    assert all(isinstance(each, AuthorityUnavailableError) for each in failed)
+    gated.failing = False
+    assert await cache.entry(SIGNING_AS, T, BUYER) is not None
+    assert gated.asked == 2

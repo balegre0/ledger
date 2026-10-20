@@ -11,6 +11,7 @@ lazy from ipaddress import IPv6Address
 import httpx
 import pytest
 
+from ledger_country_do.channels.ecf_v1.adapters.buyers import client as buyers_client
 from ledger_country_do.channels.ecf_v1.adapters.buyers.approvals import (
     APPROVAL_PATH,
     ApprovalRefused,
@@ -64,8 +65,10 @@ from ledger_country_do_testing.samples import (
 )
 from ledger_country_do_testing.signatures import sign_with_signxml
 from ledger_country_do_testing.transports import FAKE_HOSTS, outbound_over
+from ledger_fiscal_kit.ports import SignerPort
 from ledger_fiscal_kit.xml.hardened import DoctypeRefusedError
 from ledger_fiscal_kit.xml.schemas import SchemaViolationError
+from ledger_kernel.errors import InvalidValueError
 from ledger_platform.http.outbound import OutboundHttp
 from ledger_testing.clock import ManualClock
 from ledger_testing.pki import Authority
@@ -76,7 +79,11 @@ lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClie
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.directory import DirectoryLookup
 lazy from ledger_country_do.channels.ecf_v1.application.ports import SigningAs
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
+lazy from ledger_country_do.channels.ecf_v1.domain.exchanges import Receipt
 lazy from ledger_country_do_testing.local_signer import KeyPairSigner
+lazy from ledger_fiscal_kit.ports import CertificateValidity, SeedToSign, Signed, XmlToSign
+lazy from ledger_kernel.tenancy import Tenant
+lazy from ledger_platform.runtime.calls import SystemCall
 lazy from ledger_testing.pki import Issued
 
 if TYPE_CHECKING:
@@ -1025,3 +1032,90 @@ def test_a_delivery_names_an_rnc_or_a_cedula_for_both_parties(issuer: str, buyer
     with pytest.raises(ExchangeInvalidError, match=rf"delivery_document\.{field}") as raised:
         DeliveryDocument(issuer_rnc=issuer, buyer_rnc=buyer, encf=credit_invoice().encf)
     assert [value for value in (issuer, buyer) if value and value in str(raised.value)] == []
+
+
+async def test_a_buyer_answering_401_with_authentication_on_but_none_published_is_unavailable(
+    party: Party, fake: FakeDgii
+) -> None:
+    # The switch is on; the buyer publishes no authentication URL yet refuses: no switch can help.
+    client, signer = recording(party, listed(SIMULATOR), httpx.ASGITransport(app=fake.app))
+    async with client.opened():
+        with pytest.raises(BuyerUnavailableError) as raised:
+            await deliver(client, credit_invoice(), await signed(party.signer), authenticate=True)
+        with pytest.raises(BuyerUnavailableError) as approval:
+            await client.send_acecf(WHO, T, ISSUER.rnc, acecf(party.signer), authenticate=True)
+    for error in (raised.value, approval.value):
+        assert type(error) is BuyerUnavailableError
+        assert "switched off" not in str(error)
+    assert signer.calls == []
+
+
+async def test_no_outcome_of_an_exchange_shows_a_tax_id_or_the_documents(
+    party: Party, fake: FakeDgii
+) -> None:
+    async with over(party, simulator, httpx.ASGITransport(app=fake.app)).opened() as client:
+        delivered = await deliver(client, credit_invoice(), await signed(party.signer))
+        sent = await client.send_acecf(WHO, T, ISSUER.rnc, acecf(party.signer), authenticate=True)
+    fake.state.tamper_arecf = True
+    async with over(party, simulator, httpx.ASGITransport(app=fake.app)).opened() as client:
+        refused = await deliver(client, credit_invoice(2), await signed(party.signer, 2))
+    assert isinstance(delivered, Delivered)
+    assert isinstance(refused, ReceiptRefused)
+    assert isinstance(sent, ApprovalSent)
+    for outcome in (delivered, refused, sent, *delivered.seeds):
+        shown = repr(outcome)
+        assert [
+            secret for secret in (BUYER.rnc or "", ISSUER.rnc, "<ARECF", "BEGIN") if secret in shown
+        ] == []
+
+
+async def test_a_defect_reading_a_receipt_is_not_a_refused_receipt(
+    party: Party, fake: FakeDgii, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Only the receipt's own faults (pack errors, the kit's XML and schema refusals) refuse it: a value our
+    # code breaks is a defect of ours, and must not be archived as the buyer's fault.
+    def broken(document: bytes) -> Receipt:
+        del document
+        raise InvalidValueError(field="receipt", requirement="a value our code breaks")
+
+    monkeypatch.setattr(buyers_client, "read_inbound_arecf", broken)
+    async with over(party, simulator, httpx.ASGITransport(app=fake.app)).opened() as client:
+        with pytest.raises(InvalidValueError):
+            await deliver(client, credit_invoice(), await signed(party.signer))
+
+
+@final
+class SlowSeeds(SignerPort):
+    """Signs a seed only after a minute: a signer that takes its time."""
+
+    @override
+    async def sign_xml(self, call: SystemCall, request: XmlToSign) -> Signed:
+        raise AssertionError  # a delivery signs seeds only
+
+    @override
+    async def sign_seed(self, call: SystemCall, request: SeedToSign) -> Signed:
+        await asyncio.sleep(60)
+        raise AssertionError  # never reached: the exchange's deadline ends it
+
+    @override
+    async def certificate_validity(self, call: SystemCall, tenant: Tenant) -> CertificateValidity | None:
+        raise AssertionError  # never asked
+
+
+async def test_signing_a_buyer_s_seed_ends_with_the_exchange_s_deadline(party: Party, fake: FakeDgii) -> None:
+    client = BuyerClient(
+        DocumentSigner(SlowSeeds()),
+        simulator,
+        trust=party.trust,
+        http=outbound_over(httpx.ASGITransport(app=fake.app)),
+        resolve=public_dns,
+        timeouts=DgiiTimeouts(connect=5, total=5, call=0.3),
+    )
+    loop = asyncio.get_running_loop()
+    async with client.opened():
+        began = loop.time()
+        with pytest.raises(BuyerUnavailableError, match="its seed") as raised:
+            await deliver(client, credit_invoice(), await signed(party.signer))
+    assert loop.time() - began < 5
+    assert raised.value.seeds == ()
+    assert fake.received == []

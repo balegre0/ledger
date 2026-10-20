@@ -1188,6 +1188,21 @@ async def test_an_rfce_sent_is_asked_about_on_the_fc_host_and_mapped_by_consulta
     assert fake.received[-1].host == "fc.fake.test"
 
 
+async def test_consultarfce_is_asked_on_dgii_s_fc_host(
+    signer: KeyPairSigner, clock: ManualClock, sleeps: list[float]
+) -> None:
+    asked: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append((request.url.host, request.url.path))
+        return seeded(request.url.path) or reply(200, b'{"codigo": "0"}')
+
+    async with client_over(httpx.MockTransport(handler), signer, clock, sleeps).opened() as dgii:
+        await dgii.rfce_status(WHO, T, ISSUER, Encf(EcfType.CONSUMER_INVOICE, 9), "abc123")
+    assert asked[-1] == ("fc.fake.test", "/testecf/consultarfce/api/consultas/consulta")
+    assert {host for host, _ in asked[:-1]} == {"ecf.fake.test"}  # the token is the ecf host's
+
+
 async def test_an_rfce_dgii_has_not_recorded_is_no_encontrado_and_not_final(
     dgii: DgiiClient, fake: FakeDgii
 ) -> None:
@@ -1259,8 +1274,16 @@ async def test_a_buyer_s_signed_acecf_reaches_dgii(
         MayHaveTaken(200, b'{"codigo": "x"}', "void", "unreadable"),
         MayHaveTaken(404, b"", "approval", "undocumented"),
         MayHaveTaken(200, b'{"estado": ' + b'"x"' * 2 + b"}", "approval", "unreadable"),
+        MayHaveTaken(200, b'{"mensaje": ["recibido"]}', "approval", "unreadable"),
     ],
-    ids=["void-500", "void-not-json", "void-code-not-a-number", "approval-404", "approval-not-json"],
+    ids=[
+        "void-500",
+        "void-not-json",
+        "void-code-not-a-number",
+        "approval-404",
+        "approval-not-json",
+        "approval-without-state",
+    ],
 )
 async def test_a_void_or_an_approval_dgii_may_have_taken_has_an_unknown_outcome(
     signer: KeyPairSigner, clock: ManualClock, sleeps: list[float], case: MayHaveTaken
@@ -1306,14 +1329,35 @@ async def test_what_certecf_does_not_publish_is_refused_before_anything_is_sent(
 async def test_a_call_whose_deadline_s_timer_fires_a_clock_tick_early_is_still_timed_out(
     signer: KeyPairSigner, clock: ManualClock, sleeps: list[float], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # asyncio runs a timer up to a clock resolution before its time (Windows: about 16 ms): which limit ended
-    # an attempt is the one asyncio armed, never what the clock reads once it has.
-    monkeypatch.setattr(asyncio.get_running_loop(), "_clock_resolution", 0.25)
+    # asyncio runs a timer due within a clock resolution of now (Windows: about 16 ms): which limit ended an
+    # attempt is the one asyncio armed, never what the clock reads once it has. The resolution is widened and
+    # the server wakes once inside the window, so the deadline's timer fires before the deadline.
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "_clock_resolution", 0.25)
+    cancelled_at: list[float] = []
+
+    async def wakes_then_stalls(request: httpx.Request) -> httpx.Response:
+        if (answer := seeded(request.url.path)) is not None:
+            return answer
+        try:
+            await asyncio.sleep(0.2)
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled_at.append(loop.time())
+            raise
+        return reply(200, b"{}")
+
     tight = DgiiTimeouts(connect=5, total=5, call=0.3)
-    async with client_over(httpx.MockTransport(stalls), signer, clock, sleeps, tight).opened() as dgii:
+    async with client_over(
+        httpx.MockTransport(wakes_then_stalls), signer, clock, sleeps, tight
+    ).opened() as dgii:
+        earliest_deadline = loop.time() + tight.call
         with pytest.raises(AuthorityUnavailableError, match="result: timed_out"):
             await dgii.result(WHO, T, "a")
     assert sleeps == []
+    # The timer fired before the deadline: reading the clock (the old rule) would have said "broken".
+    [fired] = cancelled_at
+    assert fired < earliest_deadline
 
 
 @final
