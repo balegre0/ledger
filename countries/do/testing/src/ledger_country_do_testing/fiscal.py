@@ -15,7 +15,13 @@ from uuid import UUID
 lazy from collections.abc import Mapping
 
 from ledger_country_do.regime import REGIME
-from ledger_fiscal_kit.drafts import DocumentRef, FiscalDraft, FiscalLine, FiscalLineTax, FiscalParty
+from ledger_fiscal_kit.drafts import (
+    DocumentRef,
+    FiscalDraft,
+    FiscalLine,
+    FiscalLineTax,
+    FiscalParty,
+)
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.money import Currency, Money
 from ledger_kernel.regimes import (
@@ -29,7 +35,7 @@ from ledger_kernel.regimes import (
 )
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Mode
-lazy from ledger_fiscal_kit.drafts import FiscalReference
+lazy from ledger_fiscal_kit.drafts import FieldValue, FiscalReference
 
 PESO: Final = Currency.of("DOP")
 ORGANIZATION: Final = OrganizationId(UUID("0199e3a0-0000-7000-8000-0000000000d1"))
@@ -52,7 +58,7 @@ ZERO: Final = TaxCategoryKey("do.itbis.zero")
 EXEMPT: Final = TaxCategoryKey("do.itbis.exempt")
 _CALCULATOR: Final = TaxCalculator(REGIME)
 _KINDS: Final = MappingProxyType({category.key: category.kind for category in REGIME.tax_categories})
-_NO_FIELDS: Final[Mapping[str, str]] = MappingProxyType({})
+_NO_FIELDS: Final[Mapping[str, FieldValue]] = MappingProxyType({})
 
 
 @final
@@ -115,7 +121,7 @@ class DraftOptions(TypedDict, total=False):
     kind: DocumentKind
     direction: Direction
     counterparty: FiscalParty | None
-    fields: Mapping[str, str]
+    fields: Mapping[str, FieldValue]
     currency: Currency
     exchange_rate: Decimal | None
     """Gives the draft its totals in pesos (its functional totals)."""

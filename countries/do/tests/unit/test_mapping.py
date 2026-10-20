@@ -18,6 +18,7 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     IncomeType,
     ModificationCode,
     PaymentType,
+    WithholdingRole,
 )
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
 from ledger_country_do.channels.ecf_v1.domain.mapping import (
@@ -51,7 +52,7 @@ from ledger_kernel.regimes import (
     TaxCategoryKind,
 )
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
-lazy from ledger_fiscal_kit.drafts import FiscalDraft
+lazy from ledger_fiscal_kit.drafts import FieldValue, FiscalDraft
 lazy from ledger_fiscal_kit.objections import Objection
 lazy from ledger_kernel.regimes import Totals
 
@@ -144,7 +145,7 @@ def test_a_type_s_comprador_takes_what_it_holds_and_no_rnc_on_a_foreign_payment(
         Priced(unit_price=D(100), category=EXEMPT),
         direction=PURCHASE,
         counterparty=payee,
-        fields={"ecf_type": "47"},
+        fields=_typed("47"),
     )
     paid = ecf_draft(
         abroad, number=Encf(EcfType.FOREIGN_PAYMENTS, 1), accepted=NONE_ACCEPTED, expires_on=EXPIRES_ON
@@ -316,7 +317,7 @@ def test_a_line_taxed_as_its_type_cannot_be_is_not_allowed(ecf_type: str, catego
         Priced(unit_price=D(100), category=category),
         direction=direction,
         counterparty=PAYEE if ecf_type == "47" else BUYER,
-        fields={"ecf_type": ecf_type},
+        fields=_typed(ecf_type),
     )
     assert found(draft) == [("do_ecf_category_not_allowed", "lines.0.taxes")]
 
@@ -327,7 +328,7 @@ def test_minor_expenses_and_foreign_payments_take_no_discount(ecf_type: str) -> 
         Priced(unit_price=D(100), discount=D(1), category=EXEMPT),
         direction=PURCHASE,
         counterparty=PAYEE if ecf_type == "47" else BUYER,
-        fields={"ecf_type": ecf_type},
+        fields=_typed(ecf_type),
     )
     assert found(draft) == [("do_ecf_discount_not_allowed", "lines.0.discount")]
 
@@ -423,6 +424,13 @@ def test_several_problems_are_all_returned_by_line_then_field_and_never_quote_a_
     ]
     assert all(SECRET not in each.message and "1.005" not in each.message for each in result)
     assert all(each.message.startswith(f"{each.field} ") for each in result)
+
+
+def _typed(ecf_type: str) -> dict[str, FieldValue]:
+    """The fields naming ``ecf_type``, with the ISR a payment abroad (47) withholds on its one line."""
+    if ecf_type == "47":
+        return {"ecf_type": ecf_type, "withholdings": {"0": {"isr": "0.00"}}}
+    return {"ecf_type": ecf_type}
 
 
 def _codes(found_objections: tuple[Objection, ...]) -> list[str]:
@@ -628,3 +636,97 @@ _WORD: Final = {
     BillingIndicator.ITBIS_2: "reduced",
     BillingIndicator.ITBIS_3: "zero",
 }
+
+
+_SERVICE: Final = Priced(unit_price=D("5000.00"), description="SERVICIO DE PLOMERIA", goods=False)
+_PARTS: Final = Priced(unit_price=D("85.00"), quantity=D(4), category=EXEMPT, description="TUBO PVC")
+_CONSULTANCY: Final = Priced(unit_price=D("1000.00"), category=EXEMPT, description="CONSULTORIA")
+
+
+def _purchase(withholdings: FieldValue, **fields: str) -> FiscalDraft:
+    return fiscal_draft(
+        _SERVICE,
+        _PARTS,
+        direction=PURCHASE,
+        fields={"ecf_type": "41", "withholdings": withholdings, **fields},
+    )
+
+
+def _abroad(withholdings: FieldValue) -> FiscalDraft:
+    return fiscal_draft(
+        _CONSULTANCY,
+        direction=PURCHASE,
+        counterparty=PAYEE,
+        fields={"ecf_type": "47", "withholdings": withholdings},
+    )
+
+
+def test_a_purchase_s_withholdings_reach_its_e_cf_lines() -> None:
+    draft = _purchase({"0": {"itbis": "900.00", "isr": "500.00"}}, withholding_role="2")
+    assert found(draft) == []
+    drafted = ecf_draft(
+        draft, number=Encf(EcfType.PURCHASES, 1), accepted=NONE_ACCEPTED, expires_on=EXPIRES_ON
+    )
+    service, parts = drafted.lines
+    assert (service.itbis_withheld, service.isr_withheld) == (D("900.00"), D("500.00"))
+    assert (parts.itbis_withheld, parts.isr_withheld) == (None, None)
+    assert drafted.withholding_role is WithholdingRole.PERCEPTION
+    abroad = ecf_draft(
+        _abroad({"0": {"isr": "270.00"}}),
+        number=Encf(EcfType.FOREIGN_PAYMENTS, 1),
+        accepted=NONE_ACCEPTED,
+        expires_on=EXPIRES_ON,
+    )
+    assert abroad.lines[0].isr_withheld == D("270.00")
+    assert abroad.withholding_role is WithholdingRole.RETENTION
+
+
+@pytest.mark.parametrize(
+    ("withholdings", "expected"),
+    [
+        ({"2": {"isr": "1.00"}}, [("do_ecf_field_invalid", "fiscal.do.withholdings.2")]),
+        ({"0": {"itbis": "900.01"}}, [("do_ecf_field_invalid", "fiscal.do.withholdings.0.itbis")]),
+        ({"1": {"itbis": "0.01"}}, [("do_ecf_field_invalid", "fiscal.do.withholdings.1.itbis")]),
+        ({"0": {"isr": "5000.01"}}, [("do_ecf_field_invalid", "fiscal.do.withholdings.0.isr")]),
+        (
+            {"1": {"isr": "340.01"}, "0": {"itbis": "1000"}},
+            [
+                ("do_ecf_field_invalid", "fiscal.do.withholdings.0.itbis"),
+                ("do_ecf_field_invalid", "fiscal.do.withholdings.1.isr"),
+            ],
+        ),
+    ],
+)
+def test_a_withholding_is_at_most_the_line_s_itbis_or_amount(
+    withholdings: FieldValue, expected: list[tuple[str, str]]
+) -> None:
+    assert found(_purchase(withholdings)) == expected
+
+
+def test_a_payment_abroad_withholds_isr_on_every_line_and_no_itbis() -> None:
+    assert found(_abroad({"0": {"isr": "270.00"}})) == []
+    assert found(_abroad({})) == [("do_ecf_value_required", "fiscal.do.withholdings.0.isr")]
+    assert found(_abroad({"0": {"itbis": "1.00", "isr": "270.00"}})) == [
+        ("do_ecf_field_invalid", "fiscal.do.withholdings.0.itbis")
+    ]
+
+
+@pytest.mark.parametrize("ecf_type", ["31", "43"])
+def test_withholdings_are_given_on_a_purchase_or_a_payment_abroad_only(ecf_type: str) -> None:
+    direction = PURCHASE if ecf_type == "43" else SALES
+    draft = fiscal_draft(
+        Priced(unit_price=D(100), category=EXEMPT),
+        direction=direction,
+        counterparty=None if ecf_type == "43" else BUYER,
+        fields={"ecf_type": ecf_type, "withholdings": {"0": {"isr": "1.00"}}, "withholding_role": "1"},
+    )
+    assert found(draft) == [
+        ("do_ecf_field_invalid", "fiscal.do.withholding_role"),
+        ("do_ecf_field_invalid", "fiscal.do.withholdings"),
+    ]
+
+
+def test_a_foreign_unit_price_beyond_sixteen_digits_in_pesos_is_objected() -> None:
+    huge = Priced(unit_price=D("9000000000000000.00"), quantity=D("0.01"), category=EXEMPT)
+    draft = fiscal_draft(huge, currency=USD, exchange_rate=D(2), counterparty=None)
+    assert ("do_ecf_amount_too_large", "lines.0.unit_price") in found(draft)

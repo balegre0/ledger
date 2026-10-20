@@ -6,6 +6,7 @@ import pytest
 import xmlschema
 from lxml import etree
 
+from ledger_country_do.channels.ecf_v1.adapters.xml.ecf import BUYER_REQUIRED_TYPES, PRICE_INDICATOR_TYPES
 from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS, published_bytes
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import (
     CORRECTIONS,
@@ -24,6 +25,8 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     FOREIGN_ID,
     INCOME_TYPES,
     INTEGER_DIGITS,
+    ISR_REQUIRED_TYPES,
+    ITBIS_WITHHOLDING_TYPES,
     ITEM_NAME,
     LEGAL_NAME,
     NAMED_TYPES,
@@ -35,11 +38,14 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     TAXED,
     UNDATED_TYPES,
     UNIT_PRICE_PLACES,
+    WITHHELD_PLACES,
+    WITHHOLDING_TYPES,
     BillingIndicator,
     BuyerPart,
     IncomeType,
     ModificationCode,
     PaymentType,
+    WithholdingRole,
     max_lines,
 )
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
@@ -153,6 +159,14 @@ def test_each_type_s_rules_are_its_schema_s(ecf_type: EcfType) -> None:
     assert BUYER_PARTS[ecf_type] == holds
     assert (ecf_type in INCOME_TYPES) is _declared(format_, "TipoIngresos")
     assert (ecf_type in PAYMENT_DUE_TYPES) is _declared(format_, "FechaLimitePago")
+    assert (ecf_type in WITHHOLDING_TYPES) is _required(format_, "Retencion")
+    assert (ecf_type in ITBIS_WITHHOLDING_TYPES) is (
+        ecf_type in WITHHOLDING_TYPES and _declared(format_, "MontoITBISRetenido")
+    )
+    assert (ecf_type in ISR_REQUIRED_TYPES) is _required(format_, "MontoISRRetenido")
+    assert (ecf_type in PRICE_INDICATOR_TYPES) is _declared(format_, "IndicadorMontoGravado")
+    assert (ecf_type in BUYER_REQUIRED_TYPES) is _required(format_, "Comprador")
+    assert (ecf_type is EcfType.CREDIT_NOTE) is _required(format_, "IndicadorNotaCredito")
 
 
 _BUYER_ELEMENTS: Final = {
@@ -173,6 +187,8 @@ _NUMBERS: Final = {
     "CantidadItem": (INTEGER_DIGITS, QUANTITY_PLACES),
     "PrecioUnitarioItem": (INTEGER_DIGITS, UNIT_PRICE_PLACES),
     "DescuentoMonto": (INTEGER_DIGITS, DISCOUNT_PLACES),
+    "MontoITBISRetenido": (INTEGER_DIGITS, WITHHELD_PLACES),
+    "MontoISRRetenido": (INTEGER_DIGITS, WITHHELD_PLACES),
     "MontoItem": (INTEGER_DIGITS, 2),
     "TipoCambio": (len(str(EXCHANGE_RATE_LIMIT)) - 1, EXCHANGE_RATE_PLACES),
 }
@@ -212,6 +228,9 @@ def test_dgii_s_limits_are_the_draft_s(ecf_type: EcfType) -> None:
     if _declared(format_, "TipoIngresos"):
         assert _enumeration(format_, "TipoIngresosValidationType") == {each.value for each in IncomeType}
     assert _enumeration(format_, "TipoPagoType") == {str(each.value) for each in PaymentType}
+    if _declared(format_, "IndicadorAgenteRetencionoPercepcion"):
+        roles = _enumeration(format_, "IndicadorAgenteRetencionoPercepcionType")
+        assert roles == {str(each.value) for each in WithholdingRole}
 
 
 def test_the_foreign_currencies_are_those_dgii_lists_that_money_knows() -> None:

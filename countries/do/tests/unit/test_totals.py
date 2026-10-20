@@ -19,7 +19,7 @@ from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do.regime import REGIME
 from ledger_country_do.regime.rounding import ROUNDING
 from ledger_country_do.regime.taxes import STANDARD
-from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
+from ledger_country_do_testing.samples import consumer_invoice, credit_invoice, payment_abroad, purchase
 from ledger_kernel.money import Currency, Money, RoundingMode
 from ledger_kernel.regimes import TaxCalculator, TaxCategoryKey, TaxLine
 
@@ -239,3 +239,51 @@ def test_a_total_in_pesos_of_seventeen_integer_digits_is_refused() -> None:
     with pytest.raises(DraftInvalidError, match=r"^total ") as caught:
         compute_totals(draft)
     assert caught.value.field == "total"
+
+
+def test_each_line_s_figures_are_written_in_pesos_and_in_its_currency() -> None:
+    draft = replace(credit_invoice(), currency=_USD, exchange_rate=D("58.7512"))
+    discounted = replace(draft, lines=(replace(draft.lines[0], discount=D("10.50")), *draft.lines[1:]))
+    totals = compute_totals(discounted)
+    foreign = totals.foreign
+    assert foreign is not None
+    first = totals.lines[0]
+    assert (first.unit_price, first.discount, first.amount) == (D("88126.8000"), D("616.89"), D("175636.71"))
+    assert (foreign.lines[0].unit_price, foreign.lines[0].discount) == (D("1500.00"), D("10.50"))
+    assert totals.lines[2].unit_price == D("7069.7258")  # 120.3333 x 58.7512, four places
+    assert compute_totals(credit_invoice()).lines[0].unit_price == D("1500.00")
+
+
+def test_a_purchase_s_withholdings_are_summed_and_converted_like_every_amount() -> None:
+    totals = compute_totals(purchase(withholdings=True))
+    assert (totals.lines[0].itbis_withheld, totals.lines[0].isr_withheld) == (D("900.00"), D("500.00"))
+    assert (totals.lines[1].itbis_withheld, totals.lines[1].isr_withheld) == (None, None)
+    assert (totals.itbis_withheld, totals.isr_withheld) == (D("900.00"), D("500.00"))
+    assert (compute_totals(purchase()).itbis_withheld, compute_totals(purchase()).isr_withheld) == (
+        None,
+        None,
+    )
+    abroad = compute_totals(payment_abroad())
+    assert abroad.isr_withheld == D("15862.82")  # 270.00 x 58.7512
+    assert abroad.foreign is not None
+    assert abroad.foreign.isr_withheld == D("270.00")
+
+
+def test_itbis_withheld_is_at_most_the_line_s_itbis() -> None:
+    draft = purchase(withholdings=True)
+    service, parts = draft.lines
+    with pytest.raises(DraftInvalidError, match=r"^line\.itbis_withheld ") as caught:
+        compute_totals(replace(draft, lines=(replace(service, itbis_withheld=D("900.01")), parts)))
+    assert caught.value.field == "line.itbis_withheld"
+    with pytest.raises(DraftInvalidError, match=r"^line\.itbis_withheld "):
+        compute_totals(replace(draft, lines=(service, replace(parts, itbis_withheld=D("0.01")))))
+
+
+def test_a_unit_price_in_pesos_of_seventeen_integer_digits_is_refused() -> None:
+    line = Line(
+        name="ITEM", quantity=D("0.01"), unit_price=D("9000000000000000.00"), billing=BillingIndicator.EXEMPT
+    )
+    draft = replace(consumer_invoice(), lines=(line,), currency=_USD, exchange_rate=D(2))
+    with pytest.raises(DraftInvalidError, match=r"^line\.unit_price ") as caught:
+        compute_totals(draft)
+    assert caught.value.field == "line.unit_price"

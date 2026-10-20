@@ -37,6 +37,11 @@ FOREIGN_ID: Final = 20
 QUANTITY_PLACES: Final = 2
 UNIT_PRICE_PLACES: Final = 4
 DISCOUNT_PLACES: Final = 2
+WITHHELD_PLACES: Final = 2
+"""``MontoITBISRetenido`` and ``MontoISRRetenido``: amounts, two decimals."""
+CREDIT_NOTE_DAYS: Final = 30
+"""``IndicadorNotaCredito`` is 1 when a credit note is issued more than 30 calendar days after the e-CF it
+corrects, 0 otherwise (the 34's schema glosses 0 as "<= a 30 días calendario", 1 as "> a 30 días")."""
 INTEGER_DIGITS: Final = 16
 """DGII's schemas give quantities, unit prices and amounts at most 16 integer digits (``[0-9]{1,16}``)."""
 AMOUNT_LIMIT: Final = Decimal(10) ** INTEGER_DIGITS
@@ -102,6 +107,13 @@ class PaymentType(IntEnum):
     CASH = 1
     CREDIT = 2
     FREE = 3
+
+
+class WithholdingRole(IntEnum):
+    """FMT's ``IndicadorAgenteRetencionoPercepcion``: whether the company withholds or collects in advance."""
+
+    RETENTION = 1
+    PERCEPTION = 2
 
 
 class ModificationCode(IntEnum):
@@ -182,6 +194,14 @@ PAYMENT_DUE_TYPES: Final = frozenset(EcfType) - {EcfType.MINOR_EXPENSES}
 """The types that may state when payment is due (``FechaLimitePago``)."""
 NO_DISCOUNT_TYPES: Final = frozenset({EcfType.MINOR_EXPENSES, EcfType.FOREIGN_PAYMENTS})
 """The types whose lines hold no discount (no ``DescuentoMonto``)."""
+WITHHOLDING_TYPES: Final = frozenset({EcfType.PURCHASES, EcfType.FOREIGN_PAYMENTS})
+"""The types whose every line holds a ``Retencion`` block (their schemas require it): what the company
+self-billing a purchase or a payment abroad withholds. The other types declare the block optional and are
+never written with it: a seller does not state what its buyer withholds."""
+ITBIS_WITHHOLDING_TYPES: Final = frozenset({EcfType.PURCHASES})
+"""The withholding types that state ITBIS withheld (``MontoITBISRetenido``): a 47 has no ITBIS."""
+ISR_REQUIRED_TYPES: Final = frozenset({EcfType.FOREIGN_PAYMENTS})
+"""The types whose every line states the ISR withheld (``MontoISRRetenido``, which the 47 requires)."""
 FOREIGN_CURRENCIES: Final = frozenset(
     {"BRL", "CAD", "CHF", "COP", "DKK", "EUR", "GBP", "HTG", "JPY", "MXN", "NOK", "SEK", "USD"}
 )
@@ -206,6 +226,7 @@ class Rule(StrEnum):
     UNIT_PRICE_PRECISION = "unit_price_precision"
     DISCOUNT_PRECISION = "discount_precision"
     DISCOUNT_TOO_LARGE = "discount_too_large"
+    WITHHELD_TOO_LARGE = "withheld_too_large"
 
 
 @final
@@ -236,6 +257,10 @@ _TOO_LARGE_AMOUNT: Final = Violation(
     Rule.AMOUNT_TOO_LARGE, f"(quantity x unit price) has at most {INTEGER_DIGITS} integer digits"
 )
 _DISCOUNT_ABOVE_GROSS: Final = Violation(Rule.DISCOUNT_TOO_LARGE, "is at most quantity x unit price")
+ISR_ABOVE_AMOUNT: Final = Violation(
+    Rule.WITHHELD_TOO_LARGE, "is at most the line's amount (quantity x unit price less its discount)"
+)
+ITBIS_ABOVE_TAX: Final = Violation(Rule.WITHHELD_TOO_LARGE, "is at most the line's ITBIS")
 
 
 class DraftInvalidError(EcfInvalidError):
@@ -306,6 +331,26 @@ class _BillingNotAllowedError(DraftInvalidError):
         super().__init__(
             "line.billing", "is one the type's totals sum (exempt only on 43, 44, 47; 0 % only on 46)"
         )
+
+
+class _WithholdingNotAllowedError(DraftInvalidError):
+    def __init__(self) -> None:
+        super().__init__("line.withheld", "is given on a purchase (41) or a payment abroad (47) only")
+
+
+class _ItbisWithheldNotAllowedError(DraftInvalidError):
+    def __init__(self) -> None:
+        super().__init__("line.itbis_withheld", "is not given on a payment abroad (47): it has no ITBIS")
+
+
+class _IsrWithheldRequiredError(DraftInvalidError):
+    def __init__(self) -> None:
+        super().__init__("line.isr_withheld", "is given on every line of a payment abroad (47)")
+
+
+class _IsrAboveAmountError(DraftInvalidError):
+    def __init__(self) -> None:
+        super().__init__("line.isr_withheld", ISR_ABOVE_AMOUNT.requirement)
 
 
 class _DiscountNotAllowedError(DraftInvalidError):
@@ -404,6 +449,11 @@ def line_violations(
     return found
 
 
+def withheld_violation(value: Decimal) -> Violation | None:
+    """The rule ``value`` breaks as an amount withheld; ``None`` if none."""
+    return number_violation(value, places=WITHHELD_PLACES, precision=Rule.NUMBER_INVALID, positive=False)
+
+
 def _text(field_name: str, value: str, limit: int) -> None:
     violation = text_violation(value, limit)
     if violation is not None:
@@ -488,6 +538,10 @@ class Line:
     """An amount (``DescuentoMonto``), at most quantity x unit price."""
     billing: BillingIndicator
     kind: GoodsOrService = GoodsOrService.GOODS
+    itbis_withheld: Decimal | None = None
+    """``MontoITBISRetenido``: at most the line's ITBIS (``totals.compute_totals`` holds it to that)."""
+    isr_withheld: Decimal | None = None
+    """``MontoISRRetenido``: at most the line's amount."""
 
     def __post_init__(self) -> None:
         found = line_violations(
@@ -499,6 +553,23 @@ class Line:
             raise DraftInvalidError(field_name, violation.requirement)
         if self.billing is BillingIndicator.NOT_BILLABLE:
             raise _NotBillableLineError
+        withheld = (("line.itbis_withheld", self.itbis_withheld), ("line.isr_withheld", self.isr_withheld))
+        for field_name, amount in withheld:
+            broken = None if amount is None else withheld_violation(amount)
+            if broken is not None:
+                raise DraftInvalidError(field_name, broken.requirement)
+        if self.isr_withheld is not None and self.isr_withheld > self.amount:
+            raise _IsrAboveAmountError
+
+    @property
+    def amount(self) -> Decimal:
+        """Quantity x unit price less the discount, before rounding."""
+        return self.quantity * self.unit_price - self.discount
+
+    @property
+    def withholds(self) -> bool:
+        """Whether the line states an amount withheld."""
+        return self.itbis_withheld is not None or self.isr_withheld is not None
 
 
 @final
@@ -530,6 +601,8 @@ class EcfDraft:
     currency: Currency = PESO
     exchange_rate: Decimal | None = None
     """Pesos per unit of ``currency`` (``TipoCambio``), for a foreign currency only."""
+    withholding_role: WithholdingRole = WithholdingRole.RETENTION
+    """Written on the types that withhold (``WITHHOLDING_TYPES``) only."""
 
     def __post_init__(self) -> None:
         ecf_type = self.ecf_type
@@ -559,6 +632,14 @@ class EcfDraft:
             raise _BillingNotAllowedError
         if ecf_type in NO_DISCOUNT_TYPES and any(line.discount != 0 for line in self.lines):
             raise _DiscountNotAllowedError
+        if ecf_type not in WITHHOLDING_TYPES and any(line.withholds for line in self.lines):
+            raise _WithholdingNotAllowedError
+        if ecf_type in ISR_REQUIRED_TYPES and any(line.isr_withheld is None for line in self.lines):
+            raise _IsrWithheldRequiredError
+        if ecf_type not in ITBIS_WITHHOLDING_TYPES and any(
+            line.itbis_withheld is not None for line in self.lines
+        ):
+            raise _ItbisWithheldNotAllowedError
 
     def _require_currency(self) -> None:
         rate = self.exchange_rate
@@ -575,3 +656,10 @@ class EcfDraft:
     def ecf_type(self) -> EcfType:
         """The draft's e-CF type, the e-NCF's."""
         return self.encf.ecf_type
+
+    @property
+    def credit_note_late(self) -> bool:
+        """Whether the draft is a credit note issued more than ``CREDIT_NOTE_DAYS`` after what it corrects."""
+        return self.ecf_type is EcfType.CREDIT_NOTE and any(
+            (self.issued_on - reference.issued_on).days > CREDIT_NOTE_DAYS for reference in self.references
+        )

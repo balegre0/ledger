@@ -1,7 +1,9 @@
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final
+lazy from collections.abc import Callable, Mapping
 
 import pytest
 import xmlschema
@@ -10,9 +12,23 @@ from ledger_country_do.channels.ecf_v1.adapters.xml import ecf, rfce
 from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.drafts import CATEGORY_OF, BillingIndicator, Line
+from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do.regime import REGIME
-from ledger_country_do_testing.samples import SIGNED_AT, consumer_invoice, credit_invoice
+from ledger_country_do_testing.samples import (
+    SIGNED_AT,
+    consumer_invoice,
+    credit_invoice,
+    credit_note,
+    debit_note,
+    export_sale,
+    government_sale,
+    minor_expense,
+    payment_abroad,
+    purchase,
+    special_regime_sale,
+)
+from ledger_fiscal_kit.xml.c14n import canonical
 from ledger_kernel.money import Money
 from ledger_kernel.regimes import TaxCalculator, TaxCategoryKey, TaxLine
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
@@ -42,17 +58,31 @@ ZERO_AND_EXEMPT: Final = (
 """A type 31 mixing the standard rate, the zero rate (ITBIS 3) and an exempt line."""
 
 
+DRAFTS: Final[Mapping[str, Callable[[], EcfDraft]]] = MappingProxyType(
+    {
+        "ecf-31": credit_invoice,
+        "ecf-31-zero-and-exempt": lambda: replace(credit_invoice(2), lines=ZERO_AND_EXEMPT),
+        "ecf-32": lambda: consumer_invoice(2, large=True),
+        "ecf-32-anonymous": consumer_invoice,
+        "rfce-32": consumer_invoice,  # the summary of the anonymous sale
+        "ecf-33": debit_note,
+        "ecf-33-discounts": lambda: debit_note(discounts=True),
+        "ecf-34": credit_note,
+        "ecf-34-foreign-currency": lambda: credit_note(foreign=True),
+        "ecf-41": purchase,
+        "ecf-41-retentions": lambda: purchase(withholdings=True),
+        "ecf-43": minor_expense,
+        "ecf-44": special_regime_sale,
+        "ecf-45": government_sale,
+        "ecf-46": export_sale,
+        "ecf-47": payment_abroad,
+    }
+)
+"""The draft each golden document is written from."""
+
+
 def draft_of(name: str) -> EcfDraft:
-    """The draft the golden document ``name`` is written from."""
-    match name:
-        case "ecf-31":
-            return credit_invoice()
-        case "ecf-31-zero-and-exempt":
-            return replace(credit_invoice(2), lines=ZERO_AND_EXEMPT)
-        case "ecf-32":
-            return consumer_invoice(2, large=True)
-        case _:  # "ecf-32-anonymous", and the summary "rfce-32" of the same sale
-            return consumer_invoice(1)
+    return DRAFTS[name]()
 
 
 def written(name: str) -> bytes:
@@ -63,17 +93,21 @@ def written(name: str) -> bytes:
 
 
 CASES: Final = {
-    "ecf-31": Format.ECF_31,
-    "ecf-31-zero-and-exempt": Format.ECF_31,
-    "ecf-32": Format.ECF_32,
-    "ecf-32-anonymous": Format.ECF_32,
-    "rfce-32": Format.RFCE,
+    name: Format.RFCE if name == "rfce-32" else ecf.FORMAT_OF[draft_of(name).ecf_type] for name in DRAFTS
 }
+
+
+def test_every_e_cf_type_has_a_golden_document() -> None:
+    assert {draft_of(name).ecf_type for name in DRAFTS} == set(EcfType)
 
 
 @pytest.mark.parametrize("name", list(CASES))
 def test_the_builders_write_the_golden_documents_byte_for_byte(name: str) -> None:
-    assert written(name) == (GOLDEN / f"{name}.xml").read_bytes()
+    golden = GOLDEN / f"{name}.xml"
+    assert golden.is_file(), f"golden missing: {golden.name}"
+    expected = golden.read_bytes()
+    assert written(name) == expected
+    assert canonical(written(name)) == canonical(expected)
 
 
 @pytest.mark.parametrize("name", list(CASES))
@@ -107,10 +141,13 @@ def test_the_kernel_totals_every_golden_document_as_the_channel_does(name: str) 
     Both give each ITBIS rate the same base and tax, and the document the same total: else a document
     invoicing totals would be refused by the channel that verifies it. Taxes that compound (a selective
     consumption tax, ISC, charged first and ITBIS on a base that includes it) are not expressible in the
-    kernel's ``TaxLine`` yet: v2-M3's, with the first ISC line; no golden holds one.
+    kernel's ``TaxLine`` yet: v2-M3's, with the first ISC line; no golden holds one. A document in another
+    currency is compared in that currency, where invoicing totals it; its pesos are each amount converted
+    once, as invoicing converts its functional totals.
     """
     draft = draft_of(name)
-    channel = compute_totals(draft)
+    totals = compute_totals(draft)
+    channel = totals.foreign or totals  # in the document's currency, as invoicing totals it
     lines = [
         TaxLine(base=Money(amount, REGIME.currency), categories=(TaxCategoryKey(CATEGORY_OF[line.billing]),))
         for line, amount in zip(draft.lines, channel.line_amounts, strict=True)

@@ -30,12 +30,15 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     FOREIGN_ID,
     INCOME_TYPES,
     INDICATOR_OF,
+    ISR_REQUIRED_TYPES,
+    ITBIS_WITHHOLDING_TYPES,
     LEGAL_NAME,
     NAMED_TYPES,
     NO_DISCOUNT_TYPES,
     NOTE_TYPES,
     PAYMENT_DUE_TYPES,
     PESO,
+    WITHHOLDING_TYPES,
     BillingIndicator,
     Buyer,
     BuyerPart,
@@ -55,11 +58,14 @@ from ledger_country_do.channels.ecf_v1.domain.fields import (
     INCOME_TYPE,
     MODIFICATION_CODE,
     PAYMENT_DUE,
+    WITHHOLDING_ROLE,
+    WITHHOLDINGS,
     read_fields,
 )
 from ledger_country_do.channels.ecf_v1.domain.references import FIELD as CORRECTS
 from ledger_country_do.channels.ecf_v1.domain.references import resolve
 from ledger_country_do.channels.ecf_v1.domain.routing import rfce_threshold
+from ledger_country_do.channels.ecf_v1.domain.totals import peso_price
 from ledger_country_do.regime import REGIME
 from ledger_country_do.regime.entries import document_type
 from ledger_country_do.regime.fields import ECF_TYPE
@@ -81,6 +87,9 @@ _ECF_TYPE_FIELD: Final = f"fiscal.do.{ECF_TYPE.name}"
 _MODIFICATION_FIELD: Final = f"fiscal.do.{MODIFICATION_CODE.name}"
 _INCOME_FIELD: Final = f"fiscal.do.{INCOME_TYPE.name}"
 _PAYMENT_DUE_FIELD: Final = f"fiscal.do.{PAYMENT_DUE.name}"
+_WITHHOLDING_ROLE_FIELD: Final = f"fiscal.do.{WITHHOLDING_ROLE.name}"
+_WITHHOLDINGS_FIELD: Final = f"fiscal.do.{WITHHOLDINGS.name}"
+_WITHHOLDING_ONLY: Final = "is given on a purchase (41) or a payment abroad (47) only"
 _LINE_FIELDS: Final = {
     LinePart.NAME: "description",
     LinePart.QUANTITY: "quantity",
@@ -221,6 +230,8 @@ class _Checker:
             self.buyer_rules(ecf_type)
             self.typed_fields(ecf_type)
             self.typed_lines(ecf_type, billings)
+            if ecf_type in WITHHOLDING_TYPES:
+                self.withholdings(ecf_type, fields)
             references = self.references(ecf_type, fields)
         ordered = sorted(self.found, key=lambda each: (each[0], each[1].field or "", each[1].code))
         return _Reading(
@@ -272,7 +283,8 @@ class _Checker:
         draft = self.draft
         pesos = _pesos(draft)
         grosses = (draft.totals.gross.amount, *(() if pesos is None else (pesos.gross.amount,)))
-        if any(gross >= AMOUNT_LIMIT for gross in grosses):
+        too_large = any(gross >= AMOUNT_LIMIT for gross in grosses)
+        if too_large:
             self.add(
                 "amount_too_large", "totals", "have at most 16 integer digits, in pesos as in their currency"
             )
@@ -286,6 +298,14 @@ class _Checker:
             self.add("exchange_rate_required", "exchange_rate", "is given, to pesos, for another currency")
         elif not exchange_rate_valid(rate):
             self.add("exchange_rate_invalid", "exchange_rate", "has at most 3 integer digits and 4 decimals")
+        elif not too_large:  # a unit price in pesos is too large only on a line that is not
+            for index, line in enumerate(draft.lines):
+                converted = line.unit_price * rate  # unrounded first: rounding a huge one would overflow
+                if converted >= AMOUNT_LIMIT or peso_price(line.unit_price, rate) >= AMOUNT_LIMIT:
+                    path = f"lines.{index}.unit_price"
+                    self.add(
+                        "amount_too_large", path, "has at most 16 integer digits in pesos", line=index + 1
+                    )
 
     def chosen_type(self, fields: EcfFields) -> EcfType | None:
         draft = self.draft
@@ -337,6 +357,42 @@ class _Checker:
             self.add("field_invalid", _INCOME_FIELD, "is not given on a purchase (41, 43 or 47)")
         if PAYMENT_DUE.name in sent and ecf_type not in PAYMENT_DUE_TYPES:
             self.add("field_invalid", _PAYMENT_DUE_FIELD, "is not given on a minor expense (43)")
+        if ecf_type not in WITHHOLDING_TYPES:
+            for name, path in (
+                (WITHHOLDING_ROLE.name, _WITHHOLDING_ROLE_FIELD),
+                (WITHHOLDINGS.name, _WITHHOLDINGS_FIELD),
+            ):
+                if name in sent:
+                    self.add("field_invalid", path, _WITHHOLDING_ONLY)
+
+    def withholdings(self, ecf_type: EcfType, fields: EcfFields) -> None:
+        """What the lines of a purchase or a payment abroad withhold, against what each line bears."""
+        lines = self.draft.lines
+        for index, withholding in sorted(fields.withholdings.items()):
+            if index >= len(lines):
+                self.add("field_invalid", f"{_WITHHOLDINGS_FIELD}.{index}", "names a line of the document")
+                continue
+            line, path = lines[index], f"{_WITHHOLDINGS_FIELD}.{index}"
+            tax = sum((each.amount.amount for each in line.taxes), Decimal(0))
+            if withholding.itbis is not None and ecf_type not in ITBIS_WITHHOLDING_TYPES:
+                self.add(
+                    "field_invalid", f"{path}.itbis", "is not given on a payment abroad (47)", line=index + 1
+                )
+            elif withholding.itbis is not None and withholding.itbis > tax:
+                self.add("field_invalid", f"{path}.itbis", "is at most the line's ITBIS", line=index + 1)
+            if withholding.isr is not None and withholding.isr > line.base.amount:
+                self.add("field_invalid", f"{path}.isr", "is at most the line's amount", line=index + 1)
+        if ecf_type in ISR_REQUIRED_TYPES:
+            for index in range(len(lines)):
+                given = fields.withholdings.get(index)
+                if given is None or given.isr is None:
+                    path = f"{_WITHHOLDINGS_FIELD}.{index}.isr"
+                    self.add(
+                        "value_required",
+                        path,
+                        "is given on every line of a payment abroad (47)",
+                        line=index + 1,
+                    )
 
     def typed_lines(self, ecf_type: EcfType, billings: tuple[BillingIndicator | None, ...]) -> None:
         draft = self.draft
@@ -442,8 +498,11 @@ def ecf_draft(
             discount=line.discount,
             billing=BillingIndicator.NOT_BILLABLE if billing is None else billing,
             kind=GoodsOrService.SERVICE if line.goods is False else GoodsOrService.GOODS,
+            itbis_withheld=None if withholding is None else withholding.itbis,
+            isr_withheld=None if withholding is None else withholding.isr,
         )
-        for line, billing in zip(draft.lines, reading.billings, strict=True)
+        for index, (line, billing) in enumerate(zip(draft.lines, reading.billings, strict=True))
+        for withholding in (fields.withholdings.get(index),)
     )
     return EcfDraft(
         encf=number,
@@ -462,6 +521,7 @@ def ecf_draft(
         references=reading.references,
         currency=draft.currency,
         exchange_rate=draft.exchange_rate,
+        withholding_role=fields.withholding_role,
     )
 
 
