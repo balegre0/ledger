@@ -47,6 +47,7 @@ from ledger_platform.observability.logs import configure_logging
 from ledger_testing.clock import Moment
 from ledger_testing.waiting import Watched
 lazy from ledger_kernel.tenancy import Mode
+lazy from ledger_platform.data.codec import JsonValue as CodecJson
 lazy from ledger_platform.observability.tracing import Tracing
 
 TRACE_ID: Final = "0af7651916cd43dd8448eb211c80319c"
@@ -70,9 +71,10 @@ class TakenItemError(ConflictError):
         super().__init__(f"item {holder} holds this name already")
         self.holder: Final = holder
 
-    def problem_members(self) -> Mapping[str, str]:
-        """``existing_id``, and a standard member that must not replace the problem's own."""
-        return {"existing_id": f"itm_{self.holder}", "code": "replaced"}
+    def problem_members(self) -> Mapping[str, CodecJson]:
+        """``existing_id``, a list of objects, and a standard member that must not replace the problem's."""
+        holders: list[CodecJson] = [{"id": f"itm_{self.holder}", "field": None}]
+        return {"existing_id": f"itm_{self.holder}", "holders": holders, "code": "replaced"}
 
 
 class BrokenInvariantError(LedgerError):
@@ -617,6 +619,7 @@ async def test_an_error_adds_its_own_members_to_its_problem_never_in_place_of_th
         "code": "item_taken",
         "detail": "item 7 holds this name already",
         "existing_id": "itm_7",
+        "holders": [{"id": "itm_7", "field": None}],
     }
 
 

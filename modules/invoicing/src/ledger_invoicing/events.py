@@ -16,7 +16,14 @@ and directions travel as their words, ids as UUID strings (the platform's codec)
 
 - ``invoicing.invoice.issued`` v1: ``{"kind": "invoice" | "credit_note" | "debit_note", "direction": "sales"
   | "purchase", "corrects": "<uuid>" | null}``;
-- ``invoicing.invoice.voided`` v1: ``{"kind": ..., "direction": ...}``.
+- ``invoicing.invoice.voided`` v1: ``{"kind": ..., "direction": ...}``;
+- ``invoicing.invoice.fiscal_updated`` v1 (public ``invoice.fiscal_updated``): ``{"channel": "do-ecf-v1",
+  "status": "pending" | "accepted" | "accepted_with_observations" | "rejected" | "voided", "version": 3}``,
+  announced by the unit that keeps a channel's newer status in the fiscal mirror. Its ``aggregate_version``
+  is ``None``: the subject is the document, whose version the mirror does not change, and ordered consumers
+  sort a subject's events by it, so a channel's own version there would interleave with the document's. The
+  status's version in its channel is the payload's ``version``: a consumer keeps the newest per channel by it
+  (and consumes this event unordered).
 """
 
 from dataclasses import dataclass
@@ -51,5 +58,19 @@ class InvoiceVoided(Event):
     direction: Direction
 
 
-type InvoicingEvent = InvoiceIssued | InvoiceVoided
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InvoiceFiscalUpdated(Event):
+    """A channel's newer status of a document was kept in the fiscal mirror (see the module)."""
+
+    TYPE: ClassVar[str] = "invoicing.invoice.fiscal_updated"
+    VERSION: ClassVar[int] = 1
+    channel: str
+    status: str
+    """The platform's word for it (``FiscalStatusName``'s value)."""
+    version: int
+    """The status's version in its channel (the envelope's ``aggregate_version`` is ``None``)."""
+
+
+type InvoicingEvent = InvoiceIssued | InvoiceVoided | InvoiceFiscalUpdated
 """Every event invoicing publishes (its manifest's ``[[events.publishes]]``)."""

@@ -13,7 +13,9 @@ import pytest
 
 from ledger_invoicing.adapters.postgres.unit import PgUnits
 from ledger_invoicing.api import INVOICING_API, InvoiceNotFoundError
-from ledger_invoicing.application.facade import InvoicingFacade, info_of
+from ledger_invoicing.application.facade import InvoicingFacade
+from ledger_invoicing.application.infos import info_of
+from ledger_invoicing.application.mirror import FiscalMirroring
 from ledger_invoicing.application.queries import InvoicingQueries
 from ledger_invoicing.domain.ids import InvoiceId
 from ledger_invoicing.domain.invoice import Invoice, Opening
@@ -62,7 +64,8 @@ def called_in(scope: Scope) -> Call:
 @pytest.fixture
 def api(module_database: BoundDatabase) -> InvoicingApi:
     """The API as the assembly binds it, over invoicing's units in its own role."""
-    return INVOICING_API.take(InvoicingFacade(InvoicingQueries(units=PgUnits(module_database))))
+    units = PgUnits(module_database)
+    return INVOICING_API.take(InvoicingFacade(InvoicingQueries(units=units), FiscalMirroring(units=units)))
 
 
 async def kept(database: BoundDatabase, regime: RegimeDef, *, draft: bool = False) -> Invoice:

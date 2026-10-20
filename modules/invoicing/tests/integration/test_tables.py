@@ -12,6 +12,7 @@ from sqlalchemy import delete, func, insert, select, text, update
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 from ledger_invoicing.adapters.postgres.tables import (
+    FiscalStatusRecord,
     InvoiceLineRecord,
     InvoiceLineTaxRecord,
     InvoiceRecord,
@@ -86,8 +87,25 @@ def line_of(tenant: Tenant, invoice: UUID) -> dict[str, object]:
     }
 
 
+def status_row_of(tenant: Tenant, invoice: UUID) -> dict[str, object]:
+    """A row of the fiscal mirror: a channel's status of ``invoice``."""
+    return {
+        **keys(tenant),
+        "invoice_id": invoice,
+        "channel": "do-ecf-v1",
+        "environment": "testecf",
+        "status": "pending",
+        "version": 1,
+        "authority_number": None,
+        "messages": [],
+        "regime": "do",
+        "details": {},
+        "updated_at": NOW,
+    }
+
+
 async def seeded(module_database: BoundDatabase, tenant: Tenant) -> UUID:
-    """An invoice of ``tenant`` with a line, its tax and its totals' category: its id."""
+    """An invoice of ``tenant`` with a line, its tax, its totals' category and a fiscal status: its id."""
     identifier = new_id()
     async with module_database.unit(tenant) as unit:
         await unit.connection.execute(insert(InvoiceRecord).values(invoice_of(tenant, identifier=identifier)))
@@ -116,6 +134,7 @@ async def seeded(module_database: BoundDatabase, tenant: Tenant) -> UUID:
                 tax=Decimal(18),
             )
         )
+        await unit.connection.execute(insert(FiscalStatusRecord).values(status_row_of(tenant, identifier)))
     return identifier
 
 
@@ -135,7 +154,9 @@ async def test_row_level_security_shows_a_tenant_its_own_rows_and_nothing_withou
     await seeded(module_database, mine)
     await seeded(module_database, Tenant(mine.organization, mine.company, Mode.LIVE))
     await seeded(module_database, tenant_of(mine.organization))
-    one = dict.fromkeys(("invoices", "invoice_lines", "invoice_line_taxes", "invoice_taxes"), 1)
+    one = dict.fromkeys(
+        ("invoices", "invoice_lines", "invoice_line_taxes", "invoice_taxes", "fiscal_statuses"), 1
+    )
     assert await counts(module_database, mine) == one
     for blind in (
         None,
@@ -169,6 +190,7 @@ async def test_a_line_or_a_note_cannot_point_at_another_tenant_s_document(
     for row, table, key in (
         (line_of(attacker, theirs), InvoiceLineRecord, "fk_invoice_lines_invoice"),
         (invoice_of(attacker, corrects=theirs), InvoiceRecord, "fk_invoices_corrects"),
+        (status_row_of(attacker, theirs), FiscalStatusRecord, "fk_fiscal_statuses_invoice"),
     ):
         with pytest.raises(IntegrityError) as caught:
             async with module_database.unit(attacker) as unit:  # the policy lets the row in
@@ -257,13 +279,15 @@ async def test_a_unit_changes_and_deletes_nothing_of_another_tenant_and_moves_no
     await seeded(module_database, victim)
     own = await seeded(module_database, mine)
     async with module_database.unit(mine) as unit:
-        for table in (InvoiceLineTaxRecord, InvoiceTaxRecord, InvoiceLineRecord):
+        for table in (InvoiceLineTaxRecord, InvoiceTaxRecord, InvoiceLineRecord, FiscalStatusRecord):
             assert (await unit.connection.execute(delete(table).where(table.invoice_id != own))).rowcount == 0
         changed = await unit.connection.execute(
             update(InvoiceRecord).where(InvoiceRecord.id != own).values(status="voided", voided_at=NOW)
         )
         assert changed.rowcount == 0
-    one = dict.fromkeys(("invoices", "invoice_lines", "invoice_line_taxes", "invoice_taxes"), 1)
+    one = dict.fromkeys(
+        ("invoices", "invoice_lines", "invoice_line_taxes", "invoice_taxes", "fiscal_statuses"), 1
+    )
     assert await counts(module_database, victim) == one
     with pytest.raises(ProgrammingError) as caught:
         async with module_database.unit(mine) as unit:

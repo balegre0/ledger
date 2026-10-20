@@ -15,14 +15,19 @@ import pytest
 
 from ledger_invoicing.api import (
     INVOICING_API,
+    AuthorityMessageInfo,
     EstablishmentOfIssue,
+    FiscalStatusInfo,
+    FiscalStatusName,
     InvoiceInfo,
     LineInfo,
     LineTaxInfo,
     PartyInfo,
     SellerInfo,
 )
-from ledger_invoicing.application.facade import InvoicingFacade, info_of
+from ledger_invoicing.application.facade import InvoicingFacade
+from ledger_invoicing.application.infos import info_of
+from ledger_invoicing.application.mirror import FiscalMirroring
 from ledger_invoicing.application.queries import InvoicingQueries
 from ledger_invoicing.domain.ids import InvoiceId
 from ledger_invoicing.domain.invoice import Invoice, InvoiceStatus, Opening
@@ -196,7 +201,9 @@ def test_a_voided_note_names_the_invoice_it_corrects_and_why_it_was_voided(regim
     invoice = issued(regime, terms)
     note = issued(regime, terms, corrects=invoice)
     later = NOW + timedelta(hours=1)
-    voided, _ = note.void(reason=parse_reason("Wrong customer"), corrected_by_a_note=False, now=later)
+    voided, _ = note.void(
+        reason=parse_reason("Wrong customer"), corrected_by_a_note=False, held=False, now=later
+    )
     view = info_of(voided)
     assert (view.kind, view.corrects, view.status, view.version) == (
         DocumentKind.CREDIT_NOTE,
@@ -234,10 +241,27 @@ class _NoUnits:
 
 
 def test_the_bound_api_is_guarded_and_known_by_its_key() -> None:
-    facade = InvoicingFacade(InvoicingQueries(units=_NoUnits()))
+    units = _NoUnits()
+    facade = InvoicingFacade(InvoicingQueries(units=units), FiscalMirroring(units=units))
     require_facades(facade)  # every entry point refuses a call made while a unit is open
     assert is_facade(InvoicingFacade.document)
+    assert is_facade(InvoicingFacade.apply_fiscal_status)
     assert INVOICING_API.name == "invoicing"
     assert INVOICING_API.take(facade) is facade
     with pytest.raises(BindingTypeError):
         INVOICING_API.take(object())
+
+
+def test_a_fiscal_status_s_repr_shows_its_channel_and_status_only() -> None:
+    status = FiscalStatusInfo(
+        channel="do-ecf-v1",
+        environment="testecf",
+        status=FiscalStatusName.REJECTED,
+        authority_number="E310000000001",
+        messages=(AuthorityMessageInfo(code="7", message="RNC del comprador 130000012 invalido", lang="es"),),
+        regime="do",
+        details={"encf": "E310000000001"},
+        updated_at=NOW,
+    )
+    assert repr(status) == "FiscalStatusInfo(channel='do-ecf-v1', status='rejected')"
+    assert "130000012" not in repr(status.messages)

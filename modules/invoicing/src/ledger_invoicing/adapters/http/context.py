@@ -11,6 +11,7 @@ from ledger_platform.http.problems import current_request_id
 from ledger_platform.runtime.calls import Call
 lazy from ledger_identity.api import IdentityApi
 lazy from ledger_invoicing.application.commands import InvoicingCommands
+lazy from ledger_invoicing.application.issuing import IssuePolicies
 lazy from ledger_kernel.regimes import TaxIdSchemes
 lazy from ledger_kernel.tenancy import Tenant
 lazy from ledger_platform.auth import CompanyAccess, PermissionSource
@@ -39,6 +40,11 @@ class ApiContext:
     idempotency: Idempotency
     tax_ids: TaxIdSchemes
     """Every installed regime's schemes: they read a buyer's ``{scheme, value}``."""
+
+    @property
+    def policies(self) -> IssuePolicies:
+        """The ``IssuePolicy`` chain: what runs once a document is issued (and checked it before)."""
+        return self.commands.policies
 
     @classmethod
     def build(

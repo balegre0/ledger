@@ -8,19 +8,22 @@ are abstract so that they need no body: a ``...`` is a statement no test could r
 **Lock order.** A unit that locks two documents locks the note before the invoice it corrects (issuing a draft
 note); every other unit locks one document at most. A note being created or issued and a void of its invoice
 serialize on the invoice's lock, so whichever comes second sees the other's commit: no note stands on a voided
-invoice, and no invoice is voided under a note.
+invoice, and no invoice is voided under a note. A fiscal status is applied under a share of the document's
+lock (``FiscalMirror.apply``), so a void, which reads the mirror under the document's lock, never misses an
+acceptance written meanwhile.
 """
 
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
 from typing import ClassVar, Literal, Protocol, final
-lazy from collections.abc import Callable, Mapping
+lazy from collections.abc import Callable, Mapping, Sequence
 lazy from contextlib import AbstractAsyncContextManager
 lazy from datetime import datetime
 lazy from uuid import UUID
 
 from ledger_kernel.errors import LedgerError
 lazy from ledger_identity.api import CompanyInfo
+lazy from ledger_invoicing.domain.fiscal import Applied, FiscalStatus
 lazy from ledger_invoicing.domain.ids import InvoiceId
 lazy from ledger_invoicing.domain.invoice import Invoice, InvoiceStatus
 lazy from ledger_invoicing.domain.pricing import EstablishmentRef
@@ -52,15 +55,6 @@ class StaleWriteError(LedgerError):
         super().__init__("a change keeps the version after the one the unit holds locked")
 
 
-class UnmirroredAcceptanceError(LedgerError):
-    """A document a channel accepted, before the fiscal mirror that would keep it exists (M3b)."""
-
-    code: ClassVar[str] = "invoice_acceptance_unmirrored"
-
-    def __init__(self) -> None:
-        super().__init__("no channel's acceptance can be kept before the fiscal mirror exists")
-
-
 type RegimeOf = Callable[[Jurisdiction], RegimeDef | None]
 """The installed regime that governs a jurisdiction, if any (its subdivision's, else its country's)."""
 
@@ -84,8 +78,8 @@ class Invoices(Protocol, metaclass=ABCMeta):
         """Keep a new document: ``None`` once kept, else the document of its type holding its business key.
 
         Nothing is kept when the business key is taken: it is unique per company, mode and type for ever.
-        Another tenant's document is refused (``ForeignTenantError``), as is one a channel accepted
-        (``UnmirroredAcceptanceError``): a defect of the caller, before anything is kept.
+        Another tenant's document is refused (``ForeignTenantError``): a defect of the caller, before anything
+        is kept.
         """
 
     @abstractmethod
@@ -111,6 +105,27 @@ class Invoices(Protocol, metaclass=ABCMeta):
     @abstractmethod
     async def page(self, request: PageRequest, filters: InvoiceFilters) -> Page[Invoice]:
         """The page ``request`` asks for of the documents ``filters`` names, in id (creation) order."""
+
+
+class FiscalMirror(Protocol, metaclass=ABCMeta):
+    """What the fiscal channels last reported of the unit's tenant's documents, one status per channel."""
+
+    @abstractmethod
+    async def of(self, invoices: Sequence[InvoiceId]) -> Mapping[InvoiceId, tuple[FiscalStatus, ...]]:
+        """Each of ``invoices`` with its statuses, by channel key (none for one of another tenant)."""
+
+    @abstractmethod
+    async def held(self, invoice: InvoiceId) -> bool:
+        """Whether a channel holds ``invoice`` (a status neither rejected nor voided), read to void it."""
+
+    @abstractmethod
+    async def apply(self, invoice: InvoiceId, status: FiscalStatus) -> Applied | None:
+        """Keep ``status`` if newer than the one kept for its channel; ``None`` for no such ``invoice``.
+
+        ``DOCUMENT_VOIDED`` (nothing kept) when the document is voided.
+
+        Takes a share of the document's lock first: it waits for a unit that holds the document locked.
+        """
 
 
 class Events(Protocol, metaclass=ABCMeta):
@@ -153,6 +168,7 @@ class InvoicingUnit:
     """One unit of work: invoicing's state as one transaction sees it, and what it announces."""
 
     invoices: Invoices
+    fiscal: FiscalMirror
     events: Events
     audit: Audit
     now: datetime
@@ -186,3 +202,19 @@ class IdentityLookup(Protocol, metaclass=ABCMeta):
         self, call: Call, company: CompanyId, code: str | None
     ) -> EstablishmentRef | None:
         """The company's establishment of ``code`` (``MAIN`` when ``None``), or ``None`` when it has none."""
+
+
+class AfterIssueReport(Protocol, metaclass=ABCMeta):
+    """Where invoicing reports a policy's ``after_issue`` that did not finish: to whoever runs it.
+
+    Each is logged and counted by the policy's type name (and the error's): never a document, a party or what
+    a client sent. The document is issued all the same, and fiscal's recovery consumer finishes the work.
+    """
+
+    @abstractmethod
+    def timed_out(self, policy: str) -> None:
+        """``policy``'s ``after_issue`` ran out of the budget."""
+
+    @abstractmethod
+    def exception(self, policy: str, error: str) -> None:
+        """``policy``'s ``after_issue`` raised ``error`` (its type's name): called from the handler."""

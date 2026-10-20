@@ -16,9 +16,13 @@ company's jurisdiction, at the document's tax point (rule 12: never ``now()``):
 - a document in another currency than the company's functional one carries the exchange rate (units of the
   functional currency per one of the document's), and its functional totals are converted once, each amount
   rounded as the regime rounds (Decision 5);
-- country fields (``fiscal.<regime>.<field>``) are only those the regime declares, each of its kind and
-  bounded: text and codes without invisible characters, decimals money can hold, objects of text fields only
-  (Decision 12).
+- country fields (``fiscal.<regime>.<field>``) the regime declares are each of its kind and bounded: text and
+  codes without invisible characters, decimals money can hold, objects of text fields only (Decision 12);
+  another regime's namespace is refused. A key the regime does not declare (a channel's format-level field)
+  is kept as sent once it is plain text, or an object of up to ``MAX_LINES`` fields (one per line, DO's
+  ``withholdings``) each text or an object of up to ``MAX_FIELD_OBJECT`` text fields, every name and text
+  free of invisible characters: whether it may be sent at all is the ``IssuePolicy`` chain's to judge (M3b
+  Decision 24), and without a chain ``refuse_undeclared`` refuses it, as the use cases call it.
 
 **Taxes on one line do not compound.** A line may name several categories, one of each tax (ITBIS and a
 selective tax, say): each is charged on the line's whole base, never on a base that includes another
@@ -46,6 +50,7 @@ from ledger_invoicing.domain.errors import (
     ExchangeRateUnusedError,
     FieldInvalidError,
     FieldRequiredError,
+    FieldUndeclaredInvalidError,
     FieldUnknownError,
     InvalidExchangeRateError,
     InvalidIssueDateError,
@@ -93,6 +98,10 @@ _TEXT: Final = f"text of 1 to {MAX_FIELD_TEXT} characters, none of them invisibl
 _CODE: Final = f"text of 1 to {MAX_FIELD_CODE} characters, none of them invisible"
 _PLAIN_DECIMAL: Final = "a plain decimal number below 10^18 with at most 12 decimal places"
 _OBJECT: Final = f"an object of at most {MAX_FIELD_OBJECT} fields named in lower case, each {_TEXT}"
+_UNDECLARED: Final = (
+    f"name or value is not {_TEXT}, or an object of at most {MAX_LINES} such fields (each text, or an object "
+    f"of at most {MAX_FIELD_OBJECT} text fields)"
+)
 _NAME: Final = re.compile(r"[a-z][a-z0-9_]{0,39}", re.ASCII)
 _DATE: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
 _DECIMAL: Final = re.compile(r"-?[0-9]{1,18}(?:\.[0-9]{1,12})?", re.ASCII)
@@ -384,15 +393,26 @@ def _converted(totals: Totals, rate: Decimal, currency: Currency, rule: Rounding
     return Totals(net=net, categories=categories, tax=tax, gross=net + tax)
 
 
+def refuse_undeclared(pricing: Pricing, regime: RegimeDef) -> None:
+    """Refuse a country field of ``pricing`` that ``regime`` does not declare (``FieldUnknownError``).
+
+    What a document with no ``IssuePolicy`` chain to judge its other fields is held to (Decision 24).
+    """
+    declared = {definition.name for definition in regime.fields}
+    if not declared.issuperset(pricing.fiscal):
+        raise FieldUnknownError(regime.key, namespace=False)
+
+
 def _country_fields(fiscal: CountryFields, regime: RegimeDef) -> Mapping[str, FieldValue]:
-    """The regime's fields as sent, once every key is one it declares and every value of its kind."""
+    """The regime's namespace as sent, once each value the regime declares is of its kind (see the module)."""
     key = regime.key
     if any(namespace != key for namespace in fiscal):
         raise FieldUnknownError(key, namespace=True)
     sent = fiscal.get(key, _NOTHING)
     declared = {definition.name for definition in regime.fields}
-    if not declared.issuperset(sent):
-        raise FieldUnknownError(key, namespace=False)
+    for name, sent_value in sent.items():
+        if name not in declared and not (_is_text(name, MAX_FIELD_TEXT) and _is_undeclared(sent_value)):
+            raise FieldUndeclaredInvalidError(key, _UNDECLARED)
     for definition in regime.fields:
         value = sent.get(definition.name)
         if value is None:
@@ -425,6 +445,25 @@ def _requirement(definition: FieldDef, value: FieldValue) -> str | None:
 
 def _is_text(value: FieldValue, limit: int) -> bool:
     return isinstance(value, str) and 1 <= len(value) <= limit and not invisible(value)
+
+
+def _is_undeclared(value: FieldValue) -> bool:
+    """Whether ``value`` is what an undeclared field may hold (see the module)."""
+    if isinstance(value, str):
+        return _is_text(value, MAX_FIELD_TEXT)
+    return len(value) <= MAX_LINES and all(
+        _is_text(name, MAX_FIELD_TEXT) and (_is_text(item, MAX_FIELD_TEXT) or _is_plain_object(item))
+        for name, item in value.items()
+    )
+
+
+def _is_plain_object(value: FieldValue) -> bool:
+    """Whether ``value`` is an object of at most ``MAX_FIELD_OBJECT`` text fields, any name of plain text."""
+    if isinstance(value, str) or len(value) > MAX_FIELD_OBJECT:
+        return False
+    return all(
+        _is_text(name, MAX_FIELD_TEXT) and _is_text(item, MAX_FIELD_TEXT) for name, item in value.items()
+    )
 
 
 def _is_object(value: FieldValue) -> bool:

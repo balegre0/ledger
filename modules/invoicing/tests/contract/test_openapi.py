@@ -29,6 +29,7 @@ PLACEHOLDERS: Final = Settings(
 )
 """The document does not depend on whom the app trusts or where its database is: nothing connects."""
 PREFIXES: Final = MANIFEST.http.prefixes if MANIFEST.http is not None else ()
+REPRESENTATION: Final = "/v1/invoices/{invoice_id}/representation"
 Parameter = TypedDict("Parameter", {"name": str, "in": str, "required": bool})
 
 
@@ -87,6 +88,7 @@ def test_the_document_is_openapi_3_1_and_holds_invoicing_s_paths_only() -> None:
         "/v1/invoices",
         "/v1/invoices/{invoice_id}",
         "/v1/invoices/{invoice_id}/issue",
+        "/v1/invoices/{invoice_id}/representation",
         "/v1/invoices/{invoice_id}/void",
     ]
 
@@ -117,7 +119,8 @@ def test_every_answer_of_a_document_tells_its_version_and_only_a_creation_where_
         success = next(status for status in operation.get("responses", {}) if status.startswith("2"))
         headers = operation.get("responses", {})[success].get("headers", {})
         assert ("Location" in headers) == (success == "201"), (method, path)
-        assert ("ETag" in headers) == (path != "/v1/invoices" or method == "post"), (method, path)
+        listed_or_printed = path in {"/v1/invoices", REPRESENTATION}
+        assert ("ETag" in headers) == (not listed_or_printed or method == "post"), (method, path)
 
 
 def test_every_error_is_a_problem_document_and_every_operation_may_find_the_service_unavailable() -> None:
@@ -174,3 +177,14 @@ def test_a_creation_s_conflict_declares_the_holder_of_a_taken_business_key() -> 
     for path, method, operation in operations():
         if (path, method) != ("/v1/invoices", "post") and "409" in operation.get("responses", {}):
             assert "existing_id" not in str(operation.get("responses", {})["409"])
+
+
+def test_a_representation_names_its_channel_and_answers_a_document_to_print() -> None:
+    """Decision 22: a document's printed form is invoicing's path, rendered by the channel the query names."""
+    operation = published()["paths"][REPRESENTATION]["get"]
+    queried = [parameter for parameter in operation.get("parameters", []) if parameter["in"] == "query"]
+    assert [(parameter["name"], parameter["required"]) for parameter in queried] == [("channel", True)]
+    answers = operation.get("responses", {})
+    assert list(answers["200"].get("content", {})) == ["application/pdf"]
+    assert "Content-Disposition" in answers["200"].get("headers", {})
+    assert "404" in answers

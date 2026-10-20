@@ -11,6 +11,14 @@ claims the request's ``Idempotency-Key`` in the very unit of the change (§9.5),
 use case could share.
 ``admits`` is what ``If-Match`` names (``IfMatch.admits``): a document at a version it does not admit is
 refused (``InvoiceVersionStaleError``) before anything is decided on it.
+
+**The ``IssuePolicy`` chain** (§8.5 step 2). A change that issues a document (a creation that is no draft,
+issuing a draft) builds, outside any unit, the very document its unit will store: its id minted, priced, sold
+by the company, a note checked against its invoice as read (``Invoice.new``/``issue``), its times the clock's
+(the unit's replace them). The chain checks that document (``IssuePolicies.check``) before ``prepare_*``
+returns, so an objection refuses it with nothing stored; the unit still checks the note's invoice again, once
+it holds it locked. With a chain, the keys of ``fiscal.<regime>`` the regime does not declare are the chain's
+to judge (Decision 24). What runs once it is issued (``after_issue``) is the HTTP edge's, after the commit.
 """
 
 from dataclasses import dataclass, field
@@ -21,6 +29,7 @@ lazy from decimal import Decimal
 lazy from uuid import UUID
 
 from ledger_identity.api import CompanyInactiveError
+from ledger_invoicing.application.infos import info_of
 from ledger_invoicing.domain.errors import (
     CorrectionInvalidError,
     CorrectionProblem,
@@ -35,10 +44,11 @@ from ledger_invoicing.domain.errors import (
 from ledger_invoicing.domain.ids import InvoiceId
 from ledger_invoicing.domain.invoice import Invoice, InvoiceStatus, Opening, require_correction_named
 from ledger_invoicing.domain.parties import Seller
-from ledger_invoicing.domain.pricing import NO_FIELDS, Dating, Terms, local_date, price
+from ledger_invoicing.domain.pricing import NO_FIELDS, Dating, Terms, local_date, price, refuse_undeclared
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.tenancy import Tenant
 lazy from ledger_identity.api import CompanyInfo
+lazy from ledger_invoicing.application.issuing import IssuePolicies
 lazy from ledger_invoicing.application.ports import IdentityLookup, InvoicingUnit, InvoicingUnits, RegimeOf
 lazy from ledger_invoicing.domain.lines import LineTerms
 lazy from ledger_invoicing.domain.parties import Party
@@ -106,6 +116,8 @@ class Change:
 
     tenant: Tenant
     apply: Callable[[InvoicingUnit], Awaitable[Invoice]]
+    issues: bool = False
+    """Whether it issues a document: what the ``IssuePolicy`` chain follows once it is committed."""
 
 
 def tenant_of(call: Call | SystemCall) -> Tenant:
@@ -132,21 +144,24 @@ class InvoicingCommands:
     clock: Clock
     """The wall clock: what fixes "today" in an establishment's time zone. Times recorded are the unit's."""
     new_id: Callable[[], UUID]
+    policies: IssuePolicies
+    """The ``IssuePolicy`` chain: what a document about to be issued is checked by."""
 
     async def prepare_create(self, call: Call, creation: Creation) -> Change:
         """Create the document ``creation`` asks for in the call's tenant: a draft, or issued at once.
 
         Refused without a trace: for an inactive company (``CompanyInactiveError``), an establishment it lacks
         (``EstablishmentUnknownError``), terms its regime refuses, a note whose invoice it cannot correct
-        (``CorrectionInvalidError``), or a business key a document of its type holds
+        (``CorrectionInvalidError``), a document the ``IssuePolicy`` chain objects to unless it is a draft
+        (``DocumentInvalidError``), or a business key a document of its type holds
         (``ExternalReferenceTakenError``, when it is applied).
         """
         tenant = tenant_of(call)
         require_correction_named(creation.kind, named=creation.corrects is not None)
-        tax_point = await self._tax_point_of(tenant, creation.corrects)
+        read = await self._corrected(tenant, creation.corrects)
         company = await self._company(call, tenant)
         terms = creation.terms(company.functional_currency)
-        pricing = await self._priced(call, company, terms, tax_point)
+        pricing = await self._priced(call, company, terms, read)
         opening = Opening(
             id=InvoiceId(self.new_id()),
             tenant=tenant,
@@ -156,6 +171,11 @@ class InvoicingCommands:
             terms=terms,
         )
         seller = None if creation.draft else seller_from_company(company)
+        if seller is not None:
+            prospective, _ = Invoice.new(
+                opening, corrects=read, pricing=pricing, seller=seller, now=self.clock()
+            )
+            await self.policies.check(call, info_of(prospective))
         corrects = creation.corrects
 
         async def apply(unit: InvoicingUnit) -> Invoice:
@@ -175,15 +195,16 @@ class InvoicingCommands:
             unit.audit.record("invoice.create", invoice.id, before=None, after=invoice, detail=detail)
             return invoice
 
-        return Change(tenant, apply)
+        return Change(tenant, apply, issues=seller is not None)
 
     async def prepare_issue(self, call: Call, invoice: InvoiceId, *, admits: Admits = any_version) -> Change:
         """Issue the draft ``invoice``, priced again on the day it is issued, sold by the company as it is.
 
         ``InvoiceNotFoundError`` for no document of the tenant by that id; ``InvoiceVersionStaleError`` for
         one at a version ``admits`` refuses; ``InvoiceNotIssuableError`` for one that is not a draft, issued
-        by another call meanwhile too; ``InvoiceChangedError`` when it changed otherwise while it was priced.
-        A note locks itself, then the invoice it corrects (the lock order).
+        by another call meanwhile too; ``InvoiceChangedError`` when it changed otherwise while it was priced;
+        ``DocumentInvalidError`` for one the ``IssuePolicy`` chain objects to, issued as it would be. A note
+        locks itself, then the invoice it corrects (the lock order).
         """
         tenant = tenant_of(call)
         async with self.units.unit(tenant) as unit:
@@ -194,10 +215,12 @@ class InvoicingCommands:
             raise InvoiceVersionStaleError(invoice)
         if draft.status is not InvoiceStatus.DRAFT:
             raise InvoiceNotIssuableError(draft.id)
-        tax_point = await self._tax_point_of(tenant, draft.corrects)
+        read = await self._corrected(tenant, draft.corrects)
         company = await self._company(call, tenant)
-        pricing = await self._priced(call, company, draft.terms, tax_point)
+        pricing = await self._priced(call, company, draft.terms, read)
         seller = seller_from_company(company)
+        prospective, _ = draft.issue(seller=seller, pricing=pricing, corrected=read, now=self.clock())
+        await self.policies.check(call, info_of(prospective))
 
         async def apply(unit: InvoicingUnit) -> Invoice:
             current = await unit.invoices.locked(invoice)
@@ -213,7 +236,7 @@ class InvoicingCommands:
             unit.audit.record("invoice.issue", issued.id, before=current, after=issued, detail=detail)
             return issued
 
-        return Change(tenant, apply)
+        return Change(tenant, apply, issues=True)
 
     def prepare_void(
         self, call: Call, invoice: InvoiceId, reason: Reason | None, *, admits: Admits = any_version
@@ -222,8 +245,8 @@ class InvoicingCommands:
 
         ``InvoiceNotFoundError`` for no document of the tenant by that id; ``InvoiceVersionStaleError`` for
         one at a version ``admits`` refuses, once locked; ``InvoiceNotVoidableError`` for one not issued, one
-        a channel accepted, or one a draft or issued note corrects (read once it is locked, so a note made
-        meanwhile is seen).
+        a channel holds (any status but rejected or voided), or one a draft or issued note corrects (both read
+        once it is locked, so a note made or a status applied meanwhile is seen).
         """
 
         async def apply(unit: InvoicingUnit) -> Invoice:
@@ -233,7 +256,8 @@ class InvoicingCommands:
             if not admits(current.version):
                 raise InvoiceVersionStaleError(invoice)
             noted = await unit.invoices.corrected_by(current.id)
-            voided, event = current.void(reason=reason, corrected_by_a_note=noted, now=unit.now)
+            held = await unit.fiscal.held(current.id)
+            voided, event = current.void(reason=reason, corrected_by_a_note=noted, held=held, now=unit.now)
             await unit.invoices.update(voided)
             unit.events.publish(event)
             detail = {"kind": voided.kind.value}
@@ -249,8 +273,8 @@ class InvoicingCommands:
             raise CompanyInactiveError(company.id)
         return company
 
-    async def _tax_point_of(self, tenant: Tenant, corrects: InvoiceId | None) -> date | None:
-        """The tax point of the invoice a note corrects (``None`` for an invoice): the note's by default.
+    async def _corrected(self, tenant: Tenant, corrects: InvoiceId | None) -> Invoice | None:
+        """The invoice a note corrects, as read now (``None`` for an invoice), which the note is priced by.
 
         Read before the note is priced, in a unit of its own. An issued invoice is never priced again, so what
         is read here holds when the note's unit locks it and checks it again (``CorrectionInvalidError`` for
@@ -264,22 +288,31 @@ class InvoicingCommands:
             raise CorrectionInvalidError(CorrectionProblem.NOT_FOUND)
         if corrected.status is not InvoiceStatus.ISSUED:
             raise CorrectionInvalidError(CorrectionProblem.NOT_ISSUED)
-        return corrected.pricing.tax_point
+        return corrected
 
     async def _priced(
-        self, call: Call, company: CompanyInfo, terms: Terms, default_tax_point: date | None
+        self, call: Call, company: CompanyInfo, terms: Terms, corrected: Invoice | None
     ) -> Pricing:
-        """``terms`` priced with the company's regime, today in its establishment's time zone."""
+        """``terms`` priced with the company's regime, today in its establishment's time zone.
+
+        A note's tax point defaults to the one of the invoice it corrects (``corrected``). The regime's
+        undeclared country fields are the ``IssuePolicy`` chain's to judge, or refused without one.
+        """
         establishment = await self._establishment(call, company, terms.establishment)
-        return price(
+        regime = self._regime(company)
+        pricing = price(
             terms,
-            regime=self._regime(company),
+            regime=regime,
             functional_currency=company.functional_currency,
             establishment=establishment,
             dating=Dating(
-                today=local_date(self.clock(), establishment.time_zone), tax_point=default_tax_point
+                today=local_date(self.clock(), establishment.time_zone),
+                tax_point=None if corrected is None else corrected.pricing.tax_point,
             ),
         )
+        if not self.policies.judges_fields():
+            refuse_undeclared(pricing, regime)
+        return pricing
 
     async def _establishment(self, call: Call, company: CompanyInfo, code: str | None) -> EstablishmentRef:
         found = await self.lookup.establishment(call, company.id, code)
