@@ -5,7 +5,7 @@ from typing import Final
 lazy from collections.abc import Callable, MutableMapping
 
 import pytest
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 from joserfc import jws, jwt
 from joserfc.jwk import ECKey, OctKey, RSAKey
@@ -649,6 +649,8 @@ async def test_an_algorithm_the_published_key_does_not_fit_is_refused(
 
 
 @given(st.text(max_size=400))
+@example("0/..")  # standard Base64's alphabet: Python 3.15 warns of it in URL-safe data
+@example("0+..")
 async def test_no_text_makes_the_verifier_fail_otherwise_than_by_refusing_it(text: str) -> None:
     with pytest.raises(InvalidTokenError):
         await offline_verifier().verify(text)

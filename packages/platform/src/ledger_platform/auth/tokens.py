@@ -42,6 +42,7 @@ logged.
 import base64
 import contextlib
 import math
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from time import time
@@ -251,6 +252,8 @@ _PROVIDER_ORGANIZATION: Final = TypeAdapter(
 _AUDIENCES: Final = TypeAdapter(StrictStr | list[StrictStr])
 """``aud``: one audience, or a list of them."""
 _OBJECT: Final = TypeAdapter(dict[str, object])
+_BASE64URL: Final = re.compile(r"[A-Za-z0-9_-]*", re.ASCII)
+"""A JWS segment: base64url without padding (RFC 7515 2); Python 3.15 warns of any other character."""
 
 
 def _header_of(token: str) -> _Header:
@@ -258,6 +261,8 @@ def _header_of(token: str) -> _Header:
     if not token.isascii() or len(token) > MAX_TOKEN_LENGTH or token.count(".") != _DOTS:
         _refuse(TokenProblem.MALFORMED)
     encoded = token.partition(".")[0]
+    if _BASE64URL.fullmatch(encoded) is None:  # never handed to the decoder: it warns of other alphabets
+        _refuse(TokenProblem.MALFORMED)
     with contextlib.suppress(ValueError):  # binascii.Error and ValidationError are both ValueErrors
         return _Header.model_validate_json(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
     _refuse(TokenProblem.MALFORMED)
