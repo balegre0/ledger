@@ -1,7 +1,8 @@
 """Calls to other services' gRPC methods: always with a deadline, their errors back as ledger errors.
 
 A chassis server ends a failed call with the status of the error's kind and the error's code in the trailing
-metadata ``ledger-error-code`` (``grpc.server``). ``call_unary`` turns that back into a ``RemoteError`` of the
+metadata ``ledger-error-code`` (``grpc.server``). ``call_unary`` (and ``call_stream_unary``, for a method that
+takes its request as a stream) turns that back into a ``RemoteError`` of the
 matching kind, keeping the remote code, so that a route that called another service answers as if the error
 were its own: a company the other service does not have is a 404 here too. What the other side wrote in its
 details is not repeated (it may quote what was asked), and the message names no call: a client that gets it
@@ -23,7 +24,7 @@ unavailable: a dependency failed, and a retry may work.
 
 import re
 from typing import ClassVar, Final
-lazy from collections.abc import Mapping, Sequence
+lazy from collections.abc import AsyncIterator, Mapping, Sequence
 
 import grpc
 
@@ -149,5 +150,25 @@ async def call_unary[Request, Response](
     require_deadline(deadline)
     try:
         return await method(request, timeout=deadline, metadata=tuple(metadata))
+    except grpc.aio.AioRpcError as error:
+        raise remote_error(error, rpc) from error
+
+
+async def call_stream_unary[Request, Response](
+    method: grpc.aio.StreamUnaryMultiCallable[Request, Response],
+    requests: AsyncIterator[Request],
+    *,
+    rpc: str,
+    deadline: float = DEFAULT_DEADLINE,
+    metadata: Sequence[tuple[str, str]] = (),
+) -> Response:
+    """Call ``method`` (named ``rpc``) with the stream ``requests`` within ``deadline`` seconds.
+
+    The deadline covers the whole call, the stream sent included; a failure is the ``RemoteError`` the module
+    describes.
+    """
+    require_deadline(deadline)
+    try:
+        return await method(requests, timeout=deadline, metadata=tuple(metadata))
     except grpc.aio.AioRpcError as error:
         raise remote_error(error, rpc) from error

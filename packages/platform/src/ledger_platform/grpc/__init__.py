@@ -1,7 +1,7 @@
 """gRPC for cross-process surfaces (the signer): guarded servers, clients with deadlines and their callers."""
 
 from ledger_platform.grpc._handlers import MalformedRequestError
-from ledger_platform.grpc.client import RemoteError, call_unary
+from ledger_platform.grpc.client import RemoteError, call_stream_unary, call_unary
 from ledger_platform.grpc.guard import (
     CallerPolicy,
     CallerTokenRefusedError,
@@ -25,6 +25,7 @@ __all__ = [
     "MethodNotAllowedError",
     "RemoteError",
     "call_metadata",
+    "call_stream_unary",
     "call_unary",
     "calling_as",
     "current_caller",
