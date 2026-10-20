@@ -1,0 +1,109 @@
+"""The envelope (spec §3.7): a key or a credential sealed under a data key of its own, which the KMS wraps.
+
+``seal`` is AES-256-GCM with a fresh random 96-bit nonce: ``nonce ‖ ciphertext ‖ tag``. The associated data
+is the encryption context the KMS binds the data key to (purpose, organization, company, certificate), each
+name and value length-prefixed in the names' order: the sealed bytes open for their own certificate only, and
+a row copied to another certificate or company does not open. Anything else (a flipped bit, another context,
+another key) is ``CustodyTamperedError``, without the library's words.
+
+``sealed`` and ``unsealed`` are the two halves custody uses: a fresh data key per secret, asked of the KMS
+under the secret's context, and its plaintext dropped once it has sealed; to open, the KMS unwraps it again,
+every time (no cache, plan Decision 18). Their associated data also names the kind of material sealed (a
+private key or an entity's credential): a key is never opened as a credential, so it can never be sent to a
+certification entity, nor a credential parsed as a key; a mismatch is ``CustodyTamperedError`` before anything
+leaves the process.
+"""
+
+import os
+from typing import ClassVar, Final, Literal
+lazy from collections.abc import Mapping
+
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+from ledger_kernel.errors import InvalidValueError, LedgerError
+from ledger_signer.application.ports import SealedMaterial
+lazy from ledger_signer.application.ports import KeyManagement, SealContext
+
+DATA_KEY_BYTES: Final = 32
+"""AES-256."""
+NONCE_BYTES: Final = 12
+"""GCM's 96-bit nonce, random for every seal (2^32 seals under one key stay far from a collision: one key
+seals one secret here)."""
+TAG_BYTES: Final = 16
+"""GCM's tag: the bytes after the ciphertext."""
+_LENGTH_BYTES: Final = 8
+_MATERIAL: Final = "material"
+"""The associated data's entry naming the kind of material (the KMS's context does not hold it)."""
+
+type MaterialKind = Literal["pkcs8-rsa", "entity-credential"]
+"""What a sealed secret is: a private key (PKCS#8, the local backend) or an entity's credential (remote)."""
+PRIVATE_KEY: Final[MaterialKind] = "pkcs8-rsa"
+ENTITY_CREDENTIAL: Final[MaterialKind] = "entity-credential"
+
+
+class CustodyTamperedError(LedgerError):
+    """Sealed material that does not open: changed, or another certificate's (an internal error)."""
+
+    code: ClassVar[str] = "custody_tampered"
+
+    def __init__(self) -> None:
+        super().__init__("sealed material in custody does not open for its certificate")
+
+
+def associated_data(context: Mapping[str, str]) -> bytes:
+    """``context`` as associated data: each name and its value, length-prefixed, in the names' order."""
+    parts = (part.encode() for name in sorted(context) for part in (name, context[name]))
+    return b"".join(len(part).to_bytes(_LENGTH_BYTES, "big") + part for part in parts)
+
+
+def _cipher(data_key: bytes) -> AESGCM:
+    if len(data_key) != DATA_KEY_BYTES:
+        raise InvalidValueError(field="data_key", requirement=f"{DATA_KEY_BYTES} bytes (AES-256)")
+    return AESGCM(data_key)
+
+
+def seal(plaintext: bytes, data_key: bytes, associated: bytes) -> bytes:
+    """``plaintext`` sealed under ``data_key``, bound to ``associated``: nonce, ciphertext and tag."""
+    nonce = os.urandom(NONCE_BYTES)
+    return nonce + _cipher(data_key).encrypt(nonce, plaintext, associated)
+
+
+def unseal(sealed: bytes, data_key: bytes, associated: bytes) -> bytes:
+    """What ``seal`` sealed; ``CustodyTamperedError`` for anything it did not seal with these."""
+    cipher = _cipher(data_key)
+    if len(sealed) < NONCE_BYTES + TAG_BYTES:
+        raise CustodyTamperedError
+    try:
+        return cipher.decrypt(sealed[:NONCE_BYTES], sealed[NONCE_BYTES:], associated)
+    except InvalidTag:
+        raise CustodyTamperedError from None
+
+
+def _associated(context: Mapping[str, str], kind: MaterialKind) -> bytes:
+    return associated_data({**context, _MATERIAL: kind})
+
+
+async def sealed(
+    kms: KeyManagement, plaintext: bytes, seal_for: SealContext, *, kind: MaterialKind
+) -> SealedMaterial:
+    """``plaintext``, a secret of ``kind``, sealed under a new data key the KMS wrapped for ``seal_for``."""
+    context = seal_for.context()
+    data_key = await kms.new_data_key(context)
+    return SealedMaterial(
+        sealed=seal(plaintext, data_key.plaintext, _associated(context, kind)),
+        wrapped_data_key=data_key.wrapped,
+        kms_key_id=data_key.key_id,
+    )
+
+
+async def unsealed(
+    kms: KeyManagement, material: SealedMaterial, seal_for: SealContext, *, kind: MaterialKind
+) -> bytes:
+    """The secret of ``kind`` that ``material`` sealed for ``seal_for``, its data key unwrapped for this call.
+
+    ``CustodyTamperedError`` when ``material`` holds another kind of secret.
+    """
+    context = seal_for.context()
+    data_key = await kms.unwrap(material.wrapped_data_key, key_id=material.kms_key_id, context=context)
+    return unseal(material.sealed, data_key, _associated(context, kind))

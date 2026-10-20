@@ -30,6 +30,7 @@ lazy from uuid import UUID
 
 import pytest
 from cryptography import x509
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa, utils
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -85,6 +86,8 @@ lazy from ledger_testing.postgres import Template
 UNDER_TEST: Final = ModuleUnderTest(MANIFEST, MIGRATIONS)
 TEST_ACTOR: Final = Actor("system:test", "signer-tests")
 """Who the use cases a test calls itself act as; a request through the app acts as its caller instead."""
+ENTITY_CREDENTIAL: Final = "CREDENTIAL-SENTINEL"
+"""The one credential the stand-in entity signs for (the tests' remote imports send it)."""
 NOW: Final = datetime(2026, 10, 19, 12, tzinfo=UTC)
 """Where the stand-in clock starts, and around which the test certificates are valid."""
 _NONCE_BYTES: Final = 12
@@ -489,7 +492,12 @@ class MemoryKms(KeyManagement):
         self.unwraps += 1
         if key_id != self.KEY_ID:
             raise KmsRefusedError
-        return self._master.decrypt(wrapped[:_NONCE_BYTES], wrapped[_NONCE_BYTES:], _context_bytes(context))
+        try:
+            return self._master.decrypt(
+                wrapped[:_NONCE_BYTES], wrapped[_NONCE_BYTES:], _context_bytes(context)
+            )
+        except InvalidTag:  # wrapped under another context: refused, as the port's contract says
+            raise KmsRefusedError from None
 
     @override
     async def ready(self) -> None:
@@ -504,31 +512,38 @@ def kms() -> MemoryKms:
 
 @final
 class MemoryEntity(CertificationEntity):
-    """A certification entity that signs digests with its holder's key; it records each digest it signed."""
+    """A certification entity that signs digests with its holder's key, for one credential only.
 
-    __slots__ = ("_holder", "available", "digests", "refusing")
+    It records every credential it received and each digest it signed; any credential but its own is refused
+    (as a revoked one would be).
+    """
 
-    def __init__(self, holder: Issued) -> None:
+    __slots__ = ("_credential", "_holder", "available", "digests", "received", "refusing")
+
+    def __init__(self, holder: Issued, credential: bytes) -> None:
         self._holder = holder
+        self._credential = credential
         self.available = True
         self.refusing = False
         self.digests: list[bytes] = []
+        self.received: list[bytes] = []
 
-    def _require_serving(self) -> None:
+    def _require_serving(self, credential: bytes) -> None:
         require_no_unit()
+        self.received.append(credential)
         if not self.available:
             raise EntityUnavailableError
-        if self.refusing:
+        if self.refusing or credential != self._credential:
             raise EntityRefusedError
 
     @override
     async def certificate(self, credential: bytes) -> EntityCertificate:
-        self._require_serving()
+        self._require_serving(credential)
         return EntityCertificate(chain=(self._holder.certificate.public_bytes(serialization.Encoding.DER),))
 
     @override
     async def sign_digest(self, credential: bytes, digest: bytes) -> bytes:
-        self._require_serving()
+        self._require_serving(credential)
         self.digests.append(digest)
         key = self._holder.key
         assert isinstance(key, rsa.RSAPrivateKey)
@@ -674,8 +689,8 @@ def entity_holder(authority: Authority) -> Issued:
 
 @pytest.fixture
 def entity(entity_holder: Issued) -> MemoryEntity:
-    """An available certification entity that holds ``entity_holder``."""
-    return MemoryEntity(entity_holder)
+    """An available certification entity that holds ``entity_holder`` for ``ENTITY_CREDENTIAL``."""
+    return MemoryEntity(entity_holder, ENTITY_CREDENTIAL.encode())
 
 
 @pytest.fixture
