@@ -7,11 +7,13 @@ from contextlib import asynccontextmanager
 from datetime import date
 from decimal import Decimal
 from functools import partial
-from typing import ClassVar, Final, Protocol, TypeIs, final, runtime_checkable
+from typing import Annotated, ClassVar, Final, Protocol, TypeIs, final, runtime_checkable
 lazy from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 lazy from pathlib import Path
 
+import httpx
 import pytest
+from fastapi import APIRouter, Depends
 from pydantic import SecretStr
 from pydantic_settings import SettingsConfigDict
 from structlog.testing import capture_logs
@@ -27,6 +29,7 @@ from ledger_platform.config.settings import PackageSettings, Settings, section_p
 from ledger_platform.data.database import Database
 from ledger_platform.data.migrations import SchemaMigrations
 from ledger_platform.events.consumers import ConsumerMismatchError, ConsumerSpec
+from ledger_platform.http.outbound import OutboundHttp, OutboundTimeouts
 from ledger_platform.jobs.maintenance import maintenance_jobs
 from ledger_platform.jobs.outcomes import Done, JobSpec
 from ledger_platform.runtime import app as runtime_app
@@ -84,10 +87,12 @@ from ledger_platform.runtime.sections import (
     SettingsUndeclaredError,
 )
 from ledger_testing.waiting import Watched
+lazy from ledger_kernel.access import Principal
 lazy from ledger_platform.config.manifest import AppRole
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
 lazy from ledger_platform.events.consumers import RawEvent
+lazy from ledger_platform.http.authentication import Authentication
 lazy from ledger_platform.jobs.outcomes import Job, JobOutcome
 lazy from ledger_platform.runtime import Environment
 lazy from ledger_platform.runtime.assembly import Member
@@ -1204,3 +1209,59 @@ def test_no_module_provides_the_archive_the_app_binds(tmp_path: Path) -> None:
             PortReservedError, match="'alpha' provides port 'ArchivePort', which the app binds"
         ):
             archived(settings, provider)
+
+
+async def test_a_channel_is_given_the_app_s_authentication_and_its_outbound_http() -> None:
+    """``ChannelContext.auth`` and ``.http`` (Decision 4): the modules' caller, clients to call out with."""
+    module_auth: list[Authentication] = []
+    channels: list[ChannelContext] = []
+
+    def alpha(context: ModuleContext) -> ModuleParts:
+        module_auth.append(context.auth)
+        return ModuleParts(migrations=migrations(context.database.schema))
+
+    def channel(context: ChannelContext) -> ChannelParts:
+        channels.append(context)
+        return ChannelParts(channel="calling out", migrations=migrations(context.database.schema))
+
+    App(
+        "worker",
+        settings=SETTINGS,
+        discover=discovering(
+            module("alpha", alpha),
+            regimes=(us_regime(),),
+            packs=(ChannelPack(entry=channel_entry(), regime="us", assemble=channel),),
+        ),
+    )
+    [context] = channels
+    assert context.auth is module_auth[0]
+    assert isinstance(context.http, OutboundHttp)
+    assert not context.http.replaced("party")  # an app's clients call the network
+    async with context.http.client("party", timeouts=OutboundTimeouts(connect=1.0, total=2.0)) as client:
+        assert not client.follow_redirects
+
+
+async def test_a_channel_s_public_routes_declare_the_app_s_caller() -> None:
+    def channel(context: ChannelContext) -> ChannelParts:
+        router = APIRouter(prefix="/v1/us")
+
+        @router.get("/ranges")
+        async def ranges(principal: Annotated[Principal, Depends(context.auth.caller)]) -> str:
+            return principal.subject
+
+        return ChannelParts(
+            channel="routed", routers=(router,), migrations=migrations(context.database.schema)
+        )
+
+    app = App(
+        "api",
+        settings=TOKENS,
+        discover=discovering(
+            regimes=(us_regime(),), packs=(ChannelPack(entry=channel_entry(), regime="us", assemble=channel),)
+        ),
+    )
+    transport = httpx.ASGITransport(app=app.asgi())
+    async with httpx.AsyncClient(transport=transport, base_url="http://ledger.test") as client:
+        refused = await client.get("/v1/us/ranges")
+    assert refused.status_code == httpx.codes.UNAUTHORIZED
+    await app.aclose()

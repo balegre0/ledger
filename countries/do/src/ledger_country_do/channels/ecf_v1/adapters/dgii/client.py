@@ -31,17 +31,18 @@ Queries are ``GET``; what carries a document (the signed seed, an e-CF, an RFCE)
   call has a whole attempt's time (``total``) left; with less it is not sent at all (``timed_out``).
 * **Answers.** ``Accept-Encoding: gzip``: an answer is plain or a single gzip layer, any other encoding is
   refused; it is decompressed here as it streams and refused once it passes 1 MiB, never read whole first.
-* **Transport.** Redirects are not followed; the environment's proxies and ``.netrc`` are ignored
-  (``trust_env=False``); TLS is always verified; hosts are ``https`` origins (``endpoints``); the live
-  environment only on DGII's hosts and never over an injected transport. Every file sent is named
-  ``RNC + e-NCF + .xml`` (DT-DGII).
+* **Transport.** The platform's ``OutboundHttp`` client ``DGII_CLIENT``: redirects are not followed, the
+  environment's proxies and ``.netrc`` are ignored, TLS is always verified, every request is traced and
+  measured with its host and status only. Hosts are ``https`` origins (``endpoints``); the live environment
+  only on DGII's hosts and never over a transport that replaces the network (``OutboundHttp.replaced``).
+  Every file sent is named ``RNC + e-NCF + .xml`` (DT-DGII).
 """
 
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Final, TypedDict, Unpack, final, override
+from typing import Final, Required, TypedDict, Unpack, final, override
 lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 
 import httpx
@@ -63,6 +64,7 @@ from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import (
 from ledger_country_do.channels.ecf_v1.adapters.http import (
     ACCEPTED_ENCODING,
     DEFAULT_TIMEOUTS,
+    DGII_CLIENT,
     MAX_ANSWER,
     bounded,
 )
@@ -86,6 +88,7 @@ lazy from ledger_country_do.channels.ecf_v1.application.ports import Reception, 
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 lazy from ledger_kernel.clock import Sleep
+lazy from ledger_platform.http.outbound import OutboundHttp
 
 TOKEN_MARGIN: Final = timedelta(minutes=5)
 TOKEN_CEILING: Final = timedelta(hours=1)
@@ -114,17 +117,17 @@ class DirectoryEntry:
 
 
 class ClientOptions(TypedDict, total=False):
-    """``DgiiClient``'s keywords, each optional.
+    """``DgiiClient``'s keywords: the outbound clients, then DGII's hosts, timeouts, a clock and a sleep.
 
-    DGII's hosts (``OFFICIAL_HOSTS``), timeouts (``DEFAULT_TIMEOUTS``), a clock (UTC now), a sleep
-    (``asyncio.sleep``) and an httpx transport (``None``: httpx's own, TLS verified).
+    ``http`` the channel's ``OutboundHttp`` (required); ``hosts`` ``OFFICIAL_HOSTS``; ``timeouts``
+    ``DEFAULT_TIMEOUTS``; ``clock`` UTC now; ``sleep`` ``asyncio.sleep``.
     """
 
+    http: Required[OutboundHttp]
     hosts: DgiiHosts
     timeouts: DgiiTimeouts
     clock: Callable[[], datetime]
     sleep: Sleep
-    transport: httpx.AsyncBaseTransport | None
 
 
 @final
@@ -184,20 +187,20 @@ class DgiiClient(Authority):
         "_hosts",
         "_http",
         "_locks",
+        "_outbound",
         "_signer",
         "_sleep",
         "_timeouts",
         "_tokens",
-        "_transport",
     )
 
     def __init__(self, signer: XmlSigner, **options: Unpack[ClientOptions]) -> None:
         self._signer = signer
+        self._outbound = options["http"]
         self._hosts = options.get("hosts", OFFICIAL_HOSTS)
         self._timeouts = options.get("timeouts", DEFAULT_TIMEOUTS)
         self._clock = options.get("clock", _now)
         self._sleep = options.get("sleep", asyncio.sleep)
-        self._transport = options.get("transport")
         self._tokens: dict[Environment, _Token] = {}
         self._locks: dict[Environment, asyncio.Lock] = {}
         self._http: httpx.AsyncClient | None = None
@@ -205,10 +208,7 @@ class DgiiClient(Authority):
     @asynccontextmanager
     async def opened(self) -> AsyncGenerator[DgiiClient]:
         """This client with its connections open, for the length of the block; tokens forgotten after."""
-        timeout = httpx.Timeout(self._timeouts.total, connect=self._timeouts.connect)
-        async with httpx.AsyncClient(
-            timeout=timeout, follow_redirects=False, trust_env=False, verify=True, transport=self._transport
-        ) as http:
+        async with self._outbound.client(DGII_CLIENT, timeouts=self._timeouts.outbound()) as http:
             self._http = http
             try:
                 yield self
@@ -233,7 +233,7 @@ class DgiiClient(Authority):
         return self._http
 
     def _url(self, service: Service, environment: Environment) -> str:
-        if environment.live and self._transport is not None:
+        if environment.live and self._outbound.replaced(DGII_CLIENT):
             raise LiveHostRefusedError
         return self._hosts.url(service, environment)
 

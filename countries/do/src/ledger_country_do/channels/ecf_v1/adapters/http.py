@@ -1,8 +1,10 @@
-"""What every HTTP exchange of the channel shares: its time limits and how an answer's body is read.
+"""What every HTTP exchange of the channel shares: its clients, its time limits, how an answer is read.
 
-DGII's client and the buyer client both wait by ``DgiiTimeouts`` and read answers with ``bounded``: plain or
-a single gzip layer (``Accept-Encoding: gzip``), decompressed as it streams and refused once it passes
-``MAX_ANSWER`` (1 MiB), never read whole first; any other encoding is refused.
+DGII's client and the buyer client call out through the platform's ``OutboundHttp`` (the channel's
+``context.http``), under the names ``DGII_CLIENT`` and ``BUYERS_CLIENT``: their spans and metrics carry
+those names, and a test registers its transport under them. Both wait by ``DgiiTimeouts`` and read answers
+with ``bounded``: plain or a single gzip layer (``Accept-Encoding: gzip``), decompressed as it streams and
+refused once it passes ``MAX_ANSWER`` (1 MiB), never read whole first; any other encoding is refused.
 """
 
 import zlib
@@ -11,6 +13,12 @@ from typing import Final, final
 
 lazy import httpx
 
+from ledger_platform.http.outbound import OutboundTimeouts
+
+DGII_CLIENT: Final = "dgii"
+"""The outbound client DGII's web services are called with."""
+BUYERS_CLIENT: Final = "buyers"
+"""The outbound client buyers' receivers are called with."""
 MAX_ANSWER: Final = 1024 * 1024
 ACCEPTED_ENCODING: Final = "gzip"
 _PLAIN: Final = "identity"
@@ -27,6 +35,10 @@ class DgiiTimeouts:
     total: float = 20.0
     call: float = 60.0
     """A call's deadline: its token, every attempt, the waits between them."""
+
+    def outbound(self) -> OutboundTimeouts:
+        """What an outbound client waits by: to connect, and per attempt (the call's deadline is ours)."""
+        return OutboundTimeouts(connect=self.connect, total=self.total)
 
 
 DEFAULT_TIMEOUTS: Final = DgiiTimeouts()

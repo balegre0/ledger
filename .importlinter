@@ -177,7 +177,6 @@ forbidden_modules =
     ledger_fiscal
     ledger_identity
     ledger_invoicing
-    ledger_platform
     ledger_signer
 allow_indirect_imports = True
 

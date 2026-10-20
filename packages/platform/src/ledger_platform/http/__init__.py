@@ -1,4 +1,4 @@
-"""The HTTP edge: the app, problems, what routes declare, pages, idempotent POSTs, OpenAPI helpers."""
+"""The HTTP edge: the app, problems, what routes declare, pages, idempotent POSTs, OpenAPI, outbound."""
 
 from ledger_platform.http.app import create_app
 from ledger_platform.http.authentication import Authentication
@@ -29,6 +29,7 @@ from ledger_platform.http.idempotency import (
 from ledger_platform.http.mode import ledger_mode_of
 from ledger_platform.http.models import Page, page_of_items, page_query
 from ledger_platform.http.openapi import precondition_checked, problems, success
+from ledger_platform.http.outbound import OutboundHttp, OutboundTimeouts
 from ledger_platform.http.problems import BadRequestError, Problem
 from ledger_platform.http.standing import Standing, StandingsPort
 from ledger_platform.http.versions import CURRENT_VERSION, ApiVersion
@@ -43,6 +44,8 @@ __all__ = [
     "Idempotency",
     "IfMatch",
     "InCompany",
+    "OutboundHttp",
+    "OutboundTimeouts",
     "Page",
     "Problem",
     "Standing",

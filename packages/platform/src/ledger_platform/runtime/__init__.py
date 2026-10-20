@@ -2,6 +2,7 @@
 
 from ledger_platform.config.manifest import AppRole
 from ledger_platform.config.settings import Environment, Settings
+from ledger_platform.observability.telemetry import Telemetry
 from ledger_platform.runtime.app import App
 from ledger_platform.runtime.calls import Call, SystemCall
 from ledger_platform.runtime.contexts import (
@@ -11,7 +12,6 @@ from ledger_platform.runtime.contexts import (
     Module,
     ModuleContext,
     ModuleParts,
-    Telemetry,
 )
 from ledger_platform.runtime.facade import UnitOpenError, facade
 from ledger_platform.runtime.keys import Key
