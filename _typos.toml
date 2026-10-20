@@ -12,6 +12,8 @@ extend-exclude = [
 extend-ignore-identifiers-re = ["^CPY[0-9]{3}$"]
 
 [default.extend-words]
+# The Python package of Mozilla's CA bundle, which httpx verifies TLS against.
+certifi = "certifi"
 # Spanish: a DGII e-invoice status ("Aceptado Condicional"), not an English typo.
 condicional = "condicional"
 # Spanish: DGII's own words (element names, document titles, sample addresses) its files and the DO pack quote.

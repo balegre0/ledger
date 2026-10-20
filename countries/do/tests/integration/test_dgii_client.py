@@ -32,7 +32,9 @@ from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.fake_dgii.state import Scripted, Status
 from ledger_country_do_testing.samples import SIGNED_AT, consumer_invoice, credit_invoice
-from ledger_country_do_testing.transports import FAKE_HOSTS, BreaksAfterSending, Counting
+from ledger_country_do_testing.transports import FAKE_HOSTS, BreaksAfterSending, Counting, outbound_over
+from ledger_platform.http.outbound import OUTBOUND_SECONDS
+from ledger_platform.observability.telemetry import Telemetry
 lazy from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 lazy from ledger_country_do_testing.fake_dgii.app import FakeDgii
 lazy from ledger_country_do_testing.local_signer import KeyPairSigner
@@ -64,9 +66,9 @@ def client_over(
         sleeps.append(seconds)
 
     if timeouts is None:
-        return DgiiClient(signer, hosts=FAKE_HOSTS, clock=clock, sleep=sleep, transport=transport)
+        return DgiiClient(signer, hosts=FAKE_HOSTS, clock=clock, sleep=sleep, http=outbound_over(transport))
     return DgiiClient(
-        signer, hosts=FAKE_HOSTS, timeouts=timeouts, clock=clock, sleep=sleep, transport=transport
+        signer, hosts=FAKE_HOSTS, timeouts=timeouts, clock=clock, sleep=sleep, http=outbound_over(transport)
     )
 
 
@@ -269,7 +271,7 @@ async def test_the_live_environment_is_never_reached_through_an_injected_transpo
         sent.append(request.url.path)
         return reply(200, b"{}")
 
-    async with DgiiClient(signer, transport=httpx.MockTransport(handler)).opened() as dgii:
+    async with DgiiClient(signer, http=outbound_over(httpx.MockTransport(handler))).opened() as dgii:
         with pytest.raises(LiveHostRefusedError):
             await dgii.result(Environment.ECF, "a")
         with pytest.raises(LiveHostRefusedError):
@@ -592,7 +594,7 @@ async def test_a_seed_is_signed_for_dgii_s_host(
     recording = SeedSigner(signer)
     async with client_over(httpx.ASGITransport(app=fake.app), recording, clock, sleeps).opened() as dgii:
         await dgii.result(T, "a")
-    official = DgiiClient(recording, transport=scripted_dgii(GOOD_TOKEN, 200, b'{"codigo": 0}'))
+    official = DgiiClient(recording, http=outbound_over(scripted_dgii(GOOD_TOKEN, 200, b'{"codigo": 0}')))
     async with official.opened():
         await official.result(T, "a")
     assert recording.audiences == ["ecf.fake.test", "ecf.dgii.gov.do"]
@@ -661,7 +663,7 @@ async def test_a_client_with_every_default_reaches_dgii_s_own_hosts(signer: KeyP
         encodings.append(request.headers["accept-encoding"])
         return seeded(request.url.path) or reply(200, b'{"codigo": 0}')
 
-    async with DgiiClient(signer, transport=httpx.MockTransport(handler)).opened() as dgii:
+    async with DgiiClient(signer, http=outbound_over(httpx.MockTransport(handler))).opened() as dgii:
         assert (await dgii.result(T, "a")).code == 0
     assert set(hosts) == {"ecf.dgii.gov.do"}
     assert set(encodings) == {"gzip"}
@@ -996,8 +998,9 @@ async def test_a_client_is_ready_only_when_every_host_the_environment_uses_may_s
 
 
 def test_a_client_s_longest_attempt_at_sending_is_its_per_attempt_limit(signer: KeyPairSigner) -> None:
-    assert DgiiClient(signer).attempt_limit() == DEFAULT_TIMEOUTS.total
-    assert DgiiClient(signer, timeouts=DgiiTimeouts(total=42.0)).attempt_limit() == 42.0
+    network = outbound_over(None)
+    assert DgiiClient(signer, http=network).attempt_limit() == DEFAULT_TIMEOUTS.total
+    assert DgiiClient(signer, http=network, timeouts=DgiiTimeouts(total=42.0)).attempt_limit() == 42.0
 
 
 @pytest.mark.parametrize("service", ["submit", "rfce"])
@@ -1008,3 +1011,20 @@ async def test_a_refusal_at_the_door_that_does_not_read_is_still_a_refusal(
     async with client_over(transport, signer, clock, sleeps).opened() as dgii:
         refused = await call(dgii, service)
     assert refused == Refused((DgiiMessage("400", ""),))
+
+
+async def test_dgii_is_called_through_the_channel_s_outbound_client_named_dgii(
+    signer: KeyPairSigner, fake: FakeDgii, clock: ManualClock
+) -> None:
+    telemetry = Telemetry.unexported("do-ecf-v1")
+    http = outbound_over(httpx.ASGITransport(app=fake.app), telemetry=telemetry)
+    async with DgiiClient(signer, http=http, hosts=FAKE_HOSTS, clock=clock).opened() as dgii:
+        await dgii.submit_ecf(T, ISSUER, FIRST, await signed_ecf(signer))
+    seen = {
+        (sample.labels["client"], sample.labels["outcome"]): sample.value
+        for metric in telemetry.registry.collect()
+        if metric.name == OUTBOUND_SECONDS
+        for sample in metric.samples
+        if sample.name.endswith("_count")
+    }
+    assert seen == {("dgii", "2xx"): 3}  # the seed, its validation, the submission

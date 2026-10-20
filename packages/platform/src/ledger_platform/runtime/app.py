@@ -4,8 +4,9 @@ Assemble (at construction, no I/O): load the platform's and the modules' manifes
 channels (entry points); make the pool object and one ``BoundDatabase`` per schema; assemble the modules in
 dependency order, each reading only the APIs, extensions and ports of its declared dependencies; then the
 channels, with the ports modules provide and the archive the settings configure (``runtime.archiving``,
-bound as ``ArchivePort``); then merge what they handed back and check it against the manifests
-(every declared consumer and job is provided, nothing undeclared is: ``runtime.assembly``). Start
+bound as ``ArchivePort``), the app's request authentication and an ``OutboundHttp`` each; then merge what
+they handed back and check it against the manifests (every declared consumer and job is provided, nothing
+undeclared is: ``runtime.assembly``). Start
 (``asgi()``'s lifespan, or ``migrate()``): open what the role needs, nothing more.
 
 - ``api``: the routers of every module mounted in ``api`` (and the channels' public routes); the identity

@@ -62,6 +62,7 @@ from ledger_country_do.channels.ecf_v1.domain.notation import local_date
 from ledger_country_do.channels.ecf_v1.domain.routing import Route
 from ledger_country_do_testing.local_signer import BundleIncompleteError, KeyPairSigner
 from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
+from ledger_country_do_testing.transports import outbound_over
 from ledger_fiscal_kit.status import FiscalStatus
 from ledger_fiscal_kit.xml.dsig import NotAnRsaKeyError, SigningPairError
 from ledger_fiscal_kit.xml.hardened import XmlDocumentError
@@ -71,6 +72,7 @@ lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import Res
 lazy from ledger_country_do.channels.ecf_v1.application.emission import Emitted, Signed
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
+lazy from ledger_platform.http.outbound import OutboundHttp
 
 PREFIX: Final = "LEDGER_DO_ECF_SPIKE_"
 USED_FILE: Final = "used-encf.txt"
@@ -507,11 +509,12 @@ DEFAULT_WIRING: Final = Wiring()
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _Run:
-    """One run's settings, signer, DGII's client, wiring and output."""
+    """One run's settings, signer, DGII's client, outbound clients, wiring and output."""
 
     settings: SpikeSettings
     signer: KeyPairSigner
     dgii: DgiiClient
+    http: OutboundHttp
     wiring: Wiring
     out: TextIO
 
@@ -523,7 +526,7 @@ async def _delivered(signed: Signed, trust: CounterpartyTrust, context: _Run) ->
         context.signer,
         context.dgii.directory,
         trust=trust,
-        transport=context.wiring.transport,
+        http=context.http,
         resolve=context.wiring.resolve,
         clock=context.wiring.clock,
     )
@@ -592,12 +595,13 @@ async def run(
         settings = SpikeSettings.from_environ(environ, root=Path.cwd())
         signer = settings.signer()
         _say(out, f"environment: {settings.environment.value}")
+        http = outbound_over(wiring.transport)
         dgii = DgiiClient(
             signer,
             hosts=settings.hosts,
             clock=wiring.clock,
             sleep=wiring.sleep,
-            transport=wiring.transport,
+            http=http,
         )
         async with dgii.opened():
             if options.command == "auth":
@@ -605,7 +609,7 @@ async def run(
                 issued = f"authenticated with {settings.environment.value}: a token was issued (not shown)"
                 _say(out, f"{issued}; consultaresultado answered codigo {answer.code}")
                 return 0
-            context = _Run(settings=settings, signer=signer, dgii=dgii, wiring=wiring, out=out)
+            context = _Run(settings=settings, signer=signer, dgii=dgii, http=http, wiring=wiring, out=out)
             return await _emit(options, context)
     except (SettingsError, JournalError) as error:
         _say(out, f"error: {error}")

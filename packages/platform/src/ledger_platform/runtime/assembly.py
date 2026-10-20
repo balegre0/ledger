@@ -37,13 +37,14 @@ from ledger_platform.data.bound import BoundDatabase
 from ledger_platform.data.migrations import platform_migrations
 from ledger_platform.data.unit_of_work import JobPolicy
 from ledger_platform.events.consumers import Consumer
+from ledger_platform.http.outbound import OutboundHttp
 from ledger_platform.jobs.maintenance import maintenance_jobs
 from ledger_platform.jobs.schedules import Schedule
+from ledger_platform.observability.telemetry import Telemetry
 from ledger_platform.runtime.contexts import (
     AssembledChannels,
     ChannelContext,
     ModuleContext,
-    Telemetry,
     api_view,
     bind_parts,
     extension_view,
@@ -554,6 +555,7 @@ class _Assembly:
     def channel(self, pack: ChannelPack, provided: frozenset[str]) -> Handed:
         """Assemble the channel ``pack`` with the ports modules provide; add it to the assembled channels."""
         shared, entry = self._shared, pack.entry
+        telemetry = Telemetry.of(pack.key, shared.tracing, shared.registry)
         context = ChannelContext(
             definition=entry,
             regime=self._regimes.get(pack.regime),
@@ -562,7 +564,9 @@ class _Assembly:
             database=self._bound[entry.schema_name],
             clock=shared.clock,
             ports=self._ports.view(provided),
-            telemetry=Telemetry.of(pack.key, shared.tracing, shared.registry),
+            telemetry=telemetry,
+            auth=shared.authentication,
+            http=OutboundHttp(telemetry=telemetry),
         )
         parts = pack.assemble(context)
         self._channels.add(pack.key, parts.channel)

@@ -5,7 +5,7 @@ import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePrivateKey
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
-from cryptography.hazmat.primitives.serialization import pkcs12
+from cryptography.hazmat.primitives.serialization import load_pem_private_key, pkcs12
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from ledger_testing.pki import (
@@ -60,3 +60,18 @@ def test_an_extended_key_usage_is_written_only_when_asked_for() -> None:
     plain = root.issue(SUBJECT).certificate.extensions
     with pytest.raises(x509.ExtensionNotFound):
         plain.get_extension_for_class(x509.ExtendedKeyUsage)
+
+
+def test_a_server_certificate_names_its_hosts_and_its_key_reads_back() -> None:
+    issued = Authority.root().server("party.test", "127.0.0.1")
+    assert issued.certificate.subject.rfc4514_string() == "CN=party.test"
+    usage = issued.certificate.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+    assert list(usage) == [ExtendedKeyUsageOID.SERVER_AUTH]
+    names = issued.certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    assert names.get_values_for_type(x509.DNSName) == ["party.test"]
+    assert [str(address) for address in names.get_values_for_type(x509.IPAddress)] == ["127.0.0.1"]
+    key = load_pem_private_key(issued.key_pem(), password=None)
+    assert key.public_key() == issued.key.public_key()
+    unnamed = Authority.root().issue(SUBJECT)
+    with pytest.raises(x509.ExtensionNotFound):
+        unnamed.certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName)
