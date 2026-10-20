@@ -53,7 +53,7 @@ PLATFORM_LAYERS: Final = (
     "http | grpc",
     "events | jobs",
     "auth",
-    "data",
+    "data | blobs",
     "observability",
     "_manifest",
     "config",
@@ -61,6 +61,7 @@ PLATFORM_LAYERS: Final = (
 """The chassis's own layering (§5.2): fixed by the platform's design, not by a manifest.
 
 ``_manifest`` sits above ``config``: the generated file validates its data with ``config.manifest``'s model.
+``blobs`` (immutable objects) is beside ``data``: neither knows the other; the runtime binds the archive.
 """
 PROVING: Final = "ledger_platform.http.proving"
 """The chassis's token-only caller: every route's caller applies how its caller stands, so nothing but the

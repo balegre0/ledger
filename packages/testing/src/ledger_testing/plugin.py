@@ -6,6 +6,9 @@
   ``pytest_ledger_template`` hooks prepare once per server.
 - ``issuer_keys`` (session) and ``local_issuer`` (per test): an OpenID provider whose RSA key is made once.
 - ``clock``: a wall clock the test moves. ``restore_logging`` (autouse): the plain logging baseline.
+- ``archive_store`` and ``archive``: an immutable store in memory, and the archive the app would bind over it
+  (fiscal-kit's ``ArchivePort``, its retention counted from ``clock``). ``test_signer``: a ``SignerPort`` that
+  signs nothing (``ledger_testing.signer``); a pack's conftest overrides it with one that signs.
 - A module's fixtures, for a suite whose conftest returns its ``ModuleUnderTest`` from ``module_under_test``
   (``ledger_testing.modules``): ``migrated``, ``database``, ``app_database``, ``signals``,
   ``module_database``, ``admin``, ``settings``, ``api``, ``client``, ``fresh_database_name``, ``fresh``,
@@ -37,6 +40,8 @@ lazy from ledger_platform.data.database import Database
 lazy from ledger_platform.data.notifier import Signals
 lazy from ledger_platform.data.roles import APP, MIGRATOR
 lazy from ledger_platform.runtime.app import App
+lazy from ledger_platform.runtime.archiving import StoreArchive
+lazy from ledger_testing.blobs import MemoryImmutableStore
 lazy from ledger_testing.clock import ManualClock
 lazy from ledger_testing.database import TEST_LOGINS, app_url, fresh_database, migrator_url, signer_url
 lazy from ledger_testing.issuer import IssuerKeys, LocalIssuer
@@ -51,6 +56,7 @@ lazy from ledger_testing.postgres import (
     ensure_template,
     started_postgres,
 )
+lazy from ledger_testing.signer import TestSigner
 
 _SERVER_INPUT: Final = "ledger_postgres"
 _WORKER_INPUT: Final = TypeAdapter(dict[str, object])
@@ -163,6 +169,24 @@ async def local_issuer(issuer_keys: IssuerKeys) -> AsyncGenerator[LocalIssuer]:
 def clock() -> ManualClock:
     """A wall clock the test moves (``Clock``)."""
     return ManualClock()
+
+
+@pytest.fixture
+def archive_store() -> MemoryImmutableStore:
+    """An immutable store in memory, empty."""
+    return MemoryImmutableStore()
+
+
+@pytest.fixture
+def archive(archive_store: MemoryImmutableStore, clock: ManualClock) -> StoreArchive:
+    """The archive over ``archive_store``, as the app binds it: ten years' retention from ``clock``."""
+    return StoreArchive(archive_store, retention_years=10, clock=clock)
+
+
+@pytest.fixture
+def test_signer() -> TestSigner:
+    """A ``SignerPort`` of the test's own: it signs nothing and its certificate covers any moment."""
+    return TestSigner()
 
 
 # ── A module's fixtures (``ledger_testing.modules``) ────────────────────────────

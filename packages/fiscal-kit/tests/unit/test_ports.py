@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Final, final, override
 from uuid import UUID
 lazy from datetime import date
+lazy from pathlib import Path
 
 import pytest
 
@@ -35,11 +36,14 @@ from ledger_fiscal_kit.ports import (
     archive_key,
     is_audience,
 )
+from ledger_kernel.clock import utc_now
 from ledger_kernel.errors import ErrorKind, InvalidValueError
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.auth.access import PermissionSource
+from ledger_platform.blobs.files import FileImmutableStore
+from ledger_platform.runtime.archiving import StoreArchive
 from ledger_platform.runtime.calls import SystemCall
 from ledger_platform.runtime.keys import BindingTypeError
 lazy from ledger_kernel.access import Permission, Principal
@@ -374,3 +378,24 @@ def test_the_archive_s_errors_have_stable_kinds_and_codes(
 ) -> None:
     assert (error.kind, error.code) == (kind, code)
     assert str(error)
+
+
+async def test_the_archive_the_app_binds_keeps_the_kit_s_contract(tmp_path: Path) -> None:
+    """The platform's ``StoreArchive`` is an ``ArchivePort``: its answers and errors are the kit's."""
+    port: ArchivePort = StoreArchive(FileImmutableStore(tmp_path), retention_years=10, clock=utc_now)
+    assert ARCHIVE_PORT.take(port) is port
+    key = archive_key(channel="do-ecf-v1", tenant=TENANT, kind="ecf", content=DOCUMENT, extension="xml")
+    digest = hashlib.sha256(DOCUMENT).digest()
+    retain = date(2040, 1, 1)
+    stored = await port.put_once(key, DOCUMENT, retain_until=retain, media_type="application/xml")
+    assert stored == ArchivedObject(key=key, sha256=digest, size=len(DOCUMENT))
+    assert await port.put_once(key, DOCUMENT, retain_until=retain, media_type="application/xml") == stored
+    assert await port.get(key, sha256=digest) == DOCUMENT
+    with pytest.raises(ArchiveDigestMismatchError):
+        await port.put_once(key, b"<ECF/>", retain_until=retain, media_type="application/xml")
+    with pytest.raises(ArchiveDigestMismatchError):
+        await port.get(key, sha256=bytes(32))
+    with pytest.raises(ArchiveObjectMissingError):
+        await port.get(key.replace("/ecf/", "/rfce/"), sha256=digest)
+    with pytest.raises(InvalidValueError, match="SHA-256"):
+        await port.get(key, sha256=digest[:31])

@@ -79,7 +79,7 @@ layers =
     http | grpc
     events | jobs
     auth
-    data
+    data | blobs
     observability
     _manifest
     config
@@ -313,7 +313,6 @@ forbidden_modules =
     ledger_country_do
     ledger_country_do_testing
     ledger_devtools
-    ledger_fiscal_kit
     ledger_identity
     ledger_invoicing
     ledger_signer
@@ -873,6 +872,7 @@ forbidden_modules =
     ledger_invoicing.domain
     ledger_platform._manifest
     ledger_platform.auth
+    ledger_platform.blobs
     ledger_platform.config
     ledger_platform.data
     ledger_platform.events

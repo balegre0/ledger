@@ -13,7 +13,9 @@ primary tax id, and, as a ``PermissionSource``, what a principal may do in a com
 
 ``ArchivePort``: the app binds it over ``platform.blobs`` (spec §6.8): write-once objects kept until their
 retention date, read back only against the SHA-256 recorded for them. PostgreSQL keeps keys and digests, the
-archive keeps the bytes; ``archive_key`` names an object by whose it is, what it is and its digest.
+archive keeps the bytes; ``archive_key`` names an object by whose it is, what it is and its digest. Its answer
+(``ArchivedObject``), its errors and ``SHA256_BYTES`` are defined by the platform (``blobs.archive``), whose
+archive implements the port without importing the kit, and exported here as the kit's own.
 
 Requests and answers are built by our own code from values it holds, so a value that breaks a rule here is a
 defect of that code (``InvalidValueError``, internal), never a client's input. A document or a seed is never
@@ -34,17 +36,54 @@ from ledger_kernel.errors import (
     ConflictError,
     InvalidInputError,
     InvalidValueError,
-    LedgerError,
     UnavailableError,
 )
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.auth.access import PermissionSource
+from ledger_platform.blobs.archive import (
+    SHA256_BYTES,
+    ArchiveDigestMismatchError,
+    ArchivedObject,
+    ArchiveObjectMissingError,
+    ArchiveUnavailableError,
+)
 from ledger_platform.config.manifest import CHANNEL_KEY
 from ledger_platform.runtime.keys import Key
 lazy from ledger_kernel.ids import CompanyId, OrganizationId
 lazy from ledger_kernel.tax_ids import TaxId
 lazy from ledger_kernel.tenancy import Mode
 lazy from ledger_platform.runtime.calls import SystemCall
+
+__all__ = [
+    "ARCHIVE_PORT",
+    "COMPANY_DIRECTORY",
+    "MAX_SEED_BYTES",
+    "SHA256_BYTES",
+    "SIGNER_PORT",
+    "ArchiveDigestMismatchError",
+    "ArchiveObjectMissingError",
+    "ArchivePort",
+    "ArchiveUnavailableError",
+    "ArchivedObject",
+    "CertificateValidity",
+    "CompanyDirectory",
+    "ReceivingCompany",
+    "SeedToSign",
+    "SignatureProfile",
+    "SignatureRefusedError",
+    "Signed",
+    "SignerPort",
+    "SignerUnavailableError",
+    "SigningCertificateMissingError",
+    "SigningCertificateNotValidError",
+    "SigningClockSkewError",
+    "XmlToSign",
+    "archive_key",
+    "is_archive_port",
+    "is_audience",
+    "is_company_directory",
+    "is_signer_port",
+]
 
 MAX_SEED_BYTES: Final = 16 * 1024
 """The largest seed signed: DGII's ``SemillaModel`` is a few hundred bytes."""
@@ -54,8 +93,6 @@ _CODE: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _CHANNEL: Final = re.compile(CHANNEL_KEY)
 _KIND: Final = re.compile(r"[a-z][a-z0-9-]{0,31}")
 _EXTENSION: Final = re.compile(r"[a-z0-9]{1,8}")
-SHA256_BYTES: Final = 32
-"""The size of a SHA-256 digest: what an archived object's ``sha256`` and ``ArchivePort.get``'s take."""
 
 
 class SignatureProfile(StrEnum):
@@ -298,22 +335,6 @@ COMPANY_DIRECTORY: Final = Key("CompanyDirectory", is_company_directory)
 """``CompanyDirectory`` under its name: how fiscal provides it and how a channel reads it."""
 
 
-@final
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ArchivedObject:
-    """An object the archive holds: its key, the SHA-256 of its bytes and their size."""
-
-    key: str
-    sha256: bytes
-    size: int
-
-    def __post_init__(self) -> None:
-        if len(self.sha256) != SHA256_BYTES:
-            raise InvalidValueError(field="archived_object.sha256", requirement="a SHA-256 digest (32 bytes)")
-        if self.size < 0:
-            raise InvalidValueError(field="archived_object.size", requirement="0 or more")
-
-
 @runtime_checkable
 class ArchivePort(Protocol, metaclass=ABCMeta):
     """Write-once storage kept until a retention date (see the module).
@@ -375,30 +396,3 @@ def archive_key(*, channel: str, tenant: Tenant, kind: str, content: bytes, exte
         )
     digest = hashlib.sha256(content).hexdigest()
     return f"{channel}/{mode.value}/{tenant.organization}/{tenant.company}/{kind}/{digest}.{extension}"
-
-
-class ArchiveUnavailableError(UnavailableError):
-    """The archive could not be reached: the same call may succeed later."""
-
-    code: ClassVar[str] = "archive_unavailable"
-
-    def __init__(self) -> None:
-        super().__init__("the archive is unavailable")
-
-
-class ArchiveDigestMismatchError(LedgerError):
-    """An archived object's bytes are not those whose digest was recorded: a defect or a tampering."""
-
-    code: ClassVar[str] = "archive_digest_mismatch"
-
-    def __init__(self) -> None:
-        super().__init__("an archived object's bytes do not match the digest recorded for them")
-
-
-class ArchiveObjectMissingError(LedgerError):
-    """An object the archive was asked for is not there: what PostgreSQL recorded was never stored."""
-
-    code: ClassVar[str] = "archive_object_missing"
-
-    def __init__(self) -> None:
-        super().__init__("an archived object is missing")

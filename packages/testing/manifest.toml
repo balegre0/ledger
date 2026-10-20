@@ -5,7 +5,7 @@ summary = "The shared test harness: a pytest plugin, PostgreSQL, a local OpenID 
 owners = ["@balegre0"]
 
 [dependencies]
-packages = ["kernel", "platform"]
+packages = ["kernel", "platform", "fiscal-kit"]
 python = [
     "alembic>=1.20.0",
     "cryptography>=50.0.2",

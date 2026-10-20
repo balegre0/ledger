@@ -17,6 +17,7 @@ that it does not declare). Secrets are ``SecretStr`` and errors never echo the i
 import os
 from enum import StrEnum
 from importlib.metadata import entry_points
+from pathlib import Path
 from typing import Annotated, ClassVar, Final, Literal, Self, final, override
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -119,6 +120,22 @@ class _KindClaimOptionalError(ValueError):
         super().__init__("token_kind_claim_required must be true outside the local and test environments")
 
 
+class _ArchivePathError(ValueError):
+    """The file archive without a directory named absolutely: where it writes would depend on the process."""
+
+    def __init__(self) -> None:
+        super().__init__("archive_path must be an absolute path when archive_backend is file")
+
+
+class _FileArchiveInProductionError(ValueError):
+    """Files can be changed by whoever holds the disk: production's archive is S3 with object lock (§6.8)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "archive_backend file is refused in production: its legal archive is s3 (object lock)"
+        )
+
+
 class _ClosedSettings(BaseSettings):
     """Settings read by a source that refuses the undeclared variables under their prefix (see the module)."""
 
@@ -218,6 +235,15 @@ class Settings(_ClosedSettings):
     token_kind_claim_required: bool = False
     """Whether every token must carry the signed ``urn:ledger:principal_kind`` (an Action of the identity
     provider adds it): required in staging and production, optional on a laptop and in tests."""
+    archive_backend: Literal["file"] | None = None
+    """Where the legal archive is (§6.8): ``file`` (a directory: local runs, tests, certification work;
+    refused in production) or none, and then no archive is bound and a channel that reads one does not start.
+    The S3 object-lock store arrives with production's archive (v2-M3b Task 16)."""
+    archive_path: Path | None = None
+    """The file archive's directory, absolute (required by ``file``)."""
+    archive_retention_years: Annotated[int, Field(ge=1, le=100)] = 10
+    """The least an archived object is kept, from the day it is stored: ten years by the Código Tributario
+    (art. 50 h)."""
 
     @field_validator("database_url", "database_direct_url")
     @classmethod
@@ -240,6 +266,22 @@ class Settings(_ClosedSettings):
         """Refuse settings that let staging or production tell a person from a machine by heuristic alone."""
         if self.environment in _HTTPS_ENVIRONMENTS and not self.token_kind_claim_required:
             raise _KindClaimOptionalError
+        return self
+
+    @model_validator(mode="after")
+    def require_an_absolute_file_archive(self) -> Self:
+        """Refuse the file archive without an absolute directory: never one relative to where it runs."""
+        if self.archive_backend == "file" and (
+            self.archive_path is None or not self.archive_path.is_absolute()
+        ):
+            raise _ArchivePathError
+        return self
+
+    @model_validator(mode="after")
+    def refuse_a_file_archive_in_production(self) -> Self:
+        """Refuse the file archive in production, naming the option and never the path."""
+        if self.environment == "production" and self.archive_backend == "file":
+            raise _FileArchiveInProductionError
         return self
 
     @property
