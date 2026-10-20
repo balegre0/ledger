@@ -1096,6 +1096,32 @@ def test_an_isolated_module_reads_no_api_in_its_role() -> None:
     assert vault.read == ["dependency_undeclared", "Beta"]
 
 
+async def scraped(app: App) -> str:
+    """The app's ``/metrics`` page."""
+    transport = httpx.ASGITransport(app=app.asgi())
+    async with httpx.AsyncClient(transport=transport, base_url="http://ledger.test") as client:
+        text = (await client.get("/metrics")).text
+    await app.aclose()
+    return text
+
+
+@pytest.mark.parametrize(("role", "served"), [("api", 0), ("worker", 0), ("signer", 1)])
+async def test_every_app_says_whether_it_serves_each_isolated_module_it_installs(
+    role: AppRole, served: int
+) -> None:
+    """Installed, served by no live app: the alert of ``docs/runbooks/signer/signer-unavailable.md``."""
+    settings = TOKENS if role == "api" else SETTINGS
+    app = App(role, settings=settings, discover=discovering(Vault().module(), module("beta", beta)))
+    text = await scraped(app)
+    assert f'ledger_isolated_module_served{{isolated_in="signer",module="vault"}} {served}.0\n' in text
+    assert 'module="beta"' not in text
+
+
+async def test_an_app_without_an_isolated_module_reports_none() -> None:
+    text = await scraped(App("worker", settings=SETTINGS, discover=discovering(module("beta", beta))))
+    assert "ledger_isolated_module_served{" not in text
+
+
 def test_the_signer_role_needs_the_direct_url() -> None:
     """It listens for wake-ups, as the worker does (§6.7)."""
     with pytest.raises(DirectUrlMissingError, match="signer"):
