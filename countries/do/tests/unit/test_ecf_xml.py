@@ -1,6 +1,8 @@
 import unicodedata
 from dataclasses import replace
+from datetime import date
 from decimal import Decimal
+lazy from collections.abc import Callable
 
 import pytest
 import xmlschema
@@ -8,6 +10,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf, rfce
+from ledger_country_do.channels.ecf_v1.adapters.xml.ecf import UnwrittenContentError
 from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS
 from ledger_country_do.channels.ecf_v1.adapters.xml.writer import EmptyTextError, Node, UnwritableTextError
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
@@ -15,14 +18,19 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     BillingIndicator,
     Buyer,
     DraftInvalidError,
+    EcfReference,
     GoodsOrService,
     IncomeType,
     Line,
+    ModificationCode,
     PaymentType,
 )
+from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.samples import SIGNED_AT, consumer_invoice, credit_invoice
 from ledger_fiscal_kit.xml.hardened import texts
+from ledger_kernel.money import Currency
+lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
 
 D = Decimal
 _NAME_LIMIT = 80
@@ -187,3 +195,47 @@ def test_income_payment_and_item_kinds_are_written_in_dgii_s_codes(
         "DetallesItems/Item/IndicadorBienoServicio",
     )
     assert found == codes
+
+
+_REFERENCE = EcfReference(
+    encf=Encf(EcfType.CREDIT_INVOICE, 9), issued_on=date(2026, 10, 1), code=ModificationCode.VOID
+)
+
+
+def _discounted() -> EcfDraft:
+    draft = credit_invoice()
+    return replace(draft, lines=(replace(draft.lines[0], discount=D("1.00")), *draft.lines[1:]))
+
+
+_UNWRITTEN: list[tuple[str, Callable[[], EcfDraft]]] = [
+    ("lines", _discounted),
+    ("currency", lambda: replace(credit_invoice(), currency=Currency.of("USD"), exchange_rate=D("58.75"))),
+    (
+        "references",
+        lambda: replace(
+            credit_invoice(),
+            encf=Encf(EcfType.CREDIT_NOTE, 1),
+            sequence_expires_on=None,
+            references=(_REFERENCE,),
+        ),
+    ),
+    ("payment_due", lambda: replace(credit_invoice(), payment_due=date(2026, 11, 12))),
+    ("buyer", lambda: replace(credit_invoice(), buyer=replace(credit_invoice().buyer, address="CALLE 5"))),
+    ("buyer", lambda: replace(consumer_invoice(), buyer=Buyer(foreign_id="P1234", name="JOHN DOE"))),
+]
+
+
+@pytest.mark.parametrize(("what", "build"), _UNWRITTEN)
+def test_what_the_e_cf_does_not_write_yet_is_refused_never_dropped(
+    what: str, build: Callable[[], EcfDraft]
+) -> None:
+    draft = build()
+    with pytest.raises(UnwrittenContentError, match=what) as caught:
+        ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT)
+    assert (caught.value.kind, caught.value.code) == ("internal", "do_ecf_content_unwritten")
+
+
+def test_the_summary_refuses_what_it_does_not_write_yet() -> None:
+    draft = replace(consumer_invoice(), payment_due=date(2026, 11, 12))
+    with pytest.raises(UnwrittenContentError, match="payment_due"):
+        rfce.render(draft, compute_totals(draft), security_code="dcp79q")

@@ -8,8 +8,10 @@ Each ITBIS rate's base (``MontoGravadoI1``..``I3``) is the sum of its lines' amo
 A draft in another currency is computed so in its own currency (``OtraMoneda``), and its totals in pesos
 (``Totales``, which DGII reads) are those amounts at the exchange rate, each converted once and rounded half
 up to two places: each line's amount, each rate's base and ITBIS, the exempt amount; the total is their sum.
-This is how invoicing converts a document's functional totals (each category's base and tax): both agree.
-Surcharges, withholdings and additional taxes are not computed.
+Invoicing converts a document's functional totals the same way per category (base and tax), so each
+category agrees (both round the same product once); its gross converts the net once, so the totals in pesos
+may differ by a cent per category, within DGII's tolerance (``mapping.verify_totals``). Surcharges,
+withholdings and additional taxes are not computed.
 """
 
 from dataclasses import dataclass

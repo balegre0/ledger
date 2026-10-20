@@ -8,6 +8,7 @@ lazy from contextlib import AbstractContextManager
 import pytest
 
 from ledger_country_do.channels.ecf_v1.domain.drafts import (
+    BUYER_PARTS,
     EXEMPT_ONLY_TYPES,
     MAX_LINES,
     MAX_NOTE_LINES,
@@ -15,6 +16,7 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     UNDATED_TYPES,
     BillingIndicator,
     Buyer,
+    BuyerPart,
     DraftInvalidError,
     EcfReference,
     Issuer,
@@ -47,15 +49,27 @@ def refused(field: str) -> AbstractContextManager[pytest.ExceptionInfo[DraftInva
 
 def drafted(ecf_type: EcfType) -> EcfDraft:
     """The sample credit invoice as an e-CF of ``ecf_type``, with what that type needs."""
-    exempt_only = ecf_type in EXEMPT_ONLY_TYPES
+    billing = (
+        BillingIndicator.EXEMPT
+        if ecf_type in EXEMPT_ONLY_TYPES
+        else BillingIndicator.ITBIS_3
+        if ecf_type is EcfType.EXPORTS
+        else None
+    )
+    parts = BUYER_PARTS[ecf_type]
+    buyer = Buyer(
+        rnc=BUYER.rnc if BuyerPart.RNC in parts else None,
+        name=BUYER.name if BuyerPart.NAME in parts else None,
+    )
     return replace(
         credit_invoice(),
         encf=Encf(ecf_type, 1),
         sequence_expires_on=None if ecf_type in UNDATED_TYPES else SEQUENCE_EXPIRES_ON,
         references=(REFERENCE,) if ecf_type in NOTE_TYPES else (),
-        lines=tuple(replace(line, billing=BillingIndicator.EXEMPT) for line in CREDIT_LINES)
-        if exempt_only or ecf_type is EcfType.EXPORTS
-        else CREDIT_LINES,
+        lines=CREDIT_LINES
+        if billing is None
+        else tuple(replace(line, billing=billing) for line in CREDIT_LINES),
+        buyer=buyer,
     )
 
 
@@ -96,12 +110,31 @@ def test_types_without_taxed_totals_take_exempt_lines_only(ecf_type: EcfType) ->
         replace(drafted(ecf_type), lines=CREDIT_LINES)
 
 
-def test_an_export_takes_the_zero_rate_or_exempt_lines_only() -> None:
+def test_an_export_takes_zero_rate_lines_only() -> None:
     zero = replace(LINE, billing=BillingIndicator.ITBIS_3)
-    exempt = replace(LINE, billing=BillingIndicator.EXEMPT)
-    assert replace(drafted(EcfType.EXPORTS), lines=(zero, exempt)).lines == (zero, exempt)
-    with refused("line.billing"):
-        replace(drafted(EcfType.EXPORTS), lines=(LINE,))
+    assert replace(drafted(EcfType.EXPORTS), lines=(zero,)).lines == (zero,)
+    for billing in (BillingIndicator.ITBIS_1, BillingIndicator.EXEMPT):
+        with refused("line.billing"):
+            replace(drafted(EcfType.EXPORTS), lines=(replace(LINE, billing=billing),))
+
+
+def test_a_buyer_holds_only_what_its_type_s_comprador_holds() -> None:
+    with refused("buyer"):
+        replace(drafted(EcfType.MINOR_EXPENSES), buyer=Buyer(name="FERRETERIA"))
+    for buyer in (Buyer(rnc="131098193", name="X"), Buyer(name="X", address="CALLE 5")):
+        with refused("buyer"):
+            replace(drafted(EcfType.FOREIGN_PAYMENTS), buyer=buyer)
+    with refused("buyer"):
+        replace(drafted(EcfType.CREDIT_INVOICE), buyer=replace(BUYER, foreign_id="P1234"))
+    payee = Buyer(foreign_id="P1234", name="ACME INC")
+    assert replace(drafted(EcfType.FOREIGN_PAYMENTS), buyer=payee).buyer == payee
+
+
+def test_a_payment_due_date_is_not_given_on_minor_expenses() -> None:
+    due = date(2026, 11, 12)
+    assert replace(drafted(EcfType.PURCHASES), payment_due=due).payment_due == due
+    with refused("payment_due"):
+        replace(drafted(EcfType.MINOR_EXPENSES), payment_due=due)
 
 
 def test_minor_expenses_and_foreign_payments_take_no_discount() -> None:

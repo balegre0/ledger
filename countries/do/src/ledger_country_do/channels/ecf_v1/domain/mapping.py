@@ -25,16 +25,20 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     ADDRESS,
     AMOUNT_LIMIT,
     BILLINGS,
+    BUYER_PARTS,
     FOREIGN_CURRENCIES,
     FOREIGN_ID,
+    INCOME_TYPES,
     INDICATOR_OF,
     LEGAL_NAME,
     NAMED_TYPES,
     NO_DISCOUNT_TYPES,
     NOTE_TYPES,
+    PAYMENT_DUE_TYPES,
     PESO,
     BillingIndicator,
     Buyer,
+    BuyerPart,
     EcfDraft,
     GoodsOrService,
     Issuer,
@@ -47,13 +51,18 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
 )
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError, EcfInvalidError, from_regime
-from ledger_country_do.channels.ecf_v1.domain.fields import read_fields
+from ledger_country_do.channels.ecf_v1.domain.fields import (
+    INCOME_TYPE,
+    MODIFICATION_CODE,
+    PAYMENT_DUE,
+    read_fields,
+)
 from ledger_country_do.channels.ecf_v1.domain.references import FIELD as CORRECTS
 from ledger_country_do.channels.ecf_v1.domain.references import resolve
+from ledger_country_do.channels.ecf_v1.domain.routing import rfce_threshold
 from ledger_country_do.regime import REGIME
-from ledger_country_do.regime.entries import amount, document_type
+from ledger_country_do.regime.entries import document_type
 from ledger_country_do.regime.fields import ECF_TYPE
-from ledger_country_do.regime.parameters import RFCE_THRESHOLD
 from ledger_country_do.regime.rounding import GLOBAL_TOLERANCE_PER_LINE
 from ledger_country_do.regime.tax_ids import DIGITS
 from ledger_fiscal_kit.objections import Objection
@@ -69,7 +78,9 @@ lazy from ledger_kernel.regimes import Totals as KernelTotals
 lazy from ledger_kernel.tax_ids import TaxId
 
 _ECF_TYPE_FIELD: Final = f"fiscal.do.{ECF_TYPE.name}"
-_MODIFICATION_FIELD: Final = "fiscal.do.modification_code"
+_MODIFICATION_FIELD: Final = f"fiscal.do.{MODIFICATION_CODE.name}"
+_INCOME_FIELD: Final = f"fiscal.do.{INCOME_TYPE.name}"
+_PAYMENT_DUE_FIELD: Final = f"fiscal.do.{PAYMENT_DUE.name}"
 _LINE_FIELDS: Final = {
     LinePart.NAME: "description",
     LinePart.QUANTITY: "quantity",
@@ -208,6 +219,7 @@ class _Checker:
         references: tuple[EcfReference, ...] = ()
         if ecf_type is not None:
             self.buyer_rules(ecf_type)
+            self.typed_fields(ecf_type)
             self.typed_lines(ecf_type, billings)
             references = self.references(ecf_type, fields)
         ordered = sorted(self.found, key=lambda each: (each[0], each[1].field or "", each[1].code))
@@ -298,10 +310,8 @@ class _Checker:
 
         A draft without totals in pesos is objected to already (``exchange_rate_required``).
         """
-        draft = self.draft
-        pesos = _pesos(draft)
-        threshold = from_regime(lambda: amount(self.regime, RFCE_THRESHOLD, draft.issue_date))
-        return pesos is not None and pesos.gross.amount >= threshold
+        pesos = _pesos(self.draft)
+        return pesos is not None and pesos.gross.amount >= rfce_threshold(self.regime, self.draft.issue_date)
 
     def buyer_rules(self, ecf_type: EcfType) -> None:
         counterparty = self.draft.counterparty
@@ -315,6 +325,18 @@ class _Checker:
             )
         if ecf_type in NAMED_TYPES and (counterparty is None or counterparty.legal_name is None):
             self.add("buyer_name_required", "buyer.legal_name", "is given on a type 31, 41, 44, 45 or 46")
+        held = BUYER_PARTS[ecf_type]  # a 43 has no Comprador: its counterparty is left out, not objected to
+        if identified and held and BuyerPart.RNC not in held:
+            self.add(
+                "buyer_tax_id_not_allowed", "buyer.tax_id", "is no RNC or cédula on a payment abroad (47)"
+            )
+
+    def typed_fields(self, ecf_type: EcfType) -> None:
+        sent = self.draft.fields
+        if INCOME_TYPE.name in sent and ecf_type not in INCOME_TYPES:
+            self.add("field_invalid", _INCOME_FIELD, "is not given on a purchase (41, 43 or 47)")
+        if PAYMENT_DUE.name in sent and ecf_type not in PAYMENT_DUE_TYPES:
+            self.add("field_invalid", _PAYMENT_DUE_FIELD, "is not given on a minor expense (43)")
 
     def typed_lines(self, ecf_type: EcfType, billings: tuple[BillingIndicator | None, ...]) -> None:
         draft = self.draft
@@ -343,9 +365,12 @@ class _Checker:
             self.add("reference_required", CORRECTS, "names the one invoice a debit or credit note corrects")
         modification = fields.modification
         if modification is None:
-            self.add(
-                "modification_code_required", _MODIFICATION_FIELD, "says why a debit or credit note corrects"
-            )
+            if MODIFICATION_CODE.name not in draft.fields:  # a value it cannot take is objected to already
+                self.add(
+                    "modification_code_required",
+                    _MODIFICATION_FIELD,
+                    "says why a debit or credit note corrects",
+                )
             return ()
         if not single:
             return ()
@@ -367,16 +392,27 @@ def objections(
     return _Checker(draft=draft, accepted=accepted, regime=regime).read().objections
 
 
-def _buyer(party: FiscalParty | None) -> Buyer:
+def _buyer(party: FiscalParty | None, ecf_type: EcfType) -> Buyer:
+    """``party`` as ``ecf_type``'s ``Comprador`` holds it.
+
+    What the type's block has no element for is left out: a 43 names no supplier, a 47 no payee's address.
+    """
     if party is None:
         return Buyer()
     rnc = _rnc(party.tax_id)
-    foreign = party.tax_id if rnc is None else None
+    foreign = party.tax_id.value if rnc is None and party.tax_id is not None else None
+    given = {
+        BuyerPart.RNC: rnc,
+        BuyerPart.FOREIGN_ID: foreign,
+        BuyerPart.NAME: party.legal_name,
+        BuyerPart.ADDRESS: party.address,
+    }
+    held = {part: value if part in BUYER_PARTS[ecf_type] else None for part, value in given.items()}
     return Buyer(
-        rnc=rnc,
-        foreign_id=None if foreign is None else foreign.value,
-        name=party.legal_name,
-        address=party.address,
+        rnc=held[BuyerPart.RNC],
+        foreign_id=held[BuyerPart.FOREIGN_ID],
+        name=held[BuyerPart.NAME],
+        address=held[BuyerPart.ADDRESS],
     )
 
 
@@ -418,7 +454,7 @@ def ecf_draft(
             address=_present(issuer.address),
         ),
         lines=lines,
-        buyer=_buyer(draft.counterparty),
+        buyer=_buyer(draft.counterparty, reading.ecf_type),
         sequence_expires_on=expires_on,
         income=fields.income,
         payment=fields.payment,

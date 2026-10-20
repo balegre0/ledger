@@ -138,20 +138,56 @@ BILLINGS: Final[Mapping[EcfType, frozenset[BillingIndicator]]] = MappingProxyTyp
     {
         ecf_type: frozenset({BillingIndicator.EXEMPT})
         if ecf_type in EXEMPT_ONLY_TYPES
-        else frozenset({BillingIndicator.ITBIS_3, BillingIndicator.EXEMPT})
+        else frozenset({BillingIndicator.ITBIS_3})
         if ecf_type is EcfType.EXPORTS
         else _EVERY_BILLING
         for ecf_type in EcfType
     }
 )
-"""How each type's lines may be billed: as its totals can sum them."""
+"""How each type's lines may be billed: as its totals can sum them (a 46 has ``MontoGravadoI3`` and no
+``MontoExento``: its lines are at 0 %)."""
+
+
+class BuyerPart(StrEnum):
+    """What a ``Comprador`` may hold of a buyer."""
+
+    RNC = "rnc"
+    FOREIGN_ID = "foreign_id"
+    NAME = "name"
+    ADDRESS = "address"
+
+
+_EVERY_PART: Final = frozenset(BuyerPart)
+BUYER_PARTS: Final[Mapping[EcfType, frozenset[BuyerPart]]] = MappingProxyType(
+    {
+        ecf_type: frozenset()
+        if ecf_type is EcfType.MINOR_EXPENSES
+        else frozenset({BuyerPart.FOREIGN_ID, BuyerPart.NAME})
+        if ecf_type is EcfType.FOREIGN_PAYMENTS
+        else _EVERY_PART - {BuyerPart.FOREIGN_ID}
+        if ecf_type in RNC_TYPES
+        else _EVERY_PART
+        for ecf_type in EcfType
+    }
+)
+"""What each type's ``Comprador`` holds: a 43 has none, a 47's payee is foreign (no RNC, no address), and the
+types that require an RNC take no foreign identifier."""
+INCOME_TYPES: Final = frozenset(EcfType) - {
+    EcfType.PURCHASES,
+    EcfType.MINOR_EXPENSES,
+    EcfType.FOREIGN_PAYMENTS,
+}
+"""The types that state their income type (``TipoIngresos``): not the purchases."""
+PAYMENT_DUE_TYPES: Final = frozenset(EcfType) - {EcfType.MINOR_EXPENSES}
+"""The types that may state when payment is due (``FechaLimitePago``)."""
 NO_DISCOUNT_TYPES: Final = frozenset({EcfType.MINOR_EXPENSES, EcfType.FOREIGN_PAYMENTS})
 """The types whose lines hold no discount (no ``DescuentoMonto``)."""
 FOREIGN_CURRENCIES: Final = frozenset(
     {"BRL", "CAD", "CHF", "COP", "DKK", "EUR", "GBP", "HTG", "JPY", "MXN", "NOK", "SEK", "USD"}
 )
-"""``TipoMoneda``: the currencies DGII lists, in every type's ``OtraMoneda``, that are ISO 4217's (its
-``CHY``, ``SCP``, ``VEF`` and ``XDR`` are not money's)."""
+"""``TipoMoneda``: the currencies DGII lists, in every type's ``OtraMoneda``, that are ISO 4217's. DGII's
+``CHY`` (its Chinese yuan), ``SCP``, ``VEF`` and ``XDR`` are no ISO 4217 code money knows, so a document in
+yuan (``CNY``) cannot be written: DGII's list names no code it could be written with."""
 
 
 def max_lines(ecf_type: EcfType) -> int:
@@ -246,6 +282,18 @@ class _UnnamedBuyerError(DraftInvalidError):
         super().__init__("buyer.name", "is given on a type 31, 41, 44, 45 or 46")
 
 
+class _BuyerPartError(DraftInvalidError):
+    def __init__(self) -> None:
+        super().__init__(
+            "buyer", "holds only what the type's Comprador holds (none on 43; no RNC or address on 47)"
+        )
+
+
+class _PaymentDueError(DraftInvalidError):
+    def __init__(self) -> None:
+        super().__init__("payment_due", "is not given on a type 43")
+
+
 class _ReferenceCountError(DraftInvalidError):
     def __init__(self) -> None:
         super().__init__(
@@ -256,7 +304,7 @@ class _ReferenceCountError(DraftInvalidError):
 class _BillingNotAllowedError(DraftInvalidError):
     def __init__(self) -> None:
         super().__init__(
-            "line.billing", "is one the type's totals sum (exempt only on 43, 44, 47; 0 % or exempt on 46)"
+            "line.billing", "is one the type's totals sum (exempt only on 43, 44, 47; 0 % only on 46)"
         )
 
 
@@ -416,6 +464,17 @@ class Buyer:
         """Whether the buyer is neither identified nor named."""
         return self.rnc is None and self.foreign_id is None and self.name is None
 
+    @property
+    def parts(self) -> frozenset[BuyerPart]:
+        """What the buyer gives."""
+        given = (
+            (BuyerPart.RNC, self.rnc),
+            (BuyerPart.FOREIGN_ID, self.foreign_id),
+            (BuyerPart.NAME, self.name),
+            (BuyerPart.ADDRESS, self.address),
+        )
+        return frozenset(part for part, value in given if value is not None)
+
 
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -485,6 +544,10 @@ class EcfDraft:
             raise _UnidentifiedBuyerError
         if ecf_type in NAMED_TYPES and self.buyer.name is None:
             raise _UnnamedBuyerError
+        if not self.buyer.parts <= BUYER_PARTS[ecf_type]:
+            raise _BuyerPartError
+        if self.payment_due is not None and ecf_type not in PAYMENT_DUE_TYPES:
+            raise _PaymentDueError
         if len(self.references) != (1 if ecf_type in NOTE_TYPES else 0):
             raise _ReferenceCountError
         self._require_lines(ecf_type)

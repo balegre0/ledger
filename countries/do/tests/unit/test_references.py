@@ -46,6 +46,18 @@ def test_an_invoice_with_no_accepted_e_cf_here_is_unresolved() -> None:
     assert [each.code for each in objections(NOTE, accepted={})] == ["do_ecf_reference_unresolved"]
 
 
+def test_code_5_refers_to_a_consumer_invoice_only() -> None:
+    # DGII's schemas gloss CodigoModificacion 5 as "Referencia Factura Consumo Electrónica": a type 32.
+    consumer = {CORRECTED: AcceptedEcf(encf=Encf(EcfType.CONSUMER_INVOICE, 4), issued_on=date(2026, 10, 1))}
+    references, _ = resolve(
+        NOTE, consumer, ecf_type=EcfType.DEBIT_NOTE, code=ModificationCode.REFERENCE_CONSUMER
+    )
+    assert references[0].code is ModificationCode.REFERENCE_CONSUMER
+    credit = {CORRECTED: AcceptedEcf(encf=Encf(EcfType.CREDIT_INVOICE, 4), issued_on=date(2026, 10, 1))}
+    _, found = resolve(NOTE, credit, ecf_type=EcfType.DEBIT_NOTE, code=ModificationCode.REFERENCE_CONSUMER)
+    assert [(each.code, each.field) for each in found] == [("do_ecf_reference_type_not_allowed", "corrects")]
+
+
 @pytest.mark.parametrize("corrected", [EcfType.PURCHASES, EcfType.CREDIT_NOTE, EcfType.FOREIGN_PAYMENTS])
 def test_a_note_corrects_a_sales_invoice_only(corrected: EcfType) -> None:
     accepted = {CORRECTED: AcceptedEcf(encf=Encf(corrected, 4), issued_on=date(2026, 10, 1))}

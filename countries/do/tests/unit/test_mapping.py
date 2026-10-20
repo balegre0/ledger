@@ -1,6 +1,6 @@
 from dataclasses import replace
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import Final
 from uuid import UUID
 lazy from collections.abc import Mapping
@@ -66,6 +66,7 @@ USD: Final = Currency.of("USD")
 SECRET: Final = "SECRETO-9876"
 PASSPORT: Final = TaxId(TaxIdScheme("us.passport"), "P12345678")
 ANONYMOUS: Final = FiscalParty(tax_id=None, legal_name=None)
+PAYEE: Final = FiscalParty(tax_id=PASSPORT, legal_name="ACME INC")
 NUMBER: Final = Encf(EcfType.CREDIT_INVOICE, 1)
 EXPIRES_ON: Final = date(2028, 12, 31)
 
@@ -127,6 +128,48 @@ def test_a_valid_draft_has_no_objection() -> None:
         fields={"ecf_type": "43"},
     )
     assert found(minor) == []
+
+
+def test_a_type_s_comprador_takes_what_it_holds_and_no_rnc_on_a_foreign_payment() -> None:
+    supplier = fiscal_draft(
+        Priced(unit_price=D(100), category=EXEMPT), direction=PURCHASE, fields={"ecf_type": "43"}
+    )
+    assert found(supplier) == []
+    minor = ecf_draft(
+        supplier, number=Encf(EcfType.MINOR_EXPENSES, 1), accepted=NONE_ACCEPTED, expires_on=EXPIRES_ON
+    )
+    assert minor.buyer.anonymous
+    payee = FiscalParty(tax_id=PASSPORT, legal_name="ACME INC", address="1 MAIN ST, MIAMI")
+    abroad = fiscal_draft(
+        Priced(unit_price=D(100), category=EXEMPT),
+        direction=PURCHASE,
+        counterparty=payee,
+        fields={"ecf_type": "47"},
+    )
+    paid = ecf_draft(
+        abroad, number=Encf(EcfType.FOREIGN_PAYMENTS, 1), accepted=NONE_ACCEPTED, expires_on=EXPIRES_ON
+    )
+    assert paid.buyer == Buyer(foreign_id="P12345678", name="ACME INC")
+    local = replace(abroad, counterparty=BUYER)
+    assert found(local) == [("do_ecf_buyer_tax_id_not_allowed", "buyer.tax_id")]
+
+
+def test_a_field_a_type_does_not_hold_is_invalid_on_it() -> None:
+    purchase = fiscal_draft(direction=PURCHASE, fields={"ecf_type": "41", "income_type": "01"})
+    assert found(purchase) == [("do_ecf_field_invalid", "fiscal.do.income_type")]
+    minor = fiscal_draft(
+        Priced(unit_price=D(100), category=EXEMPT),
+        direction=PURCHASE,
+        counterparty=None,
+        fields={"ecf_type": "43", "payment_due": "2026-11-12"},
+    )
+    assert found(minor) == [("do_ecf_field_invalid", "fiscal.do.payment_due")]
+
+
+def test_china_s_yuan_is_not_dgii_s_chy() -> None:
+    # DGII's TipoMoneda lists "CHY", which is no ISO 4217 code: the yuan (CNY) cannot be written.
+    yuan = fiscal_draft(currency=Currency.of("CNY"), exchange_rate=D("8.1"))
+    assert found(yuan) == [("do_ecf_currency_unsupported", "currency")]
 
 
 def test_a_purchase_names_its_type() -> None:
@@ -192,7 +235,7 @@ def test_a_consumer_invoice_below_the_threshold_may_be_anonymous() -> None:
 @pytest.mark.parametrize("ecf_type", ["44", "46"])
 def test_a_type_that_requires_it_names_the_buyer(ecf_type: str) -> None:
     unnamed = fiscal_draft(
-        Priced(unit_price=D(100), category=EXEMPT),
+        Priced(unit_price=D(100), category=EXEMPT if ecf_type == "44" else ZERO),
         counterparty=replace(BUYER, legal_name=None),
         fields={"ecf_type": ecf_type},
     )
@@ -207,10 +250,7 @@ def test_a_note_names_why_it_corrects_and_corrects_one_document() -> None:
     twice = replace(note(DEBIT), references=CORRECTS * 2)
     assert found(twice, ACCEPTED) == [("do_ecf_reference_required", "corrects")]
     contingency = note(CREDIT, modification_code="4")
-    assert found(contingency, ACCEPTED) == [
-        ("do_ecf_field_invalid", "fiscal.do.modification_code"),
-        ("do_ecf_modification_code_required", "fiscal.do.modification_code"),
-    ]
+    assert found(contingency, ACCEPTED) == [("do_ecf_field_invalid", "fiscal.do.modification_code")]
 
 
 def test_an_invoice_takes_no_modification_code() -> None:
@@ -268,12 +308,15 @@ def _in(currency: Currency, draft: FiscalDraft) -> Totals:
 
 @pytest.mark.parametrize(
     ("ecf_type", "category"),
-    [("43", STANDARD), ("44", REDUCED), ("47", ZERO), ("46", STANDARD), ("46", REDUCED)],
+    [("43", STANDARD), ("44", REDUCED), ("47", ZERO), ("46", STANDARD), ("46", REDUCED), ("46", EXEMPT)],
 )
 def test_a_line_taxed_as_its_type_cannot_be_is_not_allowed(ecf_type: str, category: TaxCategoryKey) -> None:
     direction = PURCHASE if ecf_type in {"43", "47"} else SALES
     draft = fiscal_draft(
-        Priced(unit_price=D(100), category=category), direction=direction, fields={"ecf_type": ecf_type}
+        Priced(unit_price=D(100), category=category),
+        direction=direction,
+        counterparty=PAYEE if ecf_type == "47" else BUYER,
+        fields={"ecf_type": ecf_type},
     )
     assert found(draft) == [("do_ecf_category_not_allowed", "lines.0.taxes")]
 
@@ -283,6 +326,7 @@ def test_minor_expenses_and_foreign_payments_take_no_discount(ecf_type: str) -> 
     draft = fiscal_draft(
         Priced(unit_price=D(100), discount=D(1), category=EXEMPT),
         direction=PURCHASE,
+        counterparty=PAYEE if ecf_type == "47" else BUYER,
         fields={"ecf_type": ecf_type},
     )
     assert found(draft) == [("do_ecf_discount_not_allowed", "lines.0.discount")]
@@ -541,12 +585,20 @@ def test_a_category_dgii_does_not_bill_never_agrees() -> None:
 
 
 _CATEGORIES: Final = (STANDARD, REDUCED, ZERO, EXEMPT)
-_PRICED: Final = st.builds(
-    Priced,
-    unit_price=st.decimals(min_value=D(0), max_value=D(99999), places=4),
-    quantity=st.decimals(min_value=D("0.01"), max_value=D(9999), places=2),
-    category=st.sampled_from(_CATEGORIES),
-)
+
+
+@st.composite
+def _priced(draw: st.DrawFn) -> Priced:
+    """A line of any of the four ITBIS categories, its discount at most its gross."""
+    unit_price = draw(st.decimals(min_value=D(0), max_value=D(99999), places=4))
+    quantity = draw(st.decimals(min_value=D("0.01"), max_value=D(9999), places=2))
+    gross = (unit_price * quantity).quantize(D("0.01"), rounding=ROUND_DOWN)
+    discount = draw(st.decimals(min_value=D(0), max_value=gross, places=2))
+    category = draw(st.sampled_from(_CATEGORIES))
+    return Priced(unit_price=unit_price, quantity=quantity, discount=discount, category=category)
+
+
+_PRICED: Final = _priced()
 
 
 @given(st.lists(_PRICED, min_size=1, max_size=20), st.sampled_from([Currency.of("DOP"), USD]))
