@@ -7,11 +7,14 @@ builds on the platform and exports them as its own. A channel reads the archive 
 """
 
 from dataclasses import dataclass
-from typing import ClassVar, Final, final
+from functools import partial
+from typing import ClassVar, Final, Literal, assert_type, final
 
 from ledger_kernel.errors import InvalidValueError, LedgerError, UnavailableError
 from ledger_platform.blobs.files import FileImmutableStore
+from ledger_platform.blobs.s3 import S3Encryption, S3ImmutableStore, s3_client
 from ledger_platform.blobs.store import SHA256_BYTES, require_digest
+from ledger_platform.config.options import InvalidOptionError
 lazy from ledger_platform.blobs.store import ImmutableStore
 lazy from ledger_platform.config.settings import Settings
 
@@ -25,6 +28,7 @@ __all__ = [
     "archive_store",
 ]
 
+_REQUIRED: Final = "set for the s3 backend"
 ARCHIVE_PORT_NAME: Final = "ArchivePort"
 """The name the app binds the archive under, fiscal-kit's ``ARCHIVE_PORT``'s."""
 
@@ -75,11 +79,31 @@ def archive_store(settings: Settings) -> ImmutableStore | None:
     """The store ``LEDGER_ARCHIVE_BACKEND`` names; ``None`` when none is (no archive is bound then).
 
     ``file``: ``FileImmutableStore`` at ``LEDGER_ARCHIVE_PATH`` (``Settings`` requires it, and refuses this
-    backend in production). The S3 object-lock store arrives with Task 16.
+    backend in production). ``s3``: ``S3ImmutableStore`` in ``LEDGER_ARCHIVE_BUCKET``, whose client
+    (``LEDGER_ARCHIVE_REGION``, ``LEDGER_ARCHIVE_ENDPOINT_URL`` locally) is made on the first request.
     """
-    if settings.archive_backend is None:
+    backend = settings.archive_backend
+    if backend is None:
         return None
-    path = settings.archive_path
-    if path is None:  # Settings refuses it; a model copied past its validation may still hold it
-        raise InvalidValueError(field="settings.archive_path", requirement="set for the file backend")
-    return FileImmutableStore(path)
+    if backend == "file":
+        path = settings.archive_path
+        if path is None:  # Settings refuses it; a model copied past its validation may still hold it
+            raise InvalidValueError(field="settings.archive_path", requirement="set for the file backend")
+        return FileImmutableStore(path)
+    assert_type(backend, Literal["s3"])
+    bucket, region = settings.archive_bucket, settings.archive_region
+    if bucket is None:  # Settings refuses it too (see above)
+        raise InvalidOptionError(
+            component="archive", option="archive_bucket", requirement=_REQUIRED, value=None
+        )
+    if region is None:
+        raise InvalidOptionError(
+            component="archive", option="archive_region", requirement=_REQUIRED, value=None
+        )
+    return S3ImmutableStore(
+        bucket,
+        partial(s3_client, region=region, endpoint_url=settings.archive_endpoint_url),
+        encryption=S3Encryption(
+            algorithm=settings.archive_encryption, kms_key_id=settings.archive_kms_key_id
+        ),
+    )

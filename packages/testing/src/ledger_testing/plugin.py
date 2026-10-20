@@ -5,6 +5,8 @@
 - ``worker_database``: this worker's own database, a clone of a template that the packages'
   ``pytest_ledger_template`` hooks prepare once per server.
 - ``issuer_keys`` (session) and ``local_issuer`` (per test): an OpenID provider whose RSA key is made once.
+- ``localstack`` (session): LocalStack's S3 (``ledger_testing.localstack``), started for the first test of a
+  process that asks for it.
 - ``clock``: a wall clock the test moves. ``restore_logging`` (autouse): the plain logging baseline.
 - ``archive_store`` and ``archive``: an immutable store in memory, and the archive the app would bind over it
   (fiscal-kit's ``ArchivePort``, its retention counted from ``clock``). ``test_signer``: a ``SignerPort`` that
@@ -45,6 +47,7 @@ lazy from ledger_testing.blobs import MemoryImmutableStore
 lazy from ledger_testing.clock import ManualClock
 lazy from ledger_testing.database import TEST_LOGINS, app_url, fresh_database, migrator_url, signer_url
 lazy from ledger_testing.issuer import IssuerKeys, LocalIssuer
+lazy from ledger_testing.localstack import LocalStack, started_localstack
 lazy from ledger_testing.logs import restored_logging
 lazy from ledger_testing.modules import ModuleUnderTest, QuietSignals, app_settings
 lazy from ledger_testing.postgres import (
@@ -162,6 +165,17 @@ def issuer_keys() -> IssuerKeys:
 async def local_issuer(issuer_keys: IssuerKeys) -> AsyncGenerator[LocalIssuer]:
     """An OpenID provider on 127.0.0.1 signing with the session's key."""
     async with LocalIssuer.started(keys=issuer_keys) as started:
+        yield started
+
+
+@pytest.fixture(scope="session")
+def localstack() -> Iterator[LocalStack]:
+    """LocalStack's S3, one container for the process.
+
+    Under xdist each worker that asks starts its own: a package's S3 tests group themselves on one worker
+    (``xdist_group("localstack")``).
+    """
+    with started_localstack() as started:
         yield started
 
 
