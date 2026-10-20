@@ -1,7 +1,8 @@
 """Each module's OpenAPI snapshot (§10): its paths of the ``api`` app's document, and what they reference.
 
 The document is made from the code: the ``api`` app is built on placeholder settings (nothing connects, nobody
-is trusted) with every installed module, and asked for its schema.
+is trusted, nothing below an error is logged: a module's warning at assembly is no output of ``sync`` or
+``check``) with every installed module, and asked for its schema.
 """
 
 import functools
@@ -75,6 +76,7 @@ def api_document() -> dict[str, object]:
         token_issuer=_ISSUER,
         token_audience=_AUDIENCE,
         token_jwks_url=f"{_ISSUER}/oauth/v2/keys",
+        log_level="ERROR",
     )
     return _DOCUMENT.validate_python(App("api", settings=settings).asgi().openapi())
 

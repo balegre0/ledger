@@ -87,3 +87,11 @@ def test_the_api_document_ignores_the_environment(monkeypatch: pytest.MonkeyPatc
         assert TABLE.validate_python(api_document()["paths"])
     finally:
         api_document.cache_clear()
+
+
+def test_building_the_api_document_logs_nothing(capsys: pytest.CaptureFixture[str]) -> None:
+    """A module's warning at assembly (an unconfigured client: ``signer.not_configured``) is no output of
+    ``sync`` or ``check``: their output is what they found."""
+    api_document.cache_clear()
+    _ = api_document()
+    assert capsys.readouterr().out == ""

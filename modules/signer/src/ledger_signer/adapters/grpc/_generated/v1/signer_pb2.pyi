@@ -522,10 +522,13 @@ class SignSeedRequest(_message.Message):
     MODE_FIELD_NUMBER: _builtins.int
     PROFILE_FIELD_NUMBER: _builtins.int
     SEED_FIELD_NUMBER: _builtins.int
+    AUDIENCE_FIELD_NUMBER: _builtins.int
     mode: Global___Mode.ValueType
     profile: Global___SignatureProfile.ValueType
     seed: _builtins.bytes
     """at most 16 KiB"""
+    audience: _builtins.str
+    """the host the seed came from, with its port if any: audited"""
     @_builtins.property
     def call(self) -> Global___CallContext: ...
     @_builtins.property
@@ -538,10 +541,11 @@ class SignSeedRequest(_message.Message):
         mode: Global___Mode.ValueType = ...,
         profile: Global___SignatureProfile.ValueType = ...,
         seed: _builtins.bytes = ...,
+        audience: _builtins.str = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["call", b"call", "company", b"company"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["call", b"call", "company", b"company", "mode", b"mode", "profile", b"profile", "seed", b"seed"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["audience", b"audience", "call", b"call", "company", b"company", "mode", b"mode", "profile", b"profile", "seed", b"seed"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 

@@ -20,10 +20,10 @@ password is refused (``certificate_bundle_unreadable``) and keeps nothing, so th
 
 import hashlib
 from dataclasses import dataclass
-from typing import Final, final
+from typing import ClassVar, Final, final
 lazy from collections.abc import Awaitable, Callable
 
-from ledger_kernel.errors import InvalidValueError
+from ledger_kernel.errors import InvalidInputError, InvalidValueError
 from ledger_kernel.ids import new_id
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.data.audit import current_actor
@@ -55,6 +55,17 @@ lazy from ledger_signer.application.ports import (
 )
 
 _LENGTH_BYTES: Final = 8
+MAX_BUNDLE_BYTES: Final = 2 * 1024 * 1024
+"""The largest PKCS#12 bundle imported: refused by the api's client before it ends, and by the signer."""
+
+
+class ImportTooLargeError(InvalidInputError):
+    """A bundle over ``MAX_BUNDLE_BYTES``: refused before the rest of it is read."""
+
+    code: ClassVar[str] = "signer_import_too_large"
+
+    def __init__(self) -> None:
+        super().__init__(f"a certificate bundle is at most {MAX_BUNDLE_BYTES} bytes")
 
 
 @final

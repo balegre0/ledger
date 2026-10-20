@@ -43,7 +43,7 @@ lazy from prometheus_client import CollectorRegistry
 from ledger_kernel.errors import ErrorKind, LedgerError
 from ledger_platform.config.options import InvalidOptionError, require_seconds
 from ledger_platform.grpc._handlers import rewrapped
-from ledger_platform.grpc.client import ERROR_CODE_KEY
+from ledger_platform.grpc.client import ERROR_CODE_KEY, INTERNAL_CODE
 from ledger_platform.grpc.guard import CallerGuard
 lazy from ledger_platform.grpc._handlers import Context, CoroutineMethod, GeneratorMethod
 lazy from ledger_platform.grpc.guard import CallerTokens
@@ -60,7 +60,6 @@ _STATUS: Final[Mapping[ErrorKind, grpc.StatusCode]] = {
     ErrorKind.UNAVAILABLE: grpc.StatusCode.UNAVAILABLE,
     ErrorKind.INTERNAL: grpc.StatusCode.INTERNAL,
 }
-_INTERNAL_CODE: Final = "internal"
 _MAX_PORT: Final = 65535
 DEFAULT_MAX_MESSAGE_BYTES: Final = 5 * 1024 * 1024
 """The largest message a server takes or sends by default: a certificate's chunk, a signed document."""
@@ -86,13 +85,13 @@ class _Answer(NamedTuple):
     code: str
 
 
-_DEFECT: Final = _Answer(_STATUS[ErrorKind.INTERNAL], "internal error", _INTERNAL_CODE)
+_DEFECT: Final = _Answer(_STATUS[ErrorKind.INTERNAL], "internal error", INTERNAL_CODE)
 """What a client is told about a defect: no more than that there was one."""
 
 
 def _report_defect(error: Exception, rpc: str) -> None:
     """Log where a defect happened and what it was, never the request: it may carry credentials."""
-    code = error.code if isinstance(error, LedgerError) else _INTERNAL_CODE
+    code = error.code if isinstance(error, LedgerError) else INTERNAL_CODE
     _logger.error("grpc.unhandled_error", rpc=rpc, code=code, exc_info=error)
 
 
