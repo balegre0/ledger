@@ -344,7 +344,8 @@ def test_an_app_may_be_named_like_a_module_and_depend_on_it(tree: Path, write: W
 def test_a_name_names_one_package_a_manifest_can_depend_on(tree: Path, write: Writer) -> None:
     write("packages/identity", NESTED.replace('name = "testing"', 'name = "identity"'), ())
     assert messages(tree) == [
-        "packages/identity/manifest.toml: package.name 'identity' is modules/identity/manifest.toml's too"
+        f"packages/identity/manifest.toml: {clash('identity', 'modules/identity')}",
+        "packages/identity/manifest.toml: package.name 'identity' is modules/identity/manifest.toml's too",
     ]
 
 
@@ -484,3 +485,27 @@ def test_what_loads_with_an_isolated_module_never_imports_its_custody(tree: Path
     adapters.unlink()
     root.unlink()
     assert messages(tree) == []  # namespace packages: nothing to load
+
+
+def clash(name: str, earlier: str) -> str:
+    """The problem of the package ``ledger-<name>`` whose import package is ``earlier``'s too."""
+    distribution = f"ledger-{name}"
+    imported = distribution.replace("-", "_")
+    return f"distribution '{distribution}' (import package '{imported}') is {earlier}/manifest.toml's too"
+
+
+def plain_module(name: str) -> str:
+    return f'[package]\nname = "{name}"\nkind = "module"\nsummary = "A module."\nowners = ["@o"]\n'
+
+
+def test_a_module_whose_distribution_is_an_app_s_is_refused(tree: Path, write: Writer) -> None:
+    """``modules/app-api`` would be ``ledger-app-api``, the distribution of ``apps/api``."""
+    write("modules/app-api", plain_module("app-api"), ())
+    assert messages(tree) == [f"modules/app-api/manifest.toml: {clash('app-api', 'apps/api')}"]
+
+
+def test_two_packages_whose_import_names_clash_are_refused(tree: Path, write: Writer) -> None:
+    """``bill-ing`` and ``bill_ing`` are two names and two distributions, but one import package."""
+    write("modules/bill-ing", plain_module("bill-ing"), ())
+    write("modules/bill_ing", plain_module("bill_ing"), ())
+    assert messages(tree) == [f"modules/bill_ing/manifest.toml: {clash('bill_ing', 'modules/bill-ing')}"]

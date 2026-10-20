@@ -1,10 +1,11 @@
 """The manifest rules that need the whole workspace (§4.7 ``check``): one function per rule.
 
 A single manifest is validated by the platform's model when the workspace is loaded; what is checked here is
-how manifests agree: names and directories, one package per name a manifest can depend on, unique values,
-dependencies that exist, an acyclic module graph, consumers with a producer, schedules with a job kind,
-modules made of layers only, countries named by their directories, settings sections apart, one isolated
-module per role, an isolated module's custody out of what loads with any of it.
+how manifests agree: names and directories, one package per name a manifest can depend on, one per
+distribution and import package, unique values, dependencies that exist, an acyclic module graph, consumers
+with a producer, schedules with a job kind, modules made of layers only, countries named by their directories,
+settings sections apart, one isolated module per role, an isolated module's custody out of what loads with any
+of it.
 """
 
 import ast
@@ -149,6 +150,26 @@ def _names_name_one_package(workspace: Workspace) -> Iterator[Problem]:
         if earlier is not package:
             yield Problem(
                 package.manifest_path, f"package.name '{package.name}' is {earlier.manifest_path}'s too"
+            )
+
+
+def _distributions_are_unique(workspace: Workspace) -> Iterator[Problem]:
+    """No two packages share a distribution or an import package, whatever their kinds and names.
+
+    A module ``app-api`` is ``ledger-app-api``, the app ``api``'s distribution; ``bill-ing`` and ``bill_ing``
+    are two distributions but one import package (``ledger_bill_ing``). Either would make one package
+    install, or import, as the other.
+    """
+    first: dict[str, Package] = {}
+    for package in workspace.packages:
+        earlier = first.setdefault(package.import_name, package)
+        if earlier is not package:
+            yield Problem(
+                package.manifest_path,
+                (
+                    f"distribution '{package.distribution}' (import package '{package.import_name}') "
+                    f"is {earlier.manifest_path}'s too"
+                ),
             )
 
 
@@ -403,6 +424,7 @@ def _a_role_isolates_one_module(workspace: Workspace) -> Iterator[Problem]:
 _RULES: Final[tuple[Callable[[Workspace], Iterator[Problem]], ...]] = (
     _names_are_directories,
     _names_name_one_package,
+    _distributions_are_unique,
     _values_are_unique,
     _the_owner_holds_every_permission,
     _names_start_with_their_owner,
