@@ -104,6 +104,8 @@ TokenAlgorithm = Literal[
 An ordinary alias, not a ``type`` statement: the verifier reads its values at runtime (``get_args``), and the
 value of a ``type`` alias is typed ``Any``, which the type checkers refuse."""
 
+MAX_FORWARDED_HOPS: Final = 5
+"""The most proxies an app may declare in front of it: an ingress, a load balancer, a CDN, and some room."""
 _HTTPS_ENVIRONMENTS: Final = frozenset({"staging", "production"})
 LEGAL_RETENTION_YEARS: Final = 10
 """The least the legal archive keeps an object in staging and production (Código Tributario art. 50 h)."""
@@ -282,8 +284,8 @@ class Settings(_ClosedSettings):
     http_host: str = Field(default="127.0.0.1", min_length=1, max_length=255)
     """The address the HTTP server binds: loopback for a run on a host; the image sets every interface."""
     http_port: Annotated[int, Field(ge=1, le=65535)] = 8100
-    """The api's port on a host; the worker run on a host sets 8101, and the image sets 8000 (inside a
-    container). Never 8000 on the host: another project's."""
+    """The api's port on a host; the worker run on a host sets 8101, the signer 8102, the receiver 8103, and
+    the image sets 8000 (inside a container). Never 8000 on the host: another project's."""
     otlp_endpoint: str | None = None
     """OTLP/gRPC collector, e.g. ``http://otel-collector:4317``; traces are not exported without it."""
     token_issuer: str | None = Field(default=None, min_length=1, max_length=2048)
@@ -299,6 +301,14 @@ class Settings(_ClosedSettings):
     """Requests a second one credential may make in this replica: the backstop behind the ingress's limit."""
     rate_limit_burst: Annotated[int, Field(ge=1, le=100_000)] = 100
     """How many requests one credential may make at once before it is held to ``rate_limit_per_second``."""
+    receiver_rate_per_second: Annotated[float, Field(gt=0, le=100_000)] = 20.0
+    """Requests a second one client address may make of the receiver, in this replica (§10): its callers hold
+    no credential of ours, so the receiver limits by address; a channel limits each taxpayer's routes too."""
+    receiver_rate_burst: Annotated[int, Field(ge=1, le=100_000)] = 40
+    """How many requests one client address may make of the receiver at once."""
+    receiver_forwarded_hops: Annotated[int, Field(ge=0, le=MAX_FORWARDED_HOPS)] = 0
+    """The proxies in front of the receiver that append the client's address to ``X-Forwarded-For`` (an
+    ingress: 1). With none (the default) that header is never read, and the peer is the client."""
     token_kind_claim_required: bool = False
     """Whether every token must carry the signed ``urn:ledger:principal_kind`` (an Action of the identity
     provider adds it): required in staging and production, optional on a laptop and in tests."""

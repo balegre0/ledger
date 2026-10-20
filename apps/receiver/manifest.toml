@@ -1,0 +1,13 @@
+[package]
+name = "receiver"
+kind = "app"
+summary = "Tax-authority- and emitter-facing routes of the fiscal channels."
+owners = ["@balegre0"]
+
+[dependencies]
+packages = ["platform"]
+python = []
+
+[app]
+script = "ledger-receiver"
+role = "receiver"

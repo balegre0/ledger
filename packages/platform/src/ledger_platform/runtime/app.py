@@ -19,7 +19,13 @@ undeclared is: ``runtime.assembly``). Start
   fan-out (the worker's moves its outbox); ``/livez``, ``/readyz`` and ``/metrics`` on its HTTP port.
 - ``migrate``: every schema's revisions in order (platform first), the relay's grants, then the subscriptions
   of every schema and the routing version in one transaction.
-- ``receiver``: refused until its modules exist (v2-M4).
+- ``receiver``: the channels' receiver routes alone (§3.8: the tax authority's and other emitters' calls),
+  each path under a channel's key routed lower-cased (DGII's paths are case-insensitive), each client address
+  held to ``LEDGER_RECEIVER_RATE_*`` before anything is read, and the body limit of each route (a channel's
+  inbound document declares its own, ``larger_body``). It proves no token of ours and needs no token
+  setting: its channels prove their senders (seeds, tokens and signatures of their own). No module's router,
+  no consumer, job or schedule runs in it; its readiness is the database and its packages' schemas and
+  checks, never the signer's (a client role's signer hands no check).
 
 Connections. Units go through ``LEDGER_DATABASE_URL``, which may be a transaction pooler's (§6.7): with
 ``LEDGER_DATABASE_POOLED`` psycopg prepares no statement on it. The after-commit NOTIFYs have a pool of their
@@ -70,8 +76,9 @@ from ledger_platform.events.dispatcher import Dispatcher
 from ledger_platform.events.inbox import InboxRunner
 from ledger_platform.events.subscriptions import bump_routing, sync_subscriptions
 from ledger_platform.events.wakeups import Wakeups
-from ledger_platform.http.app import ApiInfo, Observability, create_app
+from ledger_platform.http.app import DEFAULT_EDGE, ApiInfo, Edge, Observability, create_app
 from ledger_platform.http.authentication import Authentication
+from ledger_platform.http.rate import ClientRate, RateLimiter
 from ledger_platform.jobs.runner import JobRunner
 from ledger_platform.jobs.schedules import Scheduler
 from ledger_platform.observability.health import Health
@@ -132,21 +139,13 @@ STOP: Final = StopTimes()
 _ABANDONED: Final[set[asyncio.Future[object]]] = set()
 """Stop steps left behind: kept until they end, so that they are not collected while they run."""
 _logger = structlog.stdlib.get_logger(__name__)
-_NOT_BUILT: Final = frozenset({"receiver"})
+_SERVED: Final[frozenset[AppRole]] = frozenset({"api", "worker", "signer", "receiver"})
+"""The roles an HTTP server serves; ``migrate`` runs once."""
 _LOOPS: Final[Mapping[AppRole, int]] = {"worker": WORKER_LOOPS, "signer": SIGNER_LOOPS}
 """The roles that run consumers, jobs and schedules (they listen for wake-ups), and their loops besides."""
 _PERMANENT: Final = (InvalidOptionError,)
 """Failures of a worker that no restart can fix."""
 _SET_LOCK_TIMEOUT: Final = text("SELECT set_config('lock_timeout', :wait, true)")
-
-
-class RoleNotBuiltError(LedgerError):
-    """An app of a role whose modules do not exist yet."""
-
-    code: ClassVar[str] = "role_not_built"
-
-    def __init__(self, role: str) -> None:
-        super().__init__(f"the {role} app is not built yet: its modules come with a later milestone")
 
 
 class RoleMismatchError(LedgerError):
@@ -346,15 +345,17 @@ class App:
         discover: Discover = installed,
         clock: Clock = utc_now,
     ) -> None:
-        if role in _NOT_BUILT:
-            raise RoleNotBuiltError(role)
         if role in _LOOPS and settings.database_direct_url is None:
             raise DirectUrlMissingError(role)
         self._role = role
         self._settings = settings
         self._version = version
         self._registry = _registry()
-        self._authentication = Authentication.of(settings, self._registry, required=role == "api")
+        self._authentication = (
+            Authentication.none()  # its callers hold no token of ours (see the module)
+            if role == "receiver"
+            else Authentication.of(settings, self._registry, required=role == "api")
+        )
         configure_logging(settings, service=f"ledger-{role}")
         endpoint = None if role == "migrate" else settings.otlp_endpoint  # a one-shot job: no spans
         exporter = (
@@ -396,6 +397,8 @@ class App:
             not self._assembled.modules
         ):  # nothing installed, or every module suspended: almost surely a mistake
             _logger.warning("app.no_modules", role=role)
+        if role == "receiver" and not self._assembled.channels:  # it serves its probes, and nothing else
+            _logger.warning("app.no_channels", role=role)
         need = pool_need(role, self._assembled.members)
         if settings.database_pool_size < need.total:
             raise PoolTooSmallError(role, settings.database_pool_size, need)
@@ -433,8 +436,8 @@ class App:
         await self._close_pools()
 
     def asgi(self) -> FastAPI:
-        """The app to serve (``api``, ``worker``, ``signer``): its lifespan starts and stops the rest."""
-        if self._role not in {"api", "worker", "signer"}:
+        """The app to serve (every role but ``migrate``): its lifespan starts and stops the rest."""
+        if self._role not in _SERVED:
             raise RoleMismatchError(self._role, "serve HTTP")
         if self._served is None:
             members = self._assembled.members
@@ -445,8 +448,21 @@ class App:
                 ),
                 lifespan=self._lifespan,
                 routers=[router for member in members for router in member.routers],
+                edge=self._receiver_edge() if self._role == "receiver" else DEFAULT_EDGE,
             )
         return self._served
+
+    def _receiver_edge(self) -> Edge:
+        """The receiver's edge: paths under its channels' keys lower-cased, a rate per client address (§10).
+
+        Its callers hold no credential of ours to count by.
+        """
+        settings = self._settings
+        limiter = RateLimiter(rate=settings.receiver_rate_per_second, burst=settings.receiver_rate_burst)
+        return Edge(
+            lowercase_prefixes=tuple(f"/{key}/" for key in self._assembled.channels),
+            client_rate=ClientRate(limiter=limiter, forwarded_hops=settings.receiver_forwarded_hops),
+        )
 
     def migrate(self) -> None:
         """Every schema to head (platform first), the relay's grants, the subscriptions, the routing."""

@@ -341,10 +341,23 @@ class ExtensionPoints(_Section):
         return self.order.get(point, DEFAULT_EXTENSION_ORDER)
 
 
+class _MountedInReceiverError(ValueError):
+    """The receiver serves the channels' authority-facing routes and nothing else (§3.8)."""
+
+    def __init__(self) -> None:
+        super().__init__("the receiver mounts the channels' receiver routers only, never a package's routers")
+
+
+def _not_in_the_receiver(roles: tuple[AppRole, ...]) -> tuple[AppRole, ...]:
+    if "receiver" in roles:
+        raise _MountedInReceiverError
+    return roles
+
+
 class HttpSection(_Section):
     """``[http]``: the apps that mount the package's routers and the path prefixes they own."""
 
-    mounted_in: tuple[AppRole, ...] = Field(min_length=1)
+    mounted_in: Annotated[tuple[AppRole, ...], AfterValidator(_not_in_the_receiver)] = Field(min_length=1)
     prefixes: tuple[HttpPrefix, ...] = Field(min_length=1)
 
 

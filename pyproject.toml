@@ -48,6 +48,7 @@ workspace = [
 [tool.uv.sources]
 ledger-app-api = { workspace = true }
 ledger-app-migrate = { workspace = true }
+ledger-app-receiver = { workspace = true }
 ledger-app-worker = { workspace = true }
 ledger-country-do = { workspace = true }
 ledger-country-do-testing = { workspace = true }
@@ -65,6 +66,7 @@ ledger-testing = { workspace = true }
 known-first-party = [
     "ledger_app_api",
     "ledger_app_migrate",
+    "ledger_app_receiver",
     "ledger_app_worker",
     "ledger_country_do",
     "ledger_country_do_testing",

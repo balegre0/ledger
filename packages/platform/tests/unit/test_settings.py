@@ -56,6 +56,12 @@ def test_settings_need_only_the_database_and_the_environment(monkeypatch: pytest
     assert (settings.token_issuer, settings.token_audience, settings.token_jwks_url) == (None, None, None)
     assert (settings.token_algorithms, settings.token_leeway_seconds) == (frozenset({"RS256"}), 60)
     assert (settings.rate_limit_per_second, settings.rate_limit_burst) == (50.0, 100)
+    # the receiver's per-address limit (§10), its peer the client unless proxies are declared
+    assert (
+        settings.receiver_rate_per_second,
+        settings.receiver_rate_burst,
+        settings.receiver_forwarded_hops,
+    ) == (20.0, 40, 0)
 
 
 def test_settings_come_from_ledger_environment_variables(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -289,6 +295,12 @@ def test_the_leeway_is_at_most_five_minutes(monkeypatch: pytest.MonkeyPatch, lee
         ("LEDGER_RATE_LIMIT_PER_SECOND", "100001", "rate_limit_per_second"),
         ("LEDGER_RATE_LIMIT_BURST", "0", "rate_limit_burst"),
         ("LEDGER_RATE_LIMIT_BURST", "100001", "rate_limit_burst"),
+        ("LEDGER_RECEIVER_RATE_PER_SECOND", "0", "receiver_rate_per_second"),
+        ("LEDGER_RECEIVER_RATE_PER_SECOND", "100001", "receiver_rate_per_second"),
+        ("LEDGER_RECEIVER_RATE_BURST", "0", "receiver_rate_burst"),
+        ("LEDGER_RECEIVER_RATE_BURST", "100001", "receiver_rate_burst"),
+        ("LEDGER_RECEIVER_FORWARDED_HOPS", "-1", "receiver_forwarded_hops"),
+        ("LEDGER_RECEIVER_FORWARDED_HOPS", "6", "receiver_forwarded_hops"),
     ],
 )
 def test_the_rate_limit_must_be_a_positive_rate_and_a_burst_of_at_least_one(

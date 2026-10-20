@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict
 lazy from fastapi import FastAPI
 
 from ledger_platform.config.options import InvalidOptionError
-from ledger_platform.http.app import ApiInfo, Observability, create_app
+from ledger_platform.http.app import ApiInfo, Edge, Observability, create_app
 from ledger_platform.http.limits import MAX_BODY_BYTES, MAX_UPLOAD_BYTES, larger_body
 from ledger_platform.http.problems import Problem
 from ledger_platform.observability.health import Health
@@ -86,7 +86,7 @@ def app_of(handled: Handled, *, limit: int = LIMIT) -> FastAPI:
         observability=observability,
         lifespan=lifespan,
         routers=[router],
-        max_body_bytes=limit,
+        edge=Edge(max_body_bytes=limit),
     )
 
 

@@ -1,8 +1,9 @@
-# The local stack: PostgreSQL, the migrate job, the api and the worker, and Zitadel behind a profile.
+# The local stack: PostgreSQL, the migrate job, the api, the worker, the receiver; Zitadel behind a profile.
 #
 # What an app running on the host is configured with (the LEDGER_* variables of Settings), beside ledger.env's:
 #   LEDGER_DATABASE_URL=postgresql+psycopg://ledger_app:ledger_app@127.0.0.1:5432/ledger (or LEDGER_POSTGRES_PORT)
-#   LEDGER_HTTP_PORT=8101 for the worker (the api's 8100 is the default): never 8000, another project's here
+#   LEDGER_HTTP_PORT=8101 for the worker, 8103 for the receiver (the api's 8100 is the default): never 8000,
+#   another project's here
 #   LEDGER_ARCHIVE_PATH=<an absolute directory of the host> (ledger.env's /archive is the containers'), or
 #   LEDGER_ARCHIVE_BACKEND unset: then no archive is bound, and a channel that reads one does not start
 # The containers have no /archive volume yet: nothing archives until the DO channel does (v2-M3b Task 18), and
@@ -22,11 +23,14 @@
 #
 # Apps, from the one image (deploy/docker/ledger.Dockerfile), each configured by ledger.env (one Settings class for
 # every app) plus what is its own: `migrate` runs once, as the migrator login over a direct connection, and the
-# api and the worker start after it succeeded. The worker listens for wake-ups over a direct connection too. In
-# their containers the apps listen on 8000; on the host the api is published on 127.0.0.1:${LEDGER_API_PORT:-8100}
-# and the worker's probes and metrics on 127.0.0.1:${LEDGER_WORKER_PORT:-8101} (8000 is another project's on this
-# machine). Each runs one Granian worker (scale by replicas); Granian kills one still stopping after 30 s, so
-# compose waits 40 s before its own kill.
+# api, the worker and the receiver start after it succeeded. The worker listens for wake-ups over a direct
+# connection too. In their containers the apps listen on 8000; on the host the api is published on
+# 127.0.0.1:${LEDGER_API_PORT:-8100}, the worker's probes and metrics on 127.0.0.1:${LEDGER_WORKER_PORT:-8101} and
+# the receiver (the tax authority's and other emitters' calls, its own host name in a deployment) on
+# 127.0.0.1:${LEDGER_RECEIVER_PORT:-8103}; 8102 is kept for the signer's probes (8000 is another project's on this
+# machine). The receiver proves no token of ours: ledger.env's token settings are the api's. Each runs one
+# Granian worker (scale by replicas); Granian kills one still stopping after 30 s, so compose waits 40 s before
+# its own kill.
 # The profile `zitadel` adds a local identity provider (zitadel/README.md); the profile `localstack` adds an S3
 # with object lock for the archive's s3 backend (ledger.env says how to point the apps at it).
 name: ledger
@@ -87,6 +91,14 @@ services:
     environment:
       LEDGER_DATABASE_DIRECT_URL: postgresql+psycopg://ledger_app:ledger_app@postgres:5432/ledger
     ports: ["127.0.0.1:${LEDGER_WORKER_PORT:-8101}:8000"]
+    stop_grace_period: 40s
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  receiver:
+    <<: *ledger
+    command: ["/app/.venv/bin/ledger-receiver"]
+    ports: ["127.0.0.1:${LEDGER_RECEIVER_PORT:-8103}:8000"]
     stop_grace_period: 40s
     depends_on:
       migrate: {condition: service_completed_successfully}

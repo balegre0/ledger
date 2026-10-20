@@ -13,21 +13,36 @@ when it is still active, in a second bounded map (``max_set_aside``) it is taken
 So a new credential never waits for room, and an active one keeps the allowance it used. Only past
 ``max_keys + max_set_aside`` credentials active at once is the oldest set aside forgotten: the bound a flood
 that large meets. The settings are ``LEDGER_RATE_LIMIT_PER_SECOND`` and ``LEDGER_RATE_LIMIT_BURST``.
+
+The receiver's callers hold no credential of ours (§3.8): ``RateByClient`` holds each client *address* to a
+limiter instead (§10, the receiver's per-IP limit; ``LEDGER_RECEIVER_RATE_*``), before the app reads anything
+of the request. The address is the peer's, unless proxies are declared in front (``forwarded_hops``): then it
+is the one the outermost of them appended to ``X-Forwarded-For``, the one entry a client cannot write.
 """
 
 from collections import OrderedDict
+from dataclasses import dataclass
 from http import HTTPStatus
 from math import ceil
 from time import monotonic
 from typing import ClassVar, Final, final
 lazy from collections.abc import Callable, Mapping
 
+from starlette.datastructures import Headers
+
 from ledger_kernel.errors import UnavailableError
 from ledger_platform.config.options import InvalidOptionError, is_positive_and_finite, require_at_least
+from ledger_platform.config.settings import MAX_FORWARDED_HOPS
+from ledger_platform.http.probes import OPERATIONAL_PATHS
+from ledger_platform.http.problems import refusal
+lazy from ledger_platform.http.metrics import AsgiApp, AsgiReceive, AsgiScope, AsgiSend
 
 _COMPONENT: Final = "rate limit"
 DEFAULT_KEYS: Final = 10_000
 DEFAULT_SET_ASIDE: Final = 1_000
+UNKNOWN_CLIENT: Final = "unknown"
+"""The key of a request whose server named no peer (no ASGI server does over TCP): one shared allowance."""
+_FORWARDED_FOR: Final = "x-forwarded-for"
 
 
 class RateLimitedError(UnavailableError):
@@ -117,3 +132,68 @@ class RateLimiter:
             aside[oldest] = tat
             if len(aside) > self._max_aside:
                 _ = aside.popitem(last=False)
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ClientRate:
+    """A rate per client address (see the module): the limiter, and the proxies in front of the app."""
+
+    limiter: RateLimiter
+    forwarded_hops: int = 0
+    """How many proxies append to ``X-Forwarded-For`` in front of the app: 0 (the default) trusts no such
+    header, and the peer is the client."""
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.forwarded_hops <= MAX_FORWARDED_HOPS:
+            raise InvalidOptionError(
+                component=_COMPONENT,
+                option="forwarded_hops",
+                requirement=f"0 to {MAX_FORWARDED_HOPS} proxies",
+                value=self.forwarded_hops,
+            )
+
+
+def client_address(scope: AsgiScope, *, forwarded_hops: int) -> str:
+    """The address a request came from (see the module).
+
+    Behind ``forwarded_hops`` proxies, the entry of ``X-Forwarded-For`` (every such header, in order) that the
+    outermost appended: the ``forwarded_hops``-th from the right. A chain shorter than that did not pass every
+    proxy (it reached the app another way): its peer is taken. Without a peer, ``UNKNOWN_CLIENT``.
+    """
+    match scope.get("client"):
+        case [str() as host, int()]:
+            address = host
+        case _:
+            address = UNKNOWN_CLIENT
+    if forwarded_hops == 0:
+        return address
+    written = ",".join(Headers(scope=scope).getlist(_FORWARDED_FOR)).split(",")
+    chain = [entry for entry in (each.strip() for each in written) if entry]
+    return chain[-forwarded_hops] if len(chain) >= forwarded_hops else address
+
+
+@final
+class RateByClient:
+    """Holds each client address to a ``ClientRate`` (see the module); an ASGI middleware.
+
+    Over its rate, a request is answered 429 ``rate_limited`` with ``Retry-After``, before the app reads it.
+    The probes and the metrics (``OPERATIONAL_PATHS``) are never limited: the orchestrator's prober and the
+    scraper share an address with nobody, and a refused probe would take a healthy replica out of rotation.
+    """
+
+    __slots__ = ("_app", "_rate")
+
+    def __init__(self, app: AsgiApp, *, rate: ClientRate) -> None:
+        self._app = app
+        self._rate = rate
+
+    async def __call__(self, scope: AsgiScope, receive: AsgiReceive, send: AsgiSend) -> None:
+        """Run the request, or refuse it when its client is over the rate."""
+        if scope["type"] == "http" and scope.get("path") not in OPERATIONAL_PATHS:
+            rate = self._rate
+            wait = rate.limiter.wait(client_address(scope, forwarded_hops=rate.forwarded_hops))
+            if wait > 0:
+                await refusal(RateLimitedError(wait))(scope, receive, send)
+                return
+        await self._app(scope, receive, send)

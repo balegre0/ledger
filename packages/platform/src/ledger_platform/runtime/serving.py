@@ -1,9 +1,10 @@
 """Serving an app over HTTP (§3.3, §13): the one Granian setup of the roles that serve.
 
-``api`` serves its routes; ``worker`` and ``signer`` serve their probes (the signer's gRPC service is a
-resource of its module). An app's console script calls ``serve(role)``; Granian then imports this module's
-factory of the role in its worker process, and the factory builds the ``App`` from ``LEDGER_*``. One Granian
-worker per replica: an app is scaled by replicas, each sized for one process and its pools.
+``api`` serves its routes, ``receiver`` its channels' receiver routes; ``worker`` and ``signer`` serve their
+probes (the signer's gRPC service is a resource of its module). An app's console script calls
+``serve(role)``; Granian then imports this module's factory of the role in its worker process, and the
+factory builds the ``App`` from ``LEDGER_*``. One Granian worker per replica: an app is scaled by replicas,
+each sized for one process and its pools.
 
 Stopping. On SIGTERM Granian stops accepting, lets the requests in flight finish, then runs the app's
 shutdown, which takes at most ``STOP_BUDGET`` seconds; it kills its worker ``WORKER_KILL_TIMEOUT`` seconds
@@ -35,7 +36,7 @@ from ledger_platform.config.settings import Settings
 from ledger_platform.observability.logs import configure_logging
 from ledger_platform.runtime.app import STOP_BUDGET, App
 
-type ServedRole = Literal["api", "worker", "signer"]
+type ServedRole = Literal["api", "worker", "signer", "receiver"]
 """The roles an HTTP server serves; ``migrate`` runs once and exits."""
 
 SERVER_LOGGERS: Final = ("_granian", "granian.access")
@@ -50,6 +51,7 @@ _FACTORIES: Final[Mapping[ServedRole, str]] = {
     "api": f"{__name__}:api",
     "worker": f"{__name__}:worker",
     "signer": f"{__name__}:signer",
+    "receiver": f"{__name__}:receiver",
 }
 
 
@@ -81,6 +83,11 @@ def worker() -> FastAPI:
 def signer() -> FastAPI:
     """Granian's factory of the ``signer`` app."""
     return _served("signer")
+
+
+def receiver() -> FastAPI:
+    """Granian's factory of the ``receiver`` app."""
+    return _served("receiver")
 
 
 def serve(role: ServedRole) -> int:

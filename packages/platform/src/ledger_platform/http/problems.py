@@ -262,8 +262,12 @@ def _problem(
 
 
 def refusal(error: LedgerError) -> JSONResponse:
-    """The problem document ``error`` is answered with, for a layer that answers before a route runs."""
-    return _problem(status_of(error), error.code, detail=str(error) or None)
+    """The problem document ``error`` is answered with, for a layer that answers before a route runs.
+
+    With the headers an error that names its answer adds (``ProblemAnswer``: a rate limit's ``Retry-After``).
+    """
+    headers = error.problem_headers() if isinstance(error, ProblemAnswer) else None
+    return _problem(status_of(error), error.code, detail=str(error) or None, headers=headers)
 
 
 def current_request_id() -> str | None:

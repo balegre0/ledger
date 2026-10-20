@@ -16,11 +16,11 @@ lazy from fastapi import FastAPI
 from ledger_kernel.access import Principal, PrincipalKind, SubjectId
 from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_platform.config.options import InvalidOptionError
-from ledger_platform.http.app import ApiInfo, Observability, create_app
+from ledger_platform.http.app import ApiInfo, Edge, Observability, create_app
 from ledger_platform.http.deps import Verifier
 from ledger_platform.http.problems import Problem
 from ledger_platform.http.proving import authenticated
-from ledger_platform.http.rate import RateLimitedError, RateLimiter
+from ledger_platform.http.rate import ClientRate, RateLimitedError, RateLimiter, client_address
 from ledger_platform.observability.health import Health
 
 KEY: Final = "org:subject"
@@ -219,6 +219,96 @@ async def test_an_app_without_a_limiter_does_not_limit() -> None:
 async def test_a_refusal_to_wait_names_whole_seconds_in_retry_after() -> None:
     response = await get_as(guarded_app(None), "s1", "/slow-down")
     assert (response.status_code, response.headers["retry-after"]) == (429, "3")
+
+
+def by_client_app(limiter: RateLimiter, *, forwarded_hops: int = 0) -> FastAPI:
+    """An app holding every client address to ``limiter`` (the receiver's), with one route of its own."""
+    router = APIRouter()
+
+    @router.get("/ping")
+    async def ping() -> str:
+        return "pong"
+
+    observability = Observability(
+        health=Health(), registry=CollectorRegistry(), tracer_provider=TracerProvider()
+    )
+    return create_app(
+        info=ApiInfo(title="t", version="1"),
+        observability=observability,
+        lifespan=lifespan,
+        routers=[router],
+        edge=Edge(client_rate=ClientRate(limiter=limiter, forwarded_hops=forwarded_hops)),
+    )
+
+
+async def get_from(
+    app: FastAPI, address: str, path: str = "/ping", *, forwarded: tuple[str, ...] = ()
+) -> httpx.Response:
+    """``path`` asked by a peer at ``address``, through proxies that wrote ``forwarded`` (one header each)."""
+    transport = httpx.ASGITransport(app=app, client=(address, 4711))
+    headers = [("X-Forwarded-For", value) for value in forwarded]
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        return await client.get(path, headers=headers)
+
+
+async def test_a_client_address_over_its_rate_is_refused_before_the_app_and_others_are_not() -> None:
+    app = by_client_app(limiter_of(Clock(), rate=1.0, burst=2))
+    first = [(await get_from(app, "203.0.113.7")).status_code for _ in range(2)]
+    over = await get_from(app, "203.0.113.7")
+    other = await get_from(app, "198.51.100.1")
+    assert (first, over.status_code, other.status_code) == ([200, 200], 429, 200)
+    assert over.headers["retry-after"] == "1"
+    problem = Problem.model_validate_json(over.content)
+    assert (problem.code, problem.status) == ("rate_limited", 429)
+
+
+async def test_probes_and_metrics_are_never_held_to_a_client_s_rate() -> None:
+    app = by_client_app(limiter_of(Clock(), rate=1.0, burst=1))
+    assert (await get_from(app, "10.0.0.1")).status_code == 200
+    assert (await get_from(app, "10.0.0.1")).status_code == 429
+    for path in ("/livez", "/readyz", "/metrics"):
+        assert (await get_from(app, "10.0.0.1", path)).status_code == 200
+
+
+async def test_without_proxies_a_forwarded_address_is_ignored() -> None:
+    """Anyone can write ``X-Forwarded-For``: with no proxy declared, the peer is the client."""
+    app = by_client_app(limiter_of(Clock(), rate=1.0, burst=1))
+    assert (await get_from(app, "10.0.0.1", forwarded=("192.0.2.1",))).status_code == 200
+    assert (await get_from(app, "10.0.0.1", forwarded=("192.0.2.2",))).status_code == 429
+
+
+async def test_behind_proxies_the_client_is_the_address_the_outermost_proxy_wrote() -> None:
+    """With one proxy, the last address it appended is the client; what the client wrote before is not."""
+    app = by_client_app(limiter_of(Clock(), rate=1.0, burst=1), forwarded_hops=1)
+    assert (await get_from(app, "10.0.0.1", forwarded=("192.0.2.9, 192.0.2.1",))).status_code == 200
+    assert (await get_from(app, "10.0.0.1", forwarded=("192.0.2.8, 192.0.2.1",))).status_code == 429
+    assert (await get_from(app, "10.0.0.1", forwarded=("192.0.2.2",))).status_code == 200  # another client
+
+
+@pytest.mark.parametrize(
+    ("hops", "forwarded", "client", "address"),
+    [
+        (0, ("192.0.2.1",), ("10.0.0.1", 1), "10.0.0.1"),
+        (1, ("192.0.2.9 , 192.0.2.1",), ("10.0.0.1", 1), "192.0.2.1"),
+        (2, ("192.0.2.9, 192.0.2.1", "198.51.100.4"), ("10.0.0.1", 1), "192.0.2.1"),
+        (2, ("192.0.2.1",), ("10.0.0.1", 1), "10.0.0.1"),  # fewer than declared: it did not pass them all
+        (1, (" , ",), ("10.0.0.1", 1), "10.0.0.1"),
+        (0, (), None, "unknown"),
+    ],
+    ids=["peer", "one proxy", "two proxies, two headers", "short chain", "empty chain", "no peer"],
+)
+def test_the_client_address_of_a_request(
+    hops: int, forwarded: tuple[str, ...], client: tuple[str, int] | None, address: str
+) -> None:
+    headers = [(b"x-forwarded-for", value.encode()) for value in forwarded]
+    scope: dict[str, object] = {"type": "http", "path": "/", "headers": headers, "client": client}
+    assert client_address(scope, forwarded_hops=hops) == address
+
+
+@pytest.mark.parametrize("hops", [-1, 6])
+def test_the_number_of_proxies_is_bounded(hops: int) -> None:
+    with pytest.raises(InvalidOptionError, match="forwarded_hops"):
+        ClientRate(limiter=limiter_of(Clock()), forwarded_hops=hops)
 
 
 @given(

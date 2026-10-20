@@ -9,6 +9,10 @@ its outbox and inbox, and nothing else of that role touches its schema, which it
 consumer, job, schedule, purge or readiness check of it). An isolated module that hands a consumer or a job
 handler to another role is a defect.
 
+What a role mounts: ``api`` the routers of the modules that name it (``[http] mounted_in``) and the channels'
+public routers; ``receiver`` the channels' receiver routers alone (§3.8), each under its channel's key, in
+lower case, and proving no token of ours (``ReceiverRouteError`` otherwise); no other role mounts a channel's.
+
 Every settings section of the packages the role assembles is read first (``runtime.sections``). What every
 package hands back is checked against its manifest before anything starts: a schema of its own with its own
 migrations, a handler for every consumer and job kind it declares and none it does not, an implementation for
@@ -21,11 +25,13 @@ authentication, so every route's caller applies them.
 import graphlib
 from dataclasses import dataclass
 from typing import ClassVar, Final, final
-lazy from collections.abc import Callable, Iterable, Mapping, Sequence
+lazy from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 lazy from contextlib import AbstractAsyncContextManager
 
+from fastapi.routing import APIRoute, iter_route_contexts
 from pydantic import TypeAdapter
 lazy from fastapi import APIRouter
+lazy from fastapi.dependencies.models import Dependant
 lazy from prometheus_client import CollectorRegistry
 
 from ledger_kernel.errors import LedgerError
@@ -37,6 +43,7 @@ from ledger_platform.data.bound import BoundDatabase
 from ledger_platform.data.migrations import platform_migrations
 from ledger_platform.data.unit_of_work import JobPolicy
 from ledger_platform.events.consumers import Consumer
+from ledger_platform.http.lowercase import ascii_lower
 from ledger_platform.http.outbound import OutboundHttp
 from ledger_platform.jobs.maintenance import maintenance_jobs
 from ledger_platform.jobs.schedules import Schedule
@@ -73,7 +80,7 @@ lazy from ledger_platform.jobs.outcomes import JobHandler, JobSpec
 lazy from ledger_platform.observability.health import Check
 lazy from ledger_platform.observability.tracing import Tracing
 lazy from ledger_platform.runtime.archiving import StoreArchive
-lazy from ledger_platform.runtime.contexts import ChannelPack, Module
+lazy from ledger_platform.runtime.contexts import ChannelPack, ChannelParts, Module
 lazy from ledger_platform.runtime.registries import Discover
 
 _CYCLE: Final = TypeAdapter(list[str])
@@ -214,6 +221,15 @@ class PortReservedError(LedgerError):
         super().__init__(f"{module!r} provides port {port!r}, which the app binds: no module may provide it")
 
 
+class ReceiverRouteError(LedgerError):
+    """A channel's receiver route the receiver cannot serve (§3.8): the channel's defect, found at start."""
+
+    code: ClassVar[str] = "receiver_route_invalid"
+
+    def __init__(self, channel: str, path: str, problem: str) -> None:
+        super().__init__(f"channel {channel!r}'s receiver route {path!r} {problem}")
+
+
 class CronScheduleError(LedgerError):
     """A ``cron`` schedule: refused until a schedule needs one (Decision 15)."""
 
@@ -292,6 +308,40 @@ class Assembled:
     """The platform first, then the modules in assembly order, then the channels."""
     bound: Mapping[str, BoundDatabase]
     schedules: tuple[Schedule, ...]
+    channels: tuple[str, ...] = ()
+    """The keys of the channels assembled, sorted."""
+
+
+def _calls(dependant: Dependant) -> Iterator[object]:
+    """What every dependency of ``dependant`` calls, at any depth."""
+    for dependency in dependant.dependencies:
+        yield dependency.call
+        yield from _calls(dependency)
+
+
+def _receiver_routers(
+    key: str, routers: Sequence[APIRouter], authentication: Authentication
+) -> tuple[APIRouter, ...]:
+    """``routers`` as the receiver serves them (§3.8), else ``ReceiverRouteError``.
+
+    Every route is an API route under ``/<key>/`` (DGII registers one base per channel and taxpayer), in lower
+    case (the receiver routes every path under its channels' keys lower-cased: ``http.lowercase``), and never
+    declares the app's caller: the receiver proves no token of ours; a channel proves its senders itself.
+    """
+    prefix = f"/{key}/"
+    for context in iter_route_contexts([route for router in routers for route in router.routes]):
+        route, path = context.original_route, context.path or ""
+        if not isinstance(route, APIRoute):
+            raise ReceiverRouteError(key, path, "is not an API route")
+        if not path.startswith(prefix):
+            raise ReceiverRouteError(key, path, f"is outside {prefix}")
+        if ascii_lower(path) != path:
+            problem = "is not in lower case: the receiver routes every path lower-cased"
+            raise ReceiverRouteError(key, path, problem)
+        if authentication.caller in _calls(route.dependant):
+            problem = "declares the app's caller: the receiver proves no token of ours"
+            raise ReceiverRouteError(key, path, problem)
+    return tuple(routers)
 
 
 def _ordered(modules: Iterable[Module]) -> tuple[Module, ...]:
@@ -578,15 +628,29 @@ class _Assembly:
             schedules=entry.schedules,
             consumers=parts.consumers,
             handlers=parts.jobs,
-            routers=parts.routers if shared.role == "api" else (),
+            routers=self._routers_of(pack.key, parts),
             checks=parts.checks,
             resources=parts.resources,
             migrations=parts.migrations,
         )
 
+    def _routers_of(self, key: str, parts: ChannelParts) -> tuple[APIRouter, ...]:
+        """What the role mounts of a channel's routers: ``api`` its public ones, ``receiver`` the others."""
+        match self._shared.role:
+            case "api":
+                return tuple(parts.routers)
+            case "receiver":
+                return _receiver_routers(key, parts.receiver_routers, self._shared.authentication)
+            case _:
+                return ()
+
     def seal(self) -> None:
         """Every channel is in: modules read them from now on."""
         self._channels.seal()
+
+    def keys(self) -> tuple[str, ...]:
+        """The keys of the channels assembled, sorted (once sealed)."""
+        return self._channels.keys()
 
 
 def _schedules(members: Sequence[Member], bound: Mapping[str, BoundDatabase]) -> tuple[Schedule, ...]:
@@ -678,4 +742,5 @@ def assemble(shared: Shared, discover: Discover) -> Assembled:
         members=members,
         bound=bound,
         schedules=_schedules(members, bound),
+        channels=assembly.keys(),
     )

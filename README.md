@@ -13,7 +13,7 @@ Python 3.15 · uv workspace · strictly typed in two checkers · zero suppressio
 | `packages/` | `kernel` (the shared vocabulary, standard library only), `platform` (the chassis), `testing` (test tooling, dev-only) |
 | `modules/` | Business modules, each in its own PostgreSQL schema and role: `identity` |
 | `countries/` | Country packs: `do` (regime `do`, the e-CF channel) and its dev-only `do/testing` |
-| `apps/` | The deployables: `api`, `worker`, `migrate`; they compose the installed modules and hold no business code |
+| `apps/` | The deployables: `api`, `worker`, `receiver`, `migrate`; they compose the installed modules and hold no business code |
 | `contracts/` | Wire contracts (buf); protos arrive with the signer |
 | `tools/devtools` | `ledger-devtools`: checks the manifests and generates what follows from them |
 | `deploy/` | The image (`docker/ledger.Dockerfile`) and the local stack (`local/`) |
@@ -52,7 +52,7 @@ the local stack from it.
 ## Run locally
 
 ```bash
-docker compose -f deploy/local/compose.yaml up -d --build --wait   # postgres, migrate, api, worker
+docker compose -f deploy/local/compose.yaml up -d --build --wait   # postgres, migrate, api, worker, receiver
 docker compose -f deploy/local/compose.yaml down -v                 # stop and delete the data
 ```
 
@@ -60,19 +60,27 @@ docker compose -f deploy/local/compose.yaml down -v                 # stop and d
 |---|---|
 | api | `http://127.0.0.1:8100` (`LEDGER_API_PORT`) |
 | worker (probes, metrics) | `http://127.0.0.1:8101` (`LEDGER_WORKER_PORT`) |
+| receiver (the tax authority's and other emitters' calls) | `http://127.0.0.1:8103` (`LEDGER_RECEIVER_PORT`) |
 | PostgreSQL 18.6 | `127.0.0.1:5432` (`LEDGER_POSTGRES_PORT`), database `ledger`, login `ledger_app` |
 
-Port 8000 is never used on the host. `/livez` and `/readyz` answer on both apps. To call the api with real
+Port 8000 is never used on the host (8102 is kept for the signer's probes). `/livez` and `/readyz` answer on
+every app. To call the api with real
 tokens, start the local Zitadel (compose profile `zitadel`): [deploy/local/zitadel/README.md](deploy/local/zitadel/README.md);
 a stack started under its own project (`-p <name>`) gives its scripts the same `COMPOSE_PROJECT_NAME`.
 An app run on the host takes `LEDGER_*` variables (see `deploy/local/compose.yaml`'s header) and sets
-`LEDGER_HTTP_PORT=8101` for the worker (8100, the api's, is the default).
+`LEDGER_HTTP_PORT=8101` for the worker and 8103 for the receiver (8100, the api's, is the default).
 
 The api holds every credential to a rate of its own, per replica, behind the ingress's limit (spec §10):
 `LEDGER_RATE_LIMIT_PER_SECOND` (default 50) and `LEDGER_RATE_LIMIT_BURST` (default 100, the requests it may make
 at once). Over it a request is answered 429 with `Retry-After`. Each replica remembers 10 000 credentials; when
 all are active the oldest is set aside with what it used (1 000 more at most), so a new caller never waits for
 room and no allowance is reset short of 11 000 credentials active at once.
+
+The receiver proves no token of ours (its callers are the tax authority and other emitters, proven by each
+channel's own seeds, tokens and signatures). It holds each client address to `LEDGER_RECEIVER_RATE_PER_SECOND`
+(default 20) and `LEDGER_RECEIVER_RATE_BURST` (default 40), per replica; behind an ingress,
+`LEDGER_RECEIVER_FORWARDED_HOPS` names the proxies that append to `X-Forwarded-For` (default 0: never read).
+Paths under a channel's key are case-insensitive, as DGII calls them.
 
 ## Decisions and operations
 
