@@ -16,9 +16,7 @@ from ledger_country_do.channels.ecf_v1.adapters.buyers.client import (
     RECEPTION_PATH,
     SEED_PATH,
     VALIDATION_PATH,
-    ArecfContradictoryError,
     ArecfMismatchError,
-    ArecfMomentError,
     BuyerClient,
     BuyerUnavailableError,
     Delivered,
@@ -35,9 +33,11 @@ from ledger_country_do.channels.ecf_v1.adapters.signing.trust import (
 )
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import SignatureInvalidError
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf
+from ledger_country_do.channels.ecf_v1.adapters.xml.inbound import InboundDocumentInvalidError
 from ledger_country_do.channels.ecf_v1.application.ports import XmlSigner
 from ledger_country_do.channels.ecf_v1.domain.drafts import Buyer
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
+from ledger_country_do.channels.ecf_v1.domain.exchanges import NotReceivedReason
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.fake_dgii.app import FakeDgii
 from ledger_country_do_testing.fake_dgii.receiver import arecf
@@ -465,11 +465,12 @@ async def test_a_receipt_with_a_doctype_is_refused_unread(party: Party) -> None:
 
 
 async def test_a_receipt_dgii_s_schema_refuses_is_refused(party: Party, fake: FakeDgii) -> None:
-    broken = receipt(fake.state.receiver, party.clock).replace(
-        b"<Version>1.0</Version>", b"<Version>2.0</Version>"
+    unsigned = arecf(ISSUER.rnc, BUYER.rnc or "", "E310000000001", reason=None, at=party.clock())
+    broken = sign_with_signxml(
+        unsigned.replace(b"<Version>1.0</Version>", b"<Version>2.0</Version>"), fake.state.receiver
     )
     async with over(party, listed(SIMULATOR), answering(broken)).opened() as client:
-        with pytest.raises(SchemaViolationError):
+        with pytest.raises(InboundDocumentInvalidError, match="schema"):
             await client.deliver(T, credit_invoice(), await signed(party.signer))
 
 
@@ -482,8 +483,8 @@ async def test_an_unsigned_receipt_is_refused(party: Party) -> None:
 
 @pytest.mark.parametrize(
     "changes",
-    [{"issuer": "131880738"}, {"buyer": "101850043"}, {"encf": "E310000000002"}, {"encf": "e310000000001"}],
-    ids=["another-issuer", "another-buyer", "another-encf", "encf-in-another-case"],
+    [{"issuer": "131880738"}, {"buyer": "101850043"}, {"encf": "E310000000002"}],
+    ids=["another-issuer", "another-buyer", "another-encf"],
 )
 async def test_a_receipt_that_names_another_issuer_buyer_or_e_ncf_is_refused(
     party: Party, fake: FakeDgii, changes: dict[str, str]
@@ -492,6 +493,32 @@ async def test_a_receipt_that_names_another_issuer_buyer_or_e_ncf_is_refused(
     async with over(party, listed(SIMULATOR), transport).opened() as client:
         with pytest.raises(ArecfMismatchError):
             await client.deliver(T, credit_invoice(), await signed(party.signer))
+
+
+async def test_a_receipt_naming_no_e_ncf_is_refused_as_unreadable(party: Party, fake: FakeDgii) -> None:
+    transport = answering(receipt(fake.state.receiver, party.clock, encf="e310000000001"))
+    async with over(party, listed(SIMULATOR), transport).opened() as client:
+        with pytest.raises(InboundDocumentInvalidError, match="e-NCF"):
+            await client.deliver(T, credit_invoice(), await signed(party.signer))
+
+
+@pytest.mark.parametrize(
+    ("state", "reason", "received"),
+    [(b"00", None, True), (b"+0", None, True), (b"+01", NotReceivedReason.DUPLICATE, False)],
+    ids=["zero-padded", "signed-zero", "signed-padded-one"],
+)
+async def test_a_receipt_s_state_is_read_as_the_integer_it_writes(
+    party: Party, fake: FakeDgii, state: bytes, reason: NotReceivedReason | None, *, received: bool
+) -> None:
+    written = arecf(ISSUER.rnc, BUYER.rnc or "", "E310000000001", reason=reason, at=party.clock())
+    spelled = written.replace(b"<Estado>0</Estado>", b"<Estado>" + state + b"</Estado>").replace(
+        b"<Estado>1</Estado>", b"<Estado>" + state + b"</Estado>"
+    )
+    transport = answering(sign_with_signxml(spelled, fake.state.receiver))
+    async with over(party, listed(SIMULATOR), transport).opened() as client:
+        delivery = await client.deliver(T, credit_invoice(), await signed(party.signer))
+    assert isinstance(delivery, Delivered)
+    assert (delivery.received, delivery.reason) == (received, reason)
 
 
 async def test_a_receipt_not_received_without_a_reason_reads_so(party: Party, fake: FakeDgii) -> None:
@@ -511,7 +538,7 @@ async def test_a_receipt_whose_moment_is_no_date_is_refused(party: Party, fake: 
     impossible = unsigned[:start] + b"31-02-2026 09:30:00" + unsigned[start + 19 :]
     transport = answering(sign_with_signxml(impossible, fake.state.receiver))
     async with over(party, listed(SIMULATOR), transport).opened() as client:
-        with pytest.raises(ArecfMomentError):
+        with pytest.raises(InboundDocumentInvalidError, match="moment"):
             await client.deliver(T, credit_invoice(), await signed(party.signer))
 
 
@@ -749,7 +776,7 @@ async def test_a_receipt_that_says_received_and_gives_a_reason_is_refused(
     )
     transport = answering(sign_with_signxml(unsigned, fake.state.receiver))
     async with over(party, listed(SIMULATOR), transport).opened() as client:
-        with pytest.raises(ArecfContradictoryError):
+        with pytest.raises(InboundDocumentInvalidError, match="value"):
             await client.deliver(T, credit_invoice(), await signed(party.signer))
 
 
@@ -759,8 +786,7 @@ def test_a_receipt_answered_but_wrong_is_invalid_and_a_buyer_that_failed_is_unav
         SignatureInvalidError,
         DoctypeRefusedError,
         ArecfMismatchError,
-        ArecfContradictoryError,
-        ArecfMomentError,
+        InboundDocumentInvalidError,
         CounterpartyCertificateError,
         BuyerEndpointRefusedError,
     )

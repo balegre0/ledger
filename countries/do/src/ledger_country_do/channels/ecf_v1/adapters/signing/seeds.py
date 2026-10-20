@@ -56,7 +56,7 @@ def _read(seed: bytes) -> tuple[object, ...]:
     require_readable(seed, limit=MAX_SEED_BYTES)
     try:
         root = etree.fromstring(seed, parser())
-    except etree.XMLSyntaxError as error:
-        raise MalformedDocumentError from error
+    except etree.XMLSyntaxError:
+        raise MalformedDocumentError from None
     require_plain(root.getroottree().docinfo)
     return (root.tag, *(child.tag for child in root if isinstance(child.tag, str)))

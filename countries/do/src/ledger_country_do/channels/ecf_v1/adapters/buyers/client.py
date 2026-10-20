@@ -9,8 +9,9 @@ buyer publishes an authentication URL, its seed is signed (``XmlSigner.sign_seed
 (``validacioncertificado``: issuer to buyer, DGII is not in the middle). The signed e-CF is posted to its
 reception (multipart ``xml``, named RNC + e-NCF), and the answer must be a **signed ARECF**:
 
-1. valid for DGII's schema, read by the hardened parser (no DOCTYPE, no entity, bounded);
-2. its signature holding under the inbound profile (``verify_enveloped(profile=INBOUND)``);
+1. its signature holding under the inbound profile (``verify_enveloped(profile=INBOUND)``);
+2. read as every received document is (``xml.inbound.read_inbound_arecf``: hardened, bounded, valid for
+   DGII's schema, its integers read as integers, its moment a real one);
 3. naming this very document: issuer, buyer and e-NCF;
 4. signed by a certificate the trust policy accepts (``CounterpartyTrust``): chained to the configured roots,
    valid when the ARECF says it acknowledged (``FechaHoraAcuseRecibo``, Santo Domingo's time) and at
@@ -64,11 +65,8 @@ from ledger_country_do.channels.ecf_v1.adapters.http import (
     bounded,
 )
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import INBOUND, verify_enveloped
-from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS
-from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
+from ledger_country_do.channels.ecf_v1.adapters.xml.inbound import read_inbound_arecf
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError, EcfUnavailableError
-from ledger_country_do.channels.ecf_v1.domain.notation import parse_dgii_moment
-from ledger_fiscal_kit.xml.hardened import texts
 from ledger_kernel.tax_ids import masked
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import Endpoint, Resolve
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DirectoryEntry
@@ -77,15 +75,14 @@ lazy from ledger_country_do.channels.ecf_v1.adapters.signing.trust import Counte
 lazy from ledger_country_do.channels.ecf_v1.application.ports import XmlSigner
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
+lazy from ledger_country_do.channels.ecf_v1.domain.exchanges import NotReceivedReason
 lazy from ledger_platform.http.outbound import OutboundHttp
 
 RECEPTION_PATH: Final = "/fe/recepcion/api/ecf"
 SEED_PATH: Final = "/fe/autenticacion/api/semilla"
 VALIDATION_PATH: Final = "/fe/autenticacion/api/validacioncertificado"
 _OK: Final = 200
-_RECEIVED: Final = "0"
 _TOKEN: Final = TypeAdapter(TokenAnswer)
-_DETAIL: Final = "DetalleAcusedeRecibo/"
 _NOT_OPEN: Final = "a client not opened"
 
 type DirectoryLookup = Callable[[Environment, str], Awaitable[DirectoryEntry | None]]
@@ -116,7 +113,7 @@ class Delivered:
 
     arecf: bytes
     received: bool
-    reason: int | None
+    reason: NotReceivedReason | None
     certificate: x509.Certificate
 
 
@@ -149,15 +146,6 @@ class ArecfMismatchError(EcfInvalidError):
         super().__init__("the buyer's receipt names another issuer, buyer or e-NCF")
 
 
-class ArecfContradictoryError(EcfInvalidError):
-    """A receipt that says received (``Estado`` 0) and gives a reason it was not."""
-
-    code: ClassVar[str] = "do_ecf_arecf_contradictory"
-
-    def __init__(self) -> None:
-        super().__init__("the buyer's receipt says received and gives a reason it was not")
-
-
 @final
 @dataclass(frozen=True, slots=True)
 class SeedSigned:
@@ -187,15 +175,6 @@ def log_seed_signed(event: SeedSigned) -> None:
     )
 
 
-class ArecfMomentError(EcfInvalidError):
-    """A receipt whose ``FechaHoraAcuseRecibo`` fits DGII's pattern yet is no moment (a 31 February)."""
-
-    code: ClassVar[str] = "do_ecf_arecf_moment_unreadable"
-
-    def __init__(self) -> None:
-        super().__init__("the buyer's receipt is dated with no real moment")
-
-
 class BuyerOptions(TypedDict, total=False):
     """``BuyerClient``'s keywords: the trust policy and the outbound clients, then the rest.
 
@@ -210,18 +189,6 @@ class BuyerOptions(TypedDict, total=False):
     resolve: Resolve
     clock: Callable[[], datetime]
     audit: Callable[[SeedSigned], None]
-
-
-def _integer(text: str | None) -> str | None:
-    """An ``xs:integer``'s text as DGII's schema reads it: surrounding whitespace collapsed away."""
-    return None if text is None else text.strip()
-
-
-def _acknowledged(text: str | None) -> datetime:
-    moment = parse_dgii_moment(text or "")
-    if moment is None:
-        raise ArecfMomentError
-    return moment
 
 
 @final
@@ -364,29 +331,15 @@ class BuyerClient:
         return self._receipt(arecf, draft, buyer, received_at=self._clock())
 
     def _receipt(self, arecf: bytes, draft: EcfDraft, buyer: str, *, received_at: datetime) -> Delivered:
-        """``arecf`` once it is DGII's, signed, about ``draft``, by a certificate trusted for ``buyer``."""
-        DO_SCHEMAS.checked(Format.ARECF, arecf, unsigned=False)
+        """``arecf`` once it is DGII's, signed, about ``draft``, by a certificate trusted for ``buyer``.
+
+        Its signature first, then its reading (``read_inbound_arecf``: schema, values, hardened).
+        """
         verified = verify_enveloped(arecf, INBOUND)
-        issuer, receiver, encf, state, reason, moment = texts(
-            arecf,
-            f"{_DETAIL}RNCEmisor",
-            f"{_DETAIL}RNCComprador",
-            f"{_DETAIL}eNCF",
-            f"{_DETAIL}Estado",
-            f"{_DETAIL}CodigoMotivoNoRecibido",
-            f"{_DETAIL}FechaHoraAcuseRecibo",
-        )
-        if (_integer(issuer), _integer(receiver), encf) != (draft.issuer.rnc, buyer, str(draft.encf)):
+        receipt = read_inbound_arecf(arecf)
+        if (receipt.issuer_rnc, receipt.buyer_rnc, receipt.encf) != (draft.issuer.rnc, buyer, draft.encf):
             raise ArecfMismatchError
-        received = _integer(state) == _RECEIVED
-        if received and reason is not None:
-            raise ArecfContradictoryError
-        self._trust.check(
-            verified, counterparty=buyer, signed_at=_acknowledged(moment), received_at=received_at
-        )
+        self._trust.check(verified, counterparty=buyer, signed_at=receipt.at, received_at=received_at)
         return Delivered(
-            arecf=arecf,
-            received=received,
-            reason=None if reason is None else int(reason),
-            certificate=verified.certificate,
+            arecf=arecf, received=receipt.received, reason=receipt.reason, certificate=verified.certificate
         )
