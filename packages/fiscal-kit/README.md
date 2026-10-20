@@ -4,9 +4,22 @@ The minimal contract the `fiscal` module, the channels and the signer agree on (
 two: only what two of them share lives here. It sits between the countries and modules above it and the
 platform below it (import-linter contract 1).
 
+- `channels`: the `Channel` Protocol fiscal routes to (requirements, check, issue, status, resume, printed
+  representation), its `ChannelDef` (built from the manifest entry), what it answers (`Requirements`,
+  `Objection`, `StatusUpdate`, `Issued`, `Representation`), `EnrollmentState`, `ResumeReason`, and the
+  `ChannelRegistry` over the platform's assembled channels, read at call time.
+- `drafts`: `FiscalDraft`, a commercial document at a version as a channel's input (seller and buyer, the
+  establishment and its time zone, lines with their resolved taxes, the kernel's totals, references, the
+  regime's fields), and `DocumentRef`. Pure: kernel types only.
+- `numbering`: the `NumberingPolicy` port and the `FiscalNumber` it allocates; allocation stays in the packs.
 - `ports`: `SignerPort` (sign a document or an authentication seed; the certificate's validity), its request
   and answer types, the errors that cross it and its key `SIGNER_PORT`. The signer module's client implements
-  it; channels call it. A key never crosses it.
+  it; channels call it. A key never crosses it. `CompanyDirectory` (`COMPANY_DIRECTORY`; implemented by
+  fiscal, also the channels' `PermissionSource`), `ArchivePort` (`ARCHIVE_PORT`; bound by the app over
+  `platform.blobs`), `archive_key` and the archive's errors.
+- `events`: what every channel publishes, under names no channel owns: `DocumentUpdated`
+  (`fiscal_channel.document.updated`), `ReceivedDocumentRecorded`, `RequirementsChanged`; fiscal reads the
+  first and the last back from their `RawEvent` with the class's `read`.
 - `status`: what an authority's answer means, country-neutral: `FiscalStatus`, `Severity`, `StatusEntry`, the
   exhaustive `StatusMap` a channel maps its authority's documented codes with, and its messages kept verbatim
   within bounds (`AuthorityMessage`, `kept`).
