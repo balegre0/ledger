@@ -23,7 +23,7 @@ unavailable: a dependency failed, and a retry may work.
 
 import re
 from typing import ClassVar, Final
-lazy from collections.abc import Mapping
+lazy from collections.abc import Mapping, Sequence
 
 import grpc
 
@@ -138,14 +138,16 @@ async def call_unary[Request, Response](
     *,
     rpc: str,
     deadline: float = DEFAULT_DEADLINE,
+    metadata: Sequence[tuple[str, str]] = (),
 ) -> Response:
     """Call ``method`` (named ``rpc``, ``/package.Service/Method``) within ``deadline`` seconds.
 
-    A failure is the ``RemoteError`` the module describes; the deadline must be positive and at most
-    ``MAX_DEADLINE``.
+    ``metadata`` goes with the call: to a guarded server, its caller's ``grpc.metadata.call_metadata``. A
+    failure is the ``RemoteError`` the module describes (a guard's refusal is ``RemoteForbiddenError``); the
+    deadline must be positive and at most ``MAX_DEADLINE``.
     """
     require_deadline(deadline)
     try:
-        return await method(request, timeout=deadline)
+        return await method(request, timeout=deadline, metadata=tuple(metadata))
     except grpc.aio.AioRpcError as error:
         raise remote_error(error, rpc) from error
