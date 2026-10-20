@@ -25,8 +25,8 @@ from ledger_country_do.channels.ecf_v1.adapters.buyers.client import (
     log_seed_signed,
 )
 from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import BuyerEndpointRefusedError
-from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DirectoryEntry
 from ledger_country_do.channels.ecf_v1.adapters.http import MAX_ANSWER, DgiiTimeouts
+from ledger_country_do.channels.ecf_v1.adapters.signing.port import DocumentSigner
 from ledger_country_do.channels.ecf_v1.adapters.signing.trust import (
     CounterpartyCertificateError,
     CounterpartyTrust,
@@ -34,7 +34,7 @@ from ledger_country_do.channels.ecf_v1.adapters.signing.trust import (
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import SignatureInvalidError
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf
 from ledger_country_do.channels.ecf_v1.adapters.xml.inbound import InboundDocumentInvalidError
-from ledger_country_do.channels.ecf_v1.application.ports import XmlSigner
+from ledger_country_do.channels.ecf_v1.application.ports import DirectoryEntry
 from ledger_country_do.channels.ecf_v1.domain.drafts import Buyer
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 from ledger_country_do.channels.ecf_v1.domain.exchanges import NotReceivedReason
@@ -42,6 +42,7 @@ from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.fake_dgii.app import FakeDgii
 from ledger_country_do_testing.fake_dgii.receiver import arecf
 from ledger_country_do_testing.fake_dgii.state import dgii_check
+from ledger_country_do_testing.local_signer import SIGNING_AS
 from ledger_country_do_testing.pki import organization
 from ledger_country_do_testing.samples import (
     BUYER,
@@ -58,9 +59,11 @@ from ledger_fiscal_kit.xml.schemas import SchemaViolationError
 from ledger_platform.http.outbound import OutboundHttp
 from ledger_testing.clock import ManualClock
 from ledger_testing.pki import Authority
-lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.client import DirectoryLookup
+from ledger_testing.signer import TestSigner
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import Resolve
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
+lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.directory import DirectoryLookup
+lazy from ledger_country_do.channels.ecf_v1.application.ports import SigningAs
 lazy from ledger_country_do_testing.local_signer import KeyPairSigner
 lazy from ledger_testing.pki import Issued
 
@@ -68,6 +71,7 @@ if TYPE_CHECKING:
     from ledger_platform.http.outbound import OutboundTimeouts
 
 T: Final = Environment.TESTECF
+WHO: Final = SIGNING_AS
 SIMULATOR: Final = f"{FAKE_HOSTS.ecf}/testecf/emisorreceptor"
 SIMULATOR_HOST: Final = "ecf.fake.test"
 PUBLIC: Final = IPv4Address("93.184.215.14")
@@ -83,19 +87,19 @@ async def public_dns(host: str, port: int) -> Sequence[IPv4Address | IPv6Address
     return (PUBLIC,)
 
 
-async def nobody(environment: Environment, rnc: str) -> DirectoryEntry | None:
-    del environment, rnc
+async def nobody(who: SigningAs, environment: Environment, rnc: str) -> DirectoryEntry | None:
+    del who, environment, rnc
     return None
 
 
-async def simulator(environment: Environment, rnc: str) -> DirectoryEntry | None:
-    del environment
+async def simulator(who: SigningAs, environment: Environment, rnc: str) -> DirectoryEntry | None:
+    del who, environment
     return DirectoryEntry("EMISOR RECEPTOR DGII", rnc, SIMULATOR, SIMULATOR, SIMULATOR)
 
 
 def listed(reception: str, authentication: str | None = None) -> DirectoryLookup:
-    async def lookup(environment: Environment, rnc: str) -> DirectoryEntry | None:
-        del environment
+    async def lookup(who: SigningAs, environment: Environment, rnc: str) -> DirectoryEntry | None:
+        del who, environment
         return DirectoryEntry("COMPRADOR", rnc, reception, reception, authentication)
 
     return lookup
@@ -146,7 +150,7 @@ def over(
     timeouts: DgiiTimeouts | None = None,
 ) -> BuyerClient:
     return BuyerClient(
-        party.signer,
+        DocumentSigner(party.signer),
         directory,
         trust=party.trust,
         http=outbound_over(transport),
@@ -175,11 +179,7 @@ async def buyers(party: Party, dgii: DgiiClient, fake: FakeDgii) -> AsyncIterato
 
 async def signed(signer: KeyPairSigner, sequence: int = 1) -> bytes:
     draft = credit_invoice(sequence)
-    return await signer.sign_document(
-        ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT),
-        signed_at=SIGNED_AT,
-        reference=str(draft.encf),
-    )
+    return signer.sign(ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT))
 
 
 def receipt(receiver: Issued, clock: ManualClock, **changes: str) -> bytes:
@@ -196,7 +196,7 @@ def receipt(receiver: Issued, clock: ManualClock, **changes: str) -> bytes:
 async def test_an_accepted_e_cf_reaches_the_buyer_who_signs_its_receipt(
     buyers: BuyerClient, signer: KeyPairSigner, fake: FakeDgii
 ) -> None:
-    delivery = await buyers.deliver(T, credit_invoice(), await signed(signer))
+    delivery = await buyers.deliver(WHO, T, credit_invoice(), await signed(signer))
     assert isinstance(delivery, Delivered)
     assert (delivery.received, delivery.reason) == (True, None)
     assert delivery.certificate == fake.state.receiver.certificate
@@ -209,8 +209,8 @@ async def test_without_the_buyer_s_authentication_and_a_second_time(
 ) -> None:
     fake.state.receiver_requires_auth = False
     document = await signed(signer)
-    first = await buyers.deliver(T, credit_invoice(), document)
-    again = await buyers.deliver(T, credit_invoice(), document)
+    first = await buyers.deliver(WHO, T, credit_invoice(), document)
+    again = await buyers.deliver(WHO, T, credit_invoice(), document)
     assert isinstance(first, Delivered)
     assert isinstance(again, Delivered)
     assert (first.received, again.received, again.reason) == (True, False, 3)
@@ -221,22 +221,24 @@ async def test_a_receipt_whose_signature_fails_is_refused(
 ) -> None:
     fake.state.tamper_arecf = True
     with pytest.raises(SignatureInvalidError):
-        await buyers.deliver(T, credit_invoice(), await signed(signer))
+        await buyers.deliver(WHO, T, credit_invoice(), await signed(signer))
 
 
 async def test_a_receipt_about_another_document_is_refused(
     buyers: BuyerClient, signer: KeyPairSigner
 ) -> None:
     with pytest.raises(ArecfMismatchError):
-        await buyers.deliver(T, credit_invoice(2), await signed(signer, 1))
+        await buyers.deliver(WHO, T, credit_invoice(2), await signed(signer, 1))
 
 
 async def test_delivery_does_not_apply_without_an_identified_electronic_buyer(
     buyers: BuyerClient, party: Party, fake: FakeDgii
 ) -> None:
-    assert await buyers.deliver(T, consumer_invoice(), b"") == NotApplicable("the buyer has no RNC or cédula")
+    assert await buyers.deliver(WHO, T, consumer_invoice(), b"") == NotApplicable(
+        "the buyer has no RNC or cédula"
+    )
     async with over(party, nobody, httpx.ASGITransport(app=fake.app)).opened() as client:
-        found = await client.deliver(T, credit_invoice(), b"")
+        found = await client.deliver(WHO, T, credit_invoice(), b"")
     assert found == NotApplicable("the buyer is not an electronic receiver")
 
 
@@ -244,7 +246,7 @@ async def test_a_buyer_that_fails_is_unavailable(party: Party, fake: FakeDgii) -
     async with over(party, simulator, httpx.ASGITransport(app=fake.app)).opened() as client:
         fake.script.outage = 1
         with pytest.raises(BuyerUnavailableError, match="its seed"):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
 
 
 @pytest.mark.parametrize(
@@ -268,12 +270,12 @@ async def test_a_buyer_whose_answers_cannot_be_read_or_reached_is_unavailable(
 
     async with over(party, simulator, httpx.MockTransport(handler)).opened() as client:
         with pytest.raises(BuyerUnavailableError, match=step):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
 
 
 async def test_a_client_not_opened_delivers_nothing(party: Party) -> None:
     with pytest.raises(BuyerUnavailableError, match="not opened"):
-        await over(party, simulator, None).deliver(T, credit_invoice(), await signed(party.signer))
+        await over(party, simulator, None).deliver(WHO, T, credit_invoice(), await signed(party.signer))
 
 
 # -- Endpoints from DGII's directory are the buyer's to write: attacker-controlled --------------------------
@@ -297,7 +299,7 @@ async def test_a_buyer_endpoint_that_is_not_a_public_https_name_is_refused_befor
     watched = Recording(httpx.ASGITransport(app=fake.app))
     async with over(party, listed(reception), watched).opened() as client:
         with pytest.raises(BuyerEndpointRefusedError):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
     assert watched.requests == []
 
 
@@ -308,7 +310,7 @@ async def test_an_authentication_endpoint_is_checked_too_before_anything_is_sent
     lookup = listed(SIMULATOR, authentication="https://169.254.169.254/latest")
     async with over(party, lookup, watched).opened() as client:
         with pytest.raises(BuyerEndpointRefusedError):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
     assert watched.requests == []
 
 
@@ -341,7 +343,7 @@ async def test_a_name_that_resolves_to_a_private_address_is_refused_before_anyth
     watched = Recording(httpx.ASGITransport(app=fake.app))
     async with over(party, simulator, watched, resolve=resolve).opened() as client:
         with pytest.raises(BuyerEndpointRefusedError, match="resolves to an address"):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
     assert watched.requests == []
 
 
@@ -350,7 +352,9 @@ async def test_every_request_goes_to_the_address_checked_its_name_kept_for_tls_a
 ) -> None:
     watched = Recording(httpx.ASGITransport(app=fake.app))
     async with over(party, simulator, watched).opened() as client:
-        assert isinstance(await client.deliver(T, credit_invoice(), await signed(party.signer)), Delivered)
+        assert isinstance(
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer)), Delivered
+        )
     assert [request.url.path for request in watched.requests] == [
         f"/testecf/emisorreceptor{path}" for path in (SEED_PATH, VALIDATION_PATH, RECEPTION_PATH)
     ]
@@ -372,7 +376,7 @@ async def test_a_name_rebound_to_a_private_address_between_requests_is_refused(
     watched = Recording(httpx.ASGITransport(app=fake.app))
     async with over(party, simulator, watched, resolve=rebinding).opened() as client:
         with pytest.raises(BuyerEndpointRefusedError):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
     assert [request.url.path.rsplit("/", 1)[-1] for request in watched.requests] == [
         "semilla",
         "validacioncertificado",
@@ -387,7 +391,7 @@ async def test_a_name_that_does_not_resolve_is_unavailable(party: Party, fake: F
 
     async with over(party, simulator, httpx.ASGITransport(app=fake.app), resolve=unknown).opened() as c:
         with pytest.raises(BuyerUnavailableError, match="its seed"):
-            await c.deliver(T, credit_invoice(), await signed(party.signer))
+            await c.deliver(WHO, T, credit_invoice(), await signed(party.signer))
 
 
 async def test_a_redirect_is_not_followed(party: Party) -> None:
@@ -402,7 +406,7 @@ async def test_a_redirect_is_not_followed(party: Party) -> None:
     lookup = listed(SIMULATOR)
     async with over(party, lookup, httpx.MockTransport(handler)).opened() as client:
         with pytest.raises(BuyerUnavailableError, match="its reception"):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
     assert sent == [f"/testecf/emisorreceptor{RECEPTION_PATH}"]
 
 
@@ -410,7 +414,7 @@ async def test_an_answer_over_the_limit_is_refused_as_it_streams(party: Party) -
     transport = answering(b"<" + b"a" * MAX_ANSWER + b"/>")
     async with over(party, listed(SIMULATOR), transport).opened() as client:
         with pytest.raises(BuyerUnavailableError, match="its reception"):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
 
 
 async def test_a_buyer_that_stalls_is_given_up_on(party: Party) -> None:
@@ -423,7 +427,7 @@ async def test_a_buyer_that_stalls_is_given_up_on(party: Party) -> None:
     transport = httpx.MockTransport(stalls)
     async with over(party, listed(SIMULATOR), transport, timeouts=timeouts).opened() as client:
         with pytest.raises(BuyerUnavailableError, match="its reception"):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
 
 
 async def test_a_delivery_has_an_overall_deadline(party: Party) -> None:
@@ -439,7 +443,7 @@ async def test_a_delivery_has_an_overall_deadline(party: Party) -> None:
     transport = httpx.MockTransport(slow)
     async with over(party, simulator, transport, timeouts=timeouts).opened() as client:
         with pytest.raises(BuyerUnavailableError, match="its authentication"):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
 
 
 async def test_a_hostile_seed_is_never_signed(party: Party) -> None:
@@ -451,7 +455,7 @@ async def test_a_hostile_seed_is_never_signed(party: Party) -> None:
 
     async with over(party, simulator, httpx.MockTransport(handler)).opened() as client:
         with pytest.raises(BuyerUnavailableError, match="its seed"):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
 
 
 # -- The receipt: schema, signature, contents, and its certificate under the trust policy --------------------
@@ -461,7 +465,7 @@ async def test_a_receipt_with_a_doctype_is_refused_unread(party: Party) -> None:
     transport = answering(b'<?xml version="1.0"?><!DOCTYPE ARECF SYSTEM "http://x/"><ARECF/>')
     async with over(party, listed(SIMULATOR), transport).opened() as client:
         with pytest.raises(DoctypeRefusedError):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
 
 
 async def test_a_receipt_dgii_s_schema_refuses_is_refused(party: Party, fake: FakeDgii) -> None:
@@ -471,14 +475,14 @@ async def test_a_receipt_dgii_s_schema_refuses_is_refused(party: Party, fake: Fa
     )
     async with over(party, listed(SIMULATOR), answering(broken)).opened() as client:
         with pytest.raises(InboundDocumentInvalidError, match="schema"):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
 
 
 async def test_an_unsigned_receipt_is_refused(party: Party) -> None:
     unsigned = arecf(ISSUER.rnc, BUYER.rnc or "", "E310000000001", reason=None, at=party.clock())
     async with over(party, listed(SIMULATOR), answering(unsigned)).opened() as client:
         with pytest.raises(SignatureInvalidError):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
 
 
 @pytest.mark.parametrize(
@@ -492,14 +496,14 @@ async def test_a_receipt_that_names_another_issuer_buyer_or_e_ncf_is_refused(
     transport = answering(receipt(fake.state.receiver, party.clock, **changes))
     async with over(party, listed(SIMULATOR), transport).opened() as client:
         with pytest.raises(ArecfMismatchError):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
 
 
 async def test_a_receipt_naming_no_e_ncf_is_refused_as_unreadable(party: Party, fake: FakeDgii) -> None:
     transport = answering(receipt(fake.state.receiver, party.clock, encf="e310000000001"))
     async with over(party, listed(SIMULATOR), transport).opened() as client:
         with pytest.raises(InboundDocumentInvalidError, match="e-NCF"):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
 
 
 @pytest.mark.parametrize(
@@ -516,7 +520,7 @@ async def test_a_receipt_s_state_is_read_as_the_integer_it_writes(
     )
     transport = answering(sign_with_signxml(spelled, fake.state.receiver))
     async with over(party, listed(SIMULATOR), transport).opened() as client:
-        delivery = await client.deliver(T, credit_invoice(), await signed(party.signer))
+        delivery = await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
     assert isinstance(delivery, Delivered)
     assert (delivery.received, delivery.reason) == (received, reason)
 
@@ -527,7 +531,7 @@ async def test_a_receipt_not_received_without_a_reason_reads_so(party: Party, fa
     )
     transport = answering(sign_with_signxml(unsigned, fake.state.receiver))
     async with over(party, listed(SIMULATOR), transport).opened() as client:
-        delivery = await client.deliver(T, credit_invoice(), await signed(party.signer))
+        delivery = await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
     assert isinstance(delivery, Delivered)
     assert (delivery.received, delivery.reason) == (False, None)
 
@@ -539,7 +543,7 @@ async def test_a_receipt_whose_moment_is_no_date_is_refused(party: Party, fake: 
     transport = answering(sign_with_signxml(impossible, fake.state.receiver))
     async with over(party, listed(SIMULATOR), transport).opened() as client:
         with pytest.raises(InboundDocumentInvalidError, match="moment"):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
 
 
 async def test_a_receipt_signed_under_an_authority_not_configured_is_refused(
@@ -548,7 +552,7 @@ async def test_a_receipt_signed_under_an_authority_not_configured_is_refused(
     elsewhere = replace(party, trust=CounterpartyTrust((Authority.root("ANOTHER ROOT").certificate,)))
     async with over(elsewhere, simulator, httpx.ASGITransport(app=fake.app)).opened() as client:
         with pytest.raises(CounterpartyCertificateError, match="trusted authority"):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
 
 
 async def test_a_receipt_signed_by_someone_other_than_the_buyer_is_refused(
@@ -560,7 +564,7 @@ async def test_a_receipt_signed_by_someone_other_than_the_buyer_is_refused(
     transport = answering(receipt(impostor, party.clock))
     async with over(party, listed(SIMULATOR), transport).opened() as client:
         with pytest.raises(CounterpartyCertificateError, match="not the buyer"):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
 
 
 async def test_the_buyer_on_the_e_cf_is_the_identity_its_receipt_must_carry(
@@ -568,15 +572,11 @@ async def test_the_buyer_on_the_e_cf_is_the_identity_its_receipt_must_carry(
 ) -> None:
     other = Buyer(rnc="131880738", name="OTRO COMPRADOR SRL")
     draft = credit_invoice(buyer=other)
-    document = await party.signer.sign_document(
-        ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT),
-        signed_at=SIGNED_AT,
-        reference=str(draft.encf),
-    )
+    document = party.signer.sign(ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT))
     fake.state.receiver_requires_auth = False
     async with over(party, simulator, httpx.ASGITransport(app=fake.app)).opened() as client:
         with pytest.raises(CounterpartyCertificateError, match="not the buyer"):
-            await client.deliver(T, draft, document)
+            await client.deliver(WHO, T, draft, document)
 
 
 async def test_a_receipt_dated_far_from_its_receipt_is_refused(party: Party, fake: FakeDgii) -> None:
@@ -584,7 +584,7 @@ async def test_a_receipt_dated_far_from_its_receipt_is_refused(party: Party, fak
     fake.state.receiver_requires_auth = False
     async with over(later, simulator, httpx.ASGITransport(app=fake.app)).opened() as client:
         with pytest.raises(CounterpartyCertificateError, match="far from"):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
 
 
 async def test_a_client_s_own_clock_is_the_system_s(
@@ -598,39 +598,19 @@ async def test_a_client_s_own_clock_is_the_system_s(
     )
     live.state.receiver_requires_auth = False
     client = BuyerClient(
-        party.signer,
+        DocumentSigner(party.signer),
         simulator,
         trust=party.trust,
         http=outbound_over(httpx.ASGITransport(app=live.app)),
         resolve=public_dns,
     )
     async with client.opened():
-        delivery = await client.deliver(T, credit_invoice(), await signed(party.signer))
+        delivery = await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
     assert isinstance(delivery, Delivered)
     assert delivery.received
 
 
 # -- Review round: the seed audit, every checked address, one classification -------------------------------
-
-
-@final
-class Audiences(XmlSigner):
-    """Signs with ``inner``, recording each seed's audience."""
-
-    __slots__ = ("_inner", "seen")
-
-    def __init__(self, inner: KeyPairSigner) -> None:
-        self._inner = inner
-        self.seen: list[str] = []
-
-    @override
-    async def sign_document(self, document: bytes, *, signed_at: datetime, reference: str) -> bytes:
-        return await self._inner.sign_document(document, signed_at=signed_at, reference=reference)
-
-    @override
-    async def sign_seed(self, seed: bytes, *, audience: str) -> bytes:
-        self.seen.append(audience)
-        return await self._inner.sign_seed(seed, audience=audience)
 
 
 @pytest.mark.parametrize(
@@ -644,9 +624,9 @@ class Audiences(XmlSigner):
 async def test_a_buyer_seed_is_signed_for_the_endpoint_it_came_from(
     party: Party, fake: FakeDgii, base: str, audience: str
 ) -> None:
-    signer = Audiences(party.signer)
+    signer = TestSigner(sign=party.signer.sign, sign_seed=party.signer.sign)
     client = BuyerClient(
-        signer,
+        DocumentSigner(signer),
         listed(base, base),
         trust=party.trust,
         http=outbound_over(httpx.ASGITransport(app=fake.app)),
@@ -654,14 +634,14 @@ async def test_a_buyer_seed_is_signed_for_the_endpoint_it_came_from(
         clock=party.clock,
     )
     async with client.opened():
-        await client.deliver(T, credit_invoice(), await signed(party.signer))
-    assert signer.seen == [audience]
+        await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
+    assert [(call.audience, call.tenant) for call in signer.calls] == [(audience, WHO.tenant)]
 
 
 async def test_every_buyer_seed_signed_is_audited_without_secrets(party: Party, fake: FakeDgii) -> None:
     audited: list[SeedSigned] = []
     client = BuyerClient(
-        party.signer,
+        DocumentSigner(party.signer),
         simulator,
         trust=party.trust,
         http=outbound_over(httpx.ASGITransport(app=fake.app)),
@@ -670,11 +650,11 @@ async def test_every_buyer_seed_signed_is_audited_without_secrets(party: Party, 
         audit=audited.append,
     )
     async with client.opened():
-        await client.deliver(T, credit_invoice(), await signed(party.signer))
+        await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
     assert audited == [SeedSigned(ISSUER.rnc, BUYER.rnc or "", SIMULATOR_HOST, party.clock())]
     fake.state.receiver_requires_auth = False
     unauthenticated = BuyerClient(
-        party.signer,
+        DocumentSigner(party.signer),
         listed(SIMULATOR),
         trust=party.trust,
         http=outbound_over(httpx.ASGITransport(app=fake.app)),
@@ -683,7 +663,7 @@ async def test_every_buyer_seed_signed_is_audited_without_secrets(party: Party, 
         audit=audited.append,
     )
     async with unauthenticated.opened():
-        await unauthenticated.deliver(T, credit_invoice(2), await signed(party.signer, 2))
+        await unauthenticated.deliver(WHO, T, credit_invoice(2), await signed(party.signer, 2))
     assert len(audited) == 1
 
 
@@ -742,7 +722,9 @@ async def test_an_address_that_cannot_be_connected_to_gives_way_to_the_next_chec
 
     transport = FirstAddressFails(httpx.ASGITransport(app=fake.app), after_sending=False)
     async with over(party, simulator, transport, resolve=counted).opened() as client:
-        assert isinstance(await client.deliver(T, credit_invoice(), await signed(party.signer)), Delivered)
+        assert isinstance(
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer)), Delivered
+        )
     assert transport.hosts == [str(PUBLIC), str(SECOND)] * 3
     assert resolved == [SIMULATOR_HOST] * 3
 
@@ -753,7 +735,7 @@ async def test_a_request_that_may_have_reached_an_address_is_never_sent_to_anoth
     transport = FirstAddressFails(httpx.ASGITransport(app=fake.app), after_sending=True)
     async with over(party, simulator, transport, resolve=both).opened() as client:
         with pytest.raises(BuyerUnavailableError, match="its seed"):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
     assert transport.hosts == [str(PUBLIC)]
 
 
@@ -765,7 +747,7 @@ async def test_a_buyer_none_of_whose_addresses_answers_is_unavailable(party: Par
     transport = FirstAddressFails(httpx.ASGITransport(app=fake.app), after_sending=False)
     async with over(party, simulator, transport, resolve=first_only).opened() as client:
         with pytest.raises(BuyerUnavailableError, match="its seed"):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
 
 
 async def test_a_receipt_that_says_received_and_gives_a_reason_is_refused(
@@ -777,7 +759,7 @@ async def test_a_receipt_that_says_received_and_gives_a_reason_is_refused(
     transport = answering(sign_with_signxml(unsigned, fake.state.receiver))
     async with over(party, listed(SIMULATOR), transport).opened() as client:
         with pytest.raises(InboundDocumentInvalidError, match="value"):
-            await client.deliver(T, credit_invoice(), await signed(party.signer))
+            await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
 
 
 def test_a_receipt_answered_but_wrong_is_invalid_and_a_buyer_that_failed_is_unavailable() -> None:
@@ -808,5 +790,5 @@ async def test_buyers_are_called_through_an_outbound_client_named_buyers_that_ke
 
     monkeypatch.setattr(OutboundHttp, "client", watched)
     async with over(party, simulator, httpx.ASGITransport(app=fake.app)).opened() as client:
-        await client.deliver(T, credit_invoice(), await signed(party.signer))
+        await client.deliver(WHO, T, credit_invoice(), await signed(party.signer))
     assert asked == [("buyers", False)]

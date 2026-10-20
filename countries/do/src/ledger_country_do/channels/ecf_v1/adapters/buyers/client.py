@@ -4,10 +4,11 @@ The buyer is looked up in DGII's directory; no entry means it is no electronic r
 apply (the client hands it the printed representation). The directory's URLs are the buyer's to write, so
 each is checked before anything is sent, and every request goes to an address checked public, never to a name
 resolved again (``endpoints``). They are bases to which DGII's standard paths are appended (F5). When the
-buyer publishes an authentication URL, its seed is signed (``XmlSigner.sign_seed`` refuses anything but DGII's
-``SemillaModel``, read hardened; its audience the endpoint's host and port) and exchanged for its token
-(``validacioncertificado``: issuer to buyer, DGII is not in the middle). The signed e-CF is posted to its
-reception (multipart ``xml``, named RNC + e-NCF), and the answer must be a **signed ARECF**:
+buyer publishes an authentication URL, its seed is signed as the issuing company (``Signatures.seed``
+refuses anything but DGII's ``SemillaModel``, read hardened; its audience the endpoint's host and port) and
+exchanged for its token (``validacioncertificado``: issuer to buyer, DGII is not in the middle). The signed
+e-CF is posted to its reception (multipart ``xml``, named RNC + e-NCF), and the answer must be a **signed
+ARECF**:
 
 1. its signature holding under the inbound profile (``verify_enveloped(profile=INBOUND)``);
 2. read as every received document is (``xml.inbound.read_inbound_arecf``: hardened, bounded, valid for
@@ -50,7 +51,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import ClassVar, Final, Required, TypedDict, Unpack, final
-lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
+lazy from collections.abc import AsyncGenerator, Callable, Mapping
 
 import httpx
 from pydantic import TypeAdapter, ValidationError
@@ -69,10 +70,10 @@ from ledger_country_do.channels.ecf_v1.adapters.xml.inbound import read_inbound_
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError, EcfUnavailableError
 from ledger_kernel.tax_ids import masked
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import Endpoint, Resolve
-lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DirectoryEntry
+lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.directory import DirectoryLookup
 lazy from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
 lazy from ledger_country_do.channels.ecf_v1.adapters.signing.trust import CounterpartyTrust
-lazy from ledger_country_do.channels.ecf_v1.application.ports import XmlSigner
+lazy from ledger_country_do.channels.ecf_v1.application.ports import Signatures, SigningAs
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 lazy from ledger_country_do.channels.ecf_v1.domain.exchanges import NotReceivedReason
@@ -84,8 +85,6 @@ VALIDATION_PATH: Final = "/fe/autenticacion/api/validacioncertificado"
 _OK: Final = 200
 _TOKEN: Final = TypeAdapter(TokenAnswer)
 _NOT_OPEN: Final = "a client not opened"
-
-type DirectoryLookup = Callable[[Environment, str], Awaitable[DirectoryEntry | None]]
 
 
 @final
@@ -208,7 +207,7 @@ class BuyerClient:
     )
 
     def __init__(
-        self, signer: XmlSigner, directory: DirectoryLookup, **options: Unpack[BuyerOptions]
+        self, signer: Signatures, directory: DirectoryLookup, **options: Unpack[BuyerOptions]
     ) -> None:
         self._signer = signer
         self._directory = directory
@@ -286,10 +285,10 @@ class BuyerClient:
             raise BuyerUnavailableError(step.name)
         return body
 
-    async def _token(self, at: Endpoint, deadline: float, draft: EcfDraft, buyer: str) -> str:
+    async def _token(self, who: SigningAs, at: Endpoint, deadline: float, draft: EcfDraft, buyer: str) -> str:
         seed = await self._exchange(at, _SEED, deadline, headers={"Accept": "application/xml"})
         try:
-            signed = await self._signer.sign_seed(seed, audience=at.authority)
+            signed = await self._signer.seed(who, seed, audience=at.authority)
         except EcfInvalidError as error:
             raise BuyerUnavailableError(_SEED.name) from error
         self._audit(SeedSigned(draft.issuer.rnc, buyer, at.host, self._clock()))
@@ -305,19 +304,23 @@ class BuyerClient:
         except ValidationError as error:
             raise BuyerUnavailableError(_AUTHENTICATION.name) from error
 
-    async def deliver(self, environment: Environment, draft: EcfDraft, signed: bytes) -> Delivery:
-        """``signed``, ``draft``'s accepted e-CF, delivered to its buyer (see the module)."""
+    async def deliver(
+        self, who: SigningAs, environment: Environment, draft: EcfDraft, signed: bytes
+    ) -> Delivery:
+        """``signed``, ``draft``'s accepted e-CF, delivered as ``who`` to its buyer (see the module)."""
         buyer = draft.buyer.rnc
         if buyer is None:
             return NotApplicable("the buyer has no RNC or cédula")
-        entry = await self._directory(environment, buyer)
-        if entry is None:
+        entry = await self._directory(who, environment, buyer)
+        if entry is None or entry.rnc != buyer:
             return NotApplicable("the buyer is not an electronic receiver")
         self._opened()
         reception = endpoint(entry.reception)
         authentication = None if entry.authentication is None else endpoint(entry.authentication)
         deadline = asyncio.get_running_loop().time() + self._timeouts.call
-        token = None if authentication is None else await self._token(authentication, deadline, draft, buyer)
+        token = (
+            None if authentication is None else await self._token(who, authentication, deadline, draft, buyer)
+        )
         headers = {"Accept": "application/xml"} | (
             {} if token is None else {"Authorization": f"Bearer {token}"}
         )

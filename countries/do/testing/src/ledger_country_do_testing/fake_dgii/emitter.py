@@ -13,6 +13,14 @@
 * ``GET {env}/consultarfce/api/Consultas/Consulta?RNC_Emisor=&ENCF=&Cod_Seguridad_eCF=`` (bearer): ``{rnc,
   encf, secuenciaUtilizada, codigo, estado, mensajes[{valor, codigo}]}``, its ``codigo`` a *string* of its
   own set (``RFCE_QUERY_CODES``), not ``consultaresultado``'s.
+* ``POST {env}/anulacionrangos/api/operaciones/anularrango`` (bearer; not in CerteCF): a signed ANECF,
+  answered ``{rnc, codigo, nombre, mensajes}``; ``codigo`` "1" (the fake's choice: DT-DGII's codes are
+  checked on TesteCF, Task 29).
+* ``POST {env}/aprobacioncomercial/api/aprobacioncomercial`` (bearer): a buyer's signed ACECF, answered
+  ``{mensaje: [...], estado}`` (DGII takes approvals only of e-CF it accepted: the fake does not check).
+
+Both are refused at the door (400, DGII's ``{trackId, error, mensaje}``) when they do not read, fail their
+schema or their signature; what is taken is kept (``FakeState.voids``, ``FakeState.dgii_approvals``).
 
 What is uploaded is bounded before it is read into memory: a body declared or streamed beyond ``MAX_UPLOAD``,
 or a file beyond the hardened parser's ``MAX_DOCUMENT``, raises ``UploadTooLargeError`` (the application
@@ -55,6 +63,10 @@ lazy from ledger_country_do_testing.fake_dgii.state import Credentials, FakeStat
 type Handler = Callable[[Request, str], Awaitable[Response]]
 
 WITHOUT_TRACK_IDS: Final = "certecf"
+"""CerteCF publishes neither ``consultatrackids`` nor ``anularrango`` (DT-DGII)."""
+VOIDED: Final = "Anulación de rango recibida"
+APPROVAL_TAKEN: Final = "Aprobación comercial recibida"
+NOT_VALID: Final = "El XML no es válido o su firma no lo es"
 RFCE_THRESHOLD: Final = Decimal("250000.00")
 NOT_A_FILE: Final = "Tipo de archivo no válido, favor proveer un XML"
 BAD_SIGNATURE: Final = "La firma del XML no es válida"
@@ -267,6 +279,8 @@ class EmitterServices:
             ("GET", "consultatrackids/api/trackids/consulta"): self._closed(self._track_ids),
             ("POST", "recepcionfc/api/recepcion/ecf"): self._closed(self._summary),
             ("GET", "consultarfce/api/consultas/consulta"): self._closed(self._summary_status),
+            ("POST", "anulacionrangos/api/operaciones/anularrango"): self._closed(self._void_ranges),
+            ("POST", "aprobacioncomercial/api/aprobacioncomercial"): self._closed(self._approval),
         }
 
     def _closed(self, handler: Handler) -> Handler:
@@ -420,3 +434,28 @@ class EmitterServices:
                 "mensajes": [] if found is None else _messages(found),
             }
         )
+
+    async def _signed_upload(self, request: Request, format_: Format) -> bytes | None:
+        """The uploaded document once it reads, fits ``format_``'s schema and its signature holds."""
+        sent = await upload(request)
+        if sent is None or not readable(sent[0]) or schema_problems(format_, sent[0]):
+            return None
+        return sent[0] if self._state.check.verify(sent[0]) else None
+
+    async def _void_ranges(self, request: Request, environment: str) -> Response:
+        if environment == WITHOUT_TRACK_IDS:
+            return Response(status_code=HTTPStatus.NOT_FOUND)
+        document = await self._signed_upload(request, Format.ANECF)
+        if document is None:
+            return bad_request(NOT_VALID)
+        self._state.voids.append(document)
+        (rnc,) = fields(document, "Encabezado/RncEmisor")
+        return JSONResponse({"rnc": rnc, "codigo": "1", "nombre": VOIDED, "mensajes": []})
+
+    async def _approval(self, request: Request, environment: str) -> Response:
+        del environment
+        document = await self._signed_upload(request, Format.ACECF)
+        if document is None:
+            return bad_request(NOT_VALID)
+        self._state.dgii_approvals.append(document)
+        return JSONResponse({"mensaje": [APPROVAL_TAKEN], "estado": "Aprobado"})

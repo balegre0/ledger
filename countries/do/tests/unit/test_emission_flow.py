@@ -6,7 +6,12 @@ from typing import Final, final, override
 
 import pytest
 
-from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import LiveHostRefusedError
+from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import (
+    LiveHostRefusedError,
+    Service,
+    ServiceNotInEnvironmentError,
+)
+from ledger_country_do.channels.ecf_v1.adapters.signing.port import DocumentSigner
 from ledger_country_do.channels.ecf_v1.adapters.xml.documents import DgiiXml
 from ledger_country_do.channels.ecf_v1.application.emission import (
     MAX_SIGNING_SKEW,
@@ -27,8 +32,9 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
     OutcomeUnknownError,
     Received,
     Refused,
+    Signatures,
+    SignerClockSkewError,
     SignerUnavailableError,
-    XmlSigner,
 )
 from ledger_country_do.channels.ecf_v1.domain.drafts import BillingIndicator, Line
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
@@ -38,15 +44,24 @@ from ledger_country_do.channels.ecf_v1.domain.routing import Route
 from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage, EcfState, NumberFate
 from ledger_country_do.regime import REGIME
 from ledger_country_do.regime.rounding import ROUNDING
+from ledger_country_do_testing.local_signer import SIGNING_AS
 from ledger_country_do_testing.samples import SEQUENCE_EXPIRES_ON, consumer_invoice, credit_invoice
+from ledger_fiscal_kit.ports import SignerPort
 from ledger_kernel.money import RoundingMode
 from ledger_testing.clock import ManualClock
 lazy from ledger_country_do.channels.ecf_v1.application.emission import Signed
-lazy from ledger_country_do.channels.ecf_v1.application.ports import Reception
+lazy from ledger_country_do.channels.ecf_v1.application.ports import (
+    Acknowledged,
+    DirectoryEntry,
+    Reception,
+    SignedDocument,
+    SigningAs,
+)
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
 lazy from ledger_country_do_testing.local_signer import KeyPairSigner
 
 NOW: Final = datetime(2026, 10, 13, 13, 30, tzinfo=UTC)
+WHO: Final = SIGNING_AS
 INSTANT: Final = timedelta(0)
 ISSUER: Final = "101850043"
 OUTCOME_UNKNOWN: Final = "do_ecf_dgii_outcome_unknown"
@@ -64,7 +79,7 @@ class ScriptedAuthority(Authority):
     submissions: list[Reception | EcfError] = field(default_factory=list)
     summaries: list[Answer | Refused | EcfError] = field(default_factory=lambda: [REFUSAL])
     answers: list[Answer | EcfError] = field(default_factory=list)
-    known: tuple[TrackId, ...] | EcfError | None = ()
+    known: tuple[TrackId, ...] | EcfError = ()
     not_ready: EcfError | None = None
     attempt: float = 20.0
     stall_submission: float = 0.0
@@ -83,10 +98,14 @@ class ScriptedAuthority(Authority):
     def attempt_limit(self) -> float:
         return self.attempt
 
+    def _for_whom(self, who: SigningAs) -> None:
+        assert who == WHO
+
     @override
     async def submit_ecf(
-        self, environment: Environment, issuer_rnc: str, encf: Encf, signed: bytes
+        self, who: SigningAs, environment: Environment, issuer_rnc: str, encf: Encf, signed: bytes
     ) -> Reception:
+        self._for_whom(who)
         self.events.append("submit_ecf")
         await asyncio.sleep(self.stall_submission)
         found = self.submissions.pop(0)
@@ -96,8 +115,9 @@ class ScriptedAuthority(Authority):
 
     @override
     async def submit_rfce(
-        self, environment: Environment, issuer_rnc: str, encf: Encf, signed: bytes
+        self, who: SigningAs, environment: Environment, issuer_rnc: str, encf: Encf, signed: bytes
     ) -> Answer | Refused:
+        self._for_whom(who)
         self.events.append("submit_rfce")
         found = self.summaries.pop(0)
         if isinstance(found, EcfError):
@@ -105,7 +125,8 @@ class ScriptedAuthority(Authority):
         return found
 
     @override
-    async def result(self, environment: Environment, track_id: str) -> Answer:
+    async def result(self, who: SigningAs, environment: Environment, track_id: str) -> Answer:
+        self._for_whom(who)
         self.events.append(f"result {track_id}")
         await asyncio.sleep(self.stall_result)
         found = self.answers.pop(0)
@@ -115,16 +136,39 @@ class ScriptedAuthority(Authority):
 
     @override
     async def track_ids(
-        self, environment: Environment, issuer_rnc: str, encf: Encf
-    ) -> tuple[TrackId, ...] | None:
+        self, who: SigningAs, environment: Environment, issuer_rnc: str, encf: Encf
+    ) -> tuple[TrackId, ...]:
+        self._for_whom(who)
         self.events.append("track_ids")
         if isinstance(self.known, EcfError):
             raise self.known
         return self.known
 
+    @override
+    async def rfce_status(
+        self, who: SigningAs, environment: Environment, issuer_rnc: str, encf: Encf, security_code: str
+    ) -> Answer:
+        raise AssertionError  # the emitter never resumes a parked document
+
+    @override
+    async def void_ranges(
+        self, who: SigningAs, environment: Environment, signed_anecf: bytes
+    ) -> Answer | Refused:
+        raise AssertionError  # not the emitter's
+
+    @override
+    async def commercial_approval(
+        self, who: SigningAs, environment: Environment, signed_acecf: bytes
+    ) -> Acknowledged | Refused:
+        raise AssertionError  # not the emitter's
+
+    @override
+    async def directory(self, who: SigningAs, environment: Environment, rnc: str) -> DirectoryEntry | None:
+        raise AssertionError  # not the emitter's
+
 
 @final
-class WatchedSigner(XmlSigner):
+class WatchedSigner(Signatures):
     """A real signer whose signing is recorded, may take (clock) time, or is refused with ``refusal``."""
 
     __slots__ = ("_clock", "_inner", "_late_from", "_refusal", "_takes", "asked")
@@ -138,7 +182,7 @@ class WatchedSigner(XmlSigner):
         late_from: int = 1,
         refusal: EcfError | None = None,
     ) -> None:
-        self._inner = inner
+        self._inner = DocumentSigner(inner)
         self._clock = clock
         self._takes = takes
         self._late_from = late_from
@@ -151,22 +195,29 @@ class WatchedSigner(XmlSigner):
         return len(self.asked)
 
     @override
-    async def sign_document(self, document: bytes, *, signed_at: datetime, reference: str) -> bytes:
+    async def document(
+        self, who: SigningAs, document: bytes, *, signed_at: datetime, reference: str
+    ) -> SignedDocument:
         self.asked.append((signed_at, reference))
         if self._refusal is not None:
             raise self._refusal
         if self.signed >= self._late_from:
             self._clock.advance(self._takes)
-        return await self._inner.sign_document(document, signed_at=signed_at, reference=reference)
+        return await self._inner.document(who, document, signed_at=signed_at, reference=reference)
 
     @override
-    async def sign_seed(self, seed: bytes, *, audience: str) -> bytes:
-        return await self._inner.sign_seed(seed, audience=audience)
+    async def seed(self, who: SigningAs, seed: bytes, *, audience: str) -> bytes:
+        raise AssertionError  # the emitter signs documents only
+
+
+def signatures(signer: Signatures | SignerPort) -> Signatures:
+    """``signer`` as the channel signs through it: a port (a key of the test's) behind ``DocumentSigner``."""
+    return DocumentSigner(signer) if isinstance(signer, SignerPort) else signer
 
 
 def emitter(
     authority: ScriptedAuthority,
-    signer: XmlSigner,
+    signer: Signatures | SignerPort,
     schedule: tuple[float, ...] = (1.0, 2.0),
     clock: ManualClock | None = None,
     budget: float | None = None,
@@ -177,8 +228,9 @@ def emitter(
     if budget is None:
         return Emitter(
             xml=DgiiXml(),
-            signer=signer,
+            signer=signatures(signer),
             authority=authority,
+            who=WHO,
             environment=Environment.TESTECF,
             clock=clock or (lambda: NOW),
             sleep=sleep,
@@ -186,8 +238,9 @@ def emitter(
         )
     return Emitter(
         xml=DgiiXml(),
-        signer=signer,
+        signer=signatures(signer),
         authority=authority,
+        who=WHO,
         environment=Environment.TESTECF,
         clock=clock or (lambda: NOW),
         sleep=sleep,
@@ -232,11 +285,17 @@ async def test_the_newest_fresh_track_id_is_adopted_from_the_tolerance_on(signer
 
 @pytest.mark.parametrize(
     "known",
-    [(), (STALE,), None, AuthorityUnavailableError(Failure.SERVER_ERROR, "track_ids"), EcfConflictError("x")],
+    [
+        (),
+        (STALE,),
+        ServiceNotInEnvironmentError(Service.TRACK_IDS, Environment.CERTECF),
+        AuthorityUnavailableError(Failure.SERVER_ERROR, "track_ids"),
+        EcfConflictError("x"),
+    ],
     ids=["listed-late", "stale-only", "certecf", "outage", "any-error"],
 )
 async def test_an_unknown_outcome_dgii_does_not_resolve_is_parked_never_resent(
-    signer: KeyPairSigner, known: tuple[TrackId, ...] | EcfError | None
+    signer: KeyPairSigner, known: tuple[TrackId, ...] | EcfError
 ) -> None:
     authority = ScriptedAuthority(submissions=[broken()], known=known)
     emitted = await emitter(authority, signer).emit(credit_invoice())
@@ -292,6 +351,8 @@ async def test_signing_asks_dgii_nothing_and_what_is_signed_is_sent_later(signer
     summary = await built.sign(consumer_invoice())
     assert (summary.route, authority.events) == (Route.RFCE, ["submit_ecf", "sleep 1.0", "result t"])
     assert summary.signed_rfce is not None
+    assert (signed.certificate, summary.certificate, summary.rfce_certificate) == (signer.certificate_id,) * 3
+    assert signed.rfce_certificate is None
 
 
 async def test_after_the_schedule_a_document_still_in_process_is_pending(signer: KeyPairSigner) -> None:
@@ -432,8 +493,8 @@ async def test_the_signer_is_told_the_moment_of_signing_and_the_e_ncf(signer: Ke
 
 @pytest.mark.parametrize(
     "refusal",
-    [CertificateNotValidError(), CertificateMissingError(), SignerUnavailableError()],
-    ids=["not-valid", "missing", "unavailable"],
+    [CertificateNotValidError(), CertificateMissingError(), SignerClockSkewError(), SignerUnavailableError()],
+    ids=["not-valid", "missing", "clock-skew", "unavailable"],
 )
 async def test_a_certificate_the_signer_refuses_parks_nothing_and_raises_the_channels_error(
     signer: KeyPairSigner, refusal: EcfError
@@ -450,8 +511,8 @@ async def test_a_certificate_the_signer_refuses_parks_nothing_and_raises_the_cha
 
 @pytest.mark.parametrize(
     "refusal",
-    [CertificateNotValidError(), CertificateMissingError(), SignerUnavailableError()],
-    ids=["not-valid", "missing", "unavailable"],
+    [CertificateNotValidError(), CertificateMissingError(), SignerClockSkewError(), SignerUnavailableError()],
+    ids=["not-valid", "missing", "clock-skew", "unavailable"],
 )
 async def test_a_seed_the_signer_refuses_while_sending_parks_the_document_as_never_sent(
     signer: KeyPairSigner, refusal: EcfError
@@ -524,8 +585,9 @@ def test_the_settle_delay_is_at_least_the_longest_attempt_at_sending(signer: Key
     def built(attempt: float, settle: float) -> Emitter:
         return Emitter(
             xml=DgiiXml(),
-            signer=signer,
+            signer=DocumentSigner(signer),
             authority=ScriptedAuthority(attempt=attempt),
+            who=WHO,
             environment=Environment.TESTECF,
             clock=lambda: NOW,
             sleep=sleep,
@@ -550,8 +612,9 @@ async def test_the_emitter_totals_and_rounds_with_the_regime_it_was_given(signer
     draft = replace(consumer_invoice(), lines=(line,))
     built = Emitter(
         xml=DgiiXml(),
-        signer=signer,
+        signer=DocumentSigner(signer),
         authority=ScriptedAuthority(),
+        who=WHO,
         environment=Environment.TESTECF,
         clock=lambda: NOW,
         sleep=sleep,

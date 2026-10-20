@@ -47,6 +47,7 @@ from ledger_country_do.channels.ecf_v1.adapters.buyers.client import BuyerClient
 from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import system_resolve
 from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
 from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts
+from ledger_country_do.channels.ecf_v1.adapters.signing.port import DocumentSigner
 from ledger_country_do.channels.ecf_v1.adapters.signing.trust import CounterpartyTrust
 from ledger_country_do.channels.ecf_v1.adapters.xml.documents import DgiiXml
 from ledger_country_do.channels.ecf_v1.application.emission import Emitter
@@ -60,7 +61,7 @@ from ledger_country_do.channels.ecf_v1.domain.environments import (
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 from ledger_country_do.channels.ecf_v1.domain.notation import local_date
 from ledger_country_do.channels.ecf_v1.domain.routing import Route
-from ledger_country_do_testing.local_signer import BundleIncompleteError, KeyPairSigner
+from ledger_country_do_testing.local_signer import SIGNING_AS, BundleIncompleteError, KeyPairSigner
 from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
 from ledger_country_do_testing.transports import outbound_over
 from ledger_fiscal_kit.status import FiscalStatus
@@ -94,6 +95,8 @@ _REPORTED: Final = (
     SigningPairError,
 )
 """What a run reports by its code instead of a traceback: the pack's errors and the kit's XML errors."""
+SPIKE_AS: Final = replace(SIGNING_AS, reason="do-ecf-v1.spike")
+"""Whom the spike signs and calls DGII as: its key ignores the tenant, the reason names the calls."""
 _AUTH_PROBE: Final = "ledger-spike-authentication-check"
 """A track id that does not exist: ``consultaresultado`` needs a token, so asking about it proves one."""
 _RFCE_NOT_DELIVERED: Final = "a consumer invoice sent as an RFCE is not delivered (spec 8.6.5)"
@@ -512,7 +515,7 @@ class _Run:
     """One run's settings, signer, DGII's client, outbound clients, wiring and output."""
 
     settings: SpikeSettings
-    signer: KeyPairSigner
+    signer: DocumentSigner
     dgii: DgiiClient
     http: OutboundHttp
     wiring: Wiring
@@ -532,7 +535,7 @@ async def _delivered(signed: Signed, trust: CounterpartyTrust, context: _Run) ->
     )
     try:
         async with buyers.opened() as opened:
-            delivery = await opened.deliver(settings.environment, draft, signed.signed_ecf)
+            delivery = await opened.deliver(SPIKE_AS, settings.environment, draft, signed.signed_ecf)
     except _REPORTED as error:
         _say(out, f"buyer: {error.code}: {error}")
         return _NOT_ACCEPTED
@@ -564,6 +567,7 @@ async def _emitted(draft: EcfDraft, trust: CounterpartyTrust | None, context: _R
         xml=DgiiXml(),
         signer=context.signer,
         authority=context.dgii,
+        who=SPIKE_AS,
         environment=settings.environment,
         clock=context.wiring.clock,
         sleep=context.wiring.sleep,
@@ -593,7 +597,7 @@ async def run(
         return _USAGE if refused.code else 0
     try:
         settings = SpikeSettings.from_environ(environ, root=Path.cwd())
-        signer = settings.signer()
+        signer = DocumentSigner(settings.signer())
         _say(out, f"environment: {settings.environment.value}")
         http = outbound_over(wiring.transport)
         dgii = DgiiClient(
@@ -605,7 +609,7 @@ async def run(
         )
         async with dgii.opened():
             if options.command == "auth":
-                answer = await dgii.result(settings.environment, _AUTH_PROBE)
+                answer = await dgii.result(SPIKE_AS, settings.environment, _AUTH_PROBE)
                 issued = f"authenticated with {settings.environment.value}: a token was issued (not shown)"
                 _say(out, f"{issued}; consultaresultado answered codigo {answer.code}")
                 return 0

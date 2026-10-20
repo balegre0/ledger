@@ -8,7 +8,7 @@ Emission is two steps, so a caller can keep what was signed before anything leav
   RFCE route the summary is written with that code, signed and checked too. Nothing is signed unless DGII's
   side is ready (``Authority.require_ready``: hosts allowed, connections open). The signer is told the moment
   of signing and the e-NCF; whether the certificate covers that moment is the signer's rule, not asked here
-  first (``XmlSigner``'s errors: ``CertificateNotValidError``, ``CertificateMissingError``...). Nothing is
+  first (``Signatures``' errors: ``CertificateNotValidError``, ``CertificateMissingError``...). Nothing is
   returned whose signature came back more than ``MAX_SIGNING_SKEW`` from that moment (``SigningSkewError``: a
   queued signer, a clock that jumped). ``sign`` raises, or returns everything signed with its QR.
 * ``send(signed) -> Emitted`` **never raises a pack error**: whatever stops it parks the document, ``Emitted``
@@ -48,6 +48,7 @@ from datetime import timedelta
 from typing import ClassVar, Final, Required, TypedDict, Unpack, final
 lazy from collections.abc import Awaitable
 lazy from datetime import datetime
+lazy from uuid import UUID
 
 from ledger_country_do.channels.ecf_v1.application.ports import (
     AuthorityUnavailableError,
@@ -76,7 +77,9 @@ lazy from ledger_country_do.channels.ecf_v1.application.ports import (
     Authority,
     EcfFormat,
     Reception,
-    XmlSigner,
+    Signatures,
+    SignedDocument,
+    SigningAs,
 )
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
@@ -123,8 +126,8 @@ class SettleTooShortError(EcfError):
 class SigningSkewError(EcfUnavailableError):
     """A signature came back too far from its stated moment of signing; signing again may succeed.
 
-    Raised here when the signature returns late, and by the signer (through ``XmlSigner``) when its own clock
-    is that far from the moment the document states.
+    The signer's own clock disagreeing with that moment is another matter (``SignerClockSkewError``, a
+    conflict): signing again from the same clock would be refused again.
     """
 
     code: ClassVar[str] = "do_ecf_signing_skew"
@@ -148,13 +151,15 @@ SEND_BUDGET_SPENT: Final = "do_ecf_send_budget_spent"
 
 
 class EmitterOptions(TypedDict, total=False):
-    """``Emitter``'s keywords beyond its ports: three required, the rest with defaults.
+    """``Emitter``'s keywords beyond its ports: four required, the rest with defaults.
 
-    The environment, a clock (``FechaHoraFirma``) and a sleep (the settle delay, between polls); the poll
+    Whom it emits for (``who``: the issuing company, its signatures and DGII's token), the environment, a
+    clock (``FechaHoraFirma``) and a sleep (the settle delay, between polls); the poll
     schedule (``POLL_SCHEDULE``), the settle delay (``SETTLE_DELAY``), the send budget (``SEND_BUDGET``) and
     the regime (``REGIME``). The QR's hosts are ``Emitter``'s own keyword (``OFFICIAL_QR`` by default).
     """
 
+    who: Required[SigningAs]
     environment: Required[Environment]
     clock: Required[Clock]
     sleep: Required[Sleep]
@@ -174,8 +179,12 @@ class Signed:
     route: Route
     signed_at: datetime
     signed_ecf: bytes
+    certificate: UUID
+    """The certificate that signed the e-CF (the signer's id), for the archive."""
     signed_rfce: bytes | None
     """The signed RFCE on the RFCE route; ``None`` on the reception route."""
+    rfce_certificate: UUID | None
+    """The certificate that signed the RFCE; ``None`` on the reception route."""
     security_code: str
     qr: str
 
@@ -261,6 +270,7 @@ class Emitter:
         "_settle",
         "_signer",
         "_sleep",
+        "_who",
         "_xml",
     )
 
@@ -268,7 +278,7 @@ class Emitter:
         self,
         *,
         xml: EcfFormat,
-        signer: XmlSigner,
+        signer: Signatures,
         authority: Authority,
         qr_hosts: QrHosts = OFFICIAL_QR,
         **options: Unpack[EmitterOptions],
@@ -276,6 +286,7 @@ class Emitter:
         self._xml = xml
         self._signer = signer
         self._authority = authority
+        self._who = options["who"]
         self._environment = options["environment"]
         self._clock = options["clock"]
         self._sleep = options["sleep"]
@@ -302,11 +313,11 @@ class Emitter:
             raise SequenceExpiredError  # DGII dates the range: it ran up to that day, in Santo Domingo
         reference = str(draft.encf)
         signed = await self._sign(self._xml.ecf(draft, totals, signed_at=signed_at), signed_at, reference)
-        code = security_code(self._xml.signed(draft, signed, rfce=False))
+        code = security_code(self._xml.signed(draft, signed.document, rfce=False))
         if where is Route.RFCE:
             unsigned = self._xml.rfce(draft, totals, security_code=code)
             summary = await self._sign(unsigned, signed_at, reference)
-            self._xml.signed(draft, summary, rfce=True)
+            self._xml.signed(draft, summary.document, rfce=True)
             qr = rfce_qr_url(
                 RfceQrData(draft.issuer.rnc, draft.encf, totals.total, code),
                 environment=self._environment,
@@ -317,8 +328,10 @@ class Emitter:
                 totals=totals,
                 route=where,
                 signed_at=signed_at,
-                signed_ecf=signed,
-                signed_rfce=summary,
+                signed_ecf=signed.document,
+                certificate=signed.certificate,
+                signed_rfce=summary.document,
+                rfce_certificate=summary.certificate,
                 security_code=code,
                 qr=qr,
             )
@@ -336,8 +349,10 @@ class Emitter:
             totals=totals,
             route=where,
             signed_at=signed_at,
-            signed_ecf=signed,
+            signed_ecf=signed.document,
+            certificate=signed.certificate,
             signed_rfce=None,
+            rfce_certificate=None,
             security_code=code,
             qr=qr_url(data, environment=self._environment, hosts=self._qr_hosts),
         )
@@ -358,9 +373,9 @@ class Emitter:
             unknown = Unknown.of(error, sent=progress.sent)
         return Emitted(signed=signed, track_id=progress.track_id, outcome=progress.outcome, unknown=unknown)
 
-    async def _sign(self, document: bytes, signed_at: datetime, reference: str) -> bytes:
+    async def _sign(self, document: bytes, signed_at: datetime, reference: str) -> SignedDocument:
         """``document`` signed, once its signature is back within ``MAX_SIGNING_SKEW`` of ``signed_at``."""
-        signed = await self._signer.sign_document(document, signed_at=signed_at, reference=reference)
+        signed = await self._signer.document(self._who, document, signed_at=signed_at, reference=reference)
         if abs(self._clock() - signed_at) > MAX_SIGNING_SKEW:
             raise SigningSkewError
         return signed
@@ -385,7 +400,8 @@ class Emitter:
     async def _summary_sent(self, signed: Signed, summary: bytes, progress: _Progress) -> None:
         draft = signed.draft
         answer = await self._submitted(
-            self._authority.submit_rfce(self._environment, draft.issuer.rnc, draft.encf, summary), progress
+            self._authority.submit_rfce(self._who, self._environment, draft.issuer.rnc, draft.encf, summary),
+            progress,
         )
         progress.outcome = (
             _refused(answer)
@@ -403,7 +419,7 @@ class Emitter:
             if self._spent(progress) + delay > self._budget:
                 return
             await self._waited(delay, progress)
-            answer = await self._authority.result(self._environment, reception.track_id)
+            answer = await self._authority.result(self._who, self._environment, reception.track_id)
             progress.outcome = _decided(answer, signed.draft, service=DgiiService.RESULT)
             if progress.outcome.final:
                 return
@@ -421,17 +437,19 @@ class Emitter:
         """Sent once; after an unknown outcome, a fresh track id DGII lists is adopted, or it is parked."""
         draft = signed.draft
         submit = self._authority.submit_ecf(
-            self._environment, draft.issuer.rnc, draft.encf, signed.signed_ecf
+            self._who, self._environment, draft.issuer.rnc, draft.encf, signed.signed_ecf
         )
         try:
             return await self._submitted(submit, progress)
         except OutcomeUnknownError as unknown:
             await self._waited(self._settle, progress)
             try:
-                known = await self._authority.track_ids(self._environment, draft.issuer.rnc, draft.encf)
+                known = await self._authority.track_ids(
+                    self._who, self._environment, draft.issuer.rnc, draft.encf
+                )
             except EcfError as error:
                 raise unknown from error
-            adopted = polling.adoptable(known or (), signed_at=signed.signed_at, excluded=frozenset())
+            adopted = polling.adoptable(known, signed_at=signed.signed_at, excluded=frozenset())
             if adopted is None:
                 raise
             progress.sent = True

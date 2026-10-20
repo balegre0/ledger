@@ -21,7 +21,6 @@ lazy from ledger_country_do_testing.local_signer import KeyPairSigner
 lazy from ledger_testing.pki import Issued
 
 SIMULATOR: Final = "/testecf/emisorreceptor/fe"
-AUDIENCE: Final = "ecf.fake.test"
 ACECF: Final = (
     b'<?xml version="1.0" encoding="utf-8"?><ACECF><DetalleAprobacionComercial><Version>1.0</Version>'
     b"<RNCEmisor>101850043</RNCEmisor><eNCF>E310000000001</eNCF><FechaEmision>13-10-2026</FechaEmision>"
@@ -37,13 +36,13 @@ def xml(document: bytes) -> dict[str, tuple[str, bytes, str]]:
 
 async def receiver_token(http: httpx.AsyncClient, signer: KeyPairSigner) -> dict[str, str]:
     seed = (await http.get(f"{SIMULATOR}/autenticacion/api/semilla")).content
-    signed_seed = await signer.sign_seed(seed, audience=AUDIENCE)
+    signed_seed = signer.sign(seed)
     answer = await http.post(f"{SIMULATOR}/autenticacion/api/validacioncertificado", files=xml(signed_seed))
     return {"Authorization": f"Bearer {json_object(answer)['token']}"}
 
 
 async def signed(signer: KeyPairSigner, document: bytes) -> bytes:
-    return await signer.sign_document(document, signed_at=SIGNED_AT, reference="E310000000001")
+    return signer.sign(document)
 
 
 async def signed_credit_invoice(signer: KeyPairSigner, sequence: int = 1) -> bytes:

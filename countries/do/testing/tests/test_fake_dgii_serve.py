@@ -84,7 +84,7 @@ async def test_the_factory_s_fake_takes_any_signer_but_only_dgii_s_signature_pro
         transport=httpx.ASGITransport(app=create_app()), base_url="http://127.0.0.1:8471"
     ) as http:
         seeds = [(await http.get(f"{AUTH}/semilla")).content for _ in range(2)]
-        signed = await signer.sign_seed(seeds[0], audience="127.0.0.1:8471")
+        signed = signer.sign(seeds[0])
         with_an_id = forge(
             seeds[1],
             stranger.key,
