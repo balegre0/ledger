@@ -19,11 +19,15 @@ platform's job (Decision 6).
   failure (5xx) is never stored (``ServerFailureResponseError`` carries it out of the transaction so that it
   rolls back), nor a body over ``MAX_STORED_BODY`` (a defect of the route).
 * Times are the database's (the unit's ``now``, its transaction's start).
+* ``stored`` looks a key's answer up without claiming it, waiting for nothing and writing nothing: for work
+  whose preparation must not run again for a replay (the signer's import opens a bundle and calls a KMS
+  before its unit). A use still in flight is unseen by it; ``once`` then waits for it as a twin.
+
+What a key may be is the transport-neutral ``data.idempotency``'s rule.
 """
 
 import hashlib
 import json
-import re
 from dataclasses import dataclass
 from datetime import timedelta
 from types import MappingProxyType
@@ -43,6 +47,7 @@ lazy from sqlalchemy import ColumnElement
 
 from ledger_kernel.errors import ConflictError, InvalidInputError, LedgerError
 from ledger_platform.config.options import InvalidOptionError
+from ledger_platform.data.idempotency import MAX_KEY_LENGTH, InvalidIdempotencyKeyError, is_idempotency_key
 from ledger_platform.http.metrics import full_template
 lazy from ledger_kernel.access import Principal
 lazy from ledger_kernel.ids import CompanyId
@@ -51,7 +56,6 @@ lazy from ledger_platform.data.unit_of_work import UnitOfWork
 _COMPONENT: Final = "idempotency"
 """What this module's option errors name (``InvalidOptionError.component``)."""
 DEFAULT_RETENTION: Final = timedelta(days=7)
-MAX_KEY_LENGTH: Final = 255
 MAX_STORED_BODY: Final = 1024 * 1024
 """Bytes of a response body a key keeps at most (1 MiB): a write's answer is a document, never a download."""
 REPLAYED_HEADER: Final = "Idempotent-Replayed"
@@ -77,21 +81,10 @@ _UNSTORED_HEADERS: Final = frozenset(
 
 """Headers (lowercase) a replay must not repeat: a session or a credential handed to whoever retries, what the
 server sets anew on every response (the date, the length), and the hop-by-hop headers of one connection."""
-_KEY: Final = re.compile(rf"[!-~]{{1,{MAX_KEY_LENGTH}}}", re.ASCII)
-"""Visible ASCII without spaces: what a client can put in a header and see back unchanged."""
 _LENGTH_BYTES: Final = 8
 _NO_HEADERS: Final[Mapping[str, str]] = MappingProxyType({})
 _STORED: Final = TypeAdapter(tuple[bytes, int | None, bytes | None, list[tuple[str, str]] | None])
 """A key's row as ``_stored`` reads it: the request's hash, then the answer (``None`` until it is stored)."""
-
-
-class InvalidIdempotencyKeyError(InvalidInputError):
-    """A key that is not 1 to ``MAX_KEY_LENGTH`` visible ASCII characters (never repeated)."""
-
-    code: ClassVar[str] = "invalid_idempotency_key"
-
-    def __init__(self) -> None:
-        super().__init__(f"an Idempotency-Key is 1 to {MAX_KEY_LENGTH} visible ASCII characters")
 
 
 class IdempotencyKeyReusedError(InvalidInputError):
@@ -241,7 +234,7 @@ class Attempt:
         the body, each length-prefixed: the same key on another resource of the route, or for another company
         named by a header, is another request (422).
         """
-        if _KEY.fullmatch(key) is None:
+        if not is_idempotency_key(key):
             raise InvalidIdempotencyKeyError
         digest = hashlib.sha256()
         company = b"" if target.company is None else str(target.company).encode()
@@ -286,17 +279,8 @@ class Idempotency:
         ``IdempotencyKeyInUseError`` for the client; ``ServerFailureResponseError`` and
         ``OversizedStoredResponseError`` when the work's response is not to be stored.
         """
-        scope = unit.scope
-        if scope is None or scope.mode is None:
-            raise UnmodedIdempotencyScopeError
+        identity = _identity(unit, attempt)
         keys = unit.tables.idempotency_keys
-        identity: dict[str, object] = {
-            "organization_id": scope.organization,
-            "mode": scope.mode.value,
-            "principal": attempt.principal,
-            "route": attempt.route,
-            "key": attempt.key,
-        }
         row = [keys.c[column] == value for column, value in identity.items()]
         fresh = insert(keys).values(
             **identity,
@@ -335,6 +319,35 @@ class Idempotency:
             )
         )
         return Outcome(response, replayed=False)
+
+    async def stored(self, unit: UnitOfWork, attempt: Attempt) -> StoredResponse | None:
+        """The response stored for ``attempt``'s key, or ``None``: nothing is claimed, waited for or written.
+
+        ``None`` before a first use, after the key expired, and while a first use is in flight (uncommitted,
+        so unseen). ``unit`` is scoped as ``once``'s (``UnmodedIdempotencyScopeError`` otherwise); another
+        request under a used key is ``IdempotencyKeyReusedError``, as it is for ``once``.
+        """
+        identity = _identity(unit, attempt)
+        keys = unit.tables.idempotency_keys
+        row = [keys.c[column] == value for column, value in identity.items()]
+        found = select(keys.c.key).where(*row, keys.c.expires_at > unit.now)
+        if (await unit.connection.execute(found)).first() is None:
+            return None
+        return await _stored(unit, row, attempt)
+
+
+def _identity(unit: UnitOfWork, attempt: Attempt) -> dict[str, object]:
+    """The columns that name ``attempt``'s key in ``unit``'s scope, which must hold a mode."""
+    scope = unit.scope
+    if scope is None or scope.mode is None:
+        raise UnmodedIdempotencyScopeError
+    return {
+        "organization_id": scope.organization,
+        "mode": scope.mode.value,
+        "principal": attempt.principal,
+        "route": attempt.route,
+        "key": attempt.key,
+    }
 
 
 async def _stored(unit: UnitOfWork, row: list[ColumnElement[bool]], attempt: Attempt) -> StoredResponse:
