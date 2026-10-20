@@ -285,6 +285,52 @@ def test_import_linter_breaks_on_anything_but_the_role_s_apps_reaching_the_custo
     assert "ledger_signer/__init__.py loads ledger_signer.adapters.custody" in capsys.readouterr().out
 
 
+NAMESAKE_APP: Final = """[package]
+name = "identity"
+kind = "app"
+summary = "An app planted by a test: named like the module the others depend on."
+owners = ["@o"]
+
+[dependencies]
+packages = ["platform"]
+
+[app]
+script = "ledger-identity"
+role = "worker"
+"""
+NAMESAKE_FILES: Final = {
+    "apps/identity/manifest.toml": NAMESAKE_APP,
+    "apps/identity/src/ledger_app_identity/__init__.py": PLANTED_DOCSTRING,
+    "apps/identity/src/ledger_app_identity/main.py": f"{PLANTED_DOCSTRING}\nimport ledger_platform.runtime\n",
+}
+"""An app named like a module (as ``apps/signer`` is named like ``modules/signer``): a name a manifest
+depends on names the module, never the app, and every contract and table keyed per package keeps both."""
+
+
+def test_an_app_named_like_a_module_is_a_package_of_its_own(
+    repository: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_files(repository, NAMESAKE_FILES)
+    assert main(["sync", "--root", str(repository)]) == 0
+    capsys.readouterr()
+    assert main(["check", "--root", str(repository)]) == 0, capsys.readouterr().out
+    for dependent in ("modules/signer", "modules/invoicing"):
+        pyproject = (repository / dependent / "pyproject.toml").read_text(encoding="utf-8")
+        assert '    "ledger-identity",\n' in pyproject
+        assert "ledger-app-identity" not in pyproject
+    contracts = (repository / ".importlinter").read_text(encoding="utf-8")
+    sections = [line for line in contracts.splitlines() if line.startswith("[importlinter:contract:")]
+    assert len(sections) == len(set(sections))
+    assert "[importlinter:contract:ledger-app-identity-declared-edges]" in sections
+    assert "[importlinter:contract:ledger-identity-declared-edges]" in sections
+    layers = contracts.split("[importlinter:contract:workspace-layers]", 1)[1].split("\n\n", 1)[0]
+    rows = [row.strip().split(" | ") for row in layers.split("layers =\n", 1)[1].splitlines()]
+    assert [row for row in rows if "ledger_app_identity" in row] == [rows[0]]
+    assert ["ledger_identity"] in rows
+    status, report = lint_imports(repository)
+    assert status == 0, report
+
+
 BILLS: Final = """[package]
 name = "bills"
 kind = "module"

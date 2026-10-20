@@ -127,7 +127,10 @@ FORBIDDEN: Final = {
         "packages/platform/src/ledger_platform/data/__init__.py",
         "import ledger_billing._manifest",
     ),
-    "identity-declared-edges": ("modules/identity/src/ledger_identity/__init__.py", "import ledger_billing"),
+    "ledger-identity-declared-edges": (
+        "modules/identity/src/ledger_identity/__init__.py",
+        "import ledger_billing",
+    ),
     "identity-layers": (
         "modules/identity/src/ledger_identity/domain/__init__.py",
         "import ledger_identity.application",
@@ -146,20 +149,35 @@ FORBIDDEN: Final = {
         "import ledger_testing",
     ),
     "apps-only-compose": ("apps/api/src/ledger_app_api/main.py", "import ledger_platform.data"),
-    "api-declared-edges": ("apps/api/src/ledger_app_api/main.py", "import ledger_kernel"),
-    "billing-declared-edges": ("modules/billing/src/ledger_billing/__init__.py", "import ledger_testing"),
-    "do-declared-edges": ("countries/do/src/ledger_country_do/__init__.py", "import ledger_testing"),
-    "do-testing-declared-edges": (
+    "ledger-app-api-declared-edges": ("apps/api/src/ledger_app_api/main.py", "import ledger_kernel"),
+    "ledger-billing-declared-edges": (
+        "modules/billing/src/ledger_billing/__init__.py",
+        "import ledger_testing",
+    ),
+    "ledger-country-do-declared-edges": (
+        "countries/do/src/ledger_country_do/__init__.py",
+        "import ledger_testing",
+    ),
+    "ledger-country-do-testing-declared-edges": (
         "countries/do/testing/src/ledger_country_do_testing/__init__.py",
         "import ledger_platform",
     ),
-    "kernel-declared-edges": ("packages/kernel/src/ledger_kernel/__init__.py", "import ledger_testing"),
-    "mx-declared-edges": ("countries/mx/src/ledger_country_mx/__init__.py", "import ledger_testing"),
-    "platform-declared-edges": (
+    "ledger-kernel-declared-edges": (
+        "packages/kernel/src/ledger_kernel/__init__.py",
+        "import ledger_testing",
+    ),
+    "ledger-country-mx-declared-edges": (
+        "countries/mx/src/ledger_country_mx/__init__.py",
+        "import ledger_testing",
+    ),
+    "ledger-platform-declared-edges": (
         "packages/platform/src/ledger_platform/__init__.py",
         "import ledger_identity",
     ),
-    "testing-declared-edges": ("packages/testing/src/ledger_testing/__init__.py", "import ledger_identity"),
+    "ledger-testing-declared-edges": (
+        "packages/testing/src/ledger_testing/__init__.py",
+        "import ledger_identity",
+    ),
     "do-channel-ecf_v1-layers": (
         f"{ECF_V1}/domain/__init__.py",
         "import ledger_country_do.channels.ecf_v1.adapters",

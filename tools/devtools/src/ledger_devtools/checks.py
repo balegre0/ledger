@@ -1,10 +1,10 @@
 """The manifest rules that need the whole workspace (§4.7 ``check``): one function per rule.
 
 A single manifest is validated by the platform's model when the workspace is loaded; what is checked here is
-how manifests agree: names and directories, unique values, dependencies that exist, an acyclic module graph,
-consumers with a producer, schedules with a job kind, modules made of layers only, countries named by their
-directories, settings sections apart, one isolated module per role, an isolated module's custody out of what
-loads with any of it.
+how manifests agree: names and directories, one package per name a manifest can depend on, unique values,
+dependencies that exist, an acyclic module graph, consumers with a producer, schedules with a job kind,
+modules made of layers only, countries named by their directories, settings sections apart, one isolated
+module per role, an isolated module's custody out of what loads with any of it.
 """
 
 import ast
@@ -137,6 +137,21 @@ def _names_are_directories(workspace: Workspace) -> Iterator[Problem]:
             )
 
 
+def _names_name_one_package(workspace: Workspace) -> Iterator[Problem]:
+    """A name a manifest can depend on names one package (``Workspace.named``).
+
+    No module, package, tool or country shares its name with another: their distributions would clash, or a
+    dependency would be ambiguous. An app is named by no manifest: its name may be a module's.
+    """
+    first: dict[str, Package] = {}
+    for package in workspace.named:
+        earlier = first.setdefault(package.name, package)
+        if earlier is not package:
+            yield Problem(
+                package.manifest_path, f"package.name '{package.name}' is {earlier.manifest_path}'s too"
+            )
+
+
 def _values_are_unique(workspace: Workspace) -> Iterator[Problem]:
     scopes = tuple(_scopes(workspace))
     for unique in _Unique:
@@ -162,10 +177,15 @@ def _names_start_with_their_owner(workspace: Workspace) -> Iterator[Problem]:
                 yield scope.problem(f"{what} '{name}' {rule}")
 
 
+def _is_itself(package: Package, name: str) -> bool:
+    """Whether ``name``, in ``package``'s manifest, names ``package`` itself (an app's name names nothing)."""
+    return name == package.name and package.kind is not PackageKind.APP
+
+
 def _dependency_problem(package: Package, name: str, kinds: Mapping[str, PackageKind]) -> str | None:
     """What is wrong with ``package`` naming ``name`` in ``dependencies.packages``, if anything."""
     kind = kinds.get(name)
-    if name == package.name:
+    if _is_itself(package, name):
         return f"dependencies.packages names '{name}', which is the package itself"
     if kind not in _DEPENDED_ON:
         return f"dependencies.packages names '{name}', which is not a package"
@@ -178,7 +198,7 @@ def _dependency_problem(package: Package, name: str, kinds: Mapping[str, Package
 
 
 def _dependencies_exist(workspace: Workspace) -> Iterator[Problem]:
-    kinds: Mapping[str, PackageKind] = {package.name: package.kind for package in workspace.packages}
+    kinds: Mapping[str, PackageKind] = {package.name: package.kind for package in workspace.named}
     for package in workspace.packages:
         dependencies = package.manifest.dependencies
         for name in dependencies.packages:
@@ -186,7 +206,7 @@ def _dependencies_exist(workspace: Workspace) -> Iterator[Problem]:
             if problem is not None:
                 yield Problem(package.manifest_path, problem)
         for name in dependencies.modules:
-            if name == package.name:
+            if _is_itself(package, name):
                 yield Problem(
                     package.manifest_path, f"dependencies.modules names '{name}', which is the package itself"
                 )
@@ -224,9 +244,10 @@ def _modules_are_acyclic(workspace: Workspace) -> Iterator[Problem]:
 
 
 def _packages_are_acyclic(workspace: Workspace) -> Iterator[Problem]:
-    names = {package.name for package in workspace.packages}
+    names = {package.name for package in workspace.named}
     graph = {
-        package.name: tuple(
+        # an app is depended on by nothing, so it closes no cycle: keyed apart from a module of its name
+        (package.distribution if package.kind is PackageKind.APP else package.name): tuple(
             name for name in package.manifest.dependencies.packages if name in names and name != package.name
         )
         for package in workspace.packages
@@ -381,6 +402,7 @@ def _a_role_isolates_one_module(workspace: Workspace) -> Iterator[Problem]:
 
 _RULES: Final[tuple[Callable[[Workspace], Iterator[Problem]], ...]] = (
     _names_are_directories,
+    _names_name_one_package,
     _values_are_unique,
     _the_owner_holds_every_permission,
     _names_start_with_their_owner,

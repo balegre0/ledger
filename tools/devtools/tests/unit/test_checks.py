@@ -318,6 +318,36 @@ def test_a_package_never_depends_on_itself(tree: Path, edit: Editor) -> None:
     ]
 
 
+NAMESAKE_APP: Final = """
+[package]
+name = "identity"
+kind = "app"
+summary = "An app named like a module."
+owners = ["@o"]
+
+[dependencies]
+packages = ["platform"]
+modules = ["identity"]
+
+[app]
+script = "ledger-identity"
+role = "worker"
+"""
+
+
+def test_an_app_may_be_named_like_a_module_and_depend_on_it(tree: Path, write: Writer) -> None:
+    """Apps are named by no manifest: ``identity`` in a manifest is the module, never the app."""
+    write("apps/identity", NAMESAKE_APP, ())
+    assert messages(tree) == []
+
+
+def test_a_name_names_one_package_a_manifest_can_depend_on(tree: Path, write: Writer) -> None:
+    write("packages/identity", NESTED.replace('name = "testing"', 'name = "identity"'), ())
+    assert messages(tree) == [
+        "packages/identity/manifest.toml: package.name 'identity' is modules/identity/manifest.toml's too"
+    ]
+
+
 def test_packages_never_depend_on_each_other_in_a_cycle(tree: Path) -> None:
     kernel = tree / "packages/kernel/manifest.toml"
     kernel.write_text(
