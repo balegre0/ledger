@@ -5,11 +5,11 @@ backend must be offered and the idempotency key well formed (nothing else happen
 looks the key up, and an answer stored under it is replayed at once, with no custody, KMS or entity call (a
 replay needs neither the password nor a certificate still valid); custody opens the bundle or asks the entity,
 and seals the secret under a data key the KMS wraps, outside any unit and at most ``import_concurrency`` at
-once (a pool of the imports' own, apart from the signatures'); the domain admits the certificate's facts; then
-one unit, under the request's tenant (its mode scopes the key), claims the key and, unless it replays an
-earlier answer, locks the company's active certificates, installs the new one (each of them loses its modes,
-retired once it serves none), keeps it, audits it, announces it and every certificate it retired, and plans
-its expiry notices.
+once (a semaphore of the imports' own, apart from the signatures'); the domain admits the certificate's
+facts; then one unit, under the request's tenant (its mode scopes the key), claims the key and, unless it
+replays an earlier answer, locks the company's active certificates, installs the new one (each of them loses
+its modes, retired once it serves none), keeps it, audits it, announces it and every certificate it retired,
+and plans its expiry notices.
 
 Two imports for one mode at once, with different keys, both find no certificate to lock: the second to
 commit is refused by the partial unique index (``ActiveCertificateTakenError``) and is tried again once, when
@@ -196,7 +196,9 @@ class Importing:
         seal_for = SealContext(
             organization=tenant.organization, company=tenant.company, certificate=certificate
         )
-        async with self._admitting:  # the imports' own pool: a bundle's key derivation never starves signing
+        # The imports' own semaphore: at most import_concurrency threads derive a bundle's key at once. It and
+        # the signing pool share the event loop's default executor (min(32, CPUs + 4) threads).
+        async with self._admitting:
             custody = await admitted(seal_for)
         admit(custody.facts, now=self._clock(), skew=self._rules.skew)
         try:
