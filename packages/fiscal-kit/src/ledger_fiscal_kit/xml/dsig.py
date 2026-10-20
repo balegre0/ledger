@@ -60,10 +60,12 @@ from ledger_fiscal_kit.xml.hardened import (
     DSIG,
     SIGNATURE,
     MalformedDocumentError,
+    NodeRefusedError,
     XmlDocumentError,
     parser,
     require_plain,
     require_readable,
+    require_tree,
 )
 from ledger_kernel.errors import InvalidInputError, InvalidValueError
 
@@ -248,12 +250,14 @@ def prepare(document: bytes) -> Prepared:
         raise UnsignableDocumentError(_COMMENTS)
     try:
         root = etree.fromstring(document, parser())
-    except etree.XMLSyntaxError as error:
-        raise MalformedDocumentError from error
+    except etree.XMLSyntaxError:
+        raise MalformedDocumentError from None
     tree = root.getroottree()
     require_plain(tree.docinfo)
-    if any(True for _ in root.iter(etree.ProcessingInstruction)):
-        raise UnsignableDocumentError(_COMMENTS)
+    try:
+        require_tree(root)
+    except NodeRefusedError:
+        raise UnsignableDocumentError(_COMMENTS) from None
     if any(name.startswith(_XML) for name in root.attrib):
         raise UnsignableDocumentError(_XML_ATTRIBUTES)
     if root.tag == SIGNATURE or root.find(f".//{SIGNATURE}") is not None:

@@ -7,7 +7,8 @@ read: no entity expansion, no external fetch). The parser then resolves no entit
 network, keeps libxml2's own limits on depth and entity amplification (``huge_tree`` off) and drops
 comments: a comment inside a value (``1<!---->0``) changes no signature (C14N without comments), so what is
 read must not see it either. Once parsed, ``require_plain`` checks again what the parser saw: no DTD, and
-UTF-8. lxml parsers keep per-object state, so each thread makes its own.
+UTF-8; ``require_tree`` refuses a processing instruction inside the root, which C14N keeps but a value's
+reading would stop at. lxml parsers keep per-object state, so each thread makes its own.
 
 Nothing here returns an lxml element (their class is private to the type checkers): callers parse with
 ``parser()`` after ``require_readable`` and check the tree's ``docinfo`` with ``require_plain``, or ask
@@ -68,8 +69,21 @@ class EncodingRefusedError(XmlDocumentError):
         super().__init__("a document is read only in UTF-8")
 
 
+class NodeRefusedError(XmlDocumentError):
+    """A tree holding, inside its root, a node that is no element nor text: a processing instruction.
+
+    ``findtext`` reads a value only up to such a node (``4<?x?>887.58`` reads as ``4``) while C14N, and so a
+    signature, keeps it: what is read would not be what is signed.
+    """
+
+    code: ClassVar[str] = "xml_document_node_refused"
+
+    def __init__(self) -> None:
+        super().__init__("a document holds only elements and text inside its root")
+
+
 class MalformedDocumentError(XmlDocumentError):
-    """Not well-formed XML. The parser's message quotes the document, so it is not repeated."""
+    """Not well-formed XML. The parser's message quotes the document, so it is not repeated, nor chained."""
 
     code: ClassVar[str] = "xml_document_malformed"
 
@@ -119,12 +133,23 @@ def require_plain(info: etree.DocInfo) -> None:
         raise EncodingRefusedError
 
 
+def require_tree(root: object) -> None:
+    """Refuse ``root`` unless it is a parsed element holding only elements and text (``NodeRefusedError``).
+
+    The parser drops comments; a processing instruction inside the root is refused here (one outside it is
+    the document's own, covered by C14N). Every reader of values calls it once parsed.
+    """
+    if not etree.iselement(root) or any(not isinstance(node.tag, str) for node in root.iter()):
+        raise NodeRefusedError
+
+
 def texts(document: bytes, *paths: str) -> tuple[str | None, ...]:
     """The text at each of ``paths`` (ElementPath from the root, ``{namespace}name``); ``None`` if absent."""
     require_readable(document)
     try:
         root = etree.fromstring(document, parser())
-    except etree.XMLSyntaxError as error:
-        raise MalformedDocumentError from error
+    except etree.XMLSyntaxError:
+        raise MalformedDocumentError from None
     require_plain(root.getroottree().docinfo)
+    require_tree(root)
     return tuple(root.findtext(path) for path in paths)

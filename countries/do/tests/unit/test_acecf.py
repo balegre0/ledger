@@ -109,7 +109,8 @@ def test_both_parties_are_named_by_an_rnc_or_cedula(field: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "total", [D("-0.01"), D("1.005"), D("1E+16"), D("NaN"), D("Infinity"), D("9999999999999999.995")]
+    "total",
+    [D("-0.01"), D("-0.00"), D("1.005"), D("1E+16"), D("NaN"), D("Infinity"), D("9999999999999999.995")],
 )
 def test_the_total_is_one_an_acecf_holds_as_it_is(total: Decimal) -> None:
     with pytest.raises(ExchangeInvalidError) as raised:
@@ -127,3 +128,10 @@ def test_the_largest_total_dgii_writes() -> None:
 def test_an_approval_is_dated_with_a_moment_that_carries_its_offset() -> None:
     with pytest.raises(NaiveMomentError):
         replace(APPROVAL, at=AT.replace(tzinfo=None))
+
+
+@pytest.mark.parametrize("issued_on", [date(1999, 12, 31), date(2100, 1, 1)])
+def test_the_e_cf_s_date_is_one_an_acecf_writes(issued_on: date) -> None:
+    with pytest.raises(ExchangeInvalidError) as raised:
+        replace(APPROVAL, issued_on=issued_on)
+    assert raised.value.field == "issued_on"

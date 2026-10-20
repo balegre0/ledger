@@ -64,9 +64,11 @@ from ledger_fiscal_kit.xml.hardened import (
     DSIG,
     SIGNATURE,
     MalformedDocumentError,
+    NodeRefusedError,
     parser,
     require_plain,
     require_readable,
+    require_tree,
 )
 
 
@@ -284,11 +286,13 @@ def _parts(signed: bytes, profile: VerificationProfile) -> _Parts:
         raise SignatureInvalidError(_COMMENTS)
     try:
         root = etree.fromstring(signed, parser())
-    except etree.XMLSyntaxError as error:
-        raise MalformedDocumentError from error
+    except etree.XMLSyntaxError:
+        raise MalformedDocumentError from None
     require_plain(root.getroottree().docinfo)
-    if any(True for _ in root.iter(etree.ProcessingInstruction)):
-        raise SignatureInvalidError(_COMMENTS)
+    try:
+        require_tree(root)
+    except NodeRefusedError:
+        raise SignatureInvalidError(_COMMENTS) from None
     if root.tag == SIGNATURE or len(root.findall(f".//{SIGNATURE}")) != 1 or root[-1].tag != SIGNATURE:
         raise SignatureInvalidError(_SINGLE)
     inherited = {name: value for name, value in root.attrib.items() if name.startswith(_XML)}

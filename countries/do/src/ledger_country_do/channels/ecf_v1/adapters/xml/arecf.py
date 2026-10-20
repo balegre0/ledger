@@ -10,6 +10,11 @@ from typing import Final
 from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS
 from ledger_country_do.channels.ecf_v1.adapters.xml.writer import Node
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
+from ledger_country_do.channels.ecf_v1.domain.exchanges import (
+    REASON,
+    REASON_NOT_RECEIVED,
+    ExchangeInvalidError,
+)
 from ledger_country_do.channels.ecf_v1.domain.notation import dgii_moment
 lazy from ledger_country_do.channels.ecf_v1.domain.exchanges import Receipt
 
@@ -19,7 +24,13 @@ NOT_RECEIVED: Final = "1"
 
 
 def render_arecf(receipt: Receipt) -> bytes:
-    """The unsigned ARECF of ``receipt``."""
+    """The unsigned ARECF of ``receipt``.
+
+    ``ExchangeInvalidError`` (``reason``) for a receipt of an e-CF not received that does not say why: one
+    this channel sends always does (DGII's schema leaves it optional).
+    """
+    if not receipt.received and receipt.reason is None:
+        raise ExchangeInvalidError(REASON, REASON_NOT_RECEIVED)
     root = Node.root(Format.ARECF, "arecf")
     detail = root.child("detalleacusederecibo")
     detail.text("version", VERSION)

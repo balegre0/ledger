@@ -1,10 +1,12 @@
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Final
 lazy from collections.abc import Callable
 
 import pytest
 
 from ledger_country_do.channels.ecf_v1.domain.notation import (
+    DGII_YEARS,
     SANTO_DOMINGO,
     NaiveMomentError,
     dgii_amount,
@@ -19,6 +21,8 @@ from ledger_country_do.channels.ecf_v1.domain.notation import (
 )
 
 D = Decimal
+ARABIC_SIX: Final = "٦"
+"""A digit, but no ASCII one: DGII's dates are written in ASCII digits."""
 
 
 def test_a_date_is_day_month_year() -> None:
@@ -83,9 +87,28 @@ def test_a_dgii_moment_reads_back_in_the_dominican_republic_s_time() -> None:
     assert found.tzinfo is SANTO_DOMINGO
 
 
-@pytest.mark.parametrize("text", ["31-02-2026 10:00:00", "2026-10-13T09:30:05", "13-10-2026", "", "ayer"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "31-02-2026 10:00:00",
+        "2026-10-13T09:30:05",
+        "13-10-2026",
+        "",
+        "ayer",
+        "31-12-9999 23:59:59",
+        "01-01-0001 00:00:00",
+        "31-12-1999 23:59:59",
+        f"13-10-2026 09:30:0{ARABIC_SIX}",
+    ],
+)
 def test_what_is_no_dgii_moment_reads_as_none(text: str) -> None:
     assert parse_dgii_moment(text) is None
+
+
+def test_dgii_s_years_are_this_century_s() -> None:
+    assert (DGII_YEARS.start, DGII_YEARS.stop) == (2000, 2100)
+    assert parse_dgii_date("01-01-2000") == date(2000, 1, 1)
+    assert parse_dgii_moment("31-12-2099 23:59:59") is not None
 
 
 def test_a_dgii_date_reads_back() -> None:
@@ -93,6 +116,20 @@ def test_a_dgii_date_reads_back() -> None:
     assert parse_dgii_date(" 5-1-2026 ") == date(2026, 1, 5)
 
 
-@pytest.mark.parametrize("text", ["31-02-2026", "2026-10-13", "13-10-2026 09:30:05", "", "hoy"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "31-02-2026",
+        "2026-10-13",
+        "13-10-2026 09:30:05",
+        "",
+        "hoy",
+        "31-12-1999",
+        "01-01-2100",
+        "31-12-9999",
+        "01-01-0001",
+        f"13-10-202{ARABIC_SIX}",
+    ],
+)
 def test_what_is_no_dgii_date_reads_as_none(text: str) -> None:
     assert parse_dgii_date(text) is None

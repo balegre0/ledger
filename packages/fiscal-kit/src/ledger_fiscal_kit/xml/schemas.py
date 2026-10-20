@@ -173,8 +173,8 @@ class SchemaSet[F: StrEnum]:
         require_readable(document)
         try:
             root = etree.fromstring(document, parser())
-        except etree.XMLSyntaxError as error:
-            raise MalformedDocumentError from error
+        except etree.XMLSyntaxError:
+            raise MalformedDocumentError from None
         require_plain(root.getroottree().docinfo)
         if unsigned:
             etree.SubElement(root, SIGNATURE)

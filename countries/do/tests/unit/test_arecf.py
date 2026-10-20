@@ -22,6 +22,7 @@ RECEIVED: Final = Receipt(
     issuer_rnc="101850043",
     buyer_rnc="131098193",
     encf=Encf(EcfType.CREDIT_INVOICE, 1),
+    received=True,
     reason=None,
     at=AT,
 )
@@ -56,7 +57,7 @@ def test_a_receipt_of_a_received_e_cf() -> None:
 
 @pytest.mark.parametrize("reason", list(NotReceivedReason))
 def test_a_receipt_of_an_e_cf_not_received_says_why(reason: NotReceivedReason) -> None:
-    receipt = replace(RECEIVED, buyer_rnc="00113918205", reason=reason)
+    receipt = replace(RECEIVED, buyer_rnc="00113918205", received=False, reason=reason)
     assert not receipt.received
     document = render_arecf(receipt)
     assert DO_SCHEMAS.violations(Format.ARECF, document, unsigned=True) == ()
@@ -77,3 +78,17 @@ def test_both_parties_are_named_by_an_rnc_or_cedula(issuer: str, buyer: str, fie
 def test_a_receipt_is_dated_with_a_moment_that_carries_its_offset() -> None:
     with pytest.raises(NaiveMomentError):
         replace(RECEIVED, at=AT.replace(tzinfo=None))
+
+
+def test_a_receipt_of_an_e_cf_received_gives_no_reason() -> None:
+    with pytest.raises(ExchangeInvalidError, match="is given only when not received") as raised:
+        replace(RECEIVED, reason=NotReceivedReason.DUPLICATE)
+    assert raised.value.field == "reason"
+
+
+def test_a_receipt_we_send_of_an_e_cf_not_received_says_why() -> None:
+    not_received = replace(RECEIVED, received=False)
+    assert not not_received.received
+    with pytest.raises(ExchangeInvalidError, match="is given when not received") as raised:
+        render_arecf(not_received)
+    assert raised.value.field == "reason"

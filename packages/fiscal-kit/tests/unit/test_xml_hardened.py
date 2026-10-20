@@ -8,9 +8,12 @@ from lxml import etree
 from ledger_fiscal_kit.xml import hardened
 from ledger_fiscal_kit.xml.hardened import (
     MAX_DOCUMENT,
+    MalformedDocumentError,
+    NodeRefusedError,
     XmlDocumentError,
     parser,
     require_readable,
+    require_tree,
     texts,
 )
 
@@ -137,3 +140,39 @@ def test_the_parser_reaches_no_network() -> None:
 def test_the_parser_keeps_libxml2_s_depth_limit() -> None:
     with pytest.raises(etree.XMLSyntaxError, match="depth"):
         etree.fromstring(b"<a>" * 300 + b"</a>" * 300, parser())
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        b"<ECF><MontoTotal>4<?x?>887.58</MontoTotal></ECF>",
+        b"<ECF><Estado><?x?>1</Estado></ECF>",
+        b"<ECF><RNC>131<?x?>098193</RNC></ECF>",
+        b"<ECF><RNC>131098193</RNC><?x?></ECF>",
+    ],
+    ids=["split-amount", "before-a-value", "split-tax-id", "last-child"],
+)
+def test_a_processing_instruction_inside_the_root_is_refused(document: bytes) -> None:
+    # findtext reads only the text before an instruction: "4<?x?>887.58" would read as "4".
+    with pytest.raises(NodeRefusedError) as caught:
+        texts(document, "MontoTotal")
+    assert caught.value.code == "xml_document_node_refused"
+
+
+def test_processing_instructions_outside_the_root_are_the_document_s_own() -> None:
+    # Outside the root they are covered by C14N, and so by a signature: allowed, never read.
+    assert texts(b"<?pi before?><a><b>x</b></a><?pi after?>", "b") == ("x",)
+
+
+def test_only_an_element_is_a_tree() -> None:
+    with pytest.raises(NodeRefusedError):
+        require_tree("<a/>")
+    require_tree(etree.fromstring(b"<a>t<b/>u</a>", parser()))
+
+
+def test_a_malformed_document_s_error_carries_none_of_libxml2_s_message() -> None:
+    # libxml2's message quotes the document: it is neither the error's cause nor shown as its context.
+    with pytest.raises(MalformedDocumentError) as caught:
+        texts(b"<a>SECRET</b>", "b")
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__

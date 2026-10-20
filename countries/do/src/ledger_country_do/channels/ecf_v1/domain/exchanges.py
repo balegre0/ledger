@@ -24,7 +24,7 @@ lazy from decimal import Decimal
 
 from ledger_country_do.channels.ecf_v1.domain.encf import MAX_SEQUENCE, EcfType
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError
-from ledger_country_do.channels.ecf_v1.domain.notation import require_aware
+from ledger_country_do.channels.ecf_v1.domain.notation import DGII_YEARS, require_aware
 from ledger_country_do.regime.tax_ids import normalize, scheme_of
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
 
@@ -37,11 +37,14 @@ ANNULMENT_COUNT: Final = 10**10 - 1
 REJECTION_REASON: Final = 250
 """The longest reason a rejection gives (``DetalleMotivoRechazo``)."""
 APPROVAL_TOTAL_DIGITS: Final = 16
-"""An ACECF's ``MontoTotal``: integer digits (18 in all)..."""
+"""An approval's total is an e-CF's ``MontoTotal``: at most 16 integer digits (the ACECF's own type, of 18
+digits in all, would take 17 or 18 when the cents are zero)..."""
 APPROVAL_TOTAL_PLACES: Final = 2
-"""...and decimals."""
+"""...and two decimals."""
 _RANGES: Final = "ranges"
 _TAX_ID_REQUIREMENT: Final = "is an RNC (9 digits) or a cédula (11 digits), digits only"
+_ISSUED_ON: Final = "issued_on"
+_ISSUED_ON_REQUIREMENT: Final = f"falls in the years {DGII_YEARS.start} to {DGII_YEARS.stop - 1}"
 _TOTAL: Final = "total"
 _TOTAL_REQUIREMENT: Final = (
     f"is an amount from 0 of at most {APPROVAL_TOTAL_DIGITS} integer digits "
@@ -51,6 +54,8 @@ REASON: Final = "reason"
 """The field an approval's reason is refused at."""
 REASON_ON_APPROVAL: Final = "is given only when rejecting"
 REASON_MISSING: Final = "is given when rejecting"
+REASON_ON_RECEIPT: Final = "is given only when not received"
+REASON_NOT_RECEIVED: Final = "is given when not received"
 
 
 class ExchangeInvalidError(EcfInvalidError):
@@ -183,10 +188,11 @@ class InboundEcf:
 class CommercialApproval:
     """A buyer's approval or rejection of an e-CF (an ACECF's fields): one we send, or one we receive.
 
-    ``ExchangeInvalidError`` for a party that is no RNC or cédula, a total an ACECF cannot hold as it is, or
-    a reason on an approval; ``NaiveMomentError`` for a moment without its UTC offset. What only the
-    approvals we send must do (a rejection says why, in a text DGII's can hold) is the builder's
-    (``adapters.xml.acecf``): one received is read as its sender wrote it.
+    ``ExchangeInvalidError`` for a party that is no RNC or cédula, a total an e-CF cannot have (below 0, -0.00
+    included, or of more than 16 integer digits or two decimals), a date an ACECF cannot write (a year
+    outside ``DGII_YEARS``), or a reason on an approval; ``NaiveMomentError`` for a moment without its UTC
+    offset. What only the approvals we send must do (a rejection says why, in a text DGII's can hold) is the
+    builder's (``adapters.xml.acecf``): one received is read as its sender wrote it.
     """
 
     issuer_rnc: str
@@ -210,11 +216,14 @@ class CommercialApproval:
         exponent = self.total.as_tuple().exponent
         if not (
             self.total.is_finite()
+            and not self.total.is_signed()
             and isinstance(exponent, int)
             and exponent >= -APPROVAL_TOTAL_PLACES
-            and 0 <= self.total < 10**APPROVAL_TOTAL_DIGITS
+            and self.total < 10**APPROVAL_TOTAL_DIGITS
         ):
             raise ExchangeInvalidError(_TOTAL, _TOTAL_REQUIREMENT)
+        if self.issued_on.year not in DGII_YEARS:
+            raise ExchangeInvalidError(_ISSUED_ON, _ISSUED_ON_REQUIREMENT)
         if self.approved and self.reason is not None:
             raise ExchangeInvalidError(REASON, REASON_ON_APPROVAL)
         require_aware(self.at)
@@ -223,10 +232,12 @@ class CommercialApproval:
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Receipt:
-    """A buyer's receipt of an e-CF (an ARECF's fields): received, or not for ``reason``.
+    """A buyer's receipt of an e-CF (an ARECF's fields): received, or not, for ``reason`` when it says.
 
-    ``ExchangeInvalidError`` for a party that is no RNC or cédula; ``NaiveMomentError`` for a moment without
-    its UTC offset.
+    ``ExchangeInvalidError`` for a party that is no RNC or cédula, or a reason given with a receipt of an e-CF
+    received; ``NaiveMomentError`` for a moment without its UTC offset. A receipt of an e-CF not received
+    that gives no reason is DGII's (its schema leaves the reason optional) and is read so; one this channel
+    sends always says why (``adapters.xml.arecf``).
     """
 
     issuer_rnc: str
@@ -234,17 +245,15 @@ class Receipt:
     buyer_rnc: str
     """The receiver answering."""
     encf: Encf
+    received: bool
     reason: NotReceivedReason | None
-    """Why it was not received; ``None``: received."""
+    """Why it was not received."""
     at: datetime
     """``FechaHoraAcuseRecibo``."""
 
     def __post_init__(self) -> None:
         require_tax_id("issuer_rnc", self.issuer_rnc)
         require_tax_id("buyer_rnc", self.buyer_rnc)
+        if self.received and self.reason is not None:
+            raise ExchangeInvalidError(REASON, REASON_ON_RECEIPT)
         require_aware(self.at)
-
-    @property
-    def received(self) -> bool:
-        """Whether the e-CF was received."""
-        return self.reason is None

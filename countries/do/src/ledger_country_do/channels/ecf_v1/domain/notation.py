@@ -16,6 +16,9 @@ SANTO_DOMINGO: Final = timezone(timedelta(hours=-4), "AST")
 _DATE: Final = "%d-%m-%Y"
 DGII_MOMENT: Final = "%d-%m-%Y %H:%M:%S"
 """DGII's moments (``FechaHoraFirma``, ``FechaHoraAcuseRecibo``...): ``dd-MM-yyyy HH:mm:ss``."""
+DGII_YEARS: Final = range(2000, 2100)
+"""The years a date read from a DGII document may have: e-CF exist since 2019, and the ACECF's date pattern
+writes 20xx only. A year 1 or 9999 would also leave a moment no room for an offset (``OverflowError``)."""
 
 
 class NaiveMomentError(EcfError):
@@ -51,23 +54,32 @@ def dgii_moment(value: datetime) -> str:
 def parse_dgii_date(text: str) -> date | None:
     """``text`` read as ``dd-MM-yyyy`` (days and months of one digit too), whitespace around ignored.
 
-    ``None`` if it writes no such date: another format, or no real day (a 31 February).
+    ``None`` if it writes no such date: another format, digits that are not ASCII, no real day (a 31
+    February), or a year outside ``DGII_YEARS``.
     """
+    stripped = text.strip()
+    if not stripped.isascii():
+        return None
     try:
-        return date.strptime(text.strip(), _DATE)
+        found = date.strptime(stripped, _DATE)
     except ValueError:
         return None
+    return found if found.year in DGII_YEARS else None
 
 
 def parse_dgii_moment(text: str) -> datetime | None:
     """``text`` read as ``dd-MM-yyyy HH:mm:ss`` in the Dominican Republic's time, whitespace around ignored.
 
-    ``None`` if it writes no such moment: another format, or no real day (a 31 February).
+    ``None`` as ``parse_dgii_date`` says, for its date or for a time that is none.
     """
+    stripped = text.strip()
+    if not stripped.isascii():
+        return None
     try:
-        return datetime.strptime(text.strip(), DGII_MOMENT).replace(tzinfo=SANTO_DOMINGO)
+        found = datetime.strptime(stripped, DGII_MOMENT).replace(tzinfo=SANTO_DOMINGO)
     except ValueError:
         return None
+    return found if found.year in DGII_YEARS else None
 
 
 def local_date(value: datetime) -> date:

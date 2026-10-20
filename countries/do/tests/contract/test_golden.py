@@ -125,7 +125,14 @@ def _approval(*, approved: bool, reason: str | None) -> bytes:
 
 def _receipt(reason: NotReceivedReason | None) -> bytes:
     return render_arecf(
-        Receipt(issuer_rnc=ISSUER.rnc, buyer_rnc=BUYER_RNC, encf=INVOICED, reason=reason, at=RECEIVED_AT)
+        Receipt(
+            issuer_rnc=ISSUER.rnc,
+            buyer_rnc=BUYER_RNC,
+            encf=INVOICED,
+            received=reason is None,
+            reason=reason,
+            at=RECEIVED_AT,
+        )
     )
 
 

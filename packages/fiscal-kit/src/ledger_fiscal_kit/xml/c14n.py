@@ -14,8 +14,8 @@ def canonical(document: bytes, *, exclusive: bool = False) -> bytes:
     require_readable(document)
     try:
         root = etree.fromstring(document, parser())
-    except etree.XMLSyntaxError as error:
-        raise MalformedDocumentError from error
+    except etree.XMLSyntaxError:
+        raise MalformedDocumentError from None
     tree = root.getroottree()
     require_plain(tree.docinfo)
     return etree.tostring(tree, method="c14n", exclusive=exclusive, with_comments=False)

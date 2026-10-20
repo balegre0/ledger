@@ -15,7 +15,7 @@ from hypothesis import strategies as st
 from ledger_country_do.channels.ecf_v1.adapters.xml.acecf import render_acecf
 from ledger_country_do.channels.ecf_v1.adapters.xml.anecf import render_anecf
 from ledger_country_do.channels.ecf_v1.adapters.xml.arecf import render_arecf
-from ledger_country_do.channels.ecf_v1.adapters.xml.inbound import read_inbound_acecf
+from ledger_country_do.channels.ecf_v1.adapters.xml.inbound import read_inbound_acecf, read_inbound_arecf
 from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import PUBLISHED, Format
 from ledger_country_do.channels.ecf_v1.domain.drafts import writable
@@ -105,9 +105,13 @@ def test_every_acecf_is_valid_and_reads_back(approval: CommercialApproval) -> No
     reason=st.none() | st.sampled_from(list(NotReceivedReason)),
     at=_MOMENTS,
 )
-def test_every_arecf_is_valid(
+def test_every_arecf_is_valid_and_reads_back(
     issuer: str, buyer: str, encf: Encf, reason: NotReceivedReason | None, at: datetime
 ) -> None:
-    document = render_arecf(Receipt(issuer_rnc=issuer, buyer_rnc=buyer, encf=encf, reason=reason, at=at))
+    receipt = Receipt(
+        issuer_rnc=issuer, buyer_rnc=buyer, encf=encf, received=reason is None, reason=reason, at=at
+    )
+    document = render_arecf(receipt)
     _valid_for_xmlschema(Format.ARECF, document)
     assert texts(document, "DetalleAcusedeRecibo/Estado") == ("0" if reason is None else "1",)
+    assert read_inbound_arecf(document) == receipt

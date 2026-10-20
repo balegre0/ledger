@@ -284,7 +284,14 @@ def test_the_approval_s_states_and_limits_are_its_schema_s() -> None:
     assert int(reason["maxLength"]) == REJECTION_REASON
     (total,) = _facets(Format.ACECF, "MontoTotal")
     assert int(total["fractionDigits"]) == APPROVAL_TOTAL_PLACES
-    assert int(total["totalDigits"]) - APPROVAL_TOTAL_PLACES == APPROVAL_TOTAL_DIGITS
+    # The ACECF's own type is wider than what it names: 18 digits in all, so 17 or 18 integer digits when the
+    # cents are zero. An approval names an e-CF, whose MontoTotal has 16 at most: that is the cap.
+    assert int(total["totalDigits"]) == 18
+    for ecf_type in EcfType:
+        for facet in _facets(_ecf(ecf_type), "MontoTotal"):
+            found = _INTEGER_PART.match(facet["pattern"])
+            assert found is not None
+            assert int(found.group(1)) == APPROVAL_TOTAL_DIGITS
 
 
 def test_the_receipt_s_states_and_reasons_are_its_schema_s() -> None:
