@@ -28,6 +28,8 @@ from ledger_platform.grpc.client import ERROR_CODE_KEY
 from ledger_platform.grpc.guard import CallerPolicy, CallerTokens
 from ledger_platform.grpc.metadata import call_metadata
 from ledger_platform.grpc.server import (
+    DEFAULT_MAX_CONCURRENT_RPCS,
+    MAX_CONCURRENT_RPCS,
     MAX_MESSAGE_BYTES,
     GrpcBindError,
     GuardInterceptor,
@@ -569,9 +571,14 @@ async def test_a_server_that_cannot_start_is_stopped(
     make = grpc.aio.server
 
     def failing_server(
-        *, interceptors: Sequence[grpc.aio.ServerInterceptor], options: Sequence[tuple[str, int]]
+        *,
+        interceptors: Sequence[grpc.aio.ServerInterceptor],
+        maximum_concurrent_rpcs: int,
+        options: Sequence[tuple[str, int]],
     ) -> grpc.aio.Server:
-        server = make(interceptors=interceptors, options=options)
+        server = make(
+            interceptors=interceptors, maximum_concurrent_rpcs=maximum_concurrent_rpcs, options=options
+        )
         real_stop = server.stop
 
         async def start() -> None:
@@ -749,3 +756,37 @@ async def test_a_body_that_cannot_be_read_is_invalid_even_without_the_caller_gua
         if sample.name == "ledger_grpc_request_duration_seconds_count"
     ]
     assert measured == ["INVALID_ARGUMENT"]
+
+
+@pytest.mark.parametrize("limit", [0, -1, MAX_CONCURRENT_RPCS + 1], ids=["zero", "negative", "over-the-most"])
+def test_a_concurrency_limit_outside_its_range_is_refused_at_once(limit: int) -> None:
+    with pytest.raises(
+        InvalidOptionError,
+        match=rf"^gRPC option max_concurrent_rpcs must be 1 to {MAX_CONCURRENT_RPCS} calls, not ",
+    ):
+        ServerOptions(max_concurrent_rpcs=limit)
+
+
+def test_a_server_takes_a_bounded_number_of_calls_at_once_by_default() -> None:
+    assert 1 <= ServerOptions().max_concurrent_rpcs == DEFAULT_MAX_CONCURRENT_RPCS <= MAX_CONCURRENT_RPCS
+
+
+async def test_a_call_past_the_concurrency_limit_is_refused_resource_exhausted(
+    registry: CollectorRegistry,
+) -> None:
+    started, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    async with serve_grpc(
+        port=0,
+        register=register_waiting(started, release, cancelled),
+        registry=registry,
+        callers=CALLERS,
+        options=ServerOptions(grace=0.1, max_concurrent_rpcs=1),
+    ) as bound:
+        first = asyncio.create_task(call_waiting(bound))
+        async with asyncio.timeout(TIMEOUT):
+            await started.wait()
+        with pytest.raises(grpc.aio.AioRpcError) as caught:
+            await call_waiting(bound)
+        release.set()
+        assert await first == b"done"
+    assert caught.value.code() == grpc.StatusCode.RESOURCE_EXHAUSTED
