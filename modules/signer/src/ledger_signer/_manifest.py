@@ -34,6 +34,7 @@ MANIFEST: Final = PackageManifest.model_validate(
                 "alembic>=1.20.0",
                 "cryptography>=50.0.2",
                 "grpcio>=1.84.0",
+                "prometheus-client>=0.26.0",
                 "protobuf>=7.36.2",
                 "psycopg>=3.3.6",
                 "pydantic>=2.14.1",
@@ -94,7 +95,41 @@ MANIFEST: Final = PackageManifest.model_validate(
                     "public": "certificate.expiring",
                 },
             ],
+            "consumes": [
+                {
+                    "consumer": "signer.company_deactivations",
+                    "types": [
+                        "identity.company.deactivated",
+                    ],
+                },
+            ],
         },
+        "jobs": [
+            {
+                "kind": "signer.expiry_notice",
+                "max_attempts": 20,
+            },
+            {
+                "kind": "signer.purge_idempotency_keys",
+                "concurrency": 1,
+            },
+            {
+                "kind": "signer.purge_done_jobs",
+                "concurrency": 1,
+            },
+        ],
+        "schedules": [
+            {
+                "name": "signer.purge_idempotency_keys",
+                "every": "1h",
+                "enqueues": "signer.purge_idempotency_keys",
+            },
+            {
+                "name": "signer.purge_done_jobs",
+                "every": "24h",
+                "enqueues": "signer.purge_done_jobs",
+            },
+        ],
         "extension_points": {
             "provides": [
                 "SignerPort",

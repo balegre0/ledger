@@ -1,7 +1,7 @@
 """The signer, where none can be reached: every call answers ``signer_unavailable`` (Decision 13).
 
 What an app binds as ``SignerPort`` and ``SignerApi`` while it has no client of the signer: a client role
-without the signer's address or its own token, and the signer's role until its facade is bound. A route
+without the signer's address or its own token, and every role but the client roles and the signer's. A route
 then answers 503 and a channel parks; nothing fails at the start, and no app's readiness depends on the signer
 (spec §3.7).
 """

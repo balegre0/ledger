@@ -6,6 +6,7 @@ country's test package builds its authorities' naming conventions on it. These s
 real authority, which takes only certificates of the entities it authorizes.
 """
 
+import ipaddress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Final, final
@@ -14,8 +15,14 @@ lazy from collections.abc import Sequence
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from cryptography.hazmat.primitives.serialization import BestAvailableEncryption, Encoding, pkcs12
-from cryptography.x509.oid import NameOID
+from cryptography.hazmat.primitives.serialization import (
+    BestAvailableEncryption,
+    Encoding,
+    NoEncryption,
+    PrivateFormat,
+    pkcs12,
+)
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 OPENING_PHRASE: Final = "it's the bundle's password"
 """What opens every bundle a test makes, unless it names another password."""
@@ -76,6 +83,10 @@ class Issued:
     def pem(self) -> bytes:
         """The certificate in PEM."""
         return self.certificate.public_bytes(Encoding.PEM)
+
+    def key_pem(self) -> bytes:
+        """The private key in unencrypted PKCS#8 PEM: what a test's TLS server loads."""
+        return self.key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
 
 
 def _authority_builder(
@@ -151,12 +162,36 @@ class Authority:
         key usage extension naming ``extended_usage`` when it names any.
         """
         own = rsa_key() if key is None else key
-        now = datetime.now(UTC)
+        builder = self._leaf(subject, own, not_before, not_after)
+        if extended_usage:
+            builder = builder.add_extension(x509.ExtendedKeyUsage(extended_usage), critical=False)
+        return Issued(builder.sign(self.issued.key, hashes.SHA256()), own)
+
+    def server(self, *names: str) -> Issued:
+        """A TLS server's certificate for ``names`` (host names, or IP addresses): a test's HTTPS origin.
+
+        Its subject is the first name; it is valid from a day ago for a year, for server authentication.
+        """
+        own = rsa_key()
+        subject = distinguished_name((NameOID.COMMON_NAME, names[0]))
         builder = (
+            self._leaf(subject, own, None, None)
+            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+            .add_extension(
+                x509.SubjectAlternativeName([_alternative(name) for name in names]), critical=False
+            )
+        )
+        return Issued(builder.sign(self.issued.key, hashes.SHA256()), own)
+
+    def _leaf(
+        self, subject: x509.Name, key: PrivateKey, not_before: datetime | None, not_after: datetime | None
+    ) -> x509.CertificateBuilder:
+        now = datetime.now(UTC)
+        return (
             x509.CertificateBuilder()
             .subject_name(subject)
             .issuer_name(self.certificate.subject)
-            .public_key(own.public_key())
+            .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
             .not_valid_before(now - _BACKDATED if not_before is None else not_before)
             .not_valid_after(now + _LEAF_DAYS if not_after is None else not_after)
@@ -166,11 +201,16 @@ class Authority:
                 x509.AuthorityKeyIdentifier.from_issuer_public_key(self.issued.key.public_key()),
                 critical=False,
             )
-            .add_extension(x509.SubjectKeyIdentifier.from_public_key(own.public_key()), critical=False)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
         )
-        if extended_usage:
-            builder = builder.add_extension(x509.ExtendedKeyUsage(extended_usage), critical=False)
-        return Issued(builder.sign(self.issued.key, hashes.SHA256()), own)
+
+
+def _alternative(name: str) -> x509.GeneralName:
+    """``name`` as an IP address when it reads as one, else as a host name."""
+    try:
+        return x509.IPAddress(ipaddress.ip_address(name))
+    except ValueError:
+        return x509.DNSName(name)
 
 
 def bundle(

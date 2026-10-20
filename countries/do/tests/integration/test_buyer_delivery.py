@@ -4,7 +4,7 @@ import socket
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from ipaddress import IPv4Address, ip_address
-from typing import Final, final, override
+from typing import TYPE_CHECKING, Final, final, override
 lazy from collections.abc import AsyncIterator, Sequence
 lazy from ipaddress import IPv6Address
 
@@ -52,9 +52,10 @@ from ledger_country_do_testing.samples import (
     credit_invoice,
 )
 from ledger_country_do_testing.signatures import sign_with_signxml
-from ledger_country_do_testing.transports import FAKE_HOSTS
+from ledger_country_do_testing.transports import FAKE_HOSTS, outbound_over
 from ledger_fiscal_kit.xml.hardened import DoctypeRefusedError
 from ledger_fiscal_kit.xml.schemas import SchemaViolationError
+from ledger_platform.http.outbound import OutboundHttp
 from ledger_testing.clock import ManualClock
 from ledger_testing.pki import Authority
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.client import DirectoryLookup
@@ -62,6 +63,9 @@ lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import Res
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
 lazy from ledger_country_do_testing.local_signer import KeyPairSigner
 lazy from ledger_testing.pki import Issued
+
+if TYPE_CHECKING:
+    from ledger_platform.http.outbound import OutboundTimeouts
 
 T: Final = Environment.TESTECF
 SIMULATOR: Final = f"{FAKE_HOSTS.ecf}/testecf/emisorreceptor"
@@ -145,7 +149,7 @@ def over(
         party.signer,
         directory,
         trust=party.trust,
-        transport=transport,
+        http=outbound_over(transport),
         resolve=resolve,
         clock=party.clock,
         timeouts=timeouts or DgiiTimeouts(),
@@ -597,7 +601,7 @@ async def test_a_client_s_own_clock_is_the_system_s(
         party.signer,
         simulator,
         trust=party.trust,
-        transport=httpx.ASGITransport(app=live.app),
+        http=outbound_over(httpx.ASGITransport(app=live.app)),
         resolve=public_dns,
     )
     async with client.opened():
@@ -645,7 +649,7 @@ async def test_a_buyer_seed_is_signed_for_the_endpoint_it_came_from(
         signer,
         listed(base, base),
         trust=party.trust,
-        transport=httpx.ASGITransport(app=fake.app),
+        http=outbound_over(httpx.ASGITransport(app=fake.app)),
         resolve=public_dns,
         clock=party.clock,
     )
@@ -660,7 +664,7 @@ async def test_every_buyer_seed_signed_is_audited_without_secrets(party: Party, 
         party.signer,
         simulator,
         trust=party.trust,
-        transport=httpx.ASGITransport(app=fake.app),
+        http=outbound_over(httpx.ASGITransport(app=fake.app)),
         resolve=public_dns,
         clock=party.clock,
         audit=audited.append,
@@ -673,7 +677,7 @@ async def test_every_buyer_seed_signed_is_audited_without_secrets(party: Party, 
         party.signer,
         listed(SIMULATOR),
         trust=party.trust,
-        transport=httpx.ASGITransport(app=fake.app),
+        http=outbound_over(httpx.ASGITransport(app=fake.app)),
         resolve=public_dns,
         clock=party.clock,
         audit=audited.append,
@@ -788,3 +792,21 @@ def test_a_receipt_answered_but_wrong_is_invalid_and_a_buyer_that_failed_is_unav
     )
     assert {error.kind for error in invalid} == {"invalid"}
     assert BuyerUnavailableError.kind == "unavailable"
+
+
+async def test_buyers_are_called_through_an_outbound_client_named_buyers_that_keeps_no_connection(
+    party: Party, fake: FakeDgii, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[tuple[str, bool]] = []
+    made = OutboundHttp.client
+
+    def watched(
+        self: OutboundHttp, name: str, *, timeouts: OutboundTimeouts, keep_alive: bool = True
+    ) -> httpx.AsyncClient:
+        asked.append((name, keep_alive))
+        return made(self, name, timeouts=timeouts, keep_alive=keep_alive)
+
+    monkeypatch.setattr(OutboundHttp, "client", watched)
+    async with over(party, simulator, httpx.ASGITransport(app=fake.app)).opened() as client:
+        await client.deliver(T, credit_invoice(), await signed(party.signer))
+    assert asked == [("buyers", False)]

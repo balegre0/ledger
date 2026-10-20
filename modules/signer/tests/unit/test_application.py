@@ -4,6 +4,7 @@ What each stores, announces, audits and enqueues, in how many units, and what it
 (plan Decisions 8, 9 and 10; Review Focus 3).
 """
 
+import asyncio
 import hashlib
 from datetime import timedelta
 from typing import Final, Protocol
@@ -36,6 +37,7 @@ from ledger_signer.application.ports import (
     ActiveCertificateTakenError,
     BundleIncompleteError,
     BundleUnreadableError,
+    Custody,
     DataKey,
     EntityRefusedError,
     EntityUnavailableError,
@@ -59,7 +61,7 @@ from ledger_signer.events import CertificateExpiring, CertificateInstalled, Cert
 from ledger_testing.pki import bundle, distinguished_name
 lazy from ledger_kernel.clock import Clock
 lazy from ledger_kernel.errors import LedgerError
-lazy from ledger_signer.application.ports import CertificationEntity, Custody, ImportClaim, KeyManagement
+lazy from ledger_signer.application.ports import CertificationEntity, ImportClaim, KeyManagement
 lazy from ledger_signer.events import CertificateEvent
 lazy from ledger_testing.pki import Authority, Issued
 
@@ -155,6 +157,7 @@ def rules(*backends: BackendKind) -> SignerRules:
         backends=frozenset(backends or (BackendKind.LOCAL,)),
         skew=SKEW,
         concurrency=4,
+        import_concurrency=2,
         notice_days=NOTICE_DAYS,
     )
 
@@ -538,6 +541,31 @@ async def test_a_first_import_with_a_wrong_password_is_refused_then_one_with_the
     assert list(units.rows) == [installed.view.id]
 
 
+class Admitting(Custody, Protocol):
+    """The stand-in custody, and the most admissions it ran at once."""
+
+    most_admitting: int
+
+
+async def test_imports_are_admitted_two_at_a_time_apart_from_signatures(
+    units: Store, custody: Admitting, clock: Clock
+) -> None:
+    """Opening a bundle is CPU work an api caller chooses: bounded by its own pool, not the signatures'."""
+    use_case = importing(units, custody, clock, BackendKind.REMOTE)
+    companies = [Tenant(ORGANIZATION, CompanyId(new_id()), Mode.TEST) for _ in range(6)]
+    outcomes = await asyncio.gather(
+        *(
+            use_case.remote(
+                ImportRequest(tenant=company, modes=TEST, idempotency_key=f"import-{company.company}"),
+                Secret(CREDENTIAL),
+            )
+            for company in companies
+        )
+    )
+    assert len({outcome.view.id for outcome in outcomes}) == len(companies)
+    assert custody.most_admitting == 2
+
+
 async def test_the_stand_ins_refuse_a_call_out_from_inside_a_unit(
     units: Store, kms: KeyManagement, entity: CertificationEntity
 ) -> None:
@@ -755,20 +783,27 @@ def test_a_seal_context_names_the_purpose_and_the_certificate_s_owners() -> None
 
 
 @pytest.mark.parametrize(
-    ("backends", "skew", "concurrency", "days"),
+    ("backends", "skew", "concurrency", "imports", "days"),
     [
-        (frozenset[BackendKind](), SKEW, 4, NOTICE_DAYS),
-        (frozenset({BackendKind.LOCAL}), timedelta(0), 4, NOTICE_DAYS),
-        (frozenset({BackendKind.LOCAL}), SKEW, 0, NOTICE_DAYS),
-        (frozenset({BackendKind.LOCAL}), SKEW, 4, (7, 7)),
-        (frozenset({BackendKind.LOCAL}), SKEW, 4, (-1,)),
+        (frozenset[BackendKind](), SKEW, 4, 2, NOTICE_DAYS),
+        (frozenset({BackendKind.LOCAL}), timedelta(0), 4, 2, NOTICE_DAYS),
+        (frozenset({BackendKind.LOCAL}), SKEW, 0, 2, NOTICE_DAYS),
+        (frozenset({BackendKind.LOCAL}), SKEW, 4, 0, NOTICE_DAYS),
+        (frozenset({BackendKind.LOCAL}), SKEW, 4, 2, (7, 7)),
+        (frozenset({BackendKind.LOCAL}), SKEW, 4, 2, (-1,)),
     ],
 )
 def test_rules_that_break_their_bounds_are_a_defect(
-    backends: frozenset[BackendKind], skew: timedelta, concurrency: int, days: tuple[int, ...]
+    backends: frozenset[BackendKind], skew: timedelta, concurrency: int, imports: int, days: tuple[int, ...]
 ) -> None:
     with pytest.raises(InvalidValueError):
-        _ = SignerRules(backends=backends, skew=skew, concurrency=concurrency, notice_days=days)
+        _ = SignerRules(
+            backends=backends,
+            skew=skew,
+            concurrency=concurrency,
+            import_concurrency=imports,
+            notice_days=days,
+        )
 
 
 @pytest.mark.parametrize(

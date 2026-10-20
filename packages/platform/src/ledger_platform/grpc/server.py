@@ -65,6 +65,10 @@ DEFAULT_MAX_MESSAGE_BYTES: Final = 5 * 1024 * 1024
 """The largest message a server takes or sends by default: a certificate's chunk, a signed document."""
 MAX_MESSAGE_BYTES: Final = 64 * 1024 * 1024
 """The largest limit a server may be given."""
+DEFAULT_MAX_CONCURRENT_RPCS: Final = 64
+"""The most calls a server takes at once by default: past it a call ends ``RESOURCE_EXHAUSTED`` at once."""
+MAX_CONCURRENT_RPCS: Final = 10_000
+"""The largest number of calls at once a server may be given."""
 _logger = structlog.stdlib.get_logger(__name__)
 
 
@@ -259,14 +263,18 @@ def _bind(server: grpc.aio.Server, port: int) -> int:
 class ServerOptions:
     """How a server runs, besides what it serves and who may call it. Checked when made.
 
-    Raises ``InvalidOptionError`` for a ``grace`` that is not a positive, finite number of seconds, or a
-    ``max_message_bytes`` outside 1..``MAX_MESSAGE_BYTES``.
+    Raises ``InvalidOptionError`` for a ``grace`` that is not a positive, finite number of seconds, a
+    ``max_message_bytes`` outside 1..``MAX_MESSAGE_BYTES``, or a ``max_concurrent_rpcs`` outside
+    1..``MAX_CONCURRENT_RPCS``.
     """
 
     grace: float = 10.0
     """Seconds the calls in flight have to finish when the server stops, before they are cancelled."""
     max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES
     """The largest message the server takes or sends: a larger one ends its call ``RESOURCE_EXHAUSTED``."""
+    max_concurrent_rpcs: int = DEFAULT_MAX_CONCURRENT_RPCS
+    """The most calls the server runs at once: one more ends ``RESOURCE_EXHAUSTED`` before it is admitted,
+    so a flood of calls cannot hold the process's memory and threads."""
     tracer: Tracer | None = None
     """What traces each call (the app's, ``Telemetry.tracer``); the process-wide provider's when ``None``."""
 
@@ -278,6 +286,13 @@ class ServerOptions:
                 option="max_message_bytes",
                 requirement=f"1 to {MAX_MESSAGE_BYTES} bytes",
                 value=self.max_message_bytes,
+            )
+        if not 0 < self.max_concurrent_rpcs <= MAX_CONCURRENT_RPCS:
+            raise InvalidOptionError(
+                component=_COMPONENT,
+                option="max_concurrent_rpcs",
+                requirement=f"1 to {MAX_CONCURRENT_RPCS} calls",
+                value=self.max_concurrent_rpcs,
             )
 
 
@@ -293,6 +308,7 @@ async def _serving(
 ) -> AsyncGenerator[int]:
     server = grpc.aio.server(
         interceptors=interceptors,
+        maximum_concurrent_rpcs=options.max_concurrent_rpcs,
         options=(
             ("grpc.max_receive_message_length", options.max_message_bytes),
             ("grpc.max_send_message_length", options.max_message_bytes),

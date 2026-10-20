@@ -11,6 +11,15 @@ def test_the_newest_value_in_effect_on_a_day_wins() -> None:
     assert rates.at(date(2025, 12, 31)) == 16
 
 
+def test_the_entry_in_effect_on_a_day_names_when_its_value_took_effect() -> None:
+    newest, oldest = Since(date(2026, 1, 1), 18), Since(date(2013, 1, 1), 16, until=date(2025, 6, 1))
+    rates = Timeline(newest, oldest)
+    assert (rates.entry_at(date(2026, 3, 1)), rates.entry_at(date(2013, 1, 1))) == (newest, oldest)
+    for day in (date(2025, 6, 1), date(2012, 12, 31)):
+        with pytest.raises(NotInEffectError):
+            rates.entry_at(day)
+
+
 def test_a_timeline_lists_its_values_newest_first() -> None:
     newest, oldest = Since(date(2026, 1, 1), 18), Since(date(2013, 1, 1), 16)
     assert Timeline(newest, oldest).entries == (newest, oldest)

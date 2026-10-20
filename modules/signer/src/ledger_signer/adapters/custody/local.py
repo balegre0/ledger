@@ -3,8 +3,10 @@
 Admitting a bundle opens it, reads its certificate's facts and seals its key (PKCS#8, DER) for the
 certificate. Signing unwraps the data key for this signature alone, opens the key, signs ``SignedInfo``
 (RSASSA-PKCS1-v1_5, SHA-256) and completes the document, which ``dsig`` checks against the certificate. The
-CPU work (the bundle's key derivation, loading and using the key, completing the document) runs in a thread,
-never on the event loop; the use case bounds how many at once.
+CPU work (the bundle's key derivation, loading and using the key, completing the document) runs in a thread
+(``asyncio.to_thread``), never on the event loop. The use cases bound how many run at once, each with a pool
+of its own: imports ``import_concurrency`` (``Importing``), signatures ``signing_concurrency`` (``Signing``);
+a bundle's key derivation is bounded too by the iteration ceiling ``pkcs12`` checks before opening it.
 
 Sealed material that is not a private key (a credential sealed for the remote backend) does not open
 (``CustodyTamperedError``); a private key that is no RSA key is ``dsig.NotAnRsaKeyError`` raised from nothing:

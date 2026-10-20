@@ -14,25 +14,22 @@ lazy from collections.abc import Sequence
 
 from ledger_identity.domain.errors import CompanyInactiveError
 from ledger_kernel.access import CompanyNotFoundError
-from ledger_platform.runtime.calls import Call, SystemCall
 from ledger_platform.runtime.keys import Key
 lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_kernel.ids import CompanyId, OrganizationId
 lazy from ledger_kernel.jurisdiction import Jurisdiction
 lazy from ledger_kernel.money import Currency
 lazy from ledger_kernel.tax_ids import TaxId
+lazy from ledger_platform.runtime.calls import AnyCall, SystemCall
 
 __all__ = [
     "IDENTITY_API",
-    "AnyCall",
     "CompanyInactiveError",
     "CompanyInfo",
     "CompanyNotFoundError",
+    "EstablishmentInfo",
     "IdentityApi",
 ]
-
-type AnyCall = Call | SystemCall
-"""Who asks: a principal through a request, or the platform itself."""
 
 
 @final
@@ -51,6 +48,17 @@ class CompanyInfo:
     fiscal_profile_locked: bool
     """Whether its fiscal profile (jurisdiction, functional currency, tax ids) can no longer change (§7.1)."""
     version: int
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class EstablishmentInfo:
+    """An establishment as other modules see it: where a document is issued from, and whose day it keeps."""
+
+    code: str
+    name: str
+    time_zone: str
+    """Its IANA zone: its own, or the one of ``MAIN`` it took when it was opened without one (§7.1)."""
 
 
 @runtime_checkable
@@ -80,6 +88,16 @@ class IdentityApi(Protocol, metaclass=ABCMeta):
         """What ``principal`` may do in ``company``.
 
         Its role's permissions; the reading ones once the company is deactivated; none without an active role.
+        """
+
+    @abstractmethod
+    async def establishment(
+        self, call: AnyCall, company: CompanyId, code: str | None
+    ) -> EstablishmentInfo | None:
+        """The company's establishment known by ``code`` (``MAIN`` when ``None``); ``None`` when it has none.
+
+        ``CompanyNotFoundError`` for a company the call's organization does not have. A code that is not one
+        (wrong shape) is no different from an unknown one, and is never repeated.
         """
 
     @abstractmethod

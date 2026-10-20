@@ -45,6 +45,7 @@ from ledger_platform.runtime.registries import Regimes
 lazy from ledger_fiscal.application.ports import AuditAction
 lazy from ledger_fiscal.events import FiscalEvent
 lazy from ledger_fiscal_kit.channels import ChannelDef
+lazy from ledger_identity.api import EstablishmentInfo
 lazy from ledger_kernel.access import Permission
 lazy from ledger_kernel.errors import LedgerError
 lazy from ledger_kernel.jurisdiction import Jurisdiction
@@ -106,6 +107,14 @@ class StubIdentity(IdentityApi):
     ) -> frozenset[Permission]:
         del call, principal, company
         return frozenset()
+
+    @override
+    @facade
+    async def establishment(
+        self, call: Call | SystemCall, company: CompanyId, code: str | None
+    ) -> EstablishmentInfo | None:
+        del call, company, code
+        return None
 
     @override
     @facade

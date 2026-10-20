@@ -14,7 +14,7 @@ lazy from uuid import UUID
 from ledger_platform.runtime.keys import Key
 lazy from ledger_kernel.ids import CompanyId
 lazy from ledger_kernel.tenancy import Mode
-lazy from ledger_platform.runtime.calls import Call, SystemCall
+lazy from ledger_platform.runtime.calls import AnyCall
 
 __all__ = ["FISCAL_API", "EnrollmentStatusName", "EnrollmentView", "FiscalApi"]
 
@@ -47,9 +47,7 @@ class FiscalApi(Protocol, metaclass=ABCMeta):
     """What the other modules may ask of fiscal. Abstract, so that its method needs no body."""
 
     @abstractmethod
-    async def enrollments(
-        self, call: Call | SystemCall, company: CompanyId, mode: Mode
-    ) -> tuple[EnrollmentView, ...]:
+    async def enrollments(self, call: AnyCall, company: CompanyId, mode: Mode) -> tuple[EnrollmentView, ...]:
         """Every enrollment of ``company`` (the call's organization's) in ``mode``, disabled too, by id."""
 
 

@@ -15,6 +15,7 @@ lazy from ledger_fiscal.application.ports import FiscalUnits
 lazy from ledger_fiscal.domain.enrollments import Enrollment
 lazy from ledger_kernel.ids import CompanyId, OrganizationId
 lazy from ledger_kernel.tenancy import Mode
+lazy from ledger_platform.runtime.calls import AnyCall
 
 
 def view(enrollment: Enrollment) -> EnrollmentView:
@@ -35,7 +36,7 @@ def view(enrollment: Enrollment) -> EnrollmentView:
     )
 
 
-def organization_of(call: Call | SystemCall) -> OrganizationId:
+def organization_of(call: AnyCall) -> OrganizationId:
     """The organization ``call`` acts for; a call that names none is a defect of its caller."""
     match call:
         case Call(scope=scope) | SystemCall(scope=scope) if scope is not None:
@@ -55,8 +56,6 @@ class FiscalFacade(FiscalApi):
 
     @override
     @facade
-    async def enrollments(
-        self, call: Call | SystemCall, company: CompanyId, mode: Mode
-    ) -> tuple[EnrollmentView, ...]:
+    async def enrollments(self, call: AnyCall, company: CompanyId, mode: Mode) -> tuple[EnrollmentView, ...]:
         async with self._units.unit(Tenant(organization_of(call), company, mode)) as unit:
             return tuple(view(enrollment) for enrollment in await unit.enrollments.every())

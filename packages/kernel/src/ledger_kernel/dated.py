@@ -49,7 +49,7 @@ class Since[T]:
 @final
 @dataclass(frozen=True, slots=True, init=False)
 class Timeline[T]:
-    """Dated values, newest first; ``at(day)`` is the one in effect on ``day``.
+    """Dated values, newest first; ``at(day)`` is the one in effect on ``day`` (``entry_at``, with its date).
 
     A value: equal, hashed and shown by its entries.
     """
@@ -72,9 +72,16 @@ class Timeline[T]:
 
     def at(self, day: date) -> T:
         """The value in effect on ``day``; ``NotInEffectError`` when there is none."""
+        return self.entry_at(day).value
+
+    def entry_at(self, day: date) -> Since[T]:
+        """The entry in effect on ``day``, which says since when its value is; ``NotInEffectError`` if none.
+
+        The newest that started on or before ``day``, unless it ended by then.
+        """
         for entry in self.entries:
             if entry.since <= day:
                 if entry.until is not None and day >= entry.until:
                     raise NotInEffectError(day)
-                return entry.value
+                return entry
         raise NotInEffectError(day)

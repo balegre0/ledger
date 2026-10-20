@@ -6,7 +6,7 @@ owners = ["@balegre0"]
 scripts = { "ledger-fake-dgii" = "ledger_country_do_testing.fake_dgii.serve:main", "ledger-dgii-spike" = "ledger_country_do_testing.spike:main" }
 
 [dependencies]
-packages = ["kernel", "do", "fiscal-kit", "testing"]
+packages = ["kernel", "platform", "do", "fiscal-kit", "testing"]
 python = [
     "cryptography>=50.0.2",
     "granian>=2.8.4",

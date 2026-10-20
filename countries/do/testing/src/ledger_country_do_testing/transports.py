@@ -1,14 +1,30 @@
-"""httpx transports that watch or break the fake's traffic, and the hosts tests give the fake."""
+"""Transports that watch or break the fake's traffic, the fake's hosts, and outbound clients over them."""
 
 from typing import Final, final, override
 
 import httpx
 
 from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts
+from ledger_country_do.channels.ecf_v1.adapters.http import BUYERS_CLIENT, DGII_CLIENT
+from ledger_platform.http.outbound import OutboundHttp
+from ledger_platform.observability.telemetry import Telemetry
 
 FAKE_HOSTS: Final = DgiiHosts(ecf="https://ecf.fake.test", fc="https://fc.fake.test")
 """The hosts the DO pack's tests give DGII's client in front of the fake (``.test`` never resolves)."""
 _RESET: Final = "the connection was reset"
+
+
+def outbound_over(
+    transport: httpx.AsyncBaseTransport | None, *, telemetry: Telemetry | None = None
+) -> OutboundHttp:
+    """The channel's outbound clients, DGII's and the buyers', over ``transport`` (``None``: the network).
+
+    ``telemetry`` ``Telemetry.unexported`` unless given (a test reads its spans or metrics).
+    """
+    transports = {} if transport is None else {DGII_CLIENT: transport, BUYERS_CLIENT: transport}
+    return OutboundHttp(
+        telemetry=Telemetry.unexported("do-ecf-v1") if telemetry is None else telemetry, transports=transports
+    )
 
 
 @final

@@ -19,11 +19,12 @@ reception (multipart ``xml``, named RNC + e-NCF), and the answer must be a **sig
    cédula. Revocation is not checked (a recorded gap).
 
 ``Estado`` 0 is received (and then carries no reason: one that does contradicts itself); 1 is not, with
-DGII's reason code. Requests follow no redirect, ignore the environment's proxies, verify TLS for the buyer's
-name, accept a plain or single-gzip answer of at most ``MAX_ANSWER`` bytes read as it streams, and each has
-the per-attempt limit of ``DgiiTimeouts`` (``total``) within the delivery's overall deadline (``call``). A
-request goes to the next checked address only when the previous could not be connected to; nothing is
-otherwise retried here, and no connection is reused.
+DGII's reason code. Requests go through the platform's ``OutboundHttp`` client ``BUYERS_CLIENT`` (traced
+and measured with the host and status only, keeping no connection): they follow no redirect, ignore the
+environment's proxies, verify TLS for the buyer's name, accept a plain or single-gzip answer of at most
+``MAX_ANSWER`` bytes read as it streams, and each has the per-attempt limit of ``DgiiTimeouts`` (``total``)
+within the delivery's overall deadline (``call``). A request goes to the next checked address only when the
+previous could not be connected to; nothing is otherwise retried here, and no connection is reused.
 
 **Failures, one classification.** A buyer that could not be reached, failed, timed out, answered other than
 200, or whose answer cannot be read as bytes (an encoding refused, over the size limit), or whose seed or
@@ -57,7 +58,12 @@ lazy from cryptography import x509
 
 from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import endpoint, pinned, system_resolve
 from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import TokenAnswer
-from ledger_country_do.channels.ecf_v1.adapters.http import ACCEPTED_ENCODING, DEFAULT_TIMEOUTS, bounded
+from ledger_country_do.channels.ecf_v1.adapters.http import (
+    ACCEPTED_ENCODING,
+    BUYERS_CLIENT,
+    DEFAULT_TIMEOUTS,
+    bounded,
+)
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import INBOUND, verify_enveloped
 from ledger_country_do.channels.ecf_v1.adapters.xml.inbound import read_inbound_arecf
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError, EcfUnavailableError
@@ -70,6 +76,7 @@ lazy from ledger_country_do.channels.ecf_v1.application.ports import XmlSigner
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 lazy from ledger_country_do.channels.ecf_v1.domain.exchanges import NotReceivedReason
+lazy from ledger_platform.http.outbound import OutboundHttp
 
 RECEPTION_PATH: Final = "/fe/recepcion/api/ecf"
 SEED_PATH: Final = "/fe/autenticacion/api/semilla"
@@ -169,16 +176,16 @@ def log_seed_signed(event: SeedSigned) -> None:
 
 
 class BuyerOptions(TypedDict, total=False):
-    """``BuyerClient``'s keywords: the trust policy, then timeouts, transport, resolver, clock and audit.
+    """``BuyerClient``'s keywords: the trust policy and the outbound clients, then the rest.
 
-    ``timeouts`` ``DEFAULT_TIMEOUTS``; ``transport`` ``None`` (httpx's own, TLS verified); ``resolve`` the
-    system's resolver (``endpoints.system_resolve``); ``clock`` UTC now (the moment a receipt is received, a
-    seed signed); ``audit`` ``log_seed_signed``.
+    ``trust`` and ``http`` (the channel's ``OutboundHttp``) required; ``timeouts`` ``DEFAULT_TIMEOUTS``;
+    ``resolve`` the system's resolver (``endpoints.system_resolve``); ``clock`` UTC now (the moment a
+    receipt is received, a seed signed); ``audit`` ``log_seed_signed``.
     """
 
     trust: Required[CounterpartyTrust]
+    http: Required[OutboundHttp]
     timeouts: DgiiTimeouts
-    transport: httpx.AsyncBaseTransport | None
     resolve: Resolve
     clock: Callable[[], datetime]
     audit: Callable[[SeedSigned], None]
@@ -193,10 +200,10 @@ class BuyerClient:
         "_clock",
         "_directory",
         "_http",
+        "_outbound",
         "_resolve",
         "_signer",
         "_timeouts",
-        "_transport",
         "_trust",
     )
 
@@ -206,8 +213,8 @@ class BuyerClient:
         self._signer = signer
         self._directory = directory
         self._trust = options["trust"]
+        self._outbound = options["http"]
         self._timeouts = options.get("timeouts", DEFAULT_TIMEOUTS)
-        self._transport = options.get("transport")
         self._resolve = options.get("resolve", system_resolve)
         self._clock = options.get("clock", _now)
         self._audit = options.get("audit", log_seed_signed)
@@ -216,15 +223,8 @@ class BuyerClient:
     @asynccontextmanager
     async def opened(self) -> AsyncGenerator[BuyerClient]:
         """This client with its connections open, for the length of the block."""
-        timeout = httpx.Timeout(self._timeouts.total, connect=self._timeouts.connect)
-        async with httpx.AsyncClient(
-            timeout=timeout,
-            follow_redirects=False,
-            trust_env=False,
-            verify=True,
-            limits=httpx.Limits(max_keepalive_connections=0),
-            transport=self._transport,
-        ) as http:
+        timeouts = self._timeouts.outbound()
+        async with self._outbound.client(BUYERS_CLIENT, timeouts=timeouts, keep_alive=False) as http:
             self._http = http
             try:
                 yield self

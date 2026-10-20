@@ -3,15 +3,20 @@
 A client role (``api``, ``worker``, ``receiver``) given the signer's address and its own token binds one
 ``SignerClient`` with that token as ``SignerPort`` and ``SignerApi`` and hands it as a resource; without
 either it binds the stand-ins answering ``signer_unavailable`` and says so once (Decision 13). No client role
-hands a readiness check: none depends on the signer. The signer's role binds the stand-ins until its service
-exists; ``migrate`` runs its revisions.
+hands a readiness check, a consumer or a job: none depends on the signer. The signer's role binds its facade,
+hands its gRPC server, consumer, jobs and checks, and refuses to start without its callers' tokens or its KMS;
+``migrate`` runs its revisions.
 """
 
 import dataclasses
+import os
+import subprocess
+import sys
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from typing import Final
-lazy from collections.abc import AsyncGenerator, Sequence
+lazy from collections.abc import AsyncGenerator, Callable, Sequence
+lazy from pathlib import Path
 
 import grpc
 import pytest
@@ -28,18 +33,24 @@ from ledger_fiscal_kit.ports import (
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.config.settings import Settings
-from ledger_platform.grpc.guard import CallerPolicy, CallerTokens, current_caller
+from ledger_platform.grpc.guard import CallerPolicy, CallerTokenRefusedError, CallerTokens, current_caller
 from ledger_platform.grpc.server import ServerOptions, serve_grpc
 from ledger_platform.runtime import App, Module, SystemCall
 from ledger_platform.runtime.registries import MODULES, Discovered, installed
+from ledger_signer.adapters.custody.backends import EntityNotConfiguredError
+from ledger_signer.adapters.custody.kms_local import MASTER_KEY_BYTES
 from ledger_signer.adapters.grpc import codec
 from ledger_signer.adapters.grpc._generated.v1 import signer_pb2
 from ledger_signer.adapters.grpc.client import SignerClient, SignerTokenRefusedError
+from ledger_signer.adapters.grpc.server import SignerNotServingError, SignerServer
 from ledger_signer.adapters.postgres.schema import MIGRATIONS
+from ledger_signer.adapters.serving import KmsKeyFileMissingError
 from ledger_signer.adapters.settings import SignerSettings
 from ledger_signer.adapters.unavailable import UnavailableSigner
 from ledger_signer.api import SIGNER_API
+from ledger_signer.application.facade import SignerFacade
 from ledger_signer.assembly import MODULE
+lazy from ledger_kernel.errors import LedgerError
 lazy from ledger_platform.runtime import AppRole, ModuleContext, ModuleParts
 lazy from ledger_platform.runtime.keys import Binding
 
@@ -196,7 +207,7 @@ async def test_a_configured_client_role_binds_one_client_with_its_own_token(
     assert isinstance(client, SignerClient)
     assert [(binding.name, binding.value) for binding in parts.provides] == [(SIGNER_PORT.name, client)]
     assert tuple(parts.resources) == (client,)
-    assert (parts.consumers, parts.jobs, dict(parts.checks)) == ((), (), {})  # no readiness on the signer
+    assert (parts.consumers, parts.jobs, dict(parts.checks)) == ((), (), {})  # nothing of the signer's own
     assert [member.relay_only for member in app.members if member.name == "signer"] == [True]
     assert "signer.not_configured" not in capsys.readouterr().out
     async with AsyncExitStack() as resources:
@@ -241,19 +252,96 @@ async def test_a_client_role_with_a_short_own_token_fails_to_start(
         await assembled(recorded, role)
 
 
-async def test_the_signer_role_binds_the_stand_ins_until_its_service_exists(
-    recorded: Recorded, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.fixture
+def key_file(tmp_path: Path) -> Path:
+    """A local-file KMS's key, as ``test`` wants it: made beforehand."""
+    path = tmp_path / "kms.key"
+    path.write_bytes(os.urandom(MASTER_KEY_BYTES))
+    return path
+
+
+def configure_signer(monkeypatch: pytest.MonkeyPatch, key_file: Path) -> None:
+    """Every caller's token and the KMS's key file, as the signer's deployment sets them."""
+    configure(monkeypatch, None, "api", "worker", "receiver")
+    monkeypatch.setenv("LEDGER_SIGNER_KMS_KEY_FILE", str(key_file))
+
+
+async def test_the_signer_role_binds_its_facade_and_hands_its_service_consumer_jobs_and_checks(
+    recorded: Recorded, monkeypatch: pytest.MonkeyPatch, key_file: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    configure(monkeypatch, "signer:50051", "api", "worker", "receiver")
+    configure_signer(monkeypatch, key_file)
     app, parts = await assembled(recorded, "signer")
-    assert isinstance(bound(parts.api), UnavailableSigner)
-    assert [binding.name for binding in parts.provides] == [SIGNER_PORT.name]
-    assert parts.resources == ()
+    facade = bound(parts.api)
+    assert isinstance(facade, SignerFacade)
+    assert [(binding.name, binding.value) for binding in parts.provides] == [(SIGNER_PORT.name, facade)]
+    [server] = parts.resources
+    assert isinstance(server, SignerServer)
+    assert [consumer.name for consumer in parts.consumers] == ["signer.company_deactivations"]
+    assert [job.kind for job in parts.jobs] == [
+        "signer.expiry_notice",
+        "signer.purge_idempotency_keys",
+        "signer.purge_done_jobs",
+    ]
+    assert sorted(parts.checks) == ["grpc", "kms"]
+    await parts.checks["kms"]()
+    with pytest.raises(SignerNotServingError):  # until the app starts it
+        await parts.checks["grpc"]()
     assert "signer.not_configured" not in capsys.readouterr().out
     assert [(member.name, member.relay_only) for member in app.members] == [
         ("platform", False),
         ("signer", False),
     ]
+
+
+def same_token_twice(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LEDGER_SIGNER_TOKEN_WORKER", TOKENS["api"])
+
+
+def short_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LEDGER_SIGNER_TOKEN_RECEIVER", "short-token-0123456789abcdef")
+
+
+def missing_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LEDGER_SIGNER_TOKEN_WORKER")
+
+
+def previous_token_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LEDGER_SIGNER_TOKEN_API")
+    monkeypatch.setenv("LEDGER_SIGNER_TOKEN_API_PREVIOUS", TOKENS["api"])
+
+
+def no_key_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LEDGER_SIGNER_KMS_KEY_FILE")
+
+
+def remote_offered(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LEDGER_SIGNER_BACKENDS", "local,remote")
+
+
+@pytest.mark.parametrize(
+    ("misconfigure", "refusal"),
+    [
+        (missing_token, CallerTokenRefusedError),
+        (short_token, CallerTokenRefusedError),
+        (same_token_twice, CallerTokenRefusedError),
+        (previous_token_alone, CallerTokenRefusedError),
+        (no_key_file, KmsKeyFileMissingError),
+        (remote_offered, EntityNotConfiguredError),
+    ],
+    ids=["missing token", "short token", "shared token", "previous token alone", "no key file", "remote"],
+)
+async def test_the_signer_refuses_to_start_without_its_callers_tokens_or_its_kms(
+    recorded: Recorded,
+    monkeypatch: pytest.MonkeyPatch,
+    key_file: Path,
+    misconfigure: Callable[[pytest.MonkeyPatch], None],
+    refusal: type[LedgerError],
+) -> None:
+    configure_signer(monkeypatch, key_file)
+    misconfigure(monkeypatch)
+    with pytest.raises(refusal) as caught:
+        await assembled(recorded, "signer")
+    assert all(token not in str(caught.value) for token in TOKENS.values())
 
 
 async def test_migrate_hands_the_migrations(recorded: Recorded) -> None:
@@ -279,3 +367,28 @@ async def test_the_unbound_port_answers_signer_unavailable() -> None:
         await stand_in.certificate_validity(CALL, TENANT)
     with pytest.raises(SignerUnavailableError):
         await stand_in.certificates(CALL, TENANT.company, Mode.TEST)
+
+
+_PROBE: Final = """
+import sys
+import ledger_signer.assembly as assembly
+{touch}
+print(" ".join(sorted(name for name in sys.modules if name.startswith("ledger_signer.adapters.custody"))))
+"""
+
+
+def custody_loaded(touch: str) -> list[str]:
+    """The custody modules a fresh interpreter holds once it imported the assembly and ran ``touch``."""
+    found = subprocess.run(
+        [sys.executable, "-c", _PROBE.format(touch=touch)], capture_output=True, text=True, check=True
+    )
+    return found.stdout.split()
+
+
+def test_a_client_role_never_loads_custody() -> None:
+    """Custody is the signer's own: the api, the worker and the receiver import the assembly without it."""
+    assert custody_loaded("assert assembly.MODULE.manifest.package.name == 'signer'") == []
+
+
+def test_the_probe_sees_custody_once_the_signer_s_role_reaches_for_it() -> None:
+    assert "ledger_signer.adapters.custody.kms_local" in custody_loaded("assert assembly.local_kms")

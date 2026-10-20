@@ -126,7 +126,11 @@ class Moving(Protocol):
 def rules(concurrency: int = 4) -> SignerRules:
     """Rules offering both backends, the default skew, ``concurrency`` signatures at once."""
     return SignerRules(
-        backends=frozenset(BackendKind), skew=SKEW, concurrency=concurrency, notice_days=(30, 14, 7, 1, 0)
+        backends=frozenset(BackendKind),
+        skew=SKEW,
+        concurrency=concurrency,
+        import_concurrency=2,
+        notice_days=(30, 14, 7, 1, 0),
     )
 
 

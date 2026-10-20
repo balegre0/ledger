@@ -1,6 +1,7 @@
 import logging
 import logging.config
 from importlib.metadata import version
+lazy from pathlib import Path
 
 import pytest
 from granian.constants import Interfaces
@@ -77,8 +78,18 @@ def distribution_version(distribution: str) -> str:
 
 
 @pytest.mark.usefixtures("environment")
-def test_the_signer_factory_builds_the_signer_app_without_connecting(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The workspace's signer module is isolated in the signer's role: its app serves probes, no route."""
+def test_the_signer_factory_builds_the_signer_app_without_connecting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The workspace's signer module is isolated in the signer's role: its app serves probes, no route.
+
+    The signer module refuses to start without its callers' tokens and its KMS's key file: the deployment's.
+    """
+    for caller in ("api", "worker", "receiver"):
+        monkeypatch.setenv(f"LEDGER_SIGNER_TOKEN_{caller.upper()}", f"{caller}-token-".ljust(40, "x"))
+    key_file = tmp_path / "kms.key"
+    key_file.write_bytes(bytes(range(32)))
+    monkeypatch.setenv("LEDGER_SIGNER_KMS_KEY_FILE", str(key_file))
     monkeypatch.setattr(serving, "version", distribution_version)
     app = serving.signer()
     assert (app.title, app.version) == ("ledger-signer", "1.2.3")
