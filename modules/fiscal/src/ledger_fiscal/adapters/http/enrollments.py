@@ -45,7 +45,6 @@ from ledger_platform.http import (
     problems,
     success,
 )
-from ledger_platform.http.idempotency import Outcome
 from ledger_platform.http.problems import PROBLEM_JSON, Problem, current_request_id
 from ledger_platform.runtime.calls import Call
 lazy from ledger_fiscal.adapters.http.context import ApiContext
@@ -130,11 +129,11 @@ def stored(status: HTTPStatus, enrollment: Enrollment) -> StoredResponse:
 async def _replayed(
     context: ApiContext, caller: Acting, attempt: Attempt, needed: Permission
 ) -> Response | None:
-    """The answer stored for the caller's first use of the key; else ``None``, once ``needed`` is held."""
+    """The answer stored for the caller's committed use of the key; else ``None``, once ``needed`` is held."""
     async with context.database.unit(caller.tenant) as unit:
-        earlier = await context.idempotency.stored(unit, attempt)
+        earlier = await context.idempotency.replayed(unit, attempt)
     if earlier is not None:
-        return answer(Outcome(earlier, replayed=True))
+        return answer(earlier)
     caller.access.require(needed)
     return None
 
