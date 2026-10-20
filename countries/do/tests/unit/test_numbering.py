@@ -3,12 +3,14 @@ from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from typing import Final, final
 from uuid import UUID, uuid4
+lazy from collections.abc import Iterable
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from ledger_country_do.channels.ecf_v1.domain.encf import MAX_SEQUENCE, EcfType, Encf
+from ledger_country_do.channels.ecf_v1.domain.notation import NaiveMomentError, local_date
 from ledger_country_do.channels.ecf_v1.domain.numbering import (
     Allocation,
     NoNumberAvailableError,
@@ -77,6 +79,25 @@ def test_a_released_number_is_taken_first_once_it_is_available() -> None:
     assert three_minutes == Allocation(
         encf=Encf(T31, 3), range_id=LOW, expires_on=date(2028, 12, 31), released=True
     )
+
+
+def test_a_released_number_is_available_at_its_moment_exactly() -> None:
+    ranges = [a_range(1, 10, next_=6, ident=LOW)]
+    released = [Released(ecf_type=T31, sequence=3, available_at=NOW)]
+    assert choose(ecf_type=T31, ranges=ranges, released=released, now=NOW).encf == Encf(T31, 3)
+    earlier = NOW - timedelta(microseconds=1)
+    assert choose(ecf_type=T31, ranges=ranges, released=released, now=earlier).encf == Encf(T31, 6)
+
+
+def test_a_released_number_the_range_has_not_given_is_never_taken() -> None:
+    ranges = [a_range(1, 10, next_=6, ident=LOW)]
+    released = [Released(ecf_type=T31, sequence=8, available_at=NOW)]
+    assert choose(ecf_type=T31, ranges=ranges, released=released, now=NOW).encf == Encf(T31, 6)
+
+
+def test_a_released_number_s_moment_carries_its_offset() -> None:
+    with pytest.raises(NaiveMomentError):
+        Released(ecf_type=T31, sequence=3, available_at=NOW.replace(tzinfo=None))
 
 
 def test_the_lowest_released_number_first() -> None:
@@ -159,7 +180,7 @@ def test_accounting_holds_when_every_number_has_exactly_one_fate() -> None:
 
 @pytest.mark.parametrize(
     ("used", "burned"),
-    [({1, 2, 3, 4}, set[int]()), ({1, 2, 3, 4, 5}, {5}), ({1, 2, 3, 4, 5, 6}, set[int]())],
+    [({1, 2, 3, 4}, set[int]()), ({1, 2, 3, 4, 5}, {5}), ({1, 2, 3, 4, 6}, set[int]())],
     ids=["a-gap", "two-fates", "beyond-next"],
 )
 def test_accounting_fails_on_a_gap_a_double_fate_or_a_number_not_yet_allocated(
@@ -170,11 +191,17 @@ def test_accounting_fails_on_a_gap_a_double_fate_or_a_number_not_yet_allocated(
     )
 
 
+T32: Final = EcfType.CONSUMER_INVOICE
+EXPIRING: Final = UUID(int=3)
+OTHER: Final = UUID(int=4)
+
+
 class Action(StrEnum):
-    """What happens to a series: time passes, a document is numbered, rejected or voided."""
+    """What happens to the series: time passes, a document is numbered, rejected or voided."""
 
     WAIT = "wait"
     ALLOCATE = "allocate"
+    ALLOCATE_OTHER_TYPE = "allocate_other_type"
     REJECT_USED = "reject_used"
     """Rejected with ``secuenciaUtilizada = true``: the number burned."""
     REJECT_RELEASED = "reject_released"
@@ -182,28 +209,37 @@ class Action(StrEnum):
     VOID = "void"
 
 
+def of_type(numbers: Iterable[Encf], ecf_type: EcfType) -> set[int]:
+    """The sequences of ``numbers`` of ``ecf_type``."""
+    return {number.sequence for number in numbers if number.ecf_type is ecf_type}
+
+
 @final
 class Series:
-    """A series of type 31 and the repository's bookkeeping around ``choose``."""
+    """Two types' ranges, one expiring within the run, and the repository's bookkeeping around ``choose``."""
 
     def __init__(self) -> None:
         self.now: datetime = NOW
         self.ranges: dict[UUID, RangeState] = {
             LOW: a_range(1, 6, ident=LOW),
             HIGH: a_range(10, 14, ident=HIGH),
+            EXPIRING: replace(a_range(20, 40, ident=EXPIRING), expires_on=date(2026, 10, 19)),
+            OTHER: replace(a_range(1, 8, ident=OTHER), ecf_type=T32),
         }
-        self.live: list[int] = []
-        """The sequences held by documents neither rejected nor voided."""
-        self.burned: set[int] = set()
-        self.released: dict[int, datetime] = {}
-        self.voided: set[int] = set()
+        self.live: list[Encf] = []
+        """The numbers held by documents neither rejected nor voided."""
+        self.burned: set[Encf] = set()
+        self.released: dict[Encf, datetime] = {}
+        self.voided: set[Encf] = set()
 
     def act(self, action: Action, value: int) -> None:
         match action:
             case Action.WAIT:
-                self.now += timedelta(minutes=value)
+                self.now += timedelta(hours=value)
             case Action.ALLOCATE:
-                self.allocate()
+                self.allocate(T31)
+            case Action.ALLOCATE_OTHER_TYPE:
+                self.allocate(T32)
             case _ if not self.live:
                 pass
             case Action.REJECT_USED:
@@ -213,35 +249,49 @@ class Series:
             case _:
                 self.voided.add(self.live.pop(value % len(self.live)))
 
-    def allocate(self) -> None:
+    def allocate(self, ecf_type: EcfType) -> None:
         pool = [
-            Released(ecf_type=T31, sequence=number, available_at=at) for number, at in self.released.items()
+            Released(ecf_type=number.ecf_type, sequence=number.sequence, available_at=at)
+            for number, at in self.released.items()
+        ]
+        today = local_date(self.now)
+        usable = [
+            each for each in self.ranges.values() if each.ecf_type is ecf_type and each.usable_on(today)
         ]
         try:
-            allocated = choose(ecf_type=T31, ranges=list(self.ranges.values()), released=pool, now=self.now)
+            allocated = choose(
+                ecf_type=ecf_type, ranges=list(self.ranges.values()), released=pool, now=self.now
+            )
         except NoNumberAvailableError:
-            assert all(range_.remaining == 0 for range_ in self.ranges.values())
-            assert all(at > self.now for at in self.released.values())
+            assert all(each.remaining == 0 for each in usable)
+            assert not any(
+                number.ecf_type is ecf_type
+                and at <= self.now
+                and any(each.holds(number.sequence) for each in usable)
+                for number, at in self.released.items()
+            )
             return
-        sequence = allocated.encf.sequence
-        assert sequence not in self.live
+        number = allocated.encf
+        range_ = self.ranges[allocated.range_id]
+        assert number.ecf_type is ecf_type
+        assert range_ in usable
+        assert number not in self.live
         if allocated.released:
-            assert self.released.pop(sequence) <= self.now
+            assert self.released.pop(number) <= self.now
         else:
-            range_ = self.ranges[allocated.range_id]
-            assert sequence == range_.next
-            self.ranges[allocated.range_id] = replace(range_, next=sequence + 1)
-        self.live.append(sequence)
+            assert number.sequence == range_.next
+            self.ranges[allocated.range_id] = replace(range_, next=number.sequence + 1)
+        self.live.append(number)
 
     def check(self) -> None:
         assert len(self.live) == len(set(self.live))
         for range_ in self.ranges.values():
             assert accounting_holds(
                 range_,
-                used=set(self.live),
-                burned=self.burned,
-                released=set(self.released),
-                voided=self.voided,
+                used=of_type(self.live, range_.ecf_type),
+                burned=of_type(self.burned, range_.ecf_type),
+                released=of_type(self.released, range_.ecf_type),
+                voided=of_type(self.voided, range_.ecf_type),
             )
 
 

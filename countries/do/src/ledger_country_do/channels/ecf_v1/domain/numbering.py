@@ -25,7 +25,7 @@ lazy from uuid import UUID
 
 from ledger_country_do.channels.ecf_v1.domain.encf import MAX_SEQUENCE, Encf
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfConflictError, EcfInvalidError
-from ledger_country_do.channels.ecf_v1.domain.notation import local_date
+from ledger_country_do.channels.ecf_v1.domain.notation import local_date, require_aware
 from ledger_country_do.channels.ecf_v1.domain.polling import RECEIPT_TOLERANCE
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
 
@@ -99,6 +99,9 @@ class Released:
     sequence: int
     available_at: datetime
 
+    def __post_init__(self) -> None:
+        require_aware(self.available_at)
+
 
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -134,7 +137,7 @@ def choose(
     )
     for sequence in available:
         for range_ in usable:
-            if range_.holds(sequence):
+            if range_.holds(sequence) and sequence < range_.next:
                 return Allocation(
                     encf=Encf(ecf_type, sequence),
                     range_id=range_.id,
@@ -166,7 +169,11 @@ def accounting_holds(
     released: AbstractSet[int],
     voided: AbstractSet[int],
 ) -> bool:
-    """Whether every number of the range has exactly the fates the module says; others' numbers ignored."""
+    """Whether every number of the range has exactly one fate, as the module says; others' numbers ignored.
+
+    A number in two of the sets is caught; a number held twice within one set is not (sets hold it once):
+    finding two documents with one number is the caller's check, before it builds ``used``.
+    """
     fates = [
         sequence
         for numbers in (used, burned, released, voided)

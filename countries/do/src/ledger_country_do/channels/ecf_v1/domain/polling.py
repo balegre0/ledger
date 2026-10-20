@@ -16,7 +16,7 @@ from typing import Final, final
 lazy from collections.abc import Sequence
 lazy from datetime import datetime
 
-from ledger_country_do.channels.ecf_v1.domain.notation import local_date
+from ledger_country_do.channels.ecf_v1.domain.notation import require_aware
 from ledger_kernel.errors import InvalidValueError
 
 POLL_SCHEDULE: Final = (1, 2, 5, 10, 30, 60)
@@ -49,7 +49,7 @@ class TrackId:
     received_at: datetime
 
     def __post_init__(self) -> None:
-        local_date(self.received_at)  # NaiveMomentError without a UTC offset
+        require_aware(self.received_at)
 
 
 def adoptable(
@@ -59,7 +59,6 @@ def adoptable(
 
     ``None`` when there is none. Of two received at the same moment, the greater id, whatever their order.
     """
-    local_date(signed_at)  # NaiveMomentError without a UTC offset
-    since = signed_at - RECEIPT_TOLERANCE
+    since = require_aware(signed_at) - RECEIPT_TOLERANCE
     fresh = [each for each in candidates if each.received_at >= since and each.track_id not in excluded]
     return max(fresh, key=lambda each: (each.received_at, each.track_id), default=None)

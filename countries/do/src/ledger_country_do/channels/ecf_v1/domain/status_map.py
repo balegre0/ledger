@@ -7,7 +7,8 @@ the e-NCF unless DGII says ``secuenciaUtilizada = false`` (invalid certificate o
 signer not delegated, e-NCF not authorized or expired, RNC not an electronic issuer, unknown or inactive),
 which releases it for reuse; an absent flag burns it (never reuse a number DGII may have recorded). The RFCE
 answers at once with 1, 2 or 4 (F2). ``consultarfce``, which settles an RFCE whose answer was lost, answers
-0 (pending: DGII holds the summary and has not decided), 1, 2 or 4 ([06] §2; Decision 37 of the v2-M3b plan).
+0 (No encontrado: not, or not yet, recorded by DGII; the outcome stays unknown), 1, 2 or 4 ([06] §2;
+DT-DGII; Decision 37 of the v2-M3b plan): an RFCE is decided on receipt, so there is no "in process".
 A code DGII never documented for the service is an error, never a guess.
 Messages are kept verbatim, as fiscal-kit's ``AuthorityMessage`` in Spanish, within the kit's bounds
 (``kept``).
@@ -68,16 +69,24 @@ RFCE_DOCUMENTED: Final[Mapping[DgiiCode, str]] = MappingProxyType(
 
 
 class RfceQueryCode(IntEnum):
-    """``consultarfce``'s ``codigo``: 0 is pending there, not "not found" as for ``consultaresultado``."""
+    """``consultarfce``'s ``codigo``."""
 
-    PENDING = 0
+    NOT_FOUND = 0
     ACCEPTED = 1
     REJECTED = 2
     ACCEPTED_CONDITIONALLY = 4
 
 
-RFCE_QUERY_DOCUMENTED: Final = frozenset(RfceQueryCode)
-"""What ``consultarfce`` answers ([06] §2: states 0, 1 and 2, and Aceptado Condicional)."""
+RFCE_QUERY_DOCUMENTED: Final[Mapping[RfceQueryCode, str]] = MappingProxyType(
+    {
+        RfceQueryCode.NOT_FOUND: "No encontrado",
+        RfceQueryCode.ACCEPTED: "Aceptado",
+        RfceQueryCode.REJECTED: "Rechazado",
+        RfceQueryCode.ACCEPTED_CONDITIONALLY: "Aceptado Condicional",
+    }
+)
+"""What ``consultarfce`` answers: DT-DGII documents 0, 1 and 2, and shows Aceptado Condicional "temporarily"
+without its code (4, as the RFCE reception: F2)."""
 
 
 class DgiiService(StrEnum):
@@ -135,15 +144,19 @@ RFCE_STATUS_MAP: Final = StatusMap[DgiiCode, EcfState](
 RFCE_QUERY_MAP: Final = StatusMap[RfceQueryCode, EcfState](
     MappingProxyType(
         {
-            RfceQueryCode.PENDING: StatusEntry(
-                EcfState.IN_PROCESS, FiscalStatus.PENDING, Severity.INFO, final=False
+            RfceQueryCode.NOT_FOUND: StatusEntry(
+                EcfState.OUTCOME_UNKNOWN, FiscalStatus.PENDING, Severity.INFO, final=False
             ),
-            **{code: _ENTRIES[DgiiCode(code)] for code in RfceQueryCode if code is not RfceQueryCode.PENDING},
+            **{
+                code: _ENTRIES[DgiiCode(code)]
+                for code in RfceQueryCode
+                if code is not RfceQueryCode.NOT_FOUND
+            },
         }
     ),
     documented=RFCE_QUERY_DOCUMENTED,
 )
-"""Where each of ``consultarfce``'s codes leads: pending is in process; the others as the reception's."""
+"""Where each of ``consultarfce``'s codes leads: 0 leaves it unknown; the others as the reception's."""
 _MAPS: Final[Mapping[DgiiService, StatusMap[DgiiCode, EcfState] | StatusMap[RfceQueryCode, EcfState]]] = (
     MappingProxyType(
         {
@@ -173,12 +186,19 @@ class DgiiMessage:
 class Outcome:
     """DGII's answer about one document, mapped."""
 
-    code: int
-    """The ``codigo`` as DGII answered it; what it means is ``entry``'s (it differs between services)."""
+    code: DgiiCode | RfceQueryCode
+    """The ``codigo``, as the service that answered it reads it (0 differs between them)."""
     entry: StatusEntry[EcfState]
     messages: tuple[AuthorityMessage, ...]
     number: NumberFate | None
     """``None`` while DGII has not decided."""
+
+    @property
+    def words(self) -> str:
+        """The code as DGII documents it (``Aceptado``, ``No encontrado``...)."""
+        if isinstance(self.code, RfceQueryCode):
+            return RFCE_QUERY_DOCUMENTED[self.code]
+        return DOCUMENTED[self.code]
 
     @property
     def state(self) -> EcfState:
@@ -224,7 +244,7 @@ def decide(
     *,
     sequence_used: bool | None,
     messages: Sequence[DgiiMessage],
-    service: DgiiService = DgiiService.RESULT,
+    service: DgiiService,
 ) -> Outcome:
     """DGII's ``code``, as ``service`` answered it, mapped (see the module).
 
@@ -236,4 +256,5 @@ def decide(
     except UnknownAuthorityCodeError as error:
         raise UnknownDgiiCodeError(code) from error
     found = kept([message.authority() for message in messages])
-    return Outcome(code, entry, found, _fate(entry, sequence_used=sequence_used))
+    read = RfceQueryCode(code) if service is DgiiService.RFCE_QUERY else DgiiCode(code)
+    return Outcome(read, entry, found, _fate(entry, sequence_used=sequence_used))

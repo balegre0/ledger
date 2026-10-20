@@ -232,7 +232,9 @@ class _Progress:
 
 
 def _refused(refusal: Refused) -> Outcome:
-    return decide(DgiiCode.REJECTED, sequence_used=None, messages=refusal.messages)
+    return decide(
+        DgiiCode.REJECTED, sequence_used=None, messages=refusal.messages, service=DgiiService.RESULT
+    )
 
 
 def _decided(answer: Answer, draft: EcfDraft, *, service: DgiiService) -> Outcome:

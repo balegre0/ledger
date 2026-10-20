@@ -33,16 +33,14 @@ EXPECTED: Final = {
     (S.IN_PROCESS, Step.POLL): {S.IN_PROCESS, S.OUTCOME_UNKNOWN},
     (S.IN_PROCESS, Step.DECIDE): DECIDED,
     (S.OUTCOME_UNKNOWN, Step.ADOPT_TRACK_ID): {S.SUBMITTED},
-    (S.OUTCOME_UNKNOWN, Step.POLL): {S.IN_PROCESS},
     (S.OUTCOME_UNKNOWN, Step.DECIDE): DECIDED,
 }
-SENT: Final = frozenset({S.SUBMITTED, S.IN_PROCESS, S.OUTCOME_UNKNOWN}) | DECIDED
-"""States a document reaches only once it may have left for DGII."""
 
 
-def reachable(start: EcfDocumentState) -> set[EcfDocumentState]:
-    seen = {start}
-    pending = [start]
+def closure(starts: set[EcfDocumentState]) -> set[EcfDocumentState]:
+    """``starts`` and every state some sequence of moves leads them to."""
+    seen = set(starts)
+    pending = list(starts)
     while pending:
         state = pending.pop()
         for (source, _), targets in TRANSITIONS.items():
@@ -53,8 +51,50 @@ def reachable(start: EcfDocumentState) -> set[EcfDocumentState]:
     return seen
 
 
-def test_the_table_is_the_one_drawn() -> None:
+def moves(state: EcfDocumentState) -> list[tuple[Step, EcfDocumentState]]:
+    """Every legal move out of ``state``."""
+    return sorted(
+        (step, target)
+        for (source, step), targets in TRANSITIONS.items()
+        if source is state
+        for target in targets
+    )
+
+
+AFTER_SUBMIT: Final = closure(
+    {target for (_, step), targets in TRANSITIONS.items() if step is Step.SUBMIT for target in targets}
+    | set(TRANSITIONS[S.SIGNED, Step.DECIDE])
+)
+"""Every state a document can reach once it may have left for DGII."""
+
+
+def test_the_table_matches_its_snapshot() -> None:
     assert {key: set(targets) for key, targets in TRANSITIONS.items()} == EXPECTED
+
+
+def test_only_a_signed_document_is_submitted() -> None:
+    assert {state for state, step in TRANSITIONS if step is Step.SUBMIT} == {S.SIGNED}
+
+
+def test_nothing_a_document_reaches_once_it_may_have_left_can_submit_it_again() -> None:
+    assert AFTER_SUBMIT
+    assert not any((state, Step.SUBMIT) in TRANSITIONS for state in AFTER_SUBMIT)
+    assert AFTER_SUBMIT.isdisjoint({S.NUMBERED, S.SIGNED})
+
+
+@given(st.data())
+def test_every_path_submits_at_most_once(data: st.DataObject) -> None:
+    state = S.NUMBERED
+    submits = 0
+    for _ in range(60):
+        legal = moves(state)
+        if not legal:
+            assert is_final(state)
+            break
+        step, to = data.draw(st.sampled_from(legal))
+        state = transition(state, step, to)
+        submits += step is Step.SUBMIT
+        assert submits <= 1
 
 
 @pytest.mark.parametrize(("state", "step", "to"), list(product(S, Step, S)))
@@ -77,11 +117,11 @@ def test_an_unknown_outcome_never_leads_back_to_signed() -> None:
             transition(S.OUTCOME_UNKNOWN, step, S.SIGNED)
 
 
-@pytest.mark.parametrize("state", sorted(SENT))
-def test_once_a_document_may_have_left_it_can_never_be_signed_or_numbered_again(
-    state: EcfDocumentState,
-) -> None:
-    assert reachable(state).isdisjoint({S.NUMBERED, S.SIGNED, S.BLOCKED, S.VOIDED})
+def test_an_unknown_outcome_leaves_only_by_a_track_id_or_a_decision() -> None:
+    assert {step for state, step in TRANSITIONS if state is S.OUTCOME_UNKNOWN} == {
+        Step.ADOPT_TRACK_ID,
+        Step.DECIDE,
+    }
 
 
 def test_void_only_from_numbered_or_blocked() -> None:
@@ -92,23 +132,6 @@ def test_the_final_states_lead_nowhere() -> None:
     assert frozenset(FINAL_STATES) == DECIDED | {S.VOIDED}
     assert all(state not in FINAL_STATES for state, _ in TRANSITIONS)
     assert [state for state in S if is_final(state)] == [state for state in S if state in FINAL_STATES]
-
-
-@given(st.lists(st.tuples(st.sampled_from(list(Step)), st.sampled_from(list(S))), max_size=60))
-def test_random_steps_never_leave_a_final_state(steps: list[tuple[Step, EcfDocumentState]]) -> None:
-    state = S.NUMBERED
-    left = False
-    for step, to in steps:
-        try:
-            moved = transition(state, step, to)
-        except IllegalTransitionError:
-            continue
-        assert not is_final(state)
-        if state in SENT:
-            left = True
-        if left:
-            assert moved not in {S.NUMBERED, S.SIGNED}
-        state = moved
 
 
 @pytest.mark.parametrize("state", list(EcfState))

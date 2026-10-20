@@ -60,7 +60,6 @@ from ledger_country_do.channels.ecf_v1.domain.environments import (
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 from ledger_country_do.channels.ecf_v1.domain.notation import local_date
 from ledger_country_do.channels.ecf_v1.domain.routing import Route
-from ledger_country_do.channels.ecf_v1.domain.status_map import DOCUMENTED, DgiiCode
 from ledger_country_do_testing.local_signer import BundleIncompleteError, KeyPairSigner
 from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
 from ledger_fiscal_kit.status import FiscalStatus
@@ -421,8 +420,7 @@ def _report(emitted: Emitted, settings: SpikeSettings, out: TextIO) -> None:
         )
     else:
         number = "" if outcome.number is None else f" (number {outcome.number.value})"
-        words = DOCUMENTED[DgiiCode(outcome.code)]
-        _say(out, f"DGII: codigo {outcome.code} {words} -> {outcome.status.value}{number}")
+        _say(out, f"DGII: codigo {outcome.code.value} {outcome.words} -> {outcome.status.value}{number}")
     messages = () if outcome is None else outcome.messages
     for message in messages:
         _say(out, f"  {message.code}: {message.message}")
@@ -442,7 +440,7 @@ def _report(emitted: Emitted, settings: SpikeSettings, out: TextIO) -> None:
         "route": signed.route.value,
         "track_id": emitted.track_id,
         "parked": parked,
-        "codigo": None if outcome is None else outcome.code,
+        "codigo": None if outcome is None else outcome.code.value,
         "status": None if outcome is None else outcome.status.value,
         "messages": [[message.code, message.message] for message in messages],
         "security_code": signed.security_code,

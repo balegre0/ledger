@@ -3,7 +3,7 @@
 ```
 numbered ─SIGN─► signed ─SUBMIT─► submitted ─POLL─► in_process ─POLL─► in_process
   │  ▲               │  └─SUBMIT─► outcome_unknown ─ADOPT_TRACK_ID─► submitted
-  │  └─UNBLOCK─┐     │             outcome_unknown ─POLL─► in_process   (consultarfce: pending)
+  │  └─UNBLOCK─┐     │
   ├─BLOCK─► blocked  └─DECIDE─► accepted | accepted_conditionally | rejected
   └─VOID──► voided ◄─VOID─ blocked      (DECIDE also from submitted, in_process, outcome_unknown)
 ```
@@ -14,8 +14,14 @@ numbered ─SIGN─► signed ─SUBMIT─► submitted ─POLL─► in_process
   straight from ``signed``; ``consultarfce``'s from ``outcome_unknown``.
 * ``POLL`` records an answer not yet final: in process, or DGII knows no such track id (``outcome_unknown``,
   settled by the e-NCF's track ids). ``in_process`` stays ``in_process`` while DGII deliberates.
-* **Nothing leads back to ``signed`` or ``numbered`` once a document may have left** (Decision 7: an unknown
-  outcome is settled by a track id DGII lists, never by sending again), so no step can resend it.
+* ``outcome_unknown`` is left only by ``ADOPT_TRACK_ID`` or ``DECIDE``: an answer that leaves it unknown
+  (``consultarfce`` 0, No encontrado; no fresh track id yet) changes no state.
+* **Only ``signed`` has a ``SUBMIT`` edge, and nothing reached from a ``SUBMIT`` (or from ``DECIDE`` out of
+  ``signed``) leads back to it** (Decision 7: an unknown outcome is settled by a track id DGII lists, never
+  by sending again), so the table allows one submission per document.
+* **The table does not stop a second submission from ``signed`` itself**: the submission mark does (the
+  column ``submission_started_at``, committed before the call; Decision 8). A run that finds a ``signed``
+  document marked never submits: it takes ``SUBMIT`` to ``outcome_unknown``. There is no ``submitting`` state.
 * ``BLOCK`` (an error a person must look at, such as a range expired by the moment of signing) and ``VOID``
   (an accepted ANECF) happen only before signing; an operator ``UNBLOCK``s.
 * The final states (``FINAL_STATES``) lead nowhere: delivery to the buyer is a column of its own
@@ -88,7 +94,6 @@ TRANSITIONS: Final[Mapping[tuple[EcfDocumentState, Step], frozenset[EcfDocumentS
         (_S.IN_PROCESS, Step.POLL): frozenset({_S.IN_PROCESS, _S.OUTCOME_UNKNOWN}),
         (_S.IN_PROCESS, Step.DECIDE): _DECIDED,
         (_S.OUTCOME_UNKNOWN, Step.ADOPT_TRACK_ID): frozenset({_S.SUBMITTED}),
-        (_S.OUTCOME_UNKNOWN, Step.POLL): frozenset({_S.IN_PROCESS}),
         (_S.OUTCOME_UNKNOWN, Step.DECIDE): _DECIDED,
     }
 )
