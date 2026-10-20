@@ -56,6 +56,7 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
     Received,
     Refused,
 )
+from ledger_country_do.channels.ecf_v1.domain import polling
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfConflictError, EcfError, EcfUnavailableError
 from ledger_country_do.channels.ecf_v1.domain.notation import local_date
 from ledger_country_do.channels.ecf_v1.domain.printed import (
@@ -67,7 +68,7 @@ from ledger_country_do.channels.ecf_v1.domain.printed import (
     security_code,
 )
 from ledger_country_do.channels.ecf_v1.domain.routing import Route, route
-from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiCode, decide
+from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiCode, DgiiService, decide
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do.regime import REGIME
 lazy from ledger_country_do.channels.ecf_v1.application.ports import (
@@ -85,17 +86,15 @@ lazy from ledger_country_do.channels.ecf_v1.domain.totals import Totals
 lazy from ledger_kernel.clock import Clock, Sleep
 lazy from ledger_kernel.regimes import RegimeDef
 
-POLL_SCHEDULE: Final = (1.0, 2.0, 5.0, 10.0, 30.0, 60.0)
+POLL_SCHEDULE: Final = tuple(float(seconds) for seconds in polling.POLL_SCHEDULE)
 MAX_SIGNING_SKEW: Final = timedelta(minutes=5)
 """How far a signature may come back from its ``FechaHoraFirma``, either way.
 
 Coupled to the signer: its ``LEDGER_SIGNER_SIGNING_SKEW_SECONDS`` defaults to the same 300 s and must never be
 configured below it (a test pins the value)."""
-SETTLE_DELAY: Final = 30.0
+SETTLE_DELAY: Final = polling.SETTLE_DELAY.total_seconds()
 """Seconds waited after an unknown outcome before DGII is asked: at least ``Authority.attempt_limit`` (20 s by
 default, ``DgiiTimeouts.total``), which ``Emitter`` checks when it is built."""
-RECEIPT_TOLERANCE: Final = timedelta(minutes=2)
-"""How long before the moment of signing DGII's reception time of our document may read (clocks differ)."""
 SEND_BUDGET: Final = 300.0
 """Seconds one ``send`` may take in all: the schedule (108 s), the settle delay and the calls' own limits."""
 
@@ -236,13 +235,13 @@ def _refused(refusal: Refused) -> Outcome:
     return decide(DgiiCode.REJECTED, sequence_used=None, messages=refusal.messages)
 
 
-def _decided(answer: Answer, draft: EcfDraft, *, rfce: bool) -> Outcome:
+def _decided(answer: Answer, draft: EcfDraft, *, service: DgiiService) -> Outcome:
     """``answer`` mapped, once it is about ``draft`` (an issuer or e-NCF it does not name is not checked)."""
     if (answer.rnc is not None and answer.rnc != draft.issuer.rnc) or (
         answer.encf is not None and answer.encf.upper() != str(draft.encf)
     ):
         raise AnswerMismatchError
-    return decide(answer.code, sequence_used=answer.sequence_used, messages=answer.messages, rfce=rfce)
+    return decide(answer.code, sequence_used=answer.sequence_used, messages=answer.messages, service=service)
 
 
 @final
@@ -387,7 +386,9 @@ class Emitter:
             self._authority.submit_rfce(self._environment, draft.issuer.rnc, draft.encf, summary), progress
         )
         progress.outcome = (
-            _refused(answer) if isinstance(answer, Refused) else _decided(answer, draft, rfce=True)
+            _refused(answer)
+            if isinstance(answer, Refused)
+            else _decided(answer, draft, service=DgiiService.RFCE)
         )
 
     async def _ecf_sent(self, signed: Signed, progress: _Progress) -> None:
@@ -401,7 +402,7 @@ class Emitter:
                 return
             await self._waited(delay, progress)
             answer = await self._authority.result(self._environment, reception.track_id)
-            progress.outcome = _decided(answer, signed.draft, rfce=False)
+            progress.outcome = _decided(answer, signed.draft, service=DgiiService.RESULT)
             if progress.outcome.final:
                 return
 
@@ -428,9 +429,8 @@ class Emitter:
                 known = await self._authority.track_ids(self._environment, draft.issuer.rnc, draft.encf)
             except EcfError as error:
                 raise unknown from error
-            since = signed.signed_at - RECEIPT_TOLERANCE
-            fresh = [each for each in known or () if each.received_at >= since]
-            if not fresh:
+            adopted = polling.adoptable(known or (), signed_at=signed.signed_at, excluded=frozenset())
+            if adopted is None:
                 raise
             progress.sent = True
-            return Received(max(fresh, key=lambda each: each.received_at).track_id)
+            return Received(adopted.track_id)

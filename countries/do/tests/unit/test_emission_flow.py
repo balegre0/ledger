@@ -10,7 +10,6 @@ from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import LiveHostRe
 from ledger_country_do.channels.ecf_v1.adapters.xml.documents import DgiiXml
 from ledger_country_do.channels.ecf_v1.application.emission import (
     MAX_SIGNING_SKEW,
-    RECEIPT_TOLERANCE,
     SETTLE_DELAY,
     Emitter,
     SequenceExpiredError,
@@ -29,12 +28,12 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
     Received,
     Refused,
     SignerUnavailableError,
-    TrackId,
     XmlSigner,
 )
 from ledger_country_do.channels.ecf_v1.domain.drafts import BillingIndicator, Line
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfConflictError, EcfError
+from ledger_country_do.channels.ecf_v1.domain.polling import RECEIPT_TOLERANCE, TrackId
 from ledger_country_do.channels.ecf_v1.domain.routing import Route
 from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage, EcfState, NumberFate
 from ledger_country_do.regime import REGIME

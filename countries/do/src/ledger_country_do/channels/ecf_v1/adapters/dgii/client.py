@@ -74,10 +74,10 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
     OutcomeUnknownError,
     Received,
     Refused,
-    TrackId,
 )
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError
 from ledger_country_do.channels.ecf_v1.domain.notation import SANTO_DOMINGO, parse_dgii_moment
+from ledger_country_do.channels.ecf_v1.domain.polling import TrackId
 from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import MessageAnswer

@@ -23,6 +23,7 @@ from ledger_country_do.channels.ecf_v1.domain.errors import (
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
+lazy from ledger_country_do.channels.ecf_v1.domain.polling import TrackId
 lazy from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage
 lazy from ledger_country_do.channels.ecf_v1.domain.totals import Totals
 
@@ -124,15 +125,6 @@ class Answer:
     sequence_used: bool | None
     rnc: str | None = None
     encf: str | None = None
-
-
-@final
-@dataclass(frozen=True, slots=True)
-class TrackId:
-    """A track id DGII gave an e-NCF, and when DGII received the document."""
-
-    track_id: str
-    received_at: datetime
 
 
 class Failure(StrEnum):

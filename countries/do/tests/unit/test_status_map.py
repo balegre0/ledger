@@ -5,12 +5,16 @@ import pytest
 from ledger_country_do.channels.ecf_v1.domain.status_map import (
     DOCUMENTED,
     RFCE_DOCUMENTED,
+    RFCE_QUERY_DOCUMENTED,
+    RFCE_QUERY_MAP,
     RFCE_STATUS_MAP,
     STATUS_MAP,
     DgiiCode,
     DgiiMessage,
+    DgiiService,
     EcfState,
     NumberFate,
+    RfceQueryCode,
     UnknownDgiiCodeError,
     decide,
 )
@@ -105,12 +109,22 @@ def test_en_proceso_and_no_encontrado_are_not_final(code: int, state: EcfState) 
     )
 
 
-@pytest.mark.parametrize(("code", "rfce"), [(5, False), (-1, False), (3, True), (0, True)])
+@pytest.mark.parametrize(
+    ("code", "service"),
+    [
+        (5, DgiiService.RESULT),
+        (-1, DgiiService.RESULT),
+        (3, DgiiService.RFCE),
+        (0, DgiiService.RFCE),
+        (3, DgiiService.RFCE_QUERY),
+        (5, DgiiService.RFCE_QUERY),
+    ],
+)
 def test_a_code_dgii_never_documented_for_the_service_is_an_error_not_a_guess(
-    *, code: int, rfce: bool
+    code: int, service: DgiiService
 ) -> None:
     with pytest.raises(UnknownDgiiCodeError) as caught:
-        decide(code, sequence_used=None, messages=(), rfce=rfce)
+        decide(code, sequence_used=None, messages=(), service=service)
     assert (caught.value.kind, caught.value.code) == ("unavailable", "do_ecf_dgii_code_unknown")
     assert isinstance(caught.value.__cause__, UnknownAuthorityCodeError)
 
@@ -125,3 +139,32 @@ def test_dgii_s_messages_are_kept_verbatim_within_the_kit_s_bounds() -> None:
 
 def test_a_dgii_message_is_an_authority_message_in_spanish() -> None:
     assert NOTE[0].authority() == KEPT[0]
+
+
+def test_consultarfce_s_codes_are_mapped_and_nothing_else() -> None:
+    assert set(RFCE_QUERY_DOCUMENTED) == set(RfceQueryCode) == {0, 1, 2, 4}
+    pending = RFCE_QUERY_MAP.entry(RfceQueryCode.PENDING)
+    assert (pending.state, pending.status, pending.severity, pending.final) == (
+        EcfState.IN_PROCESS,
+        FiscalStatus.PENDING,
+        Severity.INFO,
+        False,
+    )
+    for code in (RfceQueryCode.ACCEPTED, RfceQueryCode.REJECTED, RfceQueryCode.ACCEPTED_CONDITIONALLY):
+        assert RFCE_QUERY_MAP.entry(code) == STATUS_MAP.entry(code)
+
+
+def test_consultarfce_pending_is_not_decided_and_its_answers_decide_like_the_reception_s() -> None:
+    pending = decide(0, sequence_used=None, messages=(), service=DgiiService.RFCE_QUERY)
+    assert (pending.code, pending.state, pending.final, pending.number) == (
+        0,
+        EcfState.IN_PROCESS,
+        False,
+        None,
+    )
+    for code in (1, 2, 4):
+        assert decide(code, sequence_used=False, messages=NOTE, service=DgiiService.RFCE_QUERY) == decide(
+            code, sequence_used=False, messages=NOTE, service=DgiiService.RFCE
+        )
+    released = decide(2, sequence_used=False, messages=(), service=DgiiService.RFCE_QUERY)
+    assert released.number is NumberFate.RELEASED
