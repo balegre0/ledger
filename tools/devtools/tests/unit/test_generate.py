@@ -653,3 +653,28 @@ def test_an_isolated_module_without_an_app_of_its_role_gets_the_one_contract(
 
 def test_no_custody_contract_without_an_isolated_module(tree: Path) -> None:
     assert "-custody]" not in importlinter_text(Workspace.load(tree))
+
+
+def test_the_kit_s_value_types_import_the_kernel_and_the_standard_library_only(
+    tree: Path, write: Writer
+) -> None:
+    # A channel's pure layers import them: through them, nothing of the platform or a third party may come.
+    write("packages/fiscal-kit", FISCAL_KIT, ("channels", "drafts", "objections", "status"))
+    text = importlinter_text(Workspace.load(tree))
+    pure = text.split("[importlinter:contract:fiscal-kit-values-are-pure]\n", 1)[1].split("\n\n", 1)[0]
+    expected = (
+        "name = fiscal-kit's value types import the kernel and the standard library only\n"
+        "type = forbidden\n"
+        "source_modules =\n    ledger_fiscal_kit.drafts\n    ledger_fiscal_kit.objections\n"
+        "    ledger_fiscal_kit.status\n"
+    )
+    assert pure.startswith(expected)
+    forbidden = pure.split("forbidden_modules =\n", 1)[1].splitlines()
+    assert {"    ledger_platform", "    sqlalchemy"} <= set(forbidden)
+    assert not {"    ledger_kernel", "    ledger_fiscal_kit"} & set(forbidden)
+    assert "allow_indirect_imports" not in pure
+
+
+def test_without_the_kit_s_value_types_there_is_no_kit_contract(tree: Path, write: Writer) -> None:
+    write("packages/fiscal-kit", FISCAL_KIT, ())
+    assert "fiscal-kit-values-are-pure" not in importlinter_text(Workspace.load(tree))

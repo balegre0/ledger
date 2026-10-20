@@ -13,7 +13,6 @@ same update is the payload of the kit's ``fiscal_channel.document.updated`` (``e
 """
 
 import copy
-import re
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -23,6 +22,7 @@ from uuid import UUID
 lazy from collections.abc import Iterable, Mapping, Sequence
 lazy from datetime import date, datetime, timedelta
 
+from ledger_fiscal_kit.objections import Objection
 from ledger_fiscal_kit.status import MAX_MESSAGE_CODE, MAX_MESSAGE_TEXT, MAX_MESSAGES
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.regimes import Direction, DocumentKind
@@ -37,7 +37,20 @@ lazy from ledger_platform.data.codec import JsonValue
 lazy from ledger_platform.runtime.calls import SystemCall
 lazy from ledger_platform.runtime.contexts import AssembledChannels
 
-_CODE: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
+__all__ = [
+    "Channel",
+    "ChannelDef",
+    "ChannelRegistry",
+    "EnrollmentId",
+    "EnrollmentState",
+    "Issued",
+    "Objection",
+    "Representation",
+    "Requirements",
+    "ResumeReason",
+    "StatusUpdate",
+]
+"""``Objection`` is ``objections``' (pure, for a channel's domain), answered here with the rest."""
 
 EnrollmentId = NewType("EnrollmentId", UUID)
 """An enrollment's id (fiscal's): a company in a mode, on a channel, in one of its environments."""
@@ -139,23 +152,6 @@ class Requirements:
 
     currently_due: tuple[str, ...]
     disabled_reason: str | None = None
-
-
-@final
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Objection:
-    """Why a channel would refuse a draft: a rule's code, the field it is about, a message naming the rule.
-
-    The message names the rule, never the value: it is shown to the client and may be logged.
-    """
-
-    code: str
-    field: str | None
-    message: str
-
-    def __post_init__(self) -> None:
-        if _CODE.fullmatch(self.code) is None:
-            raise InvalidValueError(field="objection.code", requirement="a snake_case code")
 
 
 def _kept(message: AuthorityMessage) -> bool:

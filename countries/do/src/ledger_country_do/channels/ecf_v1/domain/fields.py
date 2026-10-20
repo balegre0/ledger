@@ -21,7 +21,7 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import IncomeType, Modifica
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
 from ledger_country_do.regime import REGIME
 from ledger_country_do.regime.fields import ECF_TYPE, REPLACES_NCF
-from ledger_fiscal_kit.channels import Objection
+from ledger_fiscal_kit.objections import Objection
 from ledger_kernel.regimes import FieldDef, FieldKind, Locale
 lazy from ledger_kernel.regimes import RegimeDef
 

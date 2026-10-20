@@ -56,7 +56,7 @@ from ledger_country_do.regime.fields import ECF_TYPE
 from ledger_country_do.regime.parameters import RFCE_THRESHOLD
 from ledger_country_do.regime.rounding import GLOBAL_TOLERANCE_PER_LINE
 from ledger_country_do.regime.tax_ids import DIGITS
-from ledger_fiscal_kit.channels import Objection
+from ledger_fiscal_kit.objections import Objection
 from ledger_kernel.regimes import Direction, DocumentKind
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfReference
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf

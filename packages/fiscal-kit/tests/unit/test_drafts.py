@@ -10,6 +10,7 @@ from uuid import UUID
 import pytest
 from pydantic import TypeAdapter
 
+from ledger_fiscal_kit.draft_codec import read_draft
 from ledger_fiscal_kit.drafts import (
     DocumentRef,
     FiscalDraft,
@@ -248,11 +249,11 @@ def test_the_time_zone_is_one_the_system_knows(zone: str) -> None:
 
 @pytest.mark.parametrize("draft", [DRAFT, NOTE, FOREIGN, replace(DRAFT, counterparty=None)])
 def test_a_draft_reads_back_from_its_json_form(draft: FiscalDraft) -> None:
-    assert FiscalDraft.read(through_json(draft)) == draft
+    assert read_draft(through_json(draft)) == draft
 
 
 def test_fields_read_back_as_they_were_written() -> None:
-    read = FiscalDraft.read(through_json(DRAFT))
+    read = read_draft(through_json(DRAFT))
     assert read.fields == {"income_type": "01", "payment": {"kind": 1, "amount": "5", "currency": "DOP"}}
 
 
@@ -289,7 +290,7 @@ def json_with_line_currency(code: str) -> JsonValue:
 )
 def test_what_is_not_a_draft_s_json_form_is_refused(found: JsonValue) -> None:
     with pytest.raises(FiscalDraftInvalidError, match=r"fiscal_draft must be a fiscal draft's JSON form"):
-        FiscalDraft.read(found)
+        read_draft(found)
 
 
 def test_a_json_form_that_breaks_a_rule_is_refused_by_the_rule() -> None:
@@ -297,7 +298,7 @@ def test_a_json_form_that_breaks_a_rule_is_refused_by_the_rule() -> None:
     assert isinstance(broken, dict)
     broken["version"] = 0
     with pytest.raises(FiscalDraftInvalidError, match=r"fiscal_draft.version must be 1 or more"):
-        FiscalDraft.read(broken)
+        read_draft(broken)
 
 
 def test_a_draft_shows_no_party_and_no_line() -> None:

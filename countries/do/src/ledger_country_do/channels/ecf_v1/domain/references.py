@@ -15,7 +15,7 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import EcfReference
 from ledger_country_do.channels.ecf_v1.domain.errors import from_regime
 from ledger_country_do.regime import REGIME
 from ledger_country_do.regime.entries import document_type
-from ledger_fiscal_kit.channels import Objection
+from ledger_fiscal_kit.objections import Objection
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import ModificationCode
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
 lazy from ledger_fiscal_kit.drafts import DocumentRef, FiscalDraft

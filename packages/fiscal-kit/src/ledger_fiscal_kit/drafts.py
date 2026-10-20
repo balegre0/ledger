@@ -17,8 +17,9 @@ objects to in a valid draft is an ``Objection`` (``channels``). Parties, lines a
 tenant and of persons: a draft's ``repr`` names its document, version, channel and kind only, a party's its
 tax id masked, a line's no description.
 
-A draft travels as the platform codec's JSON (``ledger_platform.data.codec.encode``) and reads back with
-``FiscalDraft.read``.
+Nothing here imports beyond the kernel and the standard library: a channel's pure layers read drafts. A draft
+travels as the platform codec's JSON (``ledger_platform.data.codec.encode``) and reads back with
+``draft_codec.read_draft``.
 """
 
 import copy
@@ -31,21 +32,20 @@ lazy from collections.abc import Mapping
 lazy from datetime import date
 lazy from decimal import Decimal
 
-from pydantic import TypeAdapter, ValidationError
-
-from ledger_kernel.errors import InvalidValueError, LedgerError
-from ledger_kernel.money import Currency
+from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.regimes import DocumentKind
 from ledger_kernel.tenancy import Tenant
 lazy from ledger_kernel.ids import CompanyId, OrganizationId
-lazy from ledger_kernel.money import Money
+lazy from ledger_kernel.money import Currency, Money
 lazy from ledger_kernel.regimes import Direction, RegimeKey, TaxCategoryKey, TaxCategoryKind, Totals
 lazy from ledger_kernel.tax_ids import TaxId
 lazy from ledger_kernel.tenancy import Mode
-lazy from ledger_platform.data.codec import JsonValue
 
 DocumentRef = NewType("DocumentRef", UUID)
 """A commercial document's id (invoicing's ``InvoiceId``, unwrapped): the kit never imports a module."""
+type FieldValue = str | int | bool | list[FieldValue] | dict[str, FieldValue] | None
+"""A country field's value: JSON, as the platform codec reads it (its ``JsonValue``, which the kit, pure, does
+not import)."""
 _NOTES: Final = frozenset({DocumentKind.CREDIT_NOTE, DocumentKind.DEBIT_NOTE})
 
 
@@ -133,24 +133,6 @@ def _is_time_zone(name: str) -> bool:
     return True
 
 
-def _with_currencies(found: JsonValue, *, top: bool = True) -> object:
-    """``found``, a draft's JSON form, with each currency code read as its ``Currency`` (``fields`` aside)."""
-    match found:
-        case dict():
-            return {
-                key: Currency.of(value)
-                if key == "currency" and isinstance(value, str)
-                else value
-                if top and key == "fields"
-                else _with_currencies(value, top=False)
-                for key, value in found.items()
-            }
-        case list():
-            return [_with_currencies(item, top=False) for item in found]
-        case _:
-            return found
-
-
 @final
 @dataclass(frozen=True, slots=True, kw_only=True, repr=False)
 class FiscalDraft:
@@ -186,7 +168,7 @@ class FiscalDraft:
     """In the company's functional currency, another than ``currency``."""
     references: tuple[FiscalReference, ...] = ()
     """One or more for a credit or debit note, none for an invoice."""
-    fields: Mapping[str, JsonValue] = field(hash=False)
+    fields: Mapping[str, FieldValue] = field(hash=False)
     """This regime's country fields only (``fiscal.<regime>``, one level down): a deep copy, read-only at its
     top level."""
     issue_date: date
@@ -252,24 +234,7 @@ class FiscalDraft:
         """The tenant the document belongs to: the scope of every unit and call about it."""
         return Tenant(self.organization, self.company, self.mode)
 
-    @classmethod
-    def read(cls, found: JsonValue) -> FiscalDraft:
-        """The draft whose JSON form (the platform codec's) is ``found``.
-
-        ``FiscalDraftInvalidError`` when ``found`` is no draft's JSON form, or names a draft that breaks one
-        of the rules above.
-        """
-        try:
-            return _DRAFT.validate_python(_with_currencies(found))
-        except FiscalDraftInvalidError:
-            raise
-        except (ValidationError, LedgerError) as error:
-            raise FiscalDraftInvalidError(field=None, requirement="a fiscal draft's JSON form") from error
-
     @override
     def __repr__(self) -> str:
         shown = f"version={self.version}, channel={self.channel!r}, kind={self.kind.value!r}"
         return f"FiscalDraft(document={self.document!r}, {shown})"
-
-
-_DRAFT: Final = TypeAdapter(FiscalDraft)

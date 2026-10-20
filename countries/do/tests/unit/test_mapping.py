@@ -51,8 +51,8 @@ from ledger_kernel.regimes import (
     TaxCategoryKind,
 )
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
-lazy from ledger_fiscal_kit.channels import Objection
 lazy from ledger_fiscal_kit.drafts import FiscalDraft
+lazy from ledger_fiscal_kit.objections import Objection
 lazy from ledger_kernel.regimes import Totals
 
 D = Decimal
