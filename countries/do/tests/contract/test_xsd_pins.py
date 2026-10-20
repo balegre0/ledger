@@ -1,4 +1,6 @@
 import hashlib
+import re
+from typing import Final
 
 import pytest
 import xmlschema
@@ -11,8 +13,39 @@ from ledger_country_do.channels.ecf_v1.adapters.xsd.published import (
     SOURCE,
     Format,
 )
+from ledger_country_do.channels.ecf_v1.domain.drafts import (
+    ADDRESS,
+    BILLINGS,
+    BUYER_PARTS,
+    DISCOUNT_PLACES,
+    EXCHANGE_RATE_LIMIT,
+    EXCHANGE_RATE_PLACES,
+    FOREIGN_CURRENCIES,
+    FOREIGN_ID,
+    INCOME_TYPES,
+    INTEGER_DIGITS,
+    ITEM_NAME,
+    LEGAL_NAME,
+    NAMED_TYPES,
+    NO_DISCOUNT_TYPES,
+    NOTE_TYPES,
+    PAYMENT_DUE_TYPES,
+    QUANTITY_PLACES,
+    RNC_TYPES,
+    TAXED,
+    UNDATED_TYPES,
+    UNIT_PRICE_PLACES,
+    BillingIndicator,
+    BuyerPart,
+    IncomeType,
+    ModificationCode,
+    PaymentType,
+    max_lines,
+)
+from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
 from ledger_country_do.regime import REGIME
 from ledger_fiscal_kit.xml.schemas import PinnedSchema, SchemaDriftError, SchemaSet
+from ledger_kernel.money import CURRENCIES
 lazy from ledger_kernel.regimes import DocumentTypeDef
 
 XS = "{http://www.w3.org/2001/XMLSchema}"
@@ -78,3 +111,117 @@ def test_the_regime_requires_a_buyer_tax_id_where_dgii_s_schema_does(kind: Docum
     assert kind.requires_buyer_tax_id is (
         _required(format_, "Comprador") and _required(format_, "RNCComprador")
     )
+    assert kind.requires_buyer_tax_id is (EcfType(kind.code) in RNC_TYPES)
+
+
+def _ecf(ecf_type: EcfType) -> Format:
+    return Format(f"ecf-{ecf_type.value}.xsd")
+
+
+def _declared(format_: Format, name: str) -> bool:
+    return any(
+        found.get("name") == name
+        for found in etree.fromstring(DO_SCHEMAS.corrected(format_)).iter(f"{XS}element")
+    )
+
+
+def _enumeration(format_: Format, simple_type: str) -> set[str]:
+    schema = etree.fromstring(DO_SCHEMAS.corrected(format_))
+    (declared,) = (found for found in schema.iter(f"{XS}simpleType") if found.get("name") == simple_type)
+    return {value for value in (each.get("value") for each in declared.iter(f"{XS}enumeration")) if value}
+
+
+@pytest.mark.parametrize("ecf_type", list(EcfType))
+def test_each_type_s_rules_are_its_schema_s(ecf_type: EcfType) -> None:
+    format_ = _ecf(ecf_type)
+    (item,) = (
+        found
+        for found in etree.fromstring(DO_SCHEMAS.corrected(format_)).iter(f"{XS}element")
+        if found.get("name") == "Item"
+    )
+    assert max_lines(ecf_type) == int(item.get("maxOccurs", "1"))
+    assert (ecf_type in NAMED_TYPES) is _required(format_, "RazonSocialComprador")
+    assert (ecf_type in RNC_TYPES) is (_required(format_, "Comprador") and _required(format_, "RNCComprador"))
+    assert (ecf_type not in UNDATED_TYPES) is _required(format_, "FechaVencimientoSecuencia")
+    assert (ecf_type in NOTE_TYPES) is _required(format_, "InformacionReferencia")
+    assert (ecf_type not in NO_DISCOUNT_TYPES) is _declared(format_, "DescuentoMonto")
+    assert _declared(format_, "OtraMoneda")  # every type may be in another currency
+    taxed = {indicator for indicator in TAXED if _declared(format_, f"MontoGravadoI{indicator.value}")}
+    exempt: set[BillingIndicator] = {BillingIndicator.EXEMPT} if _declared(format_, "MontoExento") else set()
+    assert BILLINGS[ecf_type] == taxed | exempt
+    holds = {part for part, element in _BUYER_ELEMENTS.items() if _declared(format_, element)}
+    assert BUYER_PARTS[ecf_type] == holds
+    assert (ecf_type in INCOME_TYPES) is _declared(format_, "TipoIngresos")
+    assert (ecf_type in PAYMENT_DUE_TYPES) is _declared(format_, "FechaLimitePago")
+
+
+_BUYER_ELEMENTS: Final = {
+    BuyerPart.RNC: "RNCComprador",
+    BuyerPart.FOREIGN_ID: "IdentificadorExtranjero",
+    BuyerPart.NAME: "RazonSocialComprador",
+    BuyerPart.ADDRESS: "DireccionComprador",
+}
+_TEXTS: Final = {
+    "RazonSocialEmisor": LEGAL_NAME,
+    "DireccionEmisor": ADDRESS,
+    "RazonSocialComprador": LEGAL_NAME,
+    "DireccionComprador": ADDRESS,
+    "IdentificadorExtranjero": FOREIGN_ID,
+    "NombreItem": ITEM_NAME,
+}
+_NUMBERS: Final = {
+    "CantidadItem": (INTEGER_DIGITS, QUANTITY_PLACES),
+    "PrecioUnitarioItem": (INTEGER_DIGITS, UNIT_PRICE_PLACES),
+    "DescuentoMonto": (INTEGER_DIGITS, DISCOUNT_PLACES),
+    "MontoItem": (INTEGER_DIGITS, 2),
+    "TipoCambio": (len(str(EXCHANGE_RATE_LIMIT)) - 1, EXCHANGE_RATE_PLACES),
+}
+_INTEGER_PART: Final = re.compile(r"^\(?(?:\[0-9\]|\\d)\{1,([0-9]+)\}")
+"""The integer part of a decimal type's pattern: ``[0-9]{1,16}`` or ``(\\d{1,16})``."""
+
+
+def _facets(format_: Format, element: str) -> list[dict[str, str]]:
+    """The facets of each simple type ``element`` is declared with in ``format_``."""
+    schema = etree.fromstring(DO_SCHEMAS.corrected(format_))
+    types = {found.get("name"): found for found in schema.iter(f"{XS}simpleType")}
+    facets: list[dict[str, str]] = []
+    for found in schema.iter(f"{XS}element"):
+        if found.get("name") != element:
+            continue
+        declared = types[found.get("type")]
+        facets.append(
+            {
+                etree.QName(facet).localname: facet.get("value", "")
+                for facet in declared.iter()
+                if facet.get("value") is not None and etree.QName(facet).localname != "enumeration"
+            }
+        )
+    return facets
+
+
+@pytest.mark.parametrize("ecf_type", list(EcfType))
+def test_dgii_s_limits_are_the_draft_s(ecf_type: EcfType) -> None:
+    format_ = _ecf(ecf_type)
+    for element, limit in _TEXTS.items():
+        assert all(int(facet["maxLength"]) == limit for facet in _facets(format_, element)), element
+    for element, (integers, places) in _NUMBERS.items():
+        for facet in _facets(format_, element):
+            found = _INTEGER_PART.match(facet["pattern"])
+            assert found is not None, element
+            assert (int(found.group(1)), int(facet["fractionDigits"])) == (integers, places), element
+    if _declared(format_, "TipoIngresos"):
+        assert _enumeration(format_, "TipoIngresosValidationType") == {each.value for each in IncomeType}
+    assert _enumeration(format_, "TipoPagoType") == {str(each.value) for each in PaymentType}
+
+
+def test_the_foreign_currencies_are_those_dgii_lists_that_money_knows() -> None:
+    listed = _enumeration(Format.ECF_31, "TipoMonedaType")
+    assert {code for code in listed if code in CURRENCIES} == FOREIGN_CURRENCIES
+    assert all(_enumeration(_ecf(each), "TipoMonedaType") == listed for each in EcfType)
+
+
+def test_the_modification_codes_are_dgii_s() -> None:
+    expected = {str(code.value) for code in ModificationCode}
+    referring = [each for each in EcfType if _declared(_ecf(each), "CodigoModificacion")]
+    assert set(NOTE_TYPES) <= set(referring)
+    assert all(_enumeration(_ecf(each), "CodigoModificacionType") == expected for each in referring)

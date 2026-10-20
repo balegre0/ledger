@@ -76,6 +76,9 @@ _CHANNEL_LAYERS: Final = ("adapters", "application", "domain")
 """A channel's layers, top to bottom (§4.6 contract 10)."""
 _CHANNEL_PURE: Final = ("application", "domain")
 """A channel's layers that know no third party (§4.6 contract 11)."""
+_KIT: Final = "ledger_fiscal_kit"
+_KIT_VALUES: Final = ("drafts", "objections", "status")
+"""fiscal-kit's value types a channel's pure layers import: the kernel and the standard library only."""
 _BARE_KEY: Final = re.compile(r"[A-Za-z0-9_-]+", re.ASCII)
 _PYTEST_PLUGIN: Final = ("ledger", "ledger_testing.plugin")
 """The shared pytest plugin's entry point (group ``pytest11``): the package named ``testing`` declares it."""
@@ -400,7 +403,7 @@ def _workspace_contracts(facts: _Facts) -> Iterator[str | None]:
         " | ".join(app.import_name for app in workspace.apps),
         *(module.import_name for module in reversed(workspace.module_order())),
         " | ".join(facts.countries),
-        *(name for name in ("ledger_fiscal_kit", "ledger_platform", "ledger_kernel") if name in facts.roots),
+        *(name for name in (_KIT, "ledger_platform", "ledger_kernel") if name in facts.roots),
     ]
     yield _contract(
         "workspace-layers", "Workspace layers", "layers", ("layers", [name for name in layers if name])
@@ -459,7 +462,7 @@ def _channels(facts: _Facts, country: Package) -> tuple[str, ...]:
 def _channel_contracts(facts: _Facts, country: Package) -> Iterator[str | None]:
     """Each channel of ``country`` is layered, and its domain and use cases know no third party."""
     root = facts.workspace.root / country.source / "channels"
-    allowed = {country.import_name, "ledger_kernel", "ledger_fiscal_kit"}
+    allowed = {country.import_name, "ledger_kernel", _KIT}
     for channel in _channels(facts, country):
         container = f"{country.import_name}.channels.{channel}"
         present = [layer for layer in _CHANNEL_LAYERS if (root / channel / layer).is_dir()]
@@ -477,6 +480,18 @@ def _channel_contracts(facts: _Facts, country: Package) -> Iterator[str | None]:
             "forbidden",
             ("source_modules", [f"{container}.{layer}" for layer in _CHANNEL_PURE if layer in present]),
             ("forbidden_modules", sorted({*facts.third_party, *facts.roots} - allowed)),
+        )
+
+
+def _kit_contracts(facts: _Facts) -> Iterator[str | None]:
+    """fiscal-kit's value types stay pure: a channel's domain reaches nothing else through them."""
+    for kit in (package for package in facts.workspace.packages if package.import_name == _KIT):
+        yield _contract(
+            "fiscal-kit-values-are-pure",
+            "fiscal-kit's value types import the kernel and the standard library only",
+            "forbidden",
+            ("source_modules", facts.submodules(kit, _KIT_VALUES)),
+            ("forbidden_modules", sorted({*facts.third_party, *facts.roots} - {_KIT, "ledger_kernel"})),
         )
 
 
@@ -650,6 +665,7 @@ def importlinter_text(workspace: Workspace) -> str:
         _section("importlinter", [("root_packages", facts.roots), ("include_external_packages", "True")]),
         *_workspace_contracts(facts),
         *_edge_contracts(facts),
+        *_kit_contracts(facts),
         *_country_contracts(facts),
         *(contract for module in workspace.modules for contract in _module_contracts(facts, module)),
         *_custody_contracts(facts),

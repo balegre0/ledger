@@ -318,6 +318,54 @@ forbidden_modules =
     ledger_signer
 allow_indirect_imports = True
 
+[importlinter:contract:fiscal-kit-values-are-pure]
+name = fiscal-kit's value types import the kernel and the standard library only
+type = forbidden
+source_modules =
+    ledger_fiscal_kit.drafts
+    ledger_fiscal_kit.objections
+    ledger_fiscal_kit.status
+forbidden_modules =
+    alembic
+    cryptography
+    fastapi
+    google
+    granian
+    grpc
+    grpc_tools
+    httpx
+    joserfc
+    ledger_app_api
+    ledger_app_migrate
+    ledger_app_worker
+    ledger_country_do
+    ledger_country_do_testing
+    ledger_devtools
+    ledger_identity
+    ledger_invoicing
+    ledger_platform
+    ledger_signer
+    ledger_testing
+    lxml
+    multipart
+    mypy_protobuf
+    opentelemetry
+    pathspec
+    prometheus_client
+    psycopg
+    py
+    pydantic
+    pydantic_settings
+    pytest
+    python_multipart
+    signxml
+    sqlalchemy
+    starlette
+    structlog
+    testcontainers
+    tzdata
+    xmlschema
+
 [importlinter:contract:do-regime-is-pure]
 name = Regime do is pure
 type = forbidden

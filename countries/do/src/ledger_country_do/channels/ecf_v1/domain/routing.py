@@ -6,6 +6,8 @@ full through reception and, as every type 32 of that size, names its buyer (FMT,
 """
 
 from enum import StrEnum
+lazy from datetime import date
+lazy from decimal import Decimal
 
 from ledger_country_do.channels.ecf_v1.domain.drafts import DraftInvalidError
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
@@ -30,6 +32,11 @@ class _UnnamedLargeBuyerError(DraftInvalidError):
         super().__init__("buyer", "names its RNC or cédula on a type 32 of DOP 250,000 or more")
 
 
+def rfce_threshold(regime: RegimeDef, day: date) -> Decimal:
+    """The total from which a type 32 of ``day`` goes in full, its buyer identified (``rfce_threshold``)."""
+    return from_regime(lambda: amount(regime, RFCE_THRESHOLD, day))
+
+
 def route(draft: EcfDraft, totals: Totals, regime: RegimeDef = REGIME) -> Route:
     """``draft``'s route (see the module).
 
@@ -37,7 +44,7 @@ def route(draft: EcfDraft, totals: Totals, regime: RegimeDef = REGIME) -> Route:
     """
     if draft.ecf_type is not EcfType.CONSUMER_INVOICE:
         return Route.RECEPTION
-    if totals.total < from_regime(lambda: amount(regime, RFCE_THRESHOLD, draft.issued_on)):
+    if totals.total < rfce_threshold(regime, draft.issued_on):
         return Route.RFCE
     if draft.buyer.rnc is None:
         raise _UnnamedLargeBuyerError

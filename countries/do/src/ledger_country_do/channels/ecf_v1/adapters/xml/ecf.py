@@ -7,7 +7,7 @@ amount, total), lines (number, billing indicator, name, goods or service, quanti
 """
 
 from types import MappingProxyType
-from typing import Final
+from typing import ClassVar, Final
 lazy from collections.abc import Mapping
 lazy from datetime import datetime
 lazy from decimal import Decimal
@@ -16,6 +16,7 @@ from ledger_country_do.channels.ecf_v1.adapters.xml.writer import Node
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.drafts import TAXED, BillingIndicator
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
+from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 from ledger_country_do.channels.ecf_v1.domain.notation import dgii_date, dgii_moment, dgii_percent
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import Buyer, EcfDraft, Line
 lazy from ledger_country_do.channels.ecf_v1.domain.totals import Totals
@@ -42,6 +43,38 @@ _RATE_TAGS: Final = {
     BillingIndicator.ITBIS_3: "3",
 }
 _PRICES_EXCLUDE_ITBIS: Final = "0"
+
+
+class UnwrittenContentError(EcfError):
+    """A draft holds what the writer does not write yet: refused, never dropped (a defect of the caller)."""
+
+    code: ClassVar[str] = "do_ecf_content_unwritten"
+
+    def __init__(self, what: str) -> None:
+        super().__init__(f"the e-CF writer does not write {what} yet: the draft is refused rather than cut")
+
+
+def require_written(draft: EcfDraft) -> None:
+    """``UnwrittenContentError`` when ``draft`` holds what neither the e-CF nor its summary writes yet.
+
+    Discounts (``DescuentoMonto``), another currency (``OtraMoneda``), references (``InformacionReferencia``),
+    the payment's due date (``FechaLimitePago``) and the buyer's address or foreign identifier are drafted but
+    not written until each type's writer is (v2-M3b Task 7): a document missing them would differ from its
+    draft.
+    """
+    unwritten = (
+        ("lines (a discount)", any(line.discount != 0 for line in draft.lines)),
+        ("currency (another than the peso)", draft.exchange_rate is not None),
+        ("references", bool(draft.references)),
+        ("payment_due", draft.payment_due is not None),
+        (
+            "buyer (an address or a foreign identifier)",
+            draft.buyer.address is not None or draft.buyer.foreign_id is not None,
+        ),
+    )
+    found = next((what for what, held in unwritten if held), None)
+    if found is not None:
+        raise UnwrittenContentError(found)
 
 
 def _identification(header: Node, draft: EcfDraft) -> None:
@@ -105,6 +138,7 @@ def _line(items: Node, number: int, line: Line, amount: Decimal) -> None:
 
 def render(draft: EcfDraft, totals: Totals, *, signed_at: datetime) -> bytes:
     """``draft`` as its unsigned e-CF, ``FechaHoraFirma`` set to ``signed_at``."""
+    require_written(draft)
     root = Node.root(FORMAT_OF[draft.ecf_type], "ecf")
     header = root.child("encabezado")
     header.text("version", VERSION)

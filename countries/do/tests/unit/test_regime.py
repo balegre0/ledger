@@ -42,6 +42,7 @@ from ledger_kernel.money import Currency, RoundingMode
 from ledger_kernel.regimes import (
     Direction,
     DocumentKind,
+    FieldKind,
     InvalidRegimeError,
     Locale,
     RegimeDef,
@@ -62,7 +63,10 @@ def test_the_regime_is_the_dominican_republic() -> None:
     assert REGIME.currency == Currency.of("DOP")
     assert REGIME.time_zone == "America/Santo_Domingo"
     assert REGIME.labels == {Locale("es"): "República Dominicana", Locale("en"): "Dominican Republic"}
-    assert REGIME.fields == ()
+    assert [(field.name, field.kind) for field in REGIME.fields] == [
+        ("ecf_type", FieldKind.CODE),
+        ("replaces_ncf", FieldKind.OBJECT),
+    ]
 
 
 def test_the_installed_entry_point_registers_the_regime() -> None:
@@ -122,7 +126,13 @@ def test_the_ten_e_cf_types_with_their_kind_direction_and_buyer_rule() -> None:
     }
     assert (types["33"].kind, types["34"].kind) == (DocumentKind.DEBIT_NOTE, DocumentKind.CREDIT_NOTE)
     assert document_type(REGIME, "32").labels[SPANISH] == "Factura de Consumo Electrónica"
-    assert all(kind.corrects == () for kind in REGIME.document_types)
+    sales_invoices = ("31", "32", "44", "45", "46")
+    assert {code: kind.corrects for code, kind in types.items() if kind.corrects} == {
+        "33": sales_invoices,
+        "34": sales_invoices,
+    }
+    assert all(types[code].kind is DocumentKind.INVOICE for code in sales_invoices)
+    assert all(types[code].direction is Direction.SALES for code in sales_invoices)
 
 
 def test_dated_parameters() -> None:
