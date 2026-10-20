@@ -3,6 +3,10 @@
 # What an app running on the host is configured with (the LEDGER_* variables of Settings), beside ledger.env's:
 #   LEDGER_DATABASE_URL=postgresql+psycopg://ledger_app:ledger_app@127.0.0.1:5432/ledger (or LEDGER_POSTGRES_PORT)
 #   LEDGER_HTTP_PORT=8101 for the worker (the api's 8100 is the default): never 8000, another project's here
+#   LEDGER_ARCHIVE_PATH=<an absolute directory of the host> (ledger.env's /archive is the containers'), or
+#   LEDGER_ARCHIVE_BACKEND unset: then no archive is bound, and a channel that reads one does not start
+# The containers have no /archive volume yet: nothing archives until the DO channel does (v2-M3b Task 18), and
+# the volume (owned by the image's user, 65532, beside the read-only root) arrives with Task 26.
 # An app that runs inside this network uses the same URL with the host name `postgres` in place of 127.0.0.1.
 #
 # PostgreSQL's administrator is `postgres`. A service never connects as that role: a superuser bypasses

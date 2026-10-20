@@ -3,6 +3,7 @@
 from importlib.metadata import EntryPoint
 from typing import ClassVar, Final
 lazy from collections.abc import Mapping
+lazy from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -397,3 +398,94 @@ def test_a_section_is_frozen() -> None:
     field = "limit"  # a variable: the type checkers rightly refuse a plain assignment
     with pytest.raises(ValidationError):
         setattr(BooksSettings(), field, 1)
+
+
+def test_no_archive_is_configured_unless_a_backend_is_named(monkeypatch: pytest.MonkeyPatch) -> None:
+    environment(monkeypatch, REQUIRED)
+    settings = Settings()
+    assert (settings.archive_backend, settings.archive_path, settings.archive_retention_years) == (
+        None,
+        None,
+        10,
+    )
+
+
+def test_the_file_archive_is_a_directory_named_absolutely(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = tmp_path / "archive"
+    environment(
+        monkeypatch,
+        {
+            **REQUIRED,
+            "LEDGER_ARCHIVE_BACKEND": "file",
+            "LEDGER_ARCHIVE_PATH": str(archive),
+            "LEDGER_ARCHIVE_RETENTION_YEARS": "12",
+        },
+    )
+    settings = Settings()
+    assert (settings.archive_backend, settings.archive_path, settings.archive_retention_years) == (
+        "file",
+        archive,
+        12,
+    )
+
+
+@pytest.mark.parametrize("path", [None, "archive"])
+def test_the_file_archive_needs_an_absolute_path(monkeypatch: pytest.MonkeyPatch, path: str | None) -> None:
+    environment(monkeypatch, {**REQUIRED, "LEDGER_ARCHIVE_BACKEND": "file"})
+    if path is not None:
+        monkeypatch.setenv("LEDGER_ARCHIVE_PATH", path)
+    with pytest.raises(ValidationError, match="archive_path must be an absolute path") as caught:
+        Settings()
+    assert "'archive'" not in str(caught.value)
+
+
+def test_production_never_archives_to_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    secret = tmp_path / "s3cret-archive"
+    environment(
+        monkeypatch,
+        {
+            **REQUIRED,
+            "LEDGER_ENVIRONMENT": "production",
+            "LEDGER_TOKEN_KIND_CLAIM_REQUIRED": "true",
+            "LEDGER_ARCHIVE_BACKEND": "file",
+            "LEDGER_ARCHIVE_PATH": str(secret),
+        },
+    )
+    with pytest.raises(ValidationError, match="archive_backend file is refused in production") as caught:
+        Settings()
+    assert "s3cret" not in str(caught.value)
+    monkeypatch.setenv("LEDGER_ENVIRONMENT", "staging")
+    assert Settings().archive_path == secret
+
+
+@pytest.mark.parametrize("years", ["0", "101"])
+def test_the_retention_is_one_to_a_hundred_years(monkeypatch: pytest.MonkeyPatch, years: str) -> None:
+    environment(monkeypatch, {**REQUIRED, "LEDGER_ARCHIVE_RETENTION_YEARS": years})
+    with pytest.raises(ValidationError) as caught:
+        Settings()
+    assert problems(caught.value) == {"archive_retention_years"}
+
+
+@pytest.mark.parametrize("environment_name", ["staging", "production"])
+def test_beyond_a_laptop_the_archive_keeps_what_the_law_requires(
+    monkeypatch: pytest.MonkeyPatch, environment_name: str
+) -> None:
+    """Ten years (Código Tributario art. 50 h) at least; a laptop or a test may keep less."""
+    environment(
+        monkeypatch,
+        {
+            **REQUIRED,
+            "LEDGER_ENVIRONMENT": environment_name,
+            "LEDGER_TOKEN_KIND_CLAIM_REQUIRED": "true",
+            "LEDGER_ARCHIVE_RETENTION_YEARS": "9",
+        },
+    )
+    with pytest.raises(ValidationError, match="archive_retention_years must be at least 10"):
+        Settings()
+    monkeypatch.setenv("LEDGER_ARCHIVE_RETENTION_YEARS", "10")
+    assert Settings().archive_retention_years == 10
+    monkeypatch.setenv("LEDGER_ENVIRONMENT", "local")
+    monkeypatch.setenv("LEDGER_ARCHIVE_RETENTION_YEARS", "1")
+    assert Settings().archive_retention_years == 1

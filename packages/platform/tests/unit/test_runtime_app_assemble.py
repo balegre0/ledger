@@ -9,6 +9,7 @@ from decimal import Decimal
 from functools import partial
 from typing import ClassVar, Final, Protocol, TypeIs, final, runtime_checkable
 lazy from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+lazy from pathlib import Path
 
 import pytest
 from pydantic import SecretStr
@@ -20,6 +21,7 @@ from ledger_kernel.jurisdiction import CountryCode, Jurisdiction
 from ledger_kernel.money import Currency, RoundingMode
 from ledger_kernel.regimes import Locale, RegimeDef, RegimeKey, RoundingPoint, RoundingRule, Source
 from ledger_platform.auth.tokens import TokenSettingsMissingError
+from ledger_platform.blobs.archive import ARCHIVE_PORT_NAME
 from ledger_platform.config.manifest import ChannelEntry, load_manifest
 from ledger_platform.config.settings import PackageSettings, Settings, section_prefix
 from ledger_platform.data.database import Database
@@ -41,6 +43,7 @@ from ledger_platform.runtime.app import (
     SchemaUnknownError,
     StopTimes,
 )
+from ledger_platform.runtime.archiving import StoreArchive
 from ledger_platform.runtime.assembly import (
     ConsumerNotProvidedError,
     ConsumerUndeclaredError,
@@ -55,6 +58,7 @@ from ledger_platform.runtime.assembly import (
     MigrationsMissingError,
     ModuleCycleError,
     ModuleMissingError,
+    PortReservedError,
     SchemaMissingError,
 )
 from ledger_platform.runtime.contexts import (
@@ -66,7 +70,12 @@ from ledger_platform.runtime.contexts import (
     SectionMissingError,
 )
 from ledger_platform.runtime.facade import UnguardedFacadeError, facade
-from ledger_platform.runtime.keys import BindingMissingError, Key, UndeclaredDependencyError
+from ledger_platform.runtime.keys import (
+    Binding,
+    BindingMissingError,
+    Key,
+    UndeclaredDependencyError,
+)
 from ledger_platform.runtime.registries import CHANNELS, MODULES, REGIMES, Discovered
 from ledger_platform.runtime.sections import (
     InvalidSettingsError,
@@ -1136,3 +1145,62 @@ def test_contexts_carry_the_environment(environment: Environment) -> None:
     App("worker", settings=settings, discover=discovering(sectioned(None, seen, declared=False)))
     [context] = seen
     assert context.environment == environment
+
+
+def is_store_archive(value: object) -> TypeIs[StoreArchive]:
+    return isinstance(value, StoreArchive)
+
+
+ARCHIVE: Final = Key[StoreArchive](ARCHIVE_PORT_NAME, is_store_archive)
+"""fiscal-kit's ``ARCHIVE_PORT`` as the platform's tests can name it (the platform imports no kit)."""
+
+
+def archived(settings: Settings, provider: Module | None = None) -> list[StoreArchive]:
+    """The archive a channel reads while it assembles, in an app with ``settings``."""
+    seen: list[StoreArchive] = []
+
+    def channel(context: ChannelContext) -> ChannelParts:
+        seen.append(context.ports.get(ARCHIVE))
+        return ChannelParts(channel="archiving", migrations=migrations(context.database.schema))
+
+    modules = () if provider is None else (provider,)
+    App(
+        "worker",
+        settings=settings,
+        discover=discovering(
+            *modules,
+            regimes=(us_regime(),),
+            packs=(ChannelPack(entry=channel_entry(), regime="us", assemble=channel),),
+        ),
+    )
+    return seen
+
+
+async def test_a_channel_reads_the_archive_the_app_binds(tmp_path: Path) -> None:
+    filed = SETTINGS.model_copy(update={"archive_backend": "file", "archive_path": tmp_path})
+    [archive] = archived(filed)
+    stored = await archive.put_once(
+        "probe/a.xml", b"<a/>", retain_until=date(2040, 1, 1), media_type="text/xml"
+    )
+    assert (tmp_path / "probe" / "a.xml").read_bytes() == b"<a/>"
+    assert await archive.get("probe/a.xml", sha256=stored.sha256) == b"<a/>"
+
+
+def test_without_an_archive_configured_a_channel_that_reads_one_does_not_start() -> None:
+    with pytest.raises(BindingMissingError, match="'ArchivePort'"):
+        archived(SETTINGS)
+
+
+def test_no_module_provides_the_archive_the_app_binds(tmp_path: Path) -> None:
+    def providing(context: ModuleContext) -> ModuleParts:
+        return ModuleParts(
+            provides=(Binding(ARCHIVE_PORT_NAME, Signer()),), migrations=migrations(context.database.schema)
+        )
+
+    filed = SETTINGS.model_copy(update={"archive_backend": "file", "archive_path": tmp_path})
+    provider = module("alpha", providing, '[extension_points]\nprovides = ["ArchivePort"]\n')
+    for settings in (filed, SETTINGS):  # configured or not, the archive is the app's alone
+        with pytest.raises(
+            PortReservedError, match="'alpha' provides port 'ArchivePort', which the app binds"
+        ):
+            archived(settings, provider)

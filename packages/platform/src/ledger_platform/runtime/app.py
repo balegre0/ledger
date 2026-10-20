@@ -3,7 +3,8 @@
 Assemble (at construction, no I/O): load the platform's and the modules' manifests, the regimes and the
 channels (entry points); make the pool object and one ``BoundDatabase`` per schema; assemble the modules in
 dependency order, each reading only the APIs, extensions and ports of its declared dependencies; then the
-channels, with the ports modules provide; then merge what they handed back and check it against the manifests
+channels, with the ports modules provide and the archive the settings configure (``runtime.archiving``,
+bound as ``ArchivePort``); then merge what they handed back and check it against the manifests
 (every declared consumer and job is provided, nothing undeclared is: ``runtime.assembly``). Start
 (``asgi()``'s lifespan, or ``migrate()``): open what the role needs, nothing more.
 
@@ -75,6 +76,7 @@ from ledger_platform.jobs.schedules import Scheduler
 from ledger_platform.observability.health import Health
 from ledger_platform.observability.logs import configure_logging
 from ledger_platform.observability.tracing import DEFAULT_SHUTDOWN_TIMEOUT, Tracing
+from ledger_platform.runtime.archiving import archive_of
 from ledger_platform.runtime.assembly import Shared, assemble
 from ledger_platform.runtime.registries import installed
 from ledger_platform.runtime.supervision import Supervisor
@@ -386,6 +388,7 @@ class App:
             tracing=self._tracing,
             registry=self._registry,
             authentication=self._authentication,
+            archive=archive_of(settings, clock=clock),
         )
         self._assembled = assemble(shared, discover)
         if (

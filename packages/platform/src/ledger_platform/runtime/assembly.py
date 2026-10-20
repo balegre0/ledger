@@ -30,6 +30,7 @@ lazy from prometheus_client import CollectorRegistry
 
 from ledger_kernel.errors import LedgerError
 from ledger_platform._manifest import MANIFEST as PLATFORM_MANIFEST
+from ledger_platform.blobs.archive import ARCHIVE_PORT_NAME
 from ledger_platform.config.manifest import PackageStatus
 from ledger_platform.config.names import PLATFORM
 from ledger_platform.data.bound import BoundDatabase
@@ -47,7 +48,7 @@ from ledger_platform.runtime.contexts import (
     bind_parts,
     extension_view,
 )
-from ledger_platform.runtime.keys import ChainDirectory, Directory
+from ledger_platform.runtime.keys import Binding, ChainDirectory, Directory
 from ledger_platform.runtime.packs import Channels, installed_modules
 from ledger_platform.runtime.registries import Regimes
 from ledger_platform.runtime.sections import Declared, read_sections
@@ -70,6 +71,7 @@ lazy from ledger_platform.http.authentication import Authentication
 lazy from ledger_platform.jobs.outcomes import JobHandler, JobSpec
 lazy from ledger_platform.observability.health import Check
 lazy from ledger_platform.observability.tracing import Tracing
+lazy from ledger_platform.runtime.archiving import StoreArchive
 lazy from ledger_platform.runtime.contexts import ChannelPack, Module
 lazy from ledger_platform.runtime.registries import Discover
 
@@ -202,6 +204,15 @@ class IsolatedPartsError(LedgerError):
         )
 
 
+class PortReservedError(LedgerError):
+    """A module that provides a port the app binds itself (the archive): a defect of the module."""
+
+    code: ClassVar[str] = "port_reserved"
+
+    def __init__(self, module: str, port: str) -> None:
+        super().__init__(f"{module!r} provides port {port!r}, which the app binds: no module may provide it")
+
+
 class CronScheduleError(LedgerError):
     """A ``cron`` schedule: refused until a schedule needs one (Decision 15)."""
 
@@ -224,6 +235,8 @@ class Shared:
     tracing: Tracing
     registry: CollectorRegistry
     authentication: Authentication
+    archive: StoreArchive | None = None
+    """The archive the settings configure, bound for channels as ``ArchivePort``; none, none is bound."""
 
 
 @final
@@ -460,6 +473,12 @@ class _Assembly:
         self._extensions = ChainDirectory("extension")
         self._ports = Directory("port")
         self._channels = AssembledChannels()
+        if shared.archive is not None:  # the app's own port: no module provides it (``PortReservedError``)
+            self._ports.add(
+                Binding(ARCHIVE_PORT_NAME, shared.archive),
+                by=PLATFORM,
+                declared=frozenset({ARCHIVE_PORT_NAME}),
+            )
 
     def module(self, module: Module) -> Handed:
         """Assemble ``module`` with the APIs of its dependencies; bind what it hands over.
@@ -470,6 +489,8 @@ class _Assembly:
         """
         shared, manifest = self._shared, module.manifest
         name, isolated_in = manifest.package.name, manifest.isolated_in
+        if ARCHIVE_PORT_NAME in manifest.extension_points.provides:  # configured or not, it is the app's
+            raise PortReservedError(name, ARCHIVE_PORT_NAME)
         database = self._bound[_schema_of(manifest)]
         own = isolated_in == shared.role
         relayed_from = None if own else isolated_in  # the role it is isolated in, when that is another
@@ -612,7 +633,13 @@ def assemble(shared: Shared, discover: Discover) -> Assembled:
     )
     handed = [assembly.module(module) for module in modules]
     assembly.require_bindings(modules)
-    provided = frozenset(port for module in modules for port in module.manifest.extension_points.provides)
+    # The archive is the app's own port: unconfigured, a channel that reads it finds nothing bound.
+    provided = frozenset(
+        (
+            ARCHIVE_PORT_NAME,
+            *(port for module in modules for port in module.manifest.extension_points.provides),
+        )
+    )
     assembly.bind_standings(provided)
     handed += [assembly.channel(pack, provided) for pack in packs]
     assembly.seal()
