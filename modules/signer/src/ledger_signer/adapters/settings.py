@@ -15,6 +15,7 @@ from pydantic_settings import NoDecode, SettingsConfigDict
 lazy from pydantic import SecretStr
 
 from ledger_platform.config.settings import PackageSettings, section_prefix
+from ledger_platform.grpc.client import MAX_DEADLINE
 
 type Caller = Literal["api", "worker", "receiver"]
 """Who may call the signer (spec §3.7): each holds a token of its own."""
@@ -30,6 +31,8 @@ MAX_SIGNING_SKEW_SECONDS: Final = 900
 """The most skew the signer may allow: past it a document's moment says too little of when it was signed."""
 MAX_DEADLINE_SECONDS: Final = 10.0
 """The longest a client waits for the signer (spec §3.7: deadlines set by the caller, at most 10 s)."""
+MAX_IMPORT_DEADLINE_SECONDS: Final = MAX_DEADLINE
+"""The longest an import may take: a bundle streams, so it gets the most any call between services may."""
 
 
 class _RepeatedDaysError(ValueError):
@@ -48,7 +51,11 @@ class SignerSettings(PackageSettings):
     address: Annotated[str, Field(min_length=1, max_length=255)] | None = None
     """``host:port`` of the signer's gRPC service, e.g. ``signer:50051``; no signer without it."""
     deadline_seconds: Annotated[float, Field(gt=0, le=MAX_DEADLINE_SECONDS)] = 5.0
-    """How long a client waits for each call."""
+    """How long a client waits for each call but an import."""
+    import_deadline_seconds: Annotated[float, Field(gt=0, le=MAX_IMPORT_DEADLINE_SECONDS)] = (
+        MAX_IMPORT_DEADLINE_SECONDS
+    )
+    """How long the api waits for an import: a bundle of up to 2 MiB streams through it."""
     # the signer role: its callers' tokens (Decision 12), its port, its backends, its KMS, its rules
     token_api: SecretStr | None = None
     token_worker: SecretStr | None = None

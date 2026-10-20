@@ -30,7 +30,9 @@ def _client(settings: SignerSettings, caller: Caller) -> SignerClient | None:
     address, token = settings.address, settings.token_of(caller)
     if address is None or token is None:
         return None
-    return SignerClient(address, token, deadline=settings.deadline_seconds)
+    return SignerClient(
+        address, token, deadline=settings.deadline_seconds, import_deadline=settings.import_deadline_seconds
+    )
 
 
 def assemble(context: ModuleContext) -> ModuleParts:

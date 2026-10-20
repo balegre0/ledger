@@ -9,7 +9,8 @@ read, so a field is only ever added.
 
 What comes off the wire is checked as our own code's output (``InvalidValueError``, a defect): an
 enumeration's ``UNSPECIFIED`` (proto3's default, what a message that never set it holds) or a number the
-contract does not name is refused, never read as a default; an id must be a UUID; a certificate's moments
+contract does not name is refused, never read as a default; an id must be a UUID as ``str`` writes it; a
+certificate's fingerprint must be a SHA-256, its modes distinct (one at least while active), its moments
 must be set (an unset ``Timestamp`` reads as 1970). Moments are aware UTC both ways: a naive one is never
 sent. Messages name the field, never the value: a password or a credential travels in a header.
 """
@@ -29,6 +30,7 @@ from ledger_platform.runtime.calls import actor_of
 from ledger_signer.adapters.grpc._generated.v1 import signer_pb2
 from ledger_signer.api import BackendKind, CertificateId, CertificateStatus, CertificateView
 from ledger_signer.application.ports import ImportOutcome
+from ledger_signer.domain.certificates import FINGERPRINT_BYTES
 lazy from ledger_fiscal_kit.ports import SeedToSign, XmlToSign
 lazy from ledger_kernel.tenancy import Tenant
 lazy from ledger_platform.runtime.calls import Call, SystemCall
@@ -147,11 +149,32 @@ def _required_moment(stamp: Timestamp, field: str, *, present: bool) -> datetime
 
 
 def id_of(text: str, field: str) -> UUID:
-    """The UUID ``text`` holds, read from ``field``; anything else is refused without being quoted."""
+    """The UUID ``text`` holds in its canonical form (as ``str`` writes it), read from ``field``.
+
+    Any other text, another spelling of a UUID included, is refused without being quoted: one id is one text.
+    """
     try:
-        return UUID(text)
+        value = UUID(text)
     except ValueError:
-        raise _invalid(field=field, requirement="a UUID") from None
+        value = None
+    if value is None or str(value) != text:
+        raise _invalid(field=field, requirement="a UUID in its canonical form")
+    return value
+
+
+def _modes_of(message: signer_pb2.Certificate, status: CertificateStatus) -> frozenset[Mode]:
+    """The modes ``message`` names: each once, and one at least while the certificate is active."""
+    wires = list(message.modes)
+    modes = frozenset(mode_of(wire, "certificate.modes") for wire in wires)
+    if len(modes) != len(wires) or (status is CertificateStatus.ACTIVE and not modes):
+        raise _invalid(field="certificate.modes", requirement="distinct modes, one at least while active")
+    return modes
+
+
+def _fingerprint_of(message: signer_pb2.Certificate) -> bytes:
+    if len(message.fingerprint_sha256) != FINGERPRINT_BYTES:
+        raise _invalid(field="certificate.fingerprint_sha256", requirement=f"{FINGERPRINT_BYTES} bytes")
+    return message.fingerprint_sha256
 
 
 def company_wire(organization: OrganizationId, company: CompanyId) -> signer_pb2.Company:
@@ -201,14 +224,15 @@ def certificate_wire(view: CertificateView) -> signer_pb2.Certificate:
 def certificate_view(message: signer_pb2.Certificate) -> CertificateView:
     """The certificate ``message`` describes (see the module for what is refused)."""
     organization, company = _company_of(message.company, "certificate.company")
+    status = status_of(message.status)
     return CertificateView(
         id=CertificateId(id_of(message.certificate_id, "certificate.certificate_id")),
         organization=organization,
         company=company,
-        modes=frozenset(mode_of(wire, "certificate.modes") for wire in message.modes),
+        modes=_modes_of(message, status),
         backend=backend_of(message.backend),
-        status=status_of(message.status),
-        fingerprint_sha256=message.fingerprint_sha256,
+        status=status,
+        fingerprint_sha256=_fingerprint_of(message),
         serial_number=message.serial_number,
         subject=message.subject,
         issuer=message.issuer,

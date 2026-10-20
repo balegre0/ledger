@@ -76,6 +76,18 @@ def test_a_deadline_over_ten_seconds_is_refused(monkeypatch: pytest.MonkeyPatch)
     assert problems(caught) == [("deadline_seconds",)]
 
 
+def test_an_import_has_its_own_deadline_of_at_most_thirty_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bundle of 2 MiB streams through the api: longer than a signature, never longer than any call."""
+    assert SignerSettings().import_deadline_seconds == 30.0
+    monkeypatch.setenv("LEDGER_SIGNER_IMPORT_DEADLINE_SECONDS", "12.5")
+    assert SignerSettings().import_deadline_seconds == 12.5
+    for refused in ("30.5", "0"):
+        monkeypatch.setenv("LEDGER_SIGNER_IMPORT_DEADLINE_SECONDS", refused)
+        with pytest.raises(ValidationError) as caught:
+            SignerSettings()
+        assert problems(caught) == [("import_deadline_seconds",)]
+
+
 def test_backends_parse_from_a_comma_list(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LEDGER_SIGNER_BACKENDS", "local, remote")
     assert SignerSettings().backends == frozenset({"local", "remote"})

@@ -8,6 +8,7 @@ the signer did not set is refused rather than read as 1970.
 import dataclasses
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Final
+from uuid import UUID
 lazy from collections.abc import Callable
 
 import pytest
@@ -95,7 +96,9 @@ def test_a_moment_is_aware_utc_both_ways_and_a_naive_one_is_never_sent() -> None
 
 def test_an_id_that_is_not_a_uuid_is_refused_without_its_text() -> None:
     assert codec.id_of(str(COMPANY), "company.company_id") == COMPANY
-    with pytest.raises(InvalidValueError, match=r"^signer\.company\.company_id must be a UUID$"):
+    with pytest.raises(
+        InvalidValueError, match=r"^signer\.company\.company_id must be a UUID in its canonical form"
+    ):
         codec.id_of("4111111111111111", "company.company_id")
 
 
@@ -143,7 +146,8 @@ def test_a_certificate_of_a_company_without_ids_is_refused() -> None:
     message = codec.certificate_wire(ACTIVE)
     message.ClearField("company")
     with pytest.raises(
-        InvalidValueError, match=r"^signer\.certificate\.company\.organization_id must be a UUID$"
+        InvalidValueError,
+        match=r"^signer\.certificate\.company\.organization_id must be a UUID in its canonical form",
     ):
         codec.certificate_view(message)
 
@@ -221,7 +225,9 @@ def test_a_signature_is_read_with_the_certificate_that_made_it() -> None:
     assert codec.signed_of(b"<a><Signature/></a>", str(certificate)) == Signed(
         document=b"<a><Signature/></a>", certificate=certificate
     )
-    with pytest.raises(InvalidValueError, match=r"^signer\.signed\.certificate_id must be a UUID$"):
+    with pytest.raises(
+        InvalidValueError, match=r"^signer\.signed\.certificate_id must be a UUID in its canonical form"
+    ):
         codec.signed_of(b"<a/>", "")
 
 
@@ -268,3 +274,79 @@ def test_the_methods_are_named_as_the_generated_descriptor_names_them() -> None:
         service + "SignXml",
         service + "SignSeed",
     ) == (codec.IMPORT, codec.DESCRIBE, codec.RETIRE, codec.SIGN_XML, codec.SIGN_SEED)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        str(COMPANY).upper(),
+        str(COMPANY).replace("-", ""),
+        "{" + str(COMPANY) + "}",
+        "urn:uuid:" + str(COMPANY),
+        f" {COMPANY}",
+    ],
+    ids=["upper", "hex", "braces", "urn", "space"],
+)
+def test_an_id_in_any_but_its_canonical_form_is_refused(text: str) -> None:
+    with pytest.raises(InvalidValueError, match=r"^signer\.certificate\.certificate_id must be a UUID"):
+        codec.id_of(text, "certificate.certificate_id")
+
+
+def test_an_active_certificate_without_modes_is_refused_a_retired_one_may_serve_none() -> None:
+    message = codec.certificate_wire(ACTIVE)
+    message.ClearField("modes")
+    with pytest.raises(InvalidValueError, match=r"^signer\.certificate\.modes must be"):
+        codec.certificate_view(message)
+    retired = dataclasses.replace(RETIRED, modes=frozenset[Mode]())
+    assert codec.certificate_view(codec.certificate_wire(retired)) == retired
+
+
+def test_a_mode_named_twice_is_refused() -> None:
+    message = codec.certificate_wire(ACTIVE)
+    message.modes.append(signer_pb2.MODE_TEST)
+    with pytest.raises(InvalidValueError, match=r"^signer\.certificate\.modes must be"):
+        codec.certificate_view(message)
+
+
+@pytest.mark.parametrize("size", [0, 31, 33])
+def test_a_fingerprint_that_is_not_a_sha_256_is_refused(size: int) -> None:
+    message = codec.certificate_wire(ACTIVE)
+    message.fingerprint_sha256 = bytes(size)
+    with pytest.raises(InvalidValueError, match=r"^signer\.certificate\.fingerprint_sha256 must be 32 bytes"):
+        codec.certificate_view(message)
+
+
+GOLDEN_VIEW: Final = CertificateView(
+    id=CertificateId(UUID("0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b")),
+    organization=OrganizationId(UUID("0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a50")),
+    company=CompanyId(UUID("0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a51")),
+    modes=frozenset({Mode.LIVE, Mode.TEST}),
+    backend=BackendKind.LOCAL,
+    status=CertificateStatus.ACTIVE,
+    fingerprint_sha256=bytes(range(32)),
+    serial_number="0a1b2c",
+    subject="CN=Juana Perez",
+    issuer="CN=Avansi CA",
+    not_before=datetime(2026, 1, 1, tzinfo=UTC),
+    not_after=datetime(2027, 1, 1, tzinfo=UTC),
+    installed_at=datetime(2026, 10, 19, 12, 30, 15, 123456, tzinfo=UTC),
+    retired_at=None,
+    retired_reason=None,
+    version=1,
+)
+GOLDEN_HEX: Final = (
+    "0ae3010a2430313933613162322d633364342d376535662d386139622d306331643265336634613562124c0a24303139"
+    "33613162322d633364342d376535662d386139622d306331643265336634613530122430313933613162322d63336434"
+    "2d376535662d386139622d3063316432653366346135311a020102200128013220000102030405060708090a0b0c0d0e"
+    "0f101112131415161718191a1b1c1d1e1f3a06306131623263420e434e3d4a75616e6120506572657a4a0c434e3d4176"
+    "616e736920434152060880f2d6ca065a060880d9dbd906620b08d79ad8d606108094ef3a7801"
+)
+"""What an import's key keeps for ``GOLDEN_VIEW``: the bytes keys already stored hold, never to change."""
+
+
+def test_what_an_import_s_key_keeps_never_changes() -> None:
+    kept = codec.import_response(ImportOutcome(view=GOLDEN_VIEW, replayed=False)).SerializeToString()
+    assert kept.hex() == GOLDEN_HEX
+    assert codec.import_outcome(
+        signer_pb2.ImportCertificateResponse.FromString(bytes.fromhex(GOLDEN_HEX))
+    ) == (ImportOutcome(view=GOLDEN_VIEW, replayed=False))

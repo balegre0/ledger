@@ -7,6 +7,7 @@ hands a readiness check: none depends on the signer. The signer's role binds the
 exists; ``migrate`` runs its revisions.
 """
 
+import dataclasses
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from typing import Final
@@ -33,7 +34,7 @@ from ledger_platform.runtime import App, Module, SystemCall
 from ledger_platform.runtime.registries import MODULES, Discovered, installed
 from ledger_signer.adapters.grpc import codec
 from ledger_signer.adapters.grpc._generated.v1 import signer_pb2
-from ledger_signer.adapters.grpc.client import SignerClient
+from ledger_signer.adapters.grpc.client import SignerClient, SignerTokenRefusedError
 from ledger_signer.adapters.postgres.schema import MIGRATIONS
 from ledger_signer.adapters.settings import SignerSettings
 from ledger_signer.adapters.unavailable import UnavailableSigner
@@ -65,6 +66,7 @@ class Recorded:
 
     def __init__(self) -> None:
         self.parts: dict[AppRole, ModuleParts] = {}
+        self.contexts: dict[AppRole, ModuleContext] = {}
 
     def module(self) -> Module:
         """signer's module, its assembly recorded."""
@@ -72,6 +74,7 @@ class Recorded:
         def assemble(context: ModuleContext) -> ModuleParts:
             parts = MODULE.assemble(context)
             self.parts[context.role] = parts
+            self.contexts[context.role] = context
             return parts
 
         return Module(
@@ -100,9 +103,16 @@ def recorded() -> Recorded:
 
 
 async def assembled(recorded: Recorded, role: AppRole) -> tuple[App, ModuleParts]:
-    """``role``'s app (its pools closed again: nothing connects) and what signer handed it."""
-    app = App(role, settings=SETTINGS, discover=recorded.discover)
+    """``role``'s app (its pools closed again: nothing connects) and what signer handed it.
+
+    The receiver's app is not built yet (a later milestone): signer is assembled in the worker's context
+    given the receiver's role, as the receiver's app will.
+    """
+    built: AppRole = "worker" if role == "receiver" else role
+    app = App(built, settings=SETTINGS, discover=recorded.discover)
     await app.aclose()
+    if role == "receiver":
+        return app, MODULE.assemble(dataclasses.replace(recorded.contexts[built], role=role))
     return app, recorded.parts[role]
 
 
@@ -169,7 +179,7 @@ def test_the_entry_point_names_the_assembly_the_settings_and_the_revisions() -> 
     )
 
 
-@pytest.mark.parametrize("role", ["api", "worker"])
+@pytest.mark.parametrize("role", ["api", "worker", "receiver"])
 async def test_a_configured_client_role_binds_one_client_with_its_own_token(
     recorded: Recorded,
     signer: tuple[str, list[str]],
@@ -218,6 +228,17 @@ async def test_an_unconfigured_client_role_binds_the_stand_ins_and_says_so_once(
     assert "warning" in line
     assert "role=worker" in line
     assert all(token not in line for token in TOKENS.values())
+
+
+@pytest.mark.parametrize("role", ["api", "worker", "receiver"])
+async def test_a_client_role_with_a_short_own_token_fails_to_start(
+    recorded: Recorded, monkeypatch: pytest.MonkeyPatch, role: AppRole
+) -> None:
+    """A token the signer's guard would refuse is a deployment's defect: found at start, never sent."""
+    monkeypatch.setenv("LEDGER_SIGNER_ADDRESS", "signer:50051")
+    monkeypatch.setenv(f"LEDGER_SIGNER_TOKEN_{role.upper()}", "short-token-0123456789abcdef")
+    with pytest.raises(SignerTokenRefusedError):
+        await assembled(recorded, role)
 
 
 async def test_the_signer_role_binds_the_stand_ins_until_its_service_exists(

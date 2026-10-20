@@ -2,14 +2,17 @@
 
 The stub answers as a test tells it and records what each call carried: its request, its caller (as the
 guard admitted it) and its metadata. Each signer error is raised by the stub as the signer raises it, so the
-server's own mapping of kinds to statuses is what the client reads back.
+server's own mapping of kinds to statuses is what the client reads back; ``abort`` answers a status and a
+code the signer would never pair, to show the client trusts neither alone.
 """
 
 import asyncio
 import dataclasses
+import logging
+import traceback
 from datetime import UTC, datetime, timedelta
 from typing import Final, final, override
-lazy from collections.abc import AsyncGenerator, AsyncIterator
+lazy from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator
 
 import grpc
 import pytest
@@ -29,32 +32,52 @@ from ledger_fiscal_kit.ports import (
     XmlToSign,
 )
 from ledger_fiscal_kit.xml.dsig import DocumentSignedError, NotAnRsaKeyError, SigningPairError
-from ledger_kernel.errors import InvalidValueError, LedgerError
+from ledger_kernel.errors import (
+    ConflictError,
+    ErrorKind,
+    InvalidInputError,
+    InvalidValueError,
+    LedgerError,
+    NotFoundError,
+)
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.tenancy import Mode, Tenant
+from ledger_platform.data.idempotency import InvalidIdempotencyKeyError
 from ledger_platform.grpc.client import (
+    ERROR_CODE_KEY,
     RemoteConflictError,
     RemoteDefectError,
     RemoteError,
-    RemoteForbiddenError,
 )
 from ledger_platform.grpc.guard import CallerPolicy, CallerTokens, current_caller
 from ledger_platform.grpc.metadata import AUTHORIZATION_KEY, CALL_ID_KEY, TRACEPARENT_KEY, metadata_value
 from ledger_platform.grpc.server import ServerOptions, serve_grpc
+from ledger_platform.http.idempotency import IdempotencyKeyInUseError, IdempotencyKeyReusedError
 from ledger_platform.runtime.calls import SystemCall
 from ledger_signer.adapters.grpc import codec
 from ledger_signer.adapters.grpc._generated.v1 import signer_pb2, signer_pb2_grpc
-from ledger_signer.adapters.grpc.client import CHUNK_BYTES, SignerClient, SignerTokenRefusedError
+from ledger_signer.adapters.grpc.client import (
+    API_REFUSALS,
+    CHANNEL_OPTIONS,
+    CHUNK_BYTES,
+    SignerClient,
+    SignerDefectError,
+    SignerTokenRefusedError,
+)
 from ledger_signer.api import (
     BackendKind,
+    BackendNotOfferedError,
     CertificateId,
     CertificateNotFoundError,
     CertificateStatus,
     CertificateView,
 )
 from ledger_signer.application.facade import port_error
-from ledger_signer.application.importing import ImportRequest
+from ledger_signer.application.importing import MAX_BUNDLE_BYTES, ImportRequest, ImportTooLargeError
 from ledger_signer.application.ports import (
+    ActiveCertificateTakenError,
+    BundleIncompleteError,
+    BundleUnreadableError,
     EntityRefusedError,
     EntityUnavailableError,
     ImportOutcome,
@@ -62,9 +85,15 @@ from ledger_signer.application.ports import (
     Secret,
 )
 from ledger_signer.application.signing import CustodyDamagedError
+from ledger_signer.domain.certificates import MIN_RSA_BITS
 from ledger_signer.domain.errors import (
     CertificateExpiredError,
+    CertificateKeyMismatchError,
+    CertificateKeyUnsupportedError,
+    CertificateNotForSigningError,
+    CertificateNotYetValidError,
     CertificateRetiredError,
+    CertificateValidityTooShortError,
     ClockSkewError,
     NotCoveredError,
 )
@@ -108,7 +137,8 @@ RETIRED: Final = dataclasses.replace(
     retired_reason="replaced",
 )
 REQUEST: Final = ImportRequest(tenant=TENANT, modes=frozenset({Mode.TEST}), idempotency_key="import-0001")
-PASSWORD: Final = "bundle-password-sentinel"
+PASSWORD: Final = "bundle-password-sentinel-7Hq2"
+CREDENTIAL: Final = "entity-credential-sentinel-9Zx4"
 DEADLINE: Final = 2.0
 
 type Context[Request, Response] = grpc.aio.ServicerContext[Request, Response]
@@ -135,6 +165,7 @@ class Stub(signer_pb2_grpc.SignerServiceServicer):
         self.delay = 0.0
         self.listed: list[CertificateView] = [ACTIVE]
         self.chunks: list[bytes] = []
+        self.abort: tuple[grpc.StatusCode, str] | None = None
 
     async def _took[Request, Response](
         self, method: str, request: object, context: Context[Request, Response]
@@ -144,6 +175,9 @@ class Stub(signer_pb2_grpc.SignerServiceServicer):
         )
         if self.delay:
             await asyncio.sleep(self.delay)
+        if self.abort is not None:
+            status, code = self.abort
+            await context.abort(status, "refused", trailing_metadata=((ERROR_CODE_KEY, code),))
         if self.failure is not None:
             raise self.failure
 
@@ -239,13 +273,17 @@ async def address(stub: Stub) -> AsyncGenerator[str]:
 
 @pytest.fixture
 async def worker(address: str) -> AsyncGenerator[SignerClient]:
-    async with SignerClient(address, SecretStr(WORKER_TOKEN), deadline=DEADLINE) as client:
+    async with SignerClient(
+        address, SecretStr(WORKER_TOKEN), deadline=DEADLINE, import_deadline=DEADLINE
+    ) as client:
         yield client
 
 
 @pytest.fixture
 async def api(address: str) -> AsyncGenerator[SignerClient]:
-    async with SignerClient(address, SecretStr(API_TOKEN), deadline=DEADLINE) as client:
+    async with SignerClient(
+        address, SecretStr(API_TOKEN), deadline=DEADLINE, import_deadline=DEADLINE
+    ) as client:
         yield client
 
 
@@ -356,26 +394,31 @@ async def test_a_defect_of_the_signer_is_a_defect_never_a_port_error(
     worker: SignerClient, stub: Stub, failure: Exception
 ) -> None:
     stub.failure = failure
-    with pytest.raises(RemoteDefectError) as caught:
+    with pytest.raises(RemoteError) as caught:
         await worker.sign_xml(CALL, DOCUMENT)
+    assert caught.value.kind is ErrorKind.INTERNAL
     assert "4111" not in str(caught.value)
 
 
 async def test_a_signer_past_its_deadline_is_unavailable(address: str, stub: Stub) -> None:
     stub.delay = 1.0
-    async with SignerClient(address, SecretStr(WORKER_TOKEN), deadline=0.2) as client:
+    async with SignerClient(
+        address, SecretStr(WORKER_TOKEN), deadline=0.2, import_deadline=DEADLINE
+    ) as client:
         with pytest.raises(SignerUnavailableError):
             await client.sign_seed(CALL, SEED)
 
 
 async def test_a_signer_that_is_not_there_is_unavailable() -> None:
-    async with SignerClient("127.0.0.1:1", SecretStr(WORKER_TOKEN), deadline=1.0) as client:
+    async with SignerClient(
+        "127.0.0.1:1", SecretStr(WORKER_TOKEN), deadline=1.0, import_deadline=1.0
+    ) as client:
         with pytest.raises(SignerUnavailableError):
             await client.sign_xml(CALL, DOCUMENT)
 
 
 async def test_a_client_never_opened_or_closed_again_is_unavailable(address: str) -> None:
-    client = SignerClient(address, SecretStr(WORKER_TOKEN), deadline=DEADLINE)
+    client = SignerClient(address, SecretStr(WORKER_TOKEN), deadline=DEADLINE, import_deadline=DEADLINE)
     with pytest.raises(SignerUnavailableError):
         await client.sign_xml(CALL, DOCUMENT)
     async with client:
@@ -383,16 +426,6 @@ async def test_a_client_never_opened_or_closed_again_is_unavailable(address: str
     await client.__aexit__(None, None, None)  # closing a closed client changes nothing
     with pytest.raises(SignerUnavailableError):
         await client.certificate_validity(CALL, TENANT)
-
-
-async def test_the_guard_s_refusals_stay_remote_errors(address: str, api: SignerClient) -> None:
-    with pytest.raises(RemoteForbiddenError) as refused:
-        await api.sign_xml(CALL, DOCUMENT)
-    assert refused.value.remote_code == "grpc_method_not_allowed"
-    async with SignerClient(address, SecretStr("x" * 40), deadline=DEADLINE) as stranger:
-        with pytest.raises(RemoteForbiddenError) as unknown:
-            await stranger.sign_xml(CALL, DOCUMENT)
-    assert unknown.value.remote_code == "grpc_caller_unknown"
 
 
 async def test_the_validity_is_the_active_certificate_s(worker: SignerClient, stub: Stub) -> None:
@@ -431,25 +464,6 @@ async def test_the_api_describes_with_retired_ones_and_retires(api: SignerClient
     assert stub.received[1].request == codec.retire_request(CALL, company, RETIRED.id)
 
 
-async def test_a_certificate_the_company_does_not_have_is_not_found(api: SignerClient, stub: Stub) -> None:
-    stub.failure = CertificateNotFoundError()
-    with pytest.raises(CertificateNotFoundError):
-        await api.retire(CALL, Tenant(ORGANIZATION, COMPANY, None), RETIRED.id)
-
-
-async def test_an_import_refused_by_the_signer_stays_a_remote_error_with_its_code(
-    api: SignerClient, stub: Stub
-) -> None:
-    stub.failure = CertificateExpiredError()
-    with pytest.raises(RemoteDefectError) as invalid:
-        await api.import_remote(CALL, REQUEST, Secret("entity-credential"))
-    assert invalid.value.remote_code == "certificate_expired"
-    stub.failure = EntityRefusedError()
-    with pytest.raises(RemoteConflictError) as refused:  # a refusal outside a signature is no port error
-        await api.import_remote(CALL, REQUEST, Secret("entity-credential"))
-    assert refused.value.remote_code == "entity_refused"
-
-
 async def test_a_signer_that_cannot_reach_its_kms_is_unavailable_to_the_api(
     api: SignerClient, stub: Stub
 ) -> None:
@@ -457,14 +471,8 @@ async def test_a_signer_that_cannot_reach_its_kms_is_unavailable_to_the_api(
     with pytest.raises(SignerUnavailableError):
         await api.import_local(CALL, REQUEST, Secret(PASSWORD), bundle(b"pkcs12"))
     stub.failure = CertificateRetiredError()
-    with pytest.raises(RemoteConflictError):
+    with pytest.raises(RemoteConflictError):  # a signature's conflict outside a signature: no port error
         await api.describe(CALL, TENANT, include_retired=False)
-
-
-async def test_a_defect_of_the_signer_is_a_defect_to_the_api(api: SignerClient, stub: Stub) -> None:
-    stub.failure = RuntimeError("anything")
-    with pytest.raises(RemoteDefectError):
-        await api.retire(CALL, Tenant(ORGANIZATION, COMPANY, None), RETIRED.id)
 
 
 async def test_a_bundle_streams_after_its_header_in_chunks_of_at_most_64_kib(
@@ -481,26 +489,271 @@ async def test_a_bundle_streams_after_its_header_in_chunks_of_at_most_64_kib(
 
 
 async def test_a_remote_import_is_its_header_alone(api: SignerClient, stub: Stub) -> None:
-    outcome = await api.import_remote(CALL, REQUEST, Secret("entity-credential"))
+    outcome = await api.import_remote(CALL, REQUEST, Secret(CREDENTIAL))
     assert outcome == ImportOutcome(view=ACTIVE, replayed=False)
     assert stub.chunks == []
-    assert stub.received[0].request == codec.remote_header(CALL, REQUEST, Secret("entity-credential"))
+    assert stub.received[0].request == codec.remote_header(CALL, REQUEST, Secret(CREDENTIAL))
 
 
 @pytest.mark.parametrize("token", ["", "short", "x" * 31])
 def test_an_empty_or_short_own_token_is_refused_when_the_client_is_built(token: str) -> None:
     with pytest.raises(SignerTokenRefusedError) as caught:
-        SignerClient("signer:50051", SecretStr(token), deadline=DEADLINE)
+        SignerClient("signer:50051", SecretStr(token), deadline=DEADLINE, import_deadline=DEADLINE)
     assert str(caught.value) == "the signer client's own token must be at least 32 characters"
 
 
 @pytest.mark.parametrize("deadline", [0.0, -1.0, 10.5])
 def test_a_deadline_outside_its_bounds_is_refused(deadline: float) -> None:
     with pytest.raises(LedgerError, match="deadline"):
-        SignerClient("signer:50051", SecretStr(WORKER_TOKEN), deadline=deadline)
+        SignerClient("signer:50051", SecretStr(WORKER_TOKEN), deadline=deadline, import_deadline=DEADLINE)
+    with pytest.raises(LedgerError, match="import_deadline"):
+        SignerClient("signer:50051", SecretStr(WORKER_TOKEN), deadline=DEADLINE, import_deadline=deadline * 3)
 
 
 def test_the_client_never_shows_its_token() -> None:
-    client = SignerClient("signer:50051", SecretStr(WORKER_TOKEN), deadline=DEADLINE)
-    assert repr(client) == "SignerClient(address='signer:50051', deadline=2.0)"
+    client = SignerClient("signer:50051", SecretStr(WORKER_TOKEN), deadline=DEADLINE, import_deadline=30.0)
+    assert repr(client) == "SignerClient(address='signer:50051', deadline=2.0, import_deadline=30.0)"
     assert WORKER_TOKEN not in repr(client)
+
+
+def test_the_channel_backs_off_between_half_a_second_and_five() -> None:
+    assert dict(CHANNEL_OPTIONS) == {
+        "grpc.max_send_message_length": 5 * 1024 * 1024,
+        "grpc.max_receive_message_length": 5 * 1024 * 1024,
+        "grpc.initial_reconnect_backoff_ms": 500,
+        "grpc.min_reconnect_backoff_ms": 1000,
+        "grpc.max_reconnect_backoff_ms": 5000,
+    }
+
+
+@pytest.mark.parametrize(
+    "failure", [CustodyDamagedError(), RuntimeError("anything")], ids=["custody_damaged", "anything"]
+)
+async def test_a_defect_the_signer_reports_is_a_signer_defect(
+    worker: SignerClient, api: SignerClient, stub: Stub, failure: Exception
+) -> None:
+    """The signer answers its own defects ``INTERNAL`` with the platform's ``internal`` code, and no more."""
+    stub.failure = failure
+    with pytest.raises(SignerDefectError) as signing:
+        await worker.sign_seed(CALL, SEED)
+    with pytest.raises(SignerDefectError) as retiring:
+        await api.retire(CALL, Tenant(ORGANIZATION, COMPANY, None), RETIRED.id)
+    for caught in (signing, retiring):
+        assert (caught.value.code, caught.value.kind, caught.value.remote_code) == (
+            "signer_defect",
+            ErrorKind.INTERNAL,
+            "internal",
+        )
+
+
+async def test_a_transport_s_internal_failure_is_the_signer_unavailable(
+    worker: SignerClient, stub: Stub
+) -> None:
+    stub.abort = (grpc.StatusCode.INTERNAL, "unknown")
+    with pytest.raises(SignerUnavailableError):
+        await worker.sign_xml(CALL, DOCUMENT)
+
+
+async def test_the_guard_s_refusals_are_defects_of_the_deployment(
+    address: str, api: SignerClient, worker: SignerClient
+) -> None:
+    """Never forbidden (a 403 would blame the route's caller): a token or an allowlist is wrong."""
+    with pytest.raises(RemoteDefectError) as refused:
+        await api.sign_xml(CALL, DOCUMENT)
+    with pytest.raises(RemoteDefectError) as importing:
+        await worker.import_remote(CALL, REQUEST, Secret(CREDENTIAL))
+    async with SignerClient(
+        address, SecretStr("x" * 40), deadline=DEADLINE, import_deadline=DEADLINE
+    ) as stranger:
+        with pytest.raises(RemoteDefectError) as unknown:
+            await stranger.describe(CALL, TENANT, include_retired=False)
+    caught = (refused, importing, unknown)
+    assert [error.value.remote_code for error in caught] == [
+        "grpc_method_not_allowed",
+        "grpc_method_not_allowed",
+        "grpc_caller_unknown",
+    ]
+    assert all(error.value.kind is ErrorKind.INTERNAL for error in caught)
+
+
+IMPORT_REFUSALS: Final[tuple[LedgerError, ...]] = (
+    CertificateKeyUnsupportedError(MIN_RSA_BITS),
+    CertificateNotForSigningError(),
+    CertificateKeyMismatchError(),
+    CertificateExpiredError(),
+    CertificateNotYetValidError(),
+    CertificateValidityTooShortError(),
+    BundleUnreadableError(),
+    BundleIncompleteError(),
+    BackendNotOfferedError(BackendKind.REMOTE),
+    ImportTooLargeError(),
+    InvalidIdempotencyKeyError(),
+    IdempotencyKeyReusedError(),
+    IdempotencyKeyInUseError(),
+    EntityRefusedError(),
+    ActiveCertificateTakenError(),
+)
+
+
+@pytest.mark.parametrize("original", IMPORT_REFUSALS, ids=[error.code for error in IMPORT_REFUSALS])
+async def test_an_import_s_refusal_is_the_error_the_facade_raises(
+    api: SignerClient, stub: Stub, original: LedgerError
+) -> None:
+    """What the HTTP edge maps to its problems, whichever process answered (Task 13)."""
+    stub.failure = original
+    with pytest.raises(LedgerError) as caught:
+        await api.import_remote(CALL, REQUEST, Secret(CREDENTIAL))
+    raised = caught.value
+    assert type(raised) is type(original)
+    assert (raised.code, raised.kind, str(raised)) == (original.code, original.kind, str(original))
+    cause = raised.__cause__
+    assert isinstance(cause, RemoteError)
+    assert cause.remote_code == original.code
+
+
+async def test_a_certificate_the_company_does_not_have_is_not_found(api: SignerClient, stub: Stub) -> None:
+    stub.failure = CertificateNotFoundError()
+    with pytest.raises(CertificateNotFoundError) as caught:
+        await api.retire(CALL, Tenant(ORGANIZATION, COMPANY, None), RETIRED.id)
+    assert isinstance(caught.value.__cause__, RemoteError)
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "expected"),
+    [
+        (grpc.StatusCode.FAILED_PRECONDITION, "certificate_expired", RemoteConflictError),
+        (grpc.StatusCode.NOT_FOUND, "certificate_expired", RemoteError),
+        (grpc.StatusCode.INVALID_ARGUMENT, "certificate_not_found", RemoteDefectError),
+        (grpc.StatusCode.INVALID_ARGUMENT, "a_code_no_signer_sends", RemoteDefectError),
+        (grpc.StatusCode.FAILED_PRECONDITION, "a_code_no_signer_sends", RemoteConflictError),
+    ],
+    ids=[
+        "invalid_as_conflict",
+        "invalid_as_not_found",
+        "not_found_as_invalid",
+        "unknown",
+        "unknown_conflict",
+    ],
+)
+async def test_a_refusal_whose_status_does_not_fit_its_code_stays_a_remote_error(
+    api: SignerClient, stub: Stub, status: grpc.StatusCode, code: str, expected: type[RemoteError]
+) -> None:
+    stub.abort = (status, code)
+    with pytest.raises(RemoteError) as caught:
+        await api.import_remote(CALL, REQUEST, Secret(CREDENTIAL))
+    assert isinstance(caught.value, expected)
+    assert caught.value.remote_code == code
+
+
+async def test_a_backend_refused_outside_an_import_stays_a_remote_error(
+    api: SignerClient, stub: Stub
+) -> None:
+    """Only an import knows its backend: the signer never refuses one elsewhere, so it is no refusal there."""
+    stub.failure = BackendNotOfferedError(BackendKind.LOCAL)
+    with pytest.raises(RemoteDefectError) as caught:
+        await api.describe(CALL, TENANT, include_retired=True)
+    assert caught.value.remote_code == "backend_not_offered"
+    stub.failure = BackendNotOfferedError(BackendKind.LOCAL)
+    with pytest.raises(BackendNotOfferedError) as local:
+        await api.import_local(CALL, REQUEST, Secret(PASSWORD), bundle(b"pkcs12"))
+    assert str(local.value) == str(BackendNotOfferedError(BackendKind.LOCAL))
+
+
+SIGNATURE_ONLY: Final = frozenset(
+    {
+        NotCoveredError.code,
+        ClockSkewError.code,
+        CertificateRetiredError.code,
+    }
+)
+"""The signer's refusals no API call answers: a signature's, mapped to the port's errors by ``port_error``."""
+
+
+def declared(base: type[LedgerError]) -> Iterator[type[LedgerError]]:
+    """Every subclass of ``base`` declared in ``ledger_signer``, however deep."""
+    for subclass in base.__subclasses__():
+        if subclass.__module__.startswith("ledger_signer."):
+            yield subclass
+        yield from declared(subclass)
+
+
+def test_every_refusal_the_signer_declares_is_mapped_or_known_to_be_a_signature_s() -> None:
+    """A new refusal of the signer fails here until the client builds it back (or it is a signature's)."""
+    codes = {
+        error.code for base in (InvalidInputError, ConflictError, NotFoundError) for error in declared(base)
+    }
+    assert codes - SIGNATURE_ONLY - frozenset(API_REFUSALS) == set()
+    assert SIGNATURE_ONLY.isdisjoint(API_REFUSALS)
+    assert {error.code for error in IMPORT_REFUSALS} | {CertificateNotFoundError.code} == set(API_REFUSALS)
+
+
+async def test_an_import_waits_its_own_deadline(address: str, stub: Stub) -> None:
+    stub.delay = 0.5
+    async with SignerClient(address, SecretStr(API_TOKEN), deadline=0.2, import_deadline=DEADLINE) as client:
+        outcome = await client.import_remote(CALL, REQUEST, Secret(CREDENTIAL))
+        with pytest.raises(SignerUnavailableError):
+            await client.describe(CALL, TENANT, include_retired=False)
+    assert outcome.view == ACTIVE
+
+
+class BundleSourceError(Exception):
+    """What reading a bundle from the HTTP request raised: never grpc's to swallow."""
+
+
+async def broken(*parts: bytes) -> AsyncGenerator[bytes]:
+    for part in parts:
+        yield part
+    raise BundleSourceError
+
+
+async def test_a_bundle_that_cannot_be_read_raises_its_own_error_and_installs_nothing(
+    api: SignerClient, stub: Stub
+) -> None:
+    with pytest.raises(BundleSourceError):
+        await api.import_local(CALL, REQUEST, Secret(PASSWORD), broken(b"pkcs12", b"more"))
+    assert stub.received == []
+
+
+async def test_a_bundle_over_two_mib_is_refused_before_it_ends_and_installs_nothing(
+    api: SignerClient, stub: Stub
+) -> None:
+    whole = bytes(MAX_BUNDLE_BYTES)
+    with pytest.raises(ImportTooLargeError) as caught:
+        await api.import_local(CALL, REQUEST, Secret(PASSWORD), bundle(whole, b"x"))
+    assert caught.value.code == "signer_import_too_large"
+    assert stub.received == []
+    outcome = await api.import_local(CALL, REQUEST, Secret(PASSWORD), bundle(whole[:10], whole[10:]))
+    assert outcome.view == ACTIVE
+    assert sum(len(chunk) for chunk in stub.chunks) == MAX_BUNDLE_BYTES == 2 * 1024 * 1024
+
+
+async def test_a_password_or_a_credential_never_leaves_in_an_error_or_a_log(
+    api: SignerClient,
+    stub: Stub,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    failures: list[BaseException] = []
+
+    stub.failure = BundleUnreadableError()
+    attempts: tuple[Callable[[], Awaitable[ImportOutcome]], ...] = (
+        lambda: api.import_local(CALL, REQUEST, Secret(PASSWORD), bundle(b"pkcs12")),
+        lambda: api.import_remote(CALL, REQUEST, Secret(CREDENTIAL)),
+        lambda: api.import_local(CALL, REQUEST, Secret(PASSWORD), broken(b"pkcs12")),
+        lambda: api.import_local(CALL, REQUEST, Secret(PASSWORD), bundle(bytes(MAX_BUNDLE_BYTES + 1))),
+    )
+    for importing in attempts:
+        with pytest.raises((BundleUnreadableError, BundleSourceError, ImportTooLargeError)) as caught:
+            await importing()
+        failures.append(caught.value)
+    async with SignerClient("127.0.0.1:1", SecretStr(API_TOKEN), deadline=0.5, import_deadline=0.5) as gone:
+        with pytest.raises(SignerUnavailableError) as unavailable:
+            await gone.import_local(CALL, REQUEST, Secret(PASSWORD), bundle(b"pkcs12"))
+        failures.append(unavailable.value)
+    captured = capsys.readouterr()
+    seen = [captured.out, captured.err, caplog.text]
+    for error in failures:
+        seen += [str(error), repr(error), repr(error.__cause__), "".join(traceback.format_exception(error))]
+    for secret in (PASSWORD, CREDENTIAL):
+        assert all(secret not in text for text in seen)
