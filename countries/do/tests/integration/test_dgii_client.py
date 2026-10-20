@@ -23,11 +23,11 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
     Received,
     Refused,
     SignerUnavailableError,
-    TrackId,
     XmlSigner,
 )
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
+from ledger_country_do.channels.ecf_v1.domain.polling import TrackId
 from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.fake_dgii.state import Scripted, Status

@@ -14,6 +14,7 @@ from ledger_country_do.channels.ecf_v1.domain.notation import (
     dgii_percent,
     local_date,
     parse_dgii_moment,
+    require_aware,
 )
 
 D = Decimal
@@ -58,13 +59,18 @@ def test_a_rate_is_an_integer(value: Decimal, written: str) -> None:
     assert dgii_percent(value) == written
 
 
-@pytest.mark.parametrize("read", [dgii_moment, local_date])
+@pytest.mark.parametrize("read", [dgii_moment, local_date, require_aware])
 def test_a_naive_moment_is_refused_never_read_in_the_machine_s_time(
     read: Callable[[datetime], object],
 ) -> None:
     with pytest.raises(NaiveMomentError) as caught:
         read(datetime(2026, 10, 13, 9, 30, tzinfo=UTC).replace(tzinfo=None))
     assert caught.value.code == "do_ecf_naive_moment"
+
+
+def test_an_aware_moment_is_kept_as_it_is() -> None:
+    moment = datetime(2026, 10, 13, 9, 30, tzinfo=UTC)
+    assert require_aware(moment) is moment
 
 
 def test_a_dgii_moment_reads_back_in_the_dominican_republic_s_time() -> None:

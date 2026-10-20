@@ -29,9 +29,14 @@ class NaiveMomentError(EcfError):
 
 
 def _in_santo_domingo(value: datetime) -> datetime:
+    return require_aware(value).astimezone(SANTO_DOMINGO)
+
+
+def require_aware(value: datetime) -> datetime:
+    """``value``, once it carries its UTC offset; ``NaiveMomentError`` otherwise."""
     if value.utcoffset() is None:
         raise NaiveMomentError
-    return value.astimezone(SANTO_DOMINGO)
+    return value
 
 
 def dgii_date(value: date) -> str:
