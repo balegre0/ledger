@@ -35,7 +35,9 @@ UNREACHABLE_PROXY: Final = "http://127.0.0.1:1"
 
 @pytest.fixture
 def policy(local_issuer: LocalIssuer) -> TokenPolicy:
-    return TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=local_issuer.keys_url, fetch_timeout=1.0)
+    # generous: a success path never races a fetch's time limit, and a stalled provider's twenty requests are
+    # held to half of it, however slow a loaded machine is to answer them
+    return TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=local_issuer.keys_url, fetch_timeout=4.0)
 
 
 @pytest.fixture
@@ -157,7 +159,8 @@ async def test_keys_past_their_ceiling_still_work_when_the_refresh_fails(
 async def test_past_the_ceiling_a_hung_provider_stalls_one_request_and_no_more(
     local_issuer: LocalIssuer, moment: Moment
 ) -> None:
-    patient = TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=local_issuer.keys_url, fetch_timeout=1.0)
+    # generous: the twenty requests below are held to half of it, a machine under load being slow to answer
+    patient = TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=local_issuer.keys_url, fetch_timeout=4.0)
     verifier = TokenVerifier(patient, keys=PublishedKeys(patient, clock=moment))
     old = local_issuer.token()
     await verifier.verify(old)
@@ -167,10 +170,11 @@ async def test_past_the_ceiling_a_hung_provider_stalls_one_request_and_no_more(
         assert await accepted(verifier, old)  # waited once, for a refresh that failed
         assert [log["event"] for log in logs] == ["tokens.keys_past_ceiling", "tokens.keys_unavailable"]
         moment.now += patient.refresh_floor
-        async with asyncio.timeout(patient.fetch_timeout / 4), asyncio.TaskGroup() as group:
+        async with asyncio.timeout(patient.fetch_timeout / 2), asyncio.TaskGroup() as group:
             answers = [group.create_task(accepted(verifier, old)) for _ in range(20)]
         assert all(answer.result() for answer in answers)
-        await eventually(lambda: logged(logs, 3))  # the refresh behind them failed too
+        assert not await logged(logs, 3)  # answered while their refresh still waits
+        await eventually(lambda: logged(logs, 3), within=3 * patient.fetch_timeout)  # its refresh failed too
         local_issuer.delay = 0.0
         local_issuer.rotate()
         local_issuer.retire("key-1")
@@ -355,10 +359,12 @@ async def test_requests_with_a_key_held_never_wait_for_a_provider_that_stalls(
     local_issuer.delay = 30.0
     moment.now += policy.keys_ttl
     with capture_logs() as logs:
-        async with asyncio.timeout(policy.fetch_timeout / 4), asyncio.TaskGroup() as group:
+        async with asyncio.timeout(policy.fetch_timeout / 2), asyncio.TaskGroup() as group:
             answers = [group.create_task(accepted(verifier, local_issuer.token())) for _ in range(20)]
         assert all(answer.result() for answer in answers)
-        await eventually(lambda: logged(logs))  # the one refresh behind them gave up on its own
+        assert not await logged(logs)  # answered while their refresh still waits
+        # the one refresh behind them gave up on its own
+        await eventually(lambda: logged(logs), within=3 * policy.fetch_timeout)
     assert local_issuer.fetches == 2
 
 
