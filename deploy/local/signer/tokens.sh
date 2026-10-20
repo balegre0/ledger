@@ -5,9 +5,12 @@
 #   .local/signer.env  LEDGER_SIGNER_TOKEN_API, _WORKER and _RECEIVER: the signer checks every caller's
 #   .local/api.env     LEDGER_SIGNER_TOKEN_API: the api's own, and nothing else
 #   .local/worker.env  LEDGER_SIGNER_TOKEN_WORKER: the worker's own, and nothing else
-# Run once before `docker compose -f deploy/local/compose.yaml up`: compose refuses to start without them. Tokens
-# that exist are kept; `--new` replaces all three (then recreate the api, the worker and the signer). A token is
-# never printed, never passed on a command line, and never leaves these files. Needs od and /dev/urandom.
+# Run once before `docker compose -f deploy/local/compose.yaml up`: without the signer's file compose refuses the
+# stack (the api and the worker start without theirs, answering signer_unavailable). Tokens that exist are
+# kept; `--new` replaces all three (then recreate the api, the worker and the signer). Each file is written whole
+# or not at all (a temporary file, moved into place once it holds its tokens), so an interrupted run leaves no
+# empty or half-written file. A token is never printed, never passed on a command line, and never leaves these
+# files. Needs od, mv and /dev/urandom.
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -25,7 +28,7 @@ case "${1:-}" in
   *) fail "unknown argument (the only one is --new)" ;;
 esac
 
-if [ -f "$OUT/signer.env" ] && [ -f "$OUT/api.env" ] && [ -f "$OUT/worker.env" ]; then
+if [ -s "$OUT/signer.env" ] && [ -s "$OUT/api.env" ] && [ -s "$OUT/worker.env" ]; then
   printf 'tokens.sh: kept the tokens in %s (--new replaces them)\n' "$OUT"
   exit 0
 fi
@@ -44,8 +47,16 @@ receiver=$(token)
 [ "$api" != "$worker" ] && [ "$api" != "$receiver" ] && [ "$worker" != "$receiver" ] ||
   fail "two tokens came out equal: run it again"
 
+# place NAME: standard input into .local/NAME, through a temporary file moved over it once it is not empty.
+place() {
+  temporary="$OUT/.$1.$$"
+  cat > "$temporary"
+  [ -s "$temporary" ] || { rm -f "$temporary"; fail "could not write $1"; }
+  mv -f "$temporary" "$OUT/$1"
+}
+
+printf 'LEDGER_SIGNER_TOKEN_API=%s\n' "$api" | place api.env
+printf 'LEDGER_SIGNER_TOKEN_WORKER=%s\n' "$worker" | place worker.env
 printf 'LEDGER_SIGNER_TOKEN_API=%s\nLEDGER_SIGNER_TOKEN_WORKER=%s\nLEDGER_SIGNER_TOKEN_RECEIVER=%s\n' \
-  "$api" "$worker" "$receiver" > "$OUT/signer.env"
-printf 'LEDGER_SIGNER_TOKEN_API=%s\n' "$api" > "$OUT/api.env"
-printf 'LEDGER_SIGNER_TOKEN_WORKER=%s\n' "$worker" > "$OUT/worker.env"
+  "$api" "$worker" "$receiver" | place signer.env # last: the three exist once all are written
 printf 'tokens.sh: wrote the tokens of the api, the worker and the receiver to %s\n' "$OUT"

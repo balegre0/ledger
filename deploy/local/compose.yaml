@@ -1,5 +1,5 @@
 # The local stack: PostgreSQL, the migrate job, the api, the worker and the signer, and Zitadel behind a profile.
-# Before the first `up`: `sh deploy/local/signer/tokens.sh` (compose refuses to start without the files it writes).
+# Before the first `up`: `sh deploy/local/signer/tokens.sh` (without the signer's file compose refuses the stack).
 #
 # What an app running on the host is configured with (the LEDGER_* variables of Settings), beside ledger.env's:
 #   LEDGER_DATABASE_URL=postgresql+psycopg://ledger_app:ledger_app@127.0.0.1:5432/ledger (or LEDGER_POSTGRES_PORT)
@@ -31,10 +31,14 @@
 #
 # The signer (ADR 0010) is a container of its own from the same image: `ledger-signer`, the login `ledger_signer`
 # (the only one that enters the schema `signer`), its probes and metrics on 127.0.0.1:${LEDGER_SIGNER_PORT:-8102}
-# and its gRPC service on signer:50051, reachable on the internal network `signer` only (never published on the
-# host; it has no gRPC health service: compose and orchestrators probe /readyz over HTTP). Each caller holds a token
-# of its own: deploy/local/signer/tokens.sh writes three random ones into signer/.local/ (git ignores it), the
-# signer reads all three, the api and the worker their own. The signer offers the local backend only (never
+# and its gRPC service on signer:50051 (never published on the host; it has no gRPC health service: compose and
+# orchestrators probe /readyz over HTTP). It is on two networks and not on `default`: `signer`, internal, which it
+# shares with its callers (the api, the worker) and PostgreSQL alone, so nothing else reaches 50051 (not migrate,
+# not Zitadel); and `signer-edge`, its alone, which carries the published probe port and, locally, gives it a route
+# out. A deployment gives it none: a NetworkPolicy admits gRPC from the api and the worker only, and lets it reach
+# PostgreSQL and the KMS only. Each caller holds a token of its own: deploy/local/signer/tokens.sh writes three
+# random ones into signer/.local/ (git ignores it), the signer reads all three, the api and the worker their own
+# (without theirs, they start and answer signer_unavailable). The signer offers the local backend only (never
 # `remote`: no certification entity's adapter exists) and keeps its KMS's master key in the volume `signer-kms`,
 # which it creates on its first start; `down -v` deletes it with the database it protects. That KMS is a file,
 # refused outside the environments `local` and `test`: this stack is the only place the signer runs yet.
@@ -61,6 +65,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports: ["127.0.0.1:${LEDGER_POSTGRES_PORT:-5432}:5432"]
+    networks: [default, signer]  # the signer reaches it on its internal network
     volumes:
       - postgres:/var/lib/postgresql
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/10-ledger.sql:ro
@@ -90,7 +95,8 @@ services:
       - ledger.env
       - path: zitadel/.local/ledger.env
         required: false
-      - signer/.local/api.env  # LEDGER_SIGNER_TOKEN_API: its own token, no other caller's
+      - path: signer/.local/api.env  # LEDGER_SIGNER_TOKEN_API: its own token, no other caller's
+        required: false  # without it the api starts, its certificate routes answering 503
     environment:
       LEDGER_SIGNER_ADDRESS: signer:50051
       LEDGER_SIGNER_IMPORT_DEADLINE_SECONDS: "28"  # the signer's; the api waits 2 s more for its answer
@@ -107,7 +113,8 @@ services:
       - ledger.env
       - path: zitadel/.local/ledger.env
         required: false
-      - signer/.local/worker.env  # LEDGER_SIGNER_TOKEN_WORKER: its own token, no other caller's
+      - path: signer/.local/worker.env  # LEDGER_SIGNER_TOKEN_WORKER: its own token, no other caller's
+        required: false  # without it the worker starts, its signatures answering signer_unavailable
     environment:
       LEDGER_DATABASE_DIRECT_URL: postgresql+psycopg://ledger_app:ledger_app@postgres:5432/ledger
       LEDGER_SIGNER_ADDRESS: signer:50051
@@ -135,7 +142,7 @@ services:
       LEDGER_SIGNER_IMPORT_DEADLINE_SECONDS: "28"  # at most 28 s: the api's 30 s less its 2 s margin
     volumes: ["signer-kms:/var/lib/ledger-signer"]
     ports: ["127.0.0.1:${LEDGER_SIGNER_PORT:-8102}:8000"]  # probes and metrics only; 50051 is never published
-    networks: [default, signer]
+    networks: [signer, signer-edge]  # not `default`: only its callers and PostgreSQL share a network with it
     stop_grace_period: 40s
     deploy:
       resources:
@@ -186,7 +193,8 @@ services:
       postgres: {condition: service_healthy}
 
 networks:
-  signer: {internal: true}  # the signer's callers and the signer: no route out, nothing published
+  signer: {internal: true}  # the signer, its callers and PostgreSQL: no route out, nothing published
+  signer-edge: {}  # the signer's alone: its published probe port (and, locally, its route out)
 
 volumes:
   postgres: {}

@@ -70,9 +70,10 @@ jobs:
       - name: Local stack starts healthy from the image
         # From the image just built: the migrate job runs once, the api, the worker and the signer start after it
         # and compose waits for their health checks (/readyz: PostgreSQL, every schema at head, the runners, the
-        # regimes; the signer's gRPC service and KMS). Then: the API refuses an anonymous caller, the api stays
-        # ready with the signer stopped, the image runs as nonroot and holds no dev-only package, and migrating
-        # again changes nothing. Torn down on any exit.
+        # regimes; the signer's gRPC service and KMS). Then: the signer says it serves its module and the api that
+        # it only relays it, the API refuses an anonymous caller, the api stays ready with the signer stopped, the
+        # image runs as nonroot and holds no dev-only package, and migrating again changes nothing. Torn down on
+        # any exit.
         run: |
           compose='docker compose -p ledger-ci -f deploy/local/compose.yaml'
           trap '$compose down -v' EXIT
@@ -83,6 +84,9 @@ jobs:
           curl --fail --silent --show-error "$worker/readyz"
           signer="http://127.0.0.1:${LEDGER_SIGNER_PORT:-8102}"
           curl --fail --silent --show-error "$signer/readyz"
+          served='ledger_isolated_module_served{isolated_in="signer",module="signer"}'
+          curl --fail --silent --show-error "$signer/metrics" | grep -qxF "$served 1.0"
+          curl --fail --silent --show-error "$api/metrics" | grep -qxF "$served 0.0"
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' "$api/v1/companies")" = 401
           test "$(docker image inspect ledger:local --format '{{.Config.User}}')" = nonroot
           test "$(docker run --rm --entrypoint /app/.venv/bin/python ledger:local -c             'import importlib.util as u; print(any(u.find_spec(m) for m in ("ledger_testing", "ledger_devtools", "ledger_country_do_testing", "pytest")))')" = False
