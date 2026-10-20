@@ -1,7 +1,9 @@
 """Importing a certificate: admitted by custody outside any unit, installed in one unit under its key.
 
 The order (spec §3.6, plan Decisions 8 to 10): the backend must be offered and the idempotency key well formed
-(nothing else happens otherwise); custody opens the bundle or asks the entity, and seals the secret under a
+(nothing else happens otherwise); a short unit looks the key up, and an answer stored under it is replayed at
+once, with no custody, KMS or entity call (a replay needs neither the password nor a certificate still valid);
+custody opens the bundle or asks the entity, and seals the secret under a
 data key the KMS wraps, outside any unit; the domain admits the certificate's facts; then one unit, under the
 request's tenant (its mode scopes the key), claims the key and, unless it replays an earlier answer, locks the
 company's active certificates, installs the new one (each of them loses its modes, retired once it serves
@@ -12,11 +14,11 @@ commit is refused by the partial unique index (``ActiveCertificateTakenError``) 
 it finds the first and replaces it. A failure keeps nothing: no key, no row, no event.
 
 The password is never stored, hashed or fingerprinted: the same bundle under the same key with another
-password is the same request (its answer replays once the first succeeded).
+password is the same request, and its answer replays once the first succeeded. A first import with a wrong
+password is refused (``certificate_bundle_unreadable``) and keeps nothing, so the key stays free.
 """
 
 import hashlib
-import re
 from dataclasses import dataclass
 from typing import Final, final
 lazy from collections.abc import Awaitable, Callable
@@ -25,7 +27,7 @@ from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.ids import new_id
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.data.audit import current_actor
-from ledger_platform.http.idempotency import MAX_KEY_LENGTH, InvalidIdempotencyKeyError
+from ledger_platform.data.idempotency import InvalidIdempotencyKeyError, is_idempotency_key
 from ledger_signer.api import BackendNotOfferedError
 from ledger_signer.application.certificates import modes_of, retired_event, state_of, view_of
 from ledger_signer.application.notices import plan_notices
@@ -52,8 +54,6 @@ lazy from ledger_signer.application.ports import (
     SignerUnits,
 )
 
-_KEY: Final = re.compile(rf"[!-~]{{1,{MAX_KEY_LENGTH}}}", re.ASCII)
-"""An ``Idempotency-Key``: visible ASCII without spaces, as the platform takes it at the HTTP edge."""
 _LENGTH_BYTES: Final = 8
 
 
@@ -133,7 +133,7 @@ class Importing:
     ) -> ImportOutcome:
         if backend not in self._rules.backends:
             raise BackendNotOfferedError(backend)
-        if _KEY.fullmatch(request.idempotency_key) is None:
+        if not is_idempotency_key(request.idempotency_key):
             raise InvalidIdempotencyKeyError
         claim = ImportClaim(
             principal=current_actor().name,
@@ -141,6 +141,10 @@ class Importing:
             request_hash=fingerprint_of(request, backend, source_sha256),
         )
         tenant = request.tenant
+        async with self._units.unit(tenant) as unit:
+            replayed = await unit.import_keys.answered(claim)
+        if replayed is not None:
+            return replayed
         certificate = CertificateId(new_id())
         seal_for = SealContext(
             organization=tenant.organization, company=tenant.company, certificate=certificate

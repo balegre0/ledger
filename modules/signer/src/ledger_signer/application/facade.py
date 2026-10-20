@@ -2,9 +2,10 @@
 
 The signer role binds this facade; every other role binds the gRPC client, which answers the same errors. The
 use cases raise the signer's own codes (the domain's ``signer_window_not_covered``, ``signer_clock_skew``,
-``certificate_retired``; fiscal-kit's ``xml_*``), which the gRPC server sends as they are: here, as in the
-client, the port's contract turns them into fiscal-kit's errors (``port_error``, one mapping for both).
-Anything else passes as it is: a defect (``signer_custody_damaged``) stays one. ``@facade`` refuses a
+``certificate_retired``; fiscal-kit's ``xml_*``; custody's ``kms_unavailable``, ``entity_unavailable``,
+``entity_refused``), which the gRPC server sends as they are: here, as in the client, the port's contract
+turns them into fiscal-kit's errors (``port_error``, one mapping for both). Anything else passes as it is: a
+defect (``signer_custody_damaged``, ``kms_refused``) stays one. ``@facade`` refuses a
 call made while the caller holds a unit; each call acts as its caller's actor for the audit.
 """
 
@@ -15,6 +16,7 @@ from ledger_fiscal_kit.ports import (
     CertificateValidity,
     SignatureRefusedError,
     SignerPort,
+    SignerUnavailableError,
     SigningCertificateMissingError,
     SigningCertificateNotValidError,
     SigningClockSkewError,
@@ -24,6 +26,7 @@ from ledger_kernel.tenancy import Tenant
 from ledger_platform.runtime.calls import acting
 from ledger_platform.runtime.facade import facade
 from ledger_signer.api import SignerApi
+from ledger_signer.application.ports import EntityRefusedError
 from ledger_signer.domain.errors import CertificateRetiredError, ClockSkewError, NotCoveredError
 lazy from ledger_fiscal_kit.ports import SeedToSign, Signed, XmlToSign
 lazy from ledger_kernel.ids import CompanyId
@@ -44,10 +47,14 @@ _CUSTODY_CODES: Final = frozenset({"xml_signing_pair_refused", "xml_signing_key_
 def port_error(code: str, kind: ErrorKind) -> LedgerError | None:
     """The ``SignerPort`` error the signer's error ``code`` of ``kind`` is, or ``None`` when it is none.
 
-    A document that cannot be signed is ``SignatureRefusedError`` with its code as the reason.
+    Whatever the signer could not reach (its KMS, the entity: any ``unavailable``) is the signer unavailable;
+    a credential the entity refuses (revoked, expired) is a certificate that cannot sign; a document that
+    cannot be signed is ``SignatureRefusedError`` with its code as the reason.
     """
     match code, kind:
-        case NotCoveredError.code, ErrorKind.CONFLICT:
+        case _, ErrorKind.UNAVAILABLE:
+            return SignerUnavailableError()
+        case ((NotCoveredError.code | EntityRefusedError.code), ErrorKind.CONFLICT):
             return SigningCertificateNotValidError()
         case ClockSkewError.code, ErrorKind.CONFLICT:
             return SigningClockSkewError()

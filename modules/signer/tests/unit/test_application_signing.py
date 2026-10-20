@@ -21,6 +21,7 @@ from ledger_fiscal_kit.ports import (
     SeedToSign,
     SignatureProfile,
     SignatureRefusedError,
+    SignerUnavailableError,
     SigningCertificateMissingError,
     SigningCertificateNotValidError,
     SigningClockSkewError,
@@ -95,9 +96,10 @@ class Store(SignerUnits, Protocol):
 
 
 class Kms(Protocol):
-    """How often the stand-in KMS unwrapped a data key."""
+    """How often the stand-in KMS unwrapped a data key, and its switch."""
 
     unwraps: int
+    available: bool
 
 
 class Entity(Protocol):
@@ -189,7 +191,7 @@ async def test_a_document_is_signed_then_audited_then_answered(
     signed = await signing(units, custody, clock).sign_xml("worker", document(clock))
 
     assert_signed(signed, view)
-    assert units.opened[1:] == [IN_TEST, IN_TEST]
+    assert units.opened[2:] == [IN_TEST, IN_TEST]  # after the import's two
     [audited] = units.audits[before:]
     assert (audited.scope, audited.actor.name, audited.action, audited.subject) == (
         IN_TEST,
@@ -474,6 +476,16 @@ async def test_the_facade_answers_the_port_s_errors(
         await signer.sign_seed(CALL, seed())
 
 
+async def test_the_facade_answers_a_kms_that_cannot_be_reached_as_the_signer_unavailable(
+    units: Store, custody: Custody, clock: Clock, holder: Issued, kms: Kms
+) -> None:
+    _ = await install(units, custody, clock, holder)
+    kms.available = False
+
+    with pytest.raises(SignerUnavailableError):
+        await facade(units, custody, clock).sign_xml(CALL, document(clock))
+
+
 async def test_the_facade_lets_a_defect_pass_as_it_is(
     units: Store, custody: Pool, clock: Clock, holder: Issued
 ) -> None:
@@ -521,6 +533,9 @@ async def test_the_facade_lists_the_certificates_serving_a_mode_for_the_call_s_o
         ("signing_certificate_missing", ErrorKind.CONFLICT, SigningCertificateMissingError),
         ("xml_document_signed", ErrorKind.INVALID, SignatureRefusedError),
         ("signature_refused", ErrorKind.INVALID, SignatureRefusedError),
+        ("entity_refused", ErrorKind.CONFLICT, SigningCertificateNotValidError),
+        ("kms_unavailable", ErrorKind.UNAVAILABLE, SignerUnavailableError),
+        ("entity_unavailable", ErrorKind.UNAVAILABLE, SignerUnavailableError),
     ],
 )
 def test_the_signer_s_codes_become_the_port_s_errors(
@@ -540,13 +555,9 @@ def test_the_signer_s_codes_become_the_port_s_errors(
         ("xml_signing_pair_refused", ErrorKind.INVALID),
         ("xml_signing_key_not_rsa", ErrorKind.INVALID),
         ("xml_document_signed", ErrorKind.INTERNAL),
-        ("kms_unavailable", ErrorKind.UNAVAILABLE),
+        ("kms_refused", ErrorKind.INTERNAL),
         ("certificate_not_found", ErrorKind.NOT_FOUND),
     ],
 )
 def test_any_other_code_is_not_the_port_s(code: str, kind: ErrorKind) -> None:
     assert port_error(code, kind) is None
-
-
-def test_the_window_and_skew_codes_are_the_domain_s() -> None:
-    assert (NotCoveredError.code, ClockSkewError.code) == ("signer_window_not_covered", "signer_clock_skew")

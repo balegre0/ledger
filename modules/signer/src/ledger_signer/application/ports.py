@@ -225,7 +225,9 @@ class Certificates(Protocol, metaclass=ABCMeta):
         """Keep a new certificate and its sealed secret.
 
         ``ActiveCertificateTakenError`` when another active certificate serves one of its modes (the partial
-        unique index: another unit installed one meanwhile): the unit is then rolled back by its caller.
+        unique index: another unit installed one meanwhile): the unit is then rolled back by its caller. The
+        index may refuse at the statement or only at the commit, when the unit's block ends (a deferred
+        write): the adapter raises ``ActiveCertificateTakenError`` for both; the use case retries the unit.
         """
 
     @abstractmethod
@@ -308,7 +310,19 @@ class ImportOutcome:
 
 
 class ImportKeys(Protocol, metaclass=ABCMeta):
-    """An import's idempotency key, claimed in the unit (the platform's ``Idempotency.once``, Decision 9)."""
+    """An import's idempotency key (Decision 9): looked up first, then claimed in the unit that installs.
+
+    The adapter wraps the platform's ``Idempotency``: ``answered`` is its ``stored``, ``once`` its ``once``,
+    both with the route ``grpc ImportCertificate`` and the claim's principal, key and request hash.
+    """
+
+    @abstractmethod
+    async def answered(self, claim: ImportClaim) -> ImportOutcome | None:
+        """The answer stored under ``claim``'s key (``replayed``), or ``None``: nothing claimed or waited for.
+
+        ``None`` before a first use, after the key expired and while a first use is in flight (``once`` then
+        waits for it); ``IdempotencyKeyReusedError`` when the key was used for another request.
+        """
 
     @abstractmethod
     async def once(self, claim: ImportClaim, work: Callable[[], Awaitable[CertificateView]]) -> ImportOutcome:
@@ -334,7 +348,12 @@ class SignerUnit:
 
 
 class SignerUnits(Protocol, metaclass=ABCMeta):
-    """Where the use cases get the units they work in."""
+    """Where the use cases get the units they work in.
+
+    A unit the platform opened itself (a consumer's, around its inbox row) is not one of these: the adapter
+    gives its signer view (``bind(uow) -> SignerUnit``, as identity's ``adapters.postgres.unit`` does), so
+    that ``retire_company`` commits with the inbox row's deletion.
+    """
 
     @abstractmethod
     def unit(self, tenant: Tenant) -> AbstractAsyncContextManager[SignerUnit]:

@@ -20,7 +20,8 @@ from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.data.audit import current_actor
 from ledger_platform.data.codec import payload_of
-from ledger_platform.http.idempotency import IdempotencyKeyReusedError, InvalidIdempotencyKeyError
+from ledger_platform.data.idempotency import InvalidIdempotencyKeyError
+from ledger_platform.http.idempotency import IdempotencyKeyReusedError
 from ledger_signer.api import BackendNotOfferedError, CertificateNotFoundError
 from ledger_signer.application.certificates import (
     Describing,
@@ -58,7 +59,7 @@ from ledger_signer.events import CertificateExpiring, CertificateInstalled, Cert
 from ledger_testing.pki import bundle, distinguished_name
 lazy from ledger_kernel.clock import Clock
 lazy from ledger_kernel.errors import LedgerError
-lazy from ledger_signer.application.ports import Custody, ImportClaim
+lazy from ledger_signer.application.ports import CertificationEntity, Custody, ImportClaim, KeyManagement
 lazy from ledger_signer.events import CertificateEvent
 lazy from ledger_testing.pki import Authority, Issued
 
@@ -131,6 +132,14 @@ class Kms(Protocol):
     """The stand-in KMS's switch."""
 
     available: bool
+
+
+class Moving(Protocol):
+    """The stand-in clock."""
+
+    now: datetime
+
+    def __call__(self) -> datetime: ...
 
 
 class Entity(Protocol):
@@ -220,7 +229,7 @@ async def test_a_local_import_installs_audits_announces_and_plans_its_notices(
         holder.certificate.not_valid_after_utc,
     )
     assert (view.installed_at, view.retired_at, view.retired_reason) == (clock(), None, None)
-    assert units.opened == [IN_TEST]
+    assert units.opened == [IN_TEST, IN_TEST]  # the key looked up, then claimed
     assert units.locked == [True]
     kept = units.rows[view.id]
     assert view_of(kept) == view
@@ -383,7 +392,7 @@ async def test_installing_takes_the_modes_of_the_certificates_before_it_in_one_u
 
     for_both = await use_case.local(request(BOTH, key="two"), sent, Secret(PASSWORD))
 
-    assert len(units.opened) == 2
+    assert len(units.opened) == 4
     retired = [units.rows[earlier.id], units.rows[for_test.view.id]]
     assert [(row.status, row.retired_reason) for row in retired] == [
         (CertificateStatus.RETIRED, RetiredReason.REPLACED)
@@ -410,7 +419,7 @@ async def test_an_install_raced_by_another_is_retried_once_and_replaces_it(
         request(), bundle(holder, password=PASSWORD), Secret(PASSWORD)
     )
 
-    assert units.opened == [IN_TEST, IN_TEST]
+    assert units.opened == [IN_TEST, IN_TEST, IN_TEST]
     assert units.rows[rival.id].retired_reason is RetiredReason.REPLACED
     assert units.rows[outcome.view.id].is_active
     [installed] = of_type(units.events, CertificateInstalled)
@@ -425,7 +434,7 @@ async def test_a_wrong_password_is_refused_and_nothing_is_kept(
             request(), bundle(holder, password="another"), Secret(PASSWORD)
         )
 
-    assert (units.opened, units.rows, units.claims) == ([], {}, [])
+    assert (units.rows, units.claims, units.events, units.audits, units.jobs) == ({}, [], [], [], [])
 
 
 async def test_a_certificate_the_domain_refuses_is_refused_and_nothing_is_kept(
@@ -444,7 +453,7 @@ async def test_a_certificate_the_domain_refuses_is_refused_and_nothing_is_kept(
     with pytest.raises(CertificateNotForSigningError):
         await use_case.local(request(), bundle(authority.issued, password=PASSWORD), Secret(PASSWORD))
 
-    assert (units.opened, units.rows, units.events, units.jobs) == ([], {}, [], [])
+    assert (units.rows, units.claims, units.events, units.audits, units.jobs) == ({}, [], [], [], [])
 
 
 async def test_a_kms_that_fails_keeps_nothing(
@@ -457,7 +466,7 @@ async def test_a_kms_that_fails_keeps_nothing(
             request(), bundle(holder, password=PASSWORD), Secret(PASSWORD)
         )
 
-    assert (units.opened, units.rows, units.audits) == ([], {}, [])
+    assert (units.rows, units.claims, units.events, units.audits, units.jobs) == ({}, [], [], [], [])
 
 
 async def test_an_entity_that_fails_keeps_nothing(
@@ -471,7 +480,74 @@ async def test_an_entity_that_fails_keeps_nothing(
     with pytest.raises(EntityUnavailableError):
         await use_case.remote(request(), Secret(CREDENTIAL))
 
-    assert (units.opened, units.rows, units.audits) == ([], {}, [])
+    assert (units.rows, units.claims, units.events, units.audits, units.jobs) == ({}, [], [], [], [])
+
+
+async def test_a_replay_needs_no_password_no_kms_and_no_valid_certificate(
+    units: Store, custody: Custody, clock: Moving, holder: Issued, kms: Kms
+) -> None:
+    use_case = importing(units, custody, clock)
+    sent = bundle(holder, password=PASSWORD)
+    first = await use_case.local(request(), sent, Secret(PASSWORD))
+    opened = len(units.opened)
+    kms.available = False
+    clock.now = first.view.not_after + timedelta(days=1)
+
+    again = await use_case.local(request(), sent, Secret("not the password"))
+
+    assert (again.replayed, again.view) == (True, first.view)
+    assert units.opened[opened:] == [IN_TEST]  # the look-up's unit alone
+    assert len(units.rows) == 1
+
+
+async def test_a_remote_replay_does_not_ask_the_entity(
+    units: Store, custody: Custody, clock: Clock, entity: Entity
+) -> None:
+    use_case = importing(units, custody, clock, BackendKind.REMOTE)
+    first = await use_case.remote(request(), Secret(CREDENTIAL))
+    entity.available = False
+
+    again = await use_case.remote(request(), Secret(CREDENTIAL))
+
+    assert (again.replayed, again.view) == (True, first.view)
+
+
+async def test_another_request_under_a_used_key_is_refused_before_custody(
+    units: Store, custody: Custody, clock: Clock, holder: Issued, kms: Kms
+) -> None:
+    use_case = importing(units, custody, clock)
+    sent = bundle(holder, password=PASSWORD)
+    _ = await use_case.local(request(), sent, Secret(PASSWORD))
+    kms.available = False
+
+    with pytest.raises(IdempotencyKeyReusedError):
+        await use_case.local(request(BOTH), sent, Secret(PASSWORD))
+
+
+async def test_a_first_import_with_a_wrong_password_is_refused_then_one_with_the_right_one_installs(
+    units: Store, custody: Custody, clock: Clock, holder: Issued
+) -> None:
+    use_case = importing(units, custody, clock)
+    sent = bundle(holder, password=PASSWORD)
+    with pytest.raises(BundleUnreadableError):
+        await use_case.local(request(), sent, Secret("not the password"))
+
+    installed = await use_case.local(request(), sent, Secret(PASSWORD))
+
+    assert not installed.replayed
+    assert list(units.rows) == [installed.view.id]
+
+
+async def test_the_stand_ins_refuse_a_call_out_from_inside_a_unit(
+    units: Store, kms: KeyManagement, entity: CertificationEntity
+) -> None:
+    async with units.unit(IN_TEST):
+        with pytest.raises(LedgerError, match="unit of work was open"):
+            await kms.ready()
+        with pytest.raises(LedgerError, match="unit of work was open"):
+            _ = await entity.certificate(CREDENTIAL.encode())
+
+    await kms.ready()
 
 
 def test_an_import_names_a_mode_and_one_or_two_modes() -> None:
@@ -490,6 +566,10 @@ def test_the_fingerprint_ignores_the_order_of_the_modes_and_names_everything_els
     assert fingerprint_of(request(BOTH, mode=Mode.LIVE), BackendKind.LOCAL, source) != base
     assert fingerprint_of(request(BOTH), BackendKind.REMOTE, source) != base
     assert fingerprint_of(request(BOTH), BackendKind.LOCAL, bytes(32)) != base
+    elsewhere = ImportRequest(
+        tenant=Tenant(ORGANIZATION, CompanyId(new_id()), Mode.TEST), modes=BOTH, idempotency_key=KEY
+    )
+    assert fingerprint_of(elsewhere, BackendKind.LOCAL, source) != base
 
 
 # ── describing and retiring ─────────────────────────────────────────────────────────────────────────────────

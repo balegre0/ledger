@@ -10,14 +10,18 @@ in-memory stand-ins of the application's ports its use cases are tested over.
 The stand-ins are fixtures (the tests directory is not importable): a test types each by the port it stands
 for, and reads what a recording one recorded through a small Protocol of its own. They behave as the adapters
 must: a unit commits what it recorded when its block ends, and keeps nothing when it raises; the store refuses
-two active certificates serving one mode, as the partial unique indexes do; the KMS binds its context; custody
-seals keys and credentials under data keys it unwraps for every signature; the entity sees digests only.
+two active certificates serving one mode, as the partial unique indexes do; a unit publishes only the event
+types the manifest declares, inside its scope, and enqueues only the job kinds the use cases name; the KMS
+binds its context; custody seals keys and credentials under data keys it unwraps for every signature; the
+entity sees digests only. The KMS, the entity and custody's signatures refuse to be called while the calling
+task holds a unit open (spec §3.6: no transaction spans a call out), so every use case test checks that too.
 """
 
 import asyncio
 import hashlib
 import os
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar, Final, Literal, assert_type, final, override
@@ -40,6 +44,7 @@ from ledger_platform.data.codec import canonical_json, encode, payload_of
 from ledger_platform.http.idempotency import IdempotencyKeyReusedError
 from ledger_signer._manifest import MANIFEST
 from ledger_signer.adapters.postgres.schema import MIGRATIONS
+from ledger_signer.application.notices import EXPIRY_NOTICE
 from ledger_signer.application.ports import (
     ActiveCertificateTakenError,
     Admitted,
@@ -86,6 +91,12 @@ _NONCE_BYTES: Final = 12
 _DATA_KEY_BITS: Final = 256
 _SIGNATURE_TAKES: Final = 0.01
 """Seconds a stand-in signature takes: long enough for others to start meanwhile, up to the bound."""
+_PUBLISHED: Final = frozenset(event.type for event in MANIFEST.events.publishes)
+"""The event types signer's manifest declares: a unit refuses any other, as ``uow.publish`` does."""
+_JOB_KINDS: Final = frozenset({EXPIRY_NOTICE})
+"""The job kinds the use cases enqueue (Task 12 declares them in the manifest, which then decides)."""
+_IN_UNIT: Final[ContextVar[bool]] = ContextVar("signer_tests_in_unit", default=False)
+"""Whether the current task holds a stand-in unit open: per task, so concurrent signatures do not count."""
 
 
 def pytest_ledger_template(template: Template) -> None:
@@ -151,6 +162,21 @@ class Enqueued:
     key: str
     run_at: datetime
     payload: Mapping[str, str | int]
+
+
+class CalledInsideUnitError(LedgerError):
+    """A call out (the KMS, the entity, a signature) made while the calling task held a unit open."""
+
+    code: ClassVar[str] = "test_called_inside_unit"
+
+    def __init__(self) -> None:
+        super().__init__("a call out was made while a unit of work was open (spec §3.6)")
+
+
+def require_no_unit() -> None:
+    """Refuse a call out from a task that holds a stand-in unit open."""
+    if _IN_UNIT.get():
+        raise CalledInsideUnitError
 
 
 class SimulatedWriteError(LedgerError):
@@ -253,13 +279,21 @@ class _MemoryCertificates(Certificates):
 
 @final
 class _MemoryEvents(Events):
-    __slots__ = ("_pending",)
+    """The unit's outbox: a declared type, about the unit's company, in its mode where both name one."""
 
-    def __init__(self, pending: _Pending) -> None:
+    __slots__ = ("_pending", "_tenant")
+
+    def __init__(self, pending: _Pending, tenant: Tenant) -> None:
         self._pending = pending
+        self._tenant = tenant
 
     @override
     def publish(self, event: CertificateEvent) -> None:
+        scope = event.scope
+        assert event.TYPE in _PUBLISHED, f"{event.TYPE} is not declared"
+        assert isinstance(scope, Tenant), "a certificate's event is a company's"
+        assert (scope.organization, scope.company) == (self._tenant.organization, self._tenant.company)
+        assert scope.mode is None or self._tenant.mode in {None, scope.mode}, "an event of another mode"
         _ = payload_of(event)  # the outbox's codec must take it
         self._pending.events.append(event)
 
@@ -305,6 +339,7 @@ class _MemoryJobs(Jobs):
 
     @override
     def enqueue(self, kind: JobKind, key: str, *, run_at: datetime, payload: Mapping[str, str | int]) -> None:
+        assert kind in _JOB_KINDS, f"{kind} is not a job kind of signer"
         _ = encode(dict(payload))
         job = Enqueued(scope=self._tenant, kind=kind, key=key, run_at=run_at, payload=dict(payload))
         self._pending.jobs.append(job)
@@ -312,7 +347,7 @@ class _MemoryJobs(Jobs):
 
 @final
 class _MemoryImportKeys(ImportKeys):
-    """``Idempotency.once`` as an adapter wraps it: a key per organization, mode, principal and key."""
+    """``Idempotency`` as an adapter wraps it: a key per organization, mode, principal and key."""
 
     __slots__ = ("_pending", "_tenant")
 
@@ -320,16 +355,26 @@ class _MemoryImportKeys(ImportKeys):
         self._pending = pending
         self._tenant = tenant
 
+    def _kept(self, claim: ImportClaim) -> tuple[tuple[UUID, str, str, str], ImportOutcome | None]:
+        identity = (self._tenant.organization, str(self._tenant.mode), claim.principal, claim.key)
+        kept = self._pending.keys.get(identity)
+        if kept is None:
+            return identity, None
+        request_hash, view = kept
+        if request_hash != claim.request_hash:
+            raise IdempotencyKeyReusedError
+        return identity, ImportOutcome(view=view, replayed=True)
+
+    @override
+    async def answered(self, claim: ImportClaim) -> ImportOutcome | None:
+        return self._kept(claim)[1]
+
     @override
     async def once(self, claim: ImportClaim, work: Callable[[], Awaitable[CertificateView]]) -> ImportOutcome:
         self._pending.claims.append(claim)
-        identity = (self._tenant.organization, str(self._tenant.mode), claim.principal, claim.key)
-        kept = self._pending.keys.get(identity)
-        if kept is not None:
-            request_hash, view = kept
-            if request_hash != claim.request_hash:
-                raise IdempotencyKeyReusedError
-            return ImportOutcome(view=view, replayed=True)
+        identity, replayed = self._kept(claim)
+        if replayed is not None:
+            return replayed
         view = await work()
         self._pending.keys[identity] = (claim.request_hash, view)
         return ImportOutcome(view=view, replayed=False)
@@ -381,14 +426,18 @@ class MemoryUnits(SignerUnits):
     async def unit(self, tenant: Tenant) -> AsyncGenerator[SignerUnit]:
         self.opened.append(tenant)
         pending = _Pending(self)
-        yield SignerUnit(
-            certificates=_MemoryCertificates(self, pending, tenant),
-            events=_MemoryEvents(pending),
-            audit=_MemoryAudit(pending, tenant),
-            jobs=_MemoryJobs(pending, tenant),
-            import_keys=_MemoryImportKeys(pending, tenant),
-            now=self._clock(),
-        )
+        inside = _IN_UNIT.set(True)
+        try:
+            yield SignerUnit(
+                certificates=_MemoryCertificates(self, pending, tenant),
+                events=_MemoryEvents(pending, tenant),
+                audit=_MemoryAudit(pending, tenant),
+                jobs=_MemoryJobs(pending, tenant),
+                import_keys=_MemoryImportKeys(pending, tenant),
+                now=self._clock(),
+            )
+        finally:
+            _IN_UNIT.reset(inside)
         if self.refuse_audit and pending.audits:
             raise SimulatedWriteError
         self.rows, self.materials, self.keys = pending.rows, pending.materials, pending.keys
@@ -422,6 +471,7 @@ class MemoryKms(KeyManagement):
         self.unwraps = 0
 
     def _require_available(self) -> None:
+        require_no_unit()
         if not self.available:
             raise KmsUnavailableError
 
@@ -465,6 +515,7 @@ class MemoryEntity(CertificationEntity):
         self.digests: list[bytes] = []
 
     def _require_serving(self) -> None:
+        require_no_unit()
         if not self.available:
             raise EntityUnavailableError
         if self.refusing:
@@ -572,6 +623,7 @@ class MemoryCustody(Custody):
         certificate_der: bytes,
         seal_for: SealContext,
     ) -> bytes:
+        require_no_unit()
         self._in_flight += 1
         self.most_in_flight = max(self.most_in_flight, self._in_flight)
         try:
