@@ -20,8 +20,9 @@ when the route's dependencies learned them (``request_fields``).
 """
 
 import re
+from abc import ABCMeta, abstractmethod
 from http import HTTPStatus
-from typing import ClassVar, Final, NamedTuple, TypedDict
+from typing import ClassVar, Final, NamedTuple, Protocol, TypedDict, runtime_checkable
 lazy from collections.abc import Callable, Mapping
 
 import structlog
@@ -46,6 +47,8 @@ REQUEST_ID_HEADER: Final = "Request-Id"
 INTERNAL_CODE: Final = "internal"
 """The code of every defect: a client learns nothing else of it."""
 _STANDARD: Final = {status.value: status for status in HTTPStatus}
+_STANDARD_MEMBERS: Final = frozenset({"type", "title", "status", "code", "detail", "request_id"})
+"""What every problem holds: no member of an error's own replaces one."""
 _CODES: Final[Mapping[int, str]] = {
     HTTPStatus.BAD_REQUEST: "bad_request",
     HTTPStatus.UNAUTHORIZED: "unauthenticated",
@@ -103,6 +106,20 @@ _logger = structlog.stdlib.get_logger(__name__)
 
 type RouteOf = Callable[[Mapping[str, object]], str]
 """The label of the route a request took, from its ASGI scope: what a failure's log line names."""
+
+
+@runtime_checkable
+class ProblemMembers(Protocol, metaclass=ABCMeta):
+    """A ``LedgerError`` that adds members of its own to its problem (§9.6): ``existing_id``, say.
+
+    What it names is the error's to keep free of client input, as its message is. A member never replaces a
+    standard one (``type``, ``title``, ``status``, ``code``, ``detail``, ``request_id``): such a member is
+    dropped. The method is abstract so that it needs no body.
+    """
+
+    @abstractmethod
+    def problem_members(self) -> Mapping[str, str]:
+        """The members the problem adds, by name."""
 
 
 class Problem(BaseModel):
@@ -207,7 +224,7 @@ def _problem(
     if detail is not None:
         body["detail"] = detail
     if extra is not None:
-        body.update(extra)
+        body.update({name: value for name, value in extra.items() if name not in _STANDARD_MEMBERS})
     answered = dict(headers or {})
     request_id = current_request_id()
     if request_id is not None:
@@ -296,7 +313,8 @@ def install_problem_handlers(app: FastAPI, *, route_of: RouteOf = declared_route
         challenge = _challenge(error.code) if error.kind is ErrorKind.UNAUTHENTICATED else None
         if isinstance(error, RateLimitedError):
             challenge = {"Retry-After": str(error.retry_after)}
-        return _problem(status, error.code, detail=str(error) or None, headers=challenge)
+        members = error.problem_members() if isinstance(error, ProblemMembers) else None
+        return _problem(status, error.code, detail=str(error) or None, extra=members, headers=challenge)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request: Request, error: RequestValidationError) -> JSONResponse:
