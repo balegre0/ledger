@@ -195,3 +195,47 @@ def test_the_kernel_s_calculator_totals_the_lines_as_dgii_does(lines: list[Line]
         assert totals.exempt is None
     else:
         assert (exempt.base.amount, exempt.tax.amount) == (totals.exempt, D(0))
+
+
+def test_a_line_s_amount_is_quantity_times_price_less_its_discount() -> None:
+    discounted = Line(
+        name="ITEM",
+        quantity=D(3),
+        unit_price=D("100.3333"),
+        discount=D("10.50"),
+        billing=BillingIndicator.ITBIS_1,
+    )
+    totals = compute_totals(replace(consumer_invoice(), lines=(discounted,)))
+    assert totals.line_amounts == (D("290.50"),)
+    (group,) = totals.groups
+    assert (group.base, group.itbis, totals.total) == (D("290.50"), D("52.29"), D("342.79"))
+
+
+_USD = Currency.of("USD")
+
+
+def test_a_foreign_currency_s_totals_are_its_own_and_pesos_at_the_exchange_rate() -> None:
+    draft = replace(credit_invoice(), currency=_USD, exchange_rate=D("58.7512"))
+    totals = compute_totals(draft)
+    foreign = totals.foreign
+    assert foreign is not None
+    assert foreign.foreign is None
+    assert foreign.line_amounts == (D("3000.00"), D("850.50"), D("361.00"))
+    assert (foreign.itbis_total, foreign.total) == (D("676.08"), D("4887.58"))
+    assert totals.line_amounts == (D("176253.60"), D("49967.90"), D("21209.18"))
+    first, second = totals.groups
+    assert (first.base, first.itbis) == (D("176253.60"), D("31725.65"))
+    assert (second.base, second.itbis) == (D("49967.90"), D("7994.86"))
+    assert totals.exempt == D("21209.18")
+    assert totals.total == D("176253.60") + D("31725.65") + D("49967.90") + D("7994.86") + D("21209.18")
+    assert compute_totals(credit_invoice()).foreign is None
+
+
+def test_a_total_in_pesos_of_seventeen_integer_digits_is_refused() -> None:
+    line = Line(
+        name="ITEM", quantity=D(1), unit_price=D("9000000000000000.00"), billing=BillingIndicator.EXEMPT
+    )
+    draft = replace(consumer_invoice(), lines=(line,), currency=_USD, exchange_rate=D(2))
+    with pytest.raises(DraftInvalidError, match=r"^total ") as caught:
+        compute_totals(draft)
+    assert caught.value.field == "total"

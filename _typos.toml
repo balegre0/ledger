@@ -22,8 +22,11 @@ descripcion = "descripcion"
 direccion = "direccion"
 emision = "emision"
 excede = "excede"
+informacion = "informacion"
 informe = "informe"
 instructivo = "instructivo"
+limite = "limite"
+modificacion = "modificacion"
 
 [default.extend-identifiers]
 # ISO 3166-1 and ISO 4217 codes the kernel lists (Bosnia, the Faroe Islands, Pitcairn; the Jordanian dinar).
