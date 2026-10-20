@@ -370,7 +370,10 @@ class SignerRules:
     skew: timedelta
     """How far a document's moment and the signer's clock may differ (plan Decision 5)."""
     concurrency: int
-    """Signatures computed at once."""
+    """Signatures computed at once (their own pool)."""
+    import_concurrency: int
+    """Bundles opened or credentials admitted at once (a pool apart from the signatures': an import's key
+    derivation is CPU work its caller chooses, and must not starve signing)."""
     notice_days: tuple[int, ...]
     """How many days before expiry a company is told."""
 
@@ -381,6 +384,8 @@ class SignerRules:
             raise InvalidValueError(field="signer_rules.skew", requirement="longer than nothing")
         if self.concurrency < 1:
             raise InvalidValueError(field="signer_rules.concurrency", requirement="at least 1")
+        if self.import_concurrency < 1:
+            raise InvalidValueError(field="signer_rules.import_concurrency", requirement="at least 1")
         if len(frozenset(self.notice_days)) != len(self.notice_days) or any(
             day < 0 for day in self.notice_days
         ):

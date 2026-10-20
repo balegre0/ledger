@@ -3,8 +3,9 @@
 The order (spec §3.6, plan Decisions 8 to 10): the backend must be offered and the idempotency key well formed
 (nothing else happens otherwise); a short unit looks the key up, and an answer stored under it is replayed at
 once, with no custody, KMS or entity call (a replay needs neither the password nor a certificate still valid);
-custody opens the bundle or asks the entity, and seals the secret under a
-data key the KMS wraps, outside any unit; the domain admits the certificate's facts; then one unit, under the
+custody opens the bundle or asks the entity, and seals the secret under a data key the KMS wraps, outside any
+unit and at most ``import_concurrency`` at once (a pool of the imports' own, apart from the signatures'); the
+domain admits the certificate's facts; then one unit, under the
 request's tenant (its mode scopes the key), claims the key and, unless it replays an earlier answer, locks the
 company's active certificates, installs the new one (each of them loses its modes, retired once it serves
 none), keeps it, audits it, announces it and every certificate it retired, and plans its expiry notices.
@@ -18,6 +19,7 @@ password is the same request, and its answer replays once the first succeeded. A
 password is refused (``certificate_bundle_unreadable``) and keeps nothing, so the key stays free.
 """
 
+import asyncio
 import hashlib
 from dataclasses import dataclass
 from typing import ClassVar, Final, final
@@ -110,13 +112,14 @@ def fingerprint_of(request: ImportRequest, backend: BackendKind, source_sha256: 
 class Importing:
     """Certificates installed for a company: a bundle's key in custody, or an entity's credential."""
 
-    __slots__ = ("_clock", "_custody", "_rules", "_units")
+    __slots__ = ("_admitting", "_clock", "_custody", "_rules", "_units")
 
     def __init__(self, *, units: SignerUnits, custody: Custody, rules: SignerRules, clock: Clock) -> None:
         self._units = units
         self._custody = custody
         self._rules = rules
         self._clock = clock
+        self._admitting = asyncio.Semaphore(rules.import_concurrency)
 
     async def local(self, request: ImportRequest, bundle: bytes, password: Secret) -> ImportOutcome:
         """Install the certificate of a PKCS#12 ``bundle`` opened with ``password`` (see the module)."""
@@ -160,7 +163,8 @@ class Importing:
         seal_for = SealContext(
             organization=tenant.organization, company=tenant.company, certificate=certificate
         )
-        custody = await admitted(seal_for)
+        async with self._admitting:  # the imports' own pool: a bundle's key derivation never starves signing
+            custody = await admitted(seal_for)
         admit(custody.facts, now=self._clock(), skew=self._rules.skew)
         try:
             return await self._install(request, claim, certificate, backend, custody)

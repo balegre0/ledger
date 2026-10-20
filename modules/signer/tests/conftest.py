@@ -572,18 +572,32 @@ def _facts(certificate: x509.Certificate, *, matches_key: bool) -> CertificateFa
 class MemoryCustody(Custody):
     """Custody over the stand-in KMS and entity: keys and credentials sealed, unwrapped for each signature.
 
-    ``most_in_flight`` is the most signatures it made at once; ``damaged`` makes it sign with a key that is
-    not the certificate's (custody broken, as a swapped row would be).
+    ``most_in_flight`` is the most signatures it made at once, ``most_admitting`` the most bundles or
+    credentials it admitted at once; ``damaged`` makes it sign with a key that is not the certificate's
+    (custody broken, as a swapped row would be).
     """
 
-    __slots__ = ("_entity", "_in_flight", "_kms", "damaged", "most_in_flight")
+    __slots__ = ("_admitting", "_entity", "_in_flight", "_kms", "damaged", "most_admitting", "most_in_flight")
 
     def __init__(self, kms: MemoryKms, entity: MemoryEntity) -> None:
         self._kms = kms
         self._entity = entity
         self._in_flight = 0
+        self._admitting = 0
         self.damaged = False
         self.most_in_flight = 0
+        self.most_admitting = 0
+
+    @asynccontextmanager
+    async def _admission(self) -> AsyncGenerator[None]:
+        """One admission, counted while it lasts (long enough for others to start meanwhile)."""
+        self._admitting += 1
+        self.most_admitting = max(self.most_admitting, self._admitting)
+        try:
+            await asyncio.sleep(_SIGNATURE_TAKES)
+            yield
+        finally:
+            self._admitting -= 1
 
     async def _seal(self, plaintext: bytes, seal_for: SealContext) -> SealedMaterial:
         data_key = await self._kms.new_data_key(seal_for.context())
@@ -602,6 +616,10 @@ class MemoryCustody(Custody):
 
     @override
     async def admit_local(self, bundle: bytes, password: Secret, *, seal_for: SealContext) -> Admitted:
+        async with self._admission():
+            return await self._admitted_local(bundle, password, seal_for)
+
+    async def _admitted_local(self, bundle: bytes, password: Secret, seal_for: SealContext) -> Admitted:
         try:
             key, certificate, _ = pkcs12.load_key_and_certificates(bundle, password.reveal().encode())
         except ValueError:
@@ -621,6 +639,10 @@ class MemoryCustody(Custody):
 
     @override
     async def admit_remote(self, credential: Secret, *, seal_for: SealContext) -> Admitted:
+        async with self._admission():
+            return await self._admitted_remote(credential, seal_for)
+
+    async def _admitted_remote(self, credential: Secret, seal_for: SealContext) -> Admitted:
         plain = credential.reveal().encode()
         chain = (await self._entity.certificate(plain)).chain
         certificate = x509.load_der_x509_certificate(chain[0])
