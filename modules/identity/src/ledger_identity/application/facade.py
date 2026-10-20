@@ -6,19 +6,19 @@ Each method opens the unit its use case needs, in the organization the call name
 
 from typing import final, override
 
-from ledger_identity.api import CompanyInfo, IdentityApi
+from ledger_identity.api import CompanyInfo, EstablishmentInfo, IdentityApi
 from ledger_identity.application import commands, queries
 from ledger_identity.domain.company import CompanyStatus
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.tenancy import OrganizationScope, Tenant
 from ledger_platform.runtime.calls import Call, SystemCall, acting
 from ledger_platform.runtime.facade import facade
-lazy from ledger_identity.api import AnyCall
 lazy from ledger_identity.application.ports import IdentityUnits
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_kernel.ids import CompanyId, OrganizationId
 lazy from ledger_kernel.tax_ids import TaxId
+lazy from ledger_platform.runtime.calls import AnyCall
 
 
 def info(company: Company) -> CompanyInfo:
@@ -80,6 +80,17 @@ class IdentityFacade(IdentityApi):
         del call
         async with self._units.unit(OrganizationScope(principal.organization, None)) as unit:
             return await queries.permissions_of(unit, company, principal.subject)
+
+    @override
+    @facade
+    async def establishment(
+        self, call: AnyCall, company: CompanyId, code: str | None
+    ) -> EstablishmentInfo | None:
+        async with self._units.unit(OrganizationScope(organization_of(call), None)) as unit:
+            found = await queries.establishment_by_code(unit, company, code)
+        if found is None:
+            return None
+        return EstablishmentInfo(code=found.code, name=found.name, time_zone=found.time_zone)
 
     @override
     @facade

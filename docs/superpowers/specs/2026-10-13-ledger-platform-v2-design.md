@@ -176,7 +176,7 @@ apps compose them (R1, ADR 0001).
 
 | Module | Owns (schema) | Public API (`api.py` Protocol) | Publishes | Consumes | Built in |
 |---|---|---|---|---|---|
-| `identity` | organizations, companies (jurisdiction, functional currency, qualified tax ids), the global tax-id registry, establishments (minimal: code, name, time zone), memberships, API clients (mode-bound, pinned API version) | `IdentityApi`: company by id, company by tax id, permissions of a principal in a company, lock fiscal profile | `identity.company.registered/updated/deactivated`, `identity.membership.granted/revoked` | — | v2-M2 |
+| `identity` | organizations, companies (jurisdiction, functional currency, qualified tax ids), the global tax-id registry, establishments (minimal: code, name, time zone), memberships, API clients (mode-bound, pinned API version) | `IdentityApi`: company by id, company by tax id, an establishment of a company by code (`MAIN` by default; code, name, time zone), permissions of a principal in a company, lock fiscal profile | `identity.company.registered/updated/deactivated`, `identity.membership.granted/revoked` | — | v2-M2 |
 | `signer` | certificates (local: sealed keys; remote: entity credential references), signing audit | `SignerApi`: describe certificates, sign XML, sign authority seed (a gRPC client in every app but `signer`) | `signer.certificate.installed/retired/expiring` | `identity.company.deactivated` (runner in the signer app) | v2-M2 |
 | `invoicing` | commercial documents (invoice, credit note, debit note; sales or self-billed purchase), lines, totals, `external_reference`, the per-channel fiscal status mirror | `InvoicingApi`: get document, `apply_fiscal_status`; extension point `IssuePolicy` (implemented by `fiscal`) | `invoicing.invoice.issued/voided/fiscal_updated` | — (nothing: its fiscal mirror is written by `fiscal` through `apply_fiscal_status`) | v2-M3 (thin) |
 | `fiscal` | enrollments (company × mode × channel, environment, requirements), routings (invoice → channel documents, 1:N keyed by channel) | `FiscalApi`: enrollments of a company; implements `invoicing.IssuePolicy`; provides `CompanyDirectory` to channels | `fiscal.enrollment.changed` | `invoicing.invoice.issued` (recovery path, §8.5), `fiscal_channel.document.*`, `signer.certificate.installed` | v2-M3 (thin) |
@@ -233,14 +233,14 @@ receive an instance from the composition root, so a test passes a fake and an ex
 ```python
 # modules/invoicing/src/ledger_invoicing/api.py
 class InvoicingApi(Protocol):
-    async def document(self, call: Call, document: InvoiceId) -> InvoiceView: ...
+    async def document(self, call: Call | SystemCall, document: InvoiceId) -> InvoiceInfo: ...
     async def apply_fiscal_status(
         self, call: SystemCall, document: InvoiceId, status: FiscalStatusView, version: int
     ) -> Applied: ...   # idempotent: applies only when version > the stored version for status.channel
 
 class IssuePolicy(Protocol):                               # extension point, implemented by fiscal
-    async def check(self, call: Call, document: InvoiceView) -> Sequence[Objection]: ...      # before the unit
-    async def after_issue(self, call: Call, document: InvoiceView, *, budget: timedelta) -> FiscalOutcome: ...
+    async def check(self, call: Call, document: InvoiceInfo) -> Sequence[Objection]: ...      # before the unit
+    async def after_issue(self, call: Call, document: InvoiceInfo, *, budget: timedelta) -> FiscalOutcome: ...
 ```
 
 - `Call` (platform `runtime.calls`) carries the principal, the tenant scope (`organization`, `company`,
@@ -253,7 +253,8 @@ class IssuePolicy(Protocol):                               # extension point, im
 - Facade **commands** reachable from consumers or jobs take an idempotency token (the event id or job key) or
   a monotonic version (`apply_fiscal_status`), so a redelivery is harmless.
 - Facades take and return DTOs, never domain objects or rows; DTOs are `@dataclass(frozen=True, slots=True,
-  kw_only=True)` with kernel value types.
+  kw_only=True)` with kernel value types. A DTO is named `*Info` (`CompanyInfo`, `InvoiceInfo`); `*View` names a module's
+  HTTP response models, so no two classes of a module share a name.
 - Errors crossing a facade are `LedgerError` subclasses with a kind and a stable code (§9.6), exported from
   the module's `api.py`.
 
@@ -1244,8 +1245,8 @@ channel document      channel-specific state machine (do-ecf-v1: §8.6.4), one p
   self-billed document issued on a supplier's behalf; DGII types 41, 43, 47). One resource covers all; v1/M5's
   separate `/v1/do/documents` is gone.
 - An accepted document is never voided; a credit note corrects it.
-- Lines carry a **resolved tax snapshot**: `{category: "do.itbis.standard", rate_key, percent, since}` taken
-  from the regime at the tax point (rule 12).
+- Lines carry a **resolved tax snapshot**: `{category: "do.itbis.standard", kind, percent, since}` taken from
+  the regime at the tax point (rule 12); the category and `since` name the rate in the regime's timeline.
 - **Business key**: `external_reference` unique per `(company, mode, type)` forever; a duplicate answers 409
   `external_reference_taken` with `existing_id`.
 
@@ -1657,6 +1658,9 @@ cannot be probed by type. Internal UUIDs never appear in the API.
   principal, **route**), stored **7 days** with the response in the owning module's `idempotency_keys` table in the
   same transaction as the work (v1 semantics: a failed request keeps nothing; a concurrent twin waits and replays
   with `Idempotent-Replayed: true`; same key with another body → 422 `idempotency_key_reused`).
+  **The company is not part of the scope** (as built, invoicing review M2): a request's `Ledger-Company` is part
+  of what it fingerprints, so the same key used for another company's request is 422 `idempotency_key_reused`.
+  An integrator acting for several companies uses a key per company (the header's OpenAPI description says so).
 - What "the same request" is: the route, the concrete path, the canonical query and the canonical body, each
   length-prefixed. The canonical query is the `(name, value)` pairs **sorted**, so parameters sent in another
   order are the same request, and so are the values of a repeated name sent in another order (`?tag=a&tag=b`

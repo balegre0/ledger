@@ -17,14 +17,14 @@ from pydantic import TypeAdapter
 lazy import psycopg
 
 from ledger_identity.adapters.postgres.unit import PgUnits, bind
-from ledger_identity.api import IDENTITY_API, CompanyInfo
+from ledger_identity.api import IDENTITY_API, CompanyInfo, EstablishmentInfo
 from ledger_identity.application import commands
 from ledger_identity.application.facade import IdentityFacade
 from ledger_identity.application.ports import IdentityUnits
 from ledger_identity.domain.errors import CompanyInactiveError
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN
 from ledger_identity.domain.roles import EVERYTHING, only_reads
-from ledger_identity.domain.text import parse_legal_name, parse_time_zone
+from ledger_identity.domain.text import parse_code, parse_legal_name, parse_name, parse_time_zone
 from ledger_kernel.access import CompanyNotFoundError, Principal, PrincipalKind, SubjectId
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.ids import CompanyId, new_id
@@ -262,6 +262,62 @@ async def test_a_deactivated_company_is_not_found_by_its_tax_id(
     assert await api.company_by_tax_id(by_the_platform(None), RNC) is None
 
 
+# ── Establishments ──────────────────────────────────────────────────────────────
+
+
+async def open_establishment(
+    module_database: BoundDatabase, company: Company, code: str, zone: str | None
+) -> None:
+    opening = commands.Opening(
+        parse_code(code), parse_name(f"Branch {code}"), None if zone is None else parse_time_zone(zone)
+    )
+    await in_unit(
+        module_database,
+        FOUNDER,
+        lambda unit: commands.open_establishment(unit, company.id, opening, actor=FOUNDER.subject),
+    )
+
+
+async def test_an_establishment_is_read_by_its_code_and_main_by_none(
+    api: IdentityApi, module_database: BoundDatabase
+) -> None:
+    company = await register(module_database)
+    await open_establishment(module_database, company, "TOKYO", "Asia/Tokyo")
+    main = EstablishmentInfo(code="MAIN", name="Main", time_zone="America/Santo_Domingo")
+    assert await api.establishment(called_by(MEMBER), company.id, None) == main
+    assert await api.establishment(by_the_platform(), company.id, "MAIN") == main
+    assert await api.establishment(called_by(FOUNDER), company.id, "TOKYO") == EstablishmentInfo(
+        code="TOKYO", name="Branch TOKYO", time_zone="Asia/Tokyo"
+    )
+
+
+async def test_an_establishment_opened_without_a_zone_answers_the_zone_of_main(
+    api: IdentityApi, module_database: BoundDatabase
+) -> None:
+    company = await register(module_database)
+    await open_establishment(module_database, company, "SUC1", None)
+    found = await api.establishment(called_by(FOUNDER), company.id, "SUC1")
+    assert found is not None
+    assert found.time_zone == "America/Santo_Domingo"
+
+
+async def test_a_code_the_company_does_not_use_or_cannot_use_answers_none(
+    api: IdentityApi, module_database: BoundDatabase
+) -> None:
+    company = await register(module_database)
+    for code in ("SUC9", "not a code", "", "x" * 300):
+        assert await api.establishment(called_by(FOUNDER), company.id, code) is None
+
+
+async def test_an_establishment_of_another_organization_s_company_is_not_found(
+    api: IdentityApi, module_database: BoundDatabase
+) -> None:
+    company = await register(module_database)
+    for call in (called_by(STRANGER), by_the_platform(STRANGER)):
+        with pytest.raises(CompanyNotFoundError):
+            await api.establishment(call, company.id, None)
+
+
 # ── Permissions ─────────────────────────────────────────────────────────────────
 
 
@@ -361,6 +417,7 @@ async def test_no_method_is_called_while_a_unit_is_open(
         lambda: api.company_by_tax_id(called_by(FOUNDER), RNC),
         lambda: api.permissions(called_by(FOUNDER), FOUNDER, company.id),
         lambda: api.lock_fiscal_profile(by_the_platform(), company.id),
+        lambda: api.establishment(called_by(FOUNDER), company.id, None),
     )
     for call in calls:
         async with module_database.unit(OrganizationScope(company.organization, None)):
@@ -377,5 +434,6 @@ def test_the_facade_has_nothing_unguarded_for_other_modules_to_call(api: Identit
             IdentityFacade.company_by_tax_id,
             IdentityFacade.permissions,
             IdentityFacade.lock_fiscal_profile,
+            IdentityFacade.establishment,
         )
     )

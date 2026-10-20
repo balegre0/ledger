@@ -19,6 +19,7 @@ MANIFEST: Final = PackageManifest.model_validate(
         },
         "dependencies": {
             "packages": [
+                "kernel",
                 "platform",
             ],
             "modules": [
@@ -26,6 +27,9 @@ MANIFEST: Final = PackageManifest.model_validate(
             ],
             "python": [
                 "alembic>=1.20.0",
+                "fastapi>=0.143.0",
+                "pydantic>=2.14.1",
+                "sqlalchemy>=2.1.4",
             ],
         },
         "data": {
@@ -79,6 +83,18 @@ MANIFEST: Final = PackageManifest.model_validate(
                 ],
             },
         ],
+        "events": {
+            "publishes": [
+                {
+                    "type": "invoicing.invoice.issued",
+                    "version": 1,
+                },
+                {
+                    "type": "invoicing.invoice.voided",
+                    "version": 1,
+                },
+            ],
+        },
         "http": {
             "mounted_in": [
                 "api",

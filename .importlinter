@@ -268,7 +268,6 @@ forbidden_modules =
     ledger_devtools
     ledger_fiscal
     ledger_fiscal_kit
-    ledger_kernel
     ledger_signer
     ledger_testing
 allow_indirect_imports = True
@@ -795,7 +794,9 @@ layers =
     assembly
     adapters
     application
+    api
     domain
+    events
     _manifest
 
 [importlinter:contract:invoicing-domain-is-pure]
@@ -803,6 +804,7 @@ name = invoicing's domain and events import the kernel and the standard library 
 type = forbidden
 source_modules =
     ledger_invoicing.domain
+    ledger_invoicing.events
 forbidden_modules =
     alembic
     cryptography
