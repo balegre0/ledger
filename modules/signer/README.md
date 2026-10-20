@@ -24,4 +24,7 @@ ADR 0010; plan `docs/superpowers/plans/2026-10-19-v2-m2b-signer.md`).
   the same fingerprint.
 - Custody (`adapters/custody`) is the only code that touches key material; only the signer's app may import it
   (import-linter's `signer-custody` contracts).
-- Assembly: `assembly.py` (`MODULE`, entry point `ledger.modules: signer`).
+- Assembly: `assembly.py` (`MODULE`, entry point `ledger.modules: signer`). The client roles (`api`, `worker`,
+  `receiver`) bind the gRPC client ([`adapters/grpc/client.py`](src/ledger_signer/adapters/grpc/client.py)) with
+  their own token, or, unconfigured, stand-ins answering `signer_unavailable` (`signer.not_configured`); no
+  client role's readiness calls the signer. Messages map to DTOs in one place, `adapters/grpc/codec.py`.
