@@ -130,7 +130,13 @@ class Template:
 
 
 @contextmanager
-def _locked(server: PostgresServer) -> Generator[psycopg.Connection]:
+def server_wide(server: PostgresServer) -> Generator[psycopg.Connection]:
+    """A superuser connection holding the lock template builds and clones hold.
+
+    Roles are the server's, shared by every database: a test that creates, alters or drops roles runs its
+    statements inside this, so that no worker's template build changes the same catalog rows meanwhile
+    (PostgreSQL answers "tuple concurrently updated" to the second writer).
+    """
     with psycopg.connect(server.libpq(), autocommit=True) as admin:
         admin.execute("SELECT pg_advisory_lock(%s)", (_LOCK,))
         try:
@@ -144,7 +150,7 @@ def ensure_template(
 ) -> None:
     """Build the template ``name`` with ``prepare`` unless it exists: once per server, for every worker."""
     building = f"{name}_building"
-    with _locked(server) as admin:
+    with server_wide(server) as admin:
         if admin.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,)).fetchone() is not None:
             return
         admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(building)))
@@ -157,7 +163,7 @@ def ensure_template(
 
 def clone(server: PostgresServer, name: str, *, template: str = TEMPLATE) -> None:
     """A fresh database ``name``, a copy of ``template`` (an old one of that name is dropped first)."""
-    with _locked(server) as admin:
+    with server_wide(server) as admin:
         admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
         admin.execute(
             sql.SQL("CREATE DATABASE {} TEMPLATE {}").format(sql.Identifier(name), sql.Identifier(template))

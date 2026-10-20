@@ -10,10 +10,12 @@ import pytest
 from ledger_country_do.channels.ecf_v1.domain.drafts import (
     BUYER_PARTS,
     EXEMPT_ONLY_TYPES,
+    ISR_REQUIRED_TYPES,
     MAX_LINES,
     MAX_NOTE_LINES,
     NOTE_TYPES,
     UNDATED_TYPES,
+    WITHHOLDING_TYPES,
     BillingIndicator,
     Buyer,
     BuyerPart,
@@ -22,12 +24,16 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     Issuer,
     ModificationCode,
     Rule,
+    Violation,
+    WithholdingRole,
     line_violations,
+    withheld_violation,
 )
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
 from ledger_country_do_testing.samples import (
     BUYER,
     CREDIT_LINES,
+    ISSUED_ON,
     ISSUER,
     SEQUENCE_EXPIRES_ON,
     consumer_invoice,
@@ -41,6 +47,7 @@ REFERENCE: Final = EcfReference(
     encf=Encf(EcfType.CREDIT_INVOICE, 7), issued_on=date(2026, 10, 1), code=ModificationCode.CORRECT_AMOUNTS
 )
 USD: Final = Currency.of("USD")
+D540: Final = Decimal("540.00")
 
 
 def refused(field: str) -> AbstractContextManager[pytest.ExceptionInfo[DraftInvalidError]]:
@@ -61,14 +68,16 @@ def drafted(ecf_type: EcfType) -> EcfDraft:
         rnc=BUYER.rnc if BuyerPart.RNC in parts else None,
         name=BUYER.name if BuyerPart.NAME in parts else None,
     )
+    withheld = Decimal(0) if ecf_type in ISR_REQUIRED_TYPES else None
+    lines = (
+        CREDIT_LINES if billing is None else tuple(replace(line, billing=billing) for line in CREDIT_LINES)
+    )
     return replace(
         credit_invoice(),
         encf=Encf(ecf_type, 1),
         sequence_expires_on=None if ecf_type in UNDATED_TYPES else SEQUENCE_EXPIRES_ON,
         references=(REFERENCE,) if ecf_type in NOTE_TYPES else (),
-        lines=CREDIT_LINES
-        if billing is None
-        else tuple(replace(line, billing=billing) for line in CREDIT_LINES),
+        lines=tuple(replace(line, isr_withheld=withheld) for line in lines),
         buyer=buyer,
     )
 
@@ -314,3 +323,85 @@ def test_a_range_is_not_used_after_its_expiry_date() -> None:
     with refused("sequence_expires_on") as caught:
         replace(credit_invoice(), issued_on=SEQUENCE_EXPIRES_ON + timedelta(days=1))
     assert caught.value.field == "sequence_expires_on"
+
+
+def _withholding(
+    ecf_type: EcfType, *, itbis_withheld: Decimal | None = None, isr_withheld: Decimal | None = None
+) -> EcfDraft:
+    """``drafted(ecf_type)`` whose first line withholds what is given."""
+    draft = drafted(ecf_type)
+    first = replace(draft.lines[0], itbis_withheld=itbis_withheld, isr_withheld=isr_withheld)
+    return replace(draft, lines=(first, *draft.lines[1:]))
+
+
+def test_a_purchase_withholds_itbis_and_isr_per_line_as_the_company_s_retention() -> None:
+    draft = _withholding(EcfType.PURCHASES, itbis_withheld=Decimal("540.00"), isr_withheld=Decimal("300.00"))
+    assert (draft.lines[0].itbis_withheld, draft.lines[0].isr_withheld) == (D540, Decimal("300.00"))
+    assert draft.withholding_role is WithholdingRole.RETENTION
+    perceived = replace(draft, withholding_role=WithholdingRole.PERCEPTION)
+    assert perceived.withholding_role is WithholdingRole.PERCEPTION
+    assert {EcfType.PURCHASES, EcfType.FOREIGN_PAYMENTS} == WITHHOLDING_TYPES
+
+
+@pytest.mark.parametrize(
+    "ecf_type", sorted(frozenset(EcfType) - {EcfType.PURCHASES, EcfType.FOREIGN_PAYMENTS})
+)
+def test_only_a_purchase_or_a_payment_abroad_withholds(ecf_type: EcfType) -> None:
+    with refused("line.withheld"):
+        _withholding(ecf_type, isr_withheld=Decimal("1.00"))
+
+
+def test_a_payment_abroad_withholds_isr_on_every_line_and_no_itbis() -> None:
+    draft = drafted(EcfType.FOREIGN_PAYMENTS)
+    lines = tuple(replace(line, isr_withheld=Decimal("10.00")) for line in draft.lines)
+    assert replace(draft, lines=lines).lines == lines
+    with refused("line.isr_withheld"):
+        replace(draft, lines=(lines[0], replace(lines[1], isr_withheld=None)))
+    with refused("line.itbis_withheld"):
+        replace(draft, lines=(replace(lines[0], itbis_withheld=Decimal("1.00")),))
+
+
+@pytest.mark.parametrize(
+    ("field", "itbis", "isr"),
+    [
+        ("line.itbis_withheld", Decimal("1.001"), None),
+        ("line.itbis_withheld", Decimal(-1), None),
+        ("line.isr_withheld", None, Decimal("NaN")),
+        ("line.isr_withheld", None, Decimal("3000.01")),
+    ],
+)
+def test_a_withheld_amount_has_two_decimals_and_never_exceeds_the_line(
+    field: str, itbis: Decimal | None, isr: Decimal | None
+) -> None:
+    with refused(field) as caught:
+        replace(LINE, itbis_withheld=itbis, isr_withheld=isr)
+    assert caught.value.field == field
+    assert replace(LINE, isr_withheld=Decimal("3000.00")).isr_withheld == Decimal("3000.00")
+
+
+@pytest.mark.parametrize(("days", "late"), [(0, False), (30, False), (31, True)])
+def test_a_credit_note_says_whether_it_comes_more_than_thirty_days_after_its_e_cf(
+    *, days: int, late: bool
+) -> None:
+    corrected = replace(REFERENCE, issued_on=ISSUED_ON - timedelta(days=days))
+    assert replace(drafted(EcfType.CREDIT_NOTE), references=(corrected,)).credit_note_late is late
+    assert replace(drafted(EcfType.DEBIT_NOTE), references=(corrected,)).credit_note_late is False
+
+
+def test_isr_withheld_is_held_to_the_line_s_rounded_amount() -> None:
+    odd = replace(LINE, quantity=Decimal(1), unit_price=Decimal("10.005"), isr_withheld=Decimal("10.01"))
+    assert odd.isr_withheld == Decimal("10.01")
+    with refused("line.isr_withheld") as caught:
+        replace(odd, isr_withheld=Decimal("10.02"))
+    assert caught.value.field == "line.isr_withheld"
+
+
+def test_a_withheld_amount_s_precision_is_its_own_rule() -> None:
+    assert withheld_violation(Decimal("1.001")) == Violation(
+        Rule.WITHHELD_PRECISION, "has at most 2 decimals"
+    )
+
+
+def test_a_payment_abroad_is_withheld_never_perceived() -> None:
+    with refused("withholding_role"):
+        replace(drafted(EcfType.FOREIGN_PAYMENTS), withholding_role=WithholdingRole.PERCEPTION)

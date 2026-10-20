@@ -21,6 +21,7 @@ from ledger_platform.data.roles import (
     cluster_statements,
 )
 from ledger_testing.database import TEST_LOGINS, libpq_as
+from ledger_testing.postgres import server_wide
 lazy from ledger_testing.postgres import WorkerDatabase
 
 A, B = uuid.uuid7(), uuid.uuid7()
@@ -452,7 +453,7 @@ def test_a_login_signs_in_with_its_password_whose_verifier_alone_reached_the_ser
 
 def test_roles_that_exist_with_other_options_are_normalized(chassis: WorkerDatabase) -> None:
     roles = SchemaRoles(schema="stale")
-    with psycopg.connect(chassis.admin_url(), autocommit=True) as connection:
+    with server_wide(chassis.server), psycopg.connect(chassis.admin_url(), autocommit=True) as connection:
         try:
             connection.execute(
                 """CREATE ROLE stale_owner LOGIN INHERIT BYPASSRLS CREATEDB PASSWORD 'old'
@@ -514,7 +515,7 @@ def test_roles_made_without_an_isolated_schema_keep_the_signer_in_the_platform_r
     """A package's template made after the signer's (no isolated schema in it) keeps its schedule leases."""
     isolated = SchemaRoles(schema="lockbox", signer=True)
     platform = SchemaRoles(schema="platform")
-    with psycopg.connect(chassis.admin_url(), autocommit=True) as connection:
+    with server_wide(chassis.server), psycopg.connect(chassis.admin_url(), autocommit=True) as connection:
         try:
             for statement in cluster_statements((platform, isolated), TEST_LOGINS):
                 connection.execute(statement.encode())
