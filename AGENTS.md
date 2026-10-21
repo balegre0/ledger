@@ -2,6 +2,10 @@
 
 For people and coding agents alike. The README says what the repository is and how to run it.
 
+## Continuing the current work
+
+Start with [docs/handoff/README.md](docs/handoff/README.md): the owner's rules, the process, the current state and the full backlog.
+
 ## Before changing anything
 
 - Read the spec ([docs/superpowers/specs/2026-10-13-ledger-platform-v2-design.md](docs/superpowers/specs/2026-10-13-ledger-platform-v2-design.md))
