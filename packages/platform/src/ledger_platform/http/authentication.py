@@ -5,7 +5,7 @@ client, opened as a resource while the app runs, and one verifier checks every b
 setting the app proves nobody: its ``caller`` refuses every token with ``TokenSettingsMissingError`` (an
 internal error). An app that serves routes requires the settings (``required``) and refuses to start without
 them, so only an app that serves no module's routes is made that way. Some token settings without the others
-are a deployment's mistake, refused at once.
+are a deployment's mistake, refused at once. The receiver proves nobody whatever its settings (``none``).
 """
 
 from contextlib import aclosing
@@ -87,12 +87,23 @@ class Authentication:
         """
         given = (settings.token_issuer, settings.token_audience, settings.token_jwks_url)
         if given == (None, None, None) and not required:
-            return cls(authenticated(_Unconfigured()), None)
+            return cls.none()
         policy = TokenPolicy.of_settings(settings)
         keys = HttpKeys()
         verifier = TokenVerifier(policy, keys=PublishedKeys(policy, fetch=keys, registry=registry))
         limiter = RateLimiter(rate=settings.rate_limit_per_second, burst=settings.rate_limit_burst)
         return cls(authenticated(verifier, limiter), keys)
+
+    @classmethod
+    def none(cls) -> Authentication:
+        """Authentication that proves nobody, whatever the token settings, and fetches no keys.
+
+        An app without token settings is made with it, and so is the receiver always (§3.8): its callers (the
+        tax authority, other emitters) hold no token of ours, and its channels prove them by their own means
+        (seeds and tokens of the channel's). Its ``caller`` refuses every request as a defect
+        (``TokenSettingsMissingError``); the receiver refuses to start with a route that declares it.
+        """
+        return cls(authenticated(_Unconfigured()), None)
 
     def bind_standings(self, standings: StandingsPort) -> None:
         """How callers stand, from the module that keeps it: bound once (``StandingsBoundError`` again)."""

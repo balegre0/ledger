@@ -100,6 +100,23 @@ def test_the_signer_factory_builds_the_signer_app_without_connecting(
 
 
 @pytest.mark.usefixtures("environment")
+def test_the_receiver_factory_builds_the_receiver_app_without_connecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No channel is installed in the workspace yet: the receiver serves its probes, no module's route.
+
+    It needs neither the token settings nor the direct URL: nothing of it proves our tokens or listens.
+    """
+    for name in ("LEDGER_TOKEN_ISSUER", "LEDGER_TOKEN_AUDIENCE", "LEDGER_TOKEN_JWKS_URL"):
+        monkeypatch.delenv(name)
+    monkeypatch.delenv("LEDGER_DATABASE_DIRECT_URL")
+    app = serving.receiver()
+    assert (app.title, app.version) == ("ledger-receiver", version("ledger-app-receiver"))
+    assert {"/livez", "/readyz", "/metrics"} <= paths(app)
+    assert not any(path.startswith("/v1/") for path in paths(app))
+
+
+@pytest.mark.usefixtures("environment")
 @pytest.mark.parametrize("role", ["worker", "signer"])
 def test_an_app_that_listens_without_a_direct_url_does_not_start(
     monkeypatch: pytest.MonkeyPatch, role: serving.ServedRole
@@ -128,7 +145,7 @@ def served(monkeypatch: pytest.MonkeyPatch, role: serving.ServedRole) -> dict[st
 
 
 @pytest.mark.usefixtures("environment")
-@pytest.mark.parametrize("role", ["api", "worker", "signer"])
+@pytest.mark.parametrize("role", ["api", "worker", "signer", "receiver"])
 def test_serve_hands_granian_the_role_s_factory_on_the_configured_address(
     monkeypatch: pytest.MonkeyPatch, role: serving.ServedRole
 ) -> None:

@@ -1,10 +1,12 @@
-# The local stack: PostgreSQL, the migrate job, the api, the worker and the signer, and Zitadel behind a profile.
-# Before the first `up`: `sh deploy/local/signer/tokens.sh` (without the signer's file compose refuses the stack)
-# and `sh deploy/local/do/roots.sh` (the worker's trusted roots for do-ecf-v1, mounted read-only).
+# The local stack: PostgreSQL, the migrate job, the api, the worker, the receiver and the signer, and Zitadel
+# behind a profile. Before the first `up`: `sh deploy/local/signer/tokens.sh` (without the signer's file compose
+# refuses the stack) and `sh deploy/local/do/roots.sh` (the worker's and the receiver's trusted roots for
+# do-ecf-v1, mounted read-only).
 #
 # What an app running on the host is configured with (the LEDGER_* variables of Settings), beside ledger.env's:
 #   LEDGER_DATABASE_URL=postgresql+psycopg://ledger_app:ledger_app@127.0.0.1:5432/ledger (or LEDGER_POSTGRES_PORT)
-#   LEDGER_HTTP_PORT=8101 for the worker (the api's 8100 is the default): never 8000, another project's here
+#   LEDGER_HTTP_PORT=8101 for the worker, 8103 for the receiver (the api's 8100 is the default): never 8000,
+#   another project's here
 #   LEDGER_ARCHIVE_PATH=<an absolute directory of the host> (ledger.env's /archive is the containers'), or
 #   LEDGER_ARCHIVE_BACKEND unset: then no archive is bound, and a channel that reads one does not start
 # The containers have no /archive volume yet: nothing archives until the DO channel does (v2-M3b Task 18), and
@@ -24,25 +26,28 @@
 #
 # Apps, from the one image (deploy/docker/ledger.Dockerfile), each configured by ledger.env (one Settings class for
 # every app) plus what is its own: `migrate` runs once, as the migrator login over a direct connection, and the
-# api and the worker start after it succeeded. The worker listens for wake-ups over a direct connection too. In
-# their containers the apps listen on 8000; on the host the api is published on 127.0.0.1:${LEDGER_API_PORT:-8100}
-# and the worker's probes and metrics on 127.0.0.1:${LEDGER_WORKER_PORT:-8101} (8000 is another project's on this
-# machine). Each runs one Granian worker (scale by replicas); Granian kills one still stopping after 30 s, so
-# compose waits 40 s before its own kill.
+# api, the worker and the receiver start after it succeeded. The worker listens for wake-ups over a direct
+# connection too. In their containers the apps listen on 8000; on the host the api is published on
+# 127.0.0.1:${LEDGER_API_PORT:-8100}, the worker's probes and metrics on 127.0.0.1:${LEDGER_WORKER_PORT:-8101} and
+# the receiver (the tax authority's and other emitters' calls, its own host name in a deployment) on
+# 127.0.0.1:${LEDGER_RECEIVER_PORT:-8103} (8000 is another project's on this machine). The receiver proves no
+# token of ours: ledger.env's token settings are the api's. Each runs one Granian worker (scale by replicas);
+# Granian kills one still stopping after 30 s, so compose waits 40 s before its own kill.
 #
 # The signer (ADR 0010) is a container of its own from the same image: `ledger-signer`, the login `ledger_signer`
 # (the only one that enters the schema `signer`), its probes and metrics on 127.0.0.1:${LEDGER_SIGNER_PORT:-8102}
 # and its gRPC service on signer:50051 (never published on the host; it has no gRPC health service: compose and
 # orchestrators probe /readyz over HTTP). It is on two networks and not on `default`: `signer`, internal, which it
-# shares with its callers (the api, the worker) and PostgreSQL alone, so nothing else reaches 50051 (not migrate,
-# not Zitadel); and `signer-edge`, its alone, which carries the published probe port and, locally, gives it a route
-# out. A deployment gives it none: a NetworkPolicy admits gRPC from the api and the worker only, and lets it reach
-# PostgreSQL and the KMS only. Each caller holds a token of its own: deploy/local/signer/tokens.sh writes three
-# random ones into signer/.local/ (git ignores it), the signer reads all three, the api and the worker their own
-# (without theirs, they start and answer signer_unavailable). The signer offers the local backend only (never
-# `remote`: no certification entity's adapter exists) and keeps its KMS's master key in the volume `signer-kms`,
-# which it creates on its first start; `down -v` deletes it with the database it protects. That KMS is a file,
-# refused outside the environments `local` and `test`: this stack is the only place the signer runs yet.
+# shares with its callers (the api, the worker, the receiver) and PostgreSQL alone, so nothing else reaches 50051
+# (not migrate, not Zitadel); and `signer-edge`, its alone, which carries the published probe port and, locally,
+# gives it a route out. A deployment gives it none: a NetworkPolicy admits gRPC from the api, the worker and the
+# receiver only, and lets it reach PostgreSQL and the KMS only. Each caller holds a token of its own:
+# deploy/local/signer/tokens.sh writes three random ones into signer/.local/ (git ignores it), the signer reads
+# all three, the api, the worker and the receiver their own (without theirs, they start and answer
+# signer_unavailable). The signer offers the local backend only (never `remote`: no certification entity's
+# adapter exists) and keeps its KMS's master key in the volume `signer-kms`, which it creates on its first start;
+# `down -v` deletes it with the database it protects. That KMS is a file, refused outside the environments `local`
+# and `test`: this stack is the only place the signer runs yet.
 # The profile `zitadel` adds a local identity provider (zitadel/README.md); the profile `localstack` adds an S3
 # with object lock for the archive's s3 backend (ledger.env says how to point the apps at it).
 name: ledger
@@ -64,7 +69,7 @@ services:
     # The tag the platform's tests run on: a service meets locally the PostgreSQL it will be tested against.
     image: postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
     # Room for every app's pool and its overflow (each up to twice LEDGER_DATABASE_POOL_SIZE): api 30, worker
-    # 50, signer 30, and zitadel's (docs/runbooks/platform/database-connections.md).
+    # 50, signer 30, receiver 30, and zitadel's (docs/runbooks/platform/database-connections.md).
     command: ["postgres", "-c", "max_connections=300"]
     environment:
       POSTGRES_USER: postgres
@@ -161,6 +166,28 @@ services:
       resources:
         limits: {cpus: "1.0", memory: 512M, pids: 128}
     depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  receiver:
+    <<: *ledger
+    command: ["/app/.venv/bin/ledger-receiver"]
+    env_file:
+      - ledger.env
+      - path: zitadel/.local/ledger.env
+        required: false
+      - path: signer/.local/receiver.env  # LEDGER_SIGNER_TOKEN_RECEIVER: its own token, no other caller's
+        required: false  # without it the receiver starts, its signatures answering signer_unavailable
+    environment:
+      LEDGER_SIGNER_ADDRESS: signer:50051
+      LEDGER_DO_ECF_TRUSTED_ROOTS: /run/ledger/do-ecf/roots.pem
+    volumes:
+      # do-ecf-v1's trusted roots, the worker's file (the emitters it receives from chain to them). Missing, compose
+      # refuses the stack.
+      - {type: bind, source: ./do/.local/roots.pem, target: /run/ledger/do-ecf/roots.pem, read_only: true, bind: {create_host_path: false}}
+    ports: ["127.0.0.1:${LEDGER_RECEIVER_PORT:-8103}:8000"]
+    networks: [default, signer]
+    stop_grace_period: 40s
+    depends_on:  # not on the signer: its readiness is not the receiver's
       migrate: {condition: service_completed_successfully}
 
   zitadel:

@@ -17,6 +17,7 @@ types-s3transfer = { timestamp = "0001-01-01T00:00:00Z", span = "P7D" }
 members = [
     "ledger-app-api",
     "ledger-app-migrate",
+    "ledger-app-receiver",
     "ledger-app-signer",
     "ledger-app-worker",
     "ledger-country-do",
@@ -766,6 +767,17 @@ requires-dist = [{ name = "ledger-platform", editable = "packages/platform" }]
 name = "ledger-app-migrate"
 version = "0.1.0"
 source = { editable = "apps/migrate" }
+dependencies = [
+    { name = "ledger-platform" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "ledger-platform", editable = "packages/platform" }]
+
+[[package]]
+name = "ledger-app-receiver"
+version = "0.1.0"
+source = { editable = "apps/receiver" }
 dependencies = [
     { name = "ledger-platform" },
 ]

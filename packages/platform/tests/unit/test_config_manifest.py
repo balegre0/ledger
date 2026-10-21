@@ -188,6 +188,15 @@ def test_a_bad_manifest_lists_where_it_is_wrong_never_the_value(text: str, locat
     assert "/invoices" not in str(caught.value).replace("/v1/invoices", "")
 
 
+def test_no_module_mounts_its_routers_in_the_receiver() -> None:
+    """The receiver serves the channels' authority-facing routes and nothing else (§3.8)."""
+    with pytest.raises(InvalidManifestError) as caught:
+        load_manifest(MODULE.replace('mounted_in = ["api"]', 'mounted_in = ["api", "receiver"]'))
+    assert caught.value.problems == (
+        "http.mounted_in: the receiver mounts the channels' receiver routers only, never a package's routers",
+    )
+
+
 def test_a_bad_id_prefix_is_located_never_echoed() -> None:
     with pytest.raises(InvalidManifestError) as caught:
         load_manifest(MODULE.replace('prefix = "inv"', 'prefix = "zzzzzzzz"'))

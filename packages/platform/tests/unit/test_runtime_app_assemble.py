@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import re
 import time
 from contextlib import asynccontextmanager
 from datetime import date
@@ -14,9 +15,11 @@ lazy from pathlib import Path
 import httpx
 import pytest
 from fastapi import APIRouter, Depends
-from pydantic import SecretStr
+from fastapi.responses import PlainTextResponse
+from pydantic import SecretStr, TypeAdapter
 from pydantic_settings import SettingsConfigDict
 from structlog.testing import capture_logs
+lazy from starlette.requests import Request
 
 from ledger_kernel.dated import Since, Timeline
 from ledger_kernel.jurisdiction import CountryCode, Jurisdiction
@@ -43,7 +46,6 @@ from ledger_platform.runtime.app import (
     DirectUrlMissingError,
     PoolTooSmallError,
     RoleMismatchError,
-    RoleNotBuiltError,
     SchemaUnknownError,
     StopTimes,
 )
@@ -63,6 +65,7 @@ from ledger_platform.runtime.assembly import (
     ModuleCycleError,
     ModuleMissingError,
     PortReservedError,
+    ReceiverRouteError,
     SchemaMissingError,
 )
 from ledger_platform.runtime.contexts import (
@@ -549,9 +552,184 @@ def test_every_module_owns_a_schema_of_its_own_with_its_migrations() -> None:
         App("worker", settings=SETTINGS, discover=discovering(module("alpha", foreign)))
 
 
-def test_the_receiver_is_not_built_yet() -> None:
-    with pytest.raises(RoleNotBuiltError, match="receiver"):
-        App("receiver", settings=SETTINGS, discover=discovering())
+RECEPTION: Final = "/us-probe-v1/{environment}/{tax_id}/fe/recepcion/api/ecf"
+"""The probe channel's authority-facing route, under its key as every receiver route is."""
+ROUTED: Final = '[http]\nmounted_in = ["api"]\nprefixes = ["/v1/alphas"]\n'
+"""A module's routers, mounted by ``api``."""
+
+
+def routed_alpha(context: ModuleContext) -> ModuleParts:
+    router = APIRouter(prefix="/v1/alphas")
+
+    @router.get("/ping")
+    async def ping() -> str:
+        return "pong"
+
+    return ModuleParts(routers=(router,), migrations=migrations(context.database.schema))
+
+
+def receives(context: ChannelContext) -> APIRouter:
+    """The authority-facing router of a channel: authenticated by the channel itself, never by the app."""
+    del context
+    router = APIRouter(prefix="/us-probe-v1/{environment}/{tax_id}")
+
+    @router.post("/fe/recepcion/api/ecf")
+    async def receive(environment: str, tax_id: str) -> dict[str, str]:
+        return {"environment": environment, "tax_id": tax_id}
+
+    return router
+
+
+def receiving(
+    receiver: Callable[[ChannelContext], APIRouter], seen: list[ChannelContext] | None = None
+) -> ChannelPack:
+    """The probe channel, its public routes and ``receiver``'s; the contexts it was given in ``seen``."""
+
+    def assemble(context: ChannelContext) -> ChannelParts:
+        if seen is not None:
+            seen.append(context)
+        public = APIRouter(prefix="/v1/us")
+
+        @public.get("/ranges")
+        async def ranges() -> str:
+            return "public"
+
+        return ChannelParts(
+            channel="receiving",
+            routers=(public,),
+            receiver_routers=(receiver(context),),
+            migrations=migrations(context.database.schema),
+        )
+
+    return ChannelPack(entry=channel_entry(), regime="us", assemble=assemble)
+
+
+def receiving_app(
+    role: AppRole,
+    receiver: Callable[[ChannelContext], APIRouter] = receives,
+    *,
+    settings: Settings = TOKENS,
+    seen: list[ChannelContext] | None = None,
+) -> App:
+    return App(
+        role,
+        settings=settings,
+        discover=discovering(
+            module("alpha", routed_alpha, ROUTED),
+            regimes=(us_regime(),),
+            packs=(receiving(receiver, seen),),
+        ),
+    )
+
+
+async def test_the_receiver_mounts_the_channels_receiver_routes_alone_in_any_case() -> None:
+    """No module's router and no channel's public route; DGII's paths are case-insensitive ([06] §4)."""
+    app = receiving_app("receiver")
+    transport = httpx.ASGITransport(app=app.asgi())
+    async with httpx.AsyncClient(transport=transport, base_url="http://receiver.test") as client:
+        received = await client.post("/US-PROBE-V1/TESTECF/131880738/FE/Recepcion/API/ECF")
+        public = await client.get("/v1/us/ranges")
+        module_s = await client.get("/v1/alphas/ping")
+        document = await client.get("/openapi.json")
+    await app.aclose()
+    assert (received.status_code, received.json()) == (200, {"environment": "testecf", "tax_id": "131880738"})
+    assert (public.status_code, module_s.status_code) == (404, 404)
+    assert list(TypeAdapter(dict[str, object]).validate_python(document.json()["paths"])) == [RECEPTION]
+
+
+async def test_the_api_mounts_no_receiver_route() -> None:
+    app = receiving_app("api")
+    transport = httpx.ASGITransport(app=app.asgi())
+    async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+        received = await client.post("/us-probe-v1/testecf/131880738/fe/recepcion/api/ecf")
+        public = await client.get("/v1/us/ranges")
+    await app.aclose()
+    assert (received.status_code, public.status_code) == (404, 200)
+
+
+@pytest.mark.parametrize("settings", [SETTINGS, TOKENS], ids=["no token settings", "token settings"])
+def test_the_receiver_proves_no_token_of_ours_whatever_the_settings(settings: Settings) -> None:
+    """Its callers (the tax authority, other emitters) hold none: it fetches no keys and needs no settings."""
+    seen: list[ChannelContext] = []
+    receiving_app("receiver", settings=settings, seen=seen)
+    [context] = seen
+    assert context.auth.resources() == ()
+
+
+def outside(context: ChannelContext) -> APIRouter:
+    del context
+    router = APIRouter(prefix="/do-ecf-v1/{environment}")
+
+    @router.get("/fe/autenticacion/api/semilla")
+    async def seed() -> str:
+        return "seed"
+
+    return router
+
+
+def upper_cased(context: ChannelContext) -> APIRouter:
+    del context
+    router = APIRouter(prefix="/us-probe-v1/{environment}")
+
+    @router.get("/FE/Autenticacion/API/Semilla")
+    async def seed() -> str:
+        return "seed"
+
+    return router
+
+
+def proving(context: ChannelContext) -> APIRouter:
+    router = APIRouter(prefix="/us-probe-v1/{environment}")
+    caller = context.auth.caller
+
+    async def sender(principal: Annotated[Principal, Depends(caller)]) -> str:
+        return principal.subject
+
+    @router.post("/fe/recepcion/api/ecf")
+    async def receive(subject: Annotated[str, Depends(sender)]) -> str:
+        return subject
+
+    return router
+
+
+def bare_route(context: ChannelContext) -> APIRouter:
+    del context
+    router = APIRouter()
+
+    async def seed(request: Request) -> PlainTextResponse:
+        del request
+        return PlainTextResponse("seed")
+
+    router.add_route("/us-probe-v1/seed", seed)
+    return router
+
+
+@pytest.mark.parametrize(
+    ("receiver", "problem"),
+    [
+        (outside, "'/do-ecf-v1/{environment}/fe/autenticacion/api/semilla' is outside /us-probe-v1/"),
+        (upper_cased, "is not in lower case: the receiver routes every path lower-cased"),
+        (proving, "declares the app's caller: the receiver proves no token of ours"),
+        (bare_route, "'/us-probe-v1/seed' is not an API route"),
+    ],
+    ids=["outside its key", "upper case", "the app's caller", "not an API route"],
+)
+def test_a_receiver_route_the_receiver_cannot_serve_fails_the_start(
+    receiver: Callable[[ChannelContext], APIRouter], problem: str
+) -> None:
+    with pytest.raises(ReceiverRouteError, match=re.escape(problem)) as caught:
+        receiving_app("receiver", receiver)
+    assert str(caught.value).startswith("channel 'us-probe-v1''s receiver route")
+    receiving_app("worker", receiver)  # no other role mounts them: none checks them
+
+
+def test_a_receiver_without_a_channel_says_so(capsys: pytest.CaptureFixture[str]) -> None:
+    """It serves its probes and nothing else: almost surely a deployment without its country packs."""
+    receiving_app("receiver")
+    assert "app.no_channels" not in capsys.readouterr().out
+    App("receiver", settings=SETTINGS, discover=discovering(module("alpha")))
+    [line] = [line for line in capsys.readouterr().out.splitlines() if "app.no_channels" in line]
+    assert ("warning" in line, "role=receiver" in line) == (True, True)
 
 
 def test_the_api_needs_token_settings() -> None:

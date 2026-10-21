@@ -40,6 +40,7 @@ lazy from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ledger_platform.config.options import require_at_least
 from ledger_platform.http.limits import MAX_BODY_BYTES, BodyLimit, route_limits
+from ledger_platform.http.lowercase import LowercasePath
 from ledger_platform.http.metrics import ROUTE_KEY, UNMATCHED, Measure, RouteLabels
 from ledger_platform.http.mode import require_mode_header
 from ledger_platform.http.probes import OPERATIONAL_PATHS, add_probes
@@ -49,6 +50,7 @@ from ledger_platform.http.problems import (
     current_request_id,
     install_problem_handlers,
 )
+from ledger_platform.http.rate import RateByClient
 from ledger_platform.http.request_fields import remembered
 from ledger_platform.http.versions import (
     CURRENT_VERSION,
@@ -58,6 +60,7 @@ from ledger_platform.http.versions import (
     sent_version,
 )
 lazy from ledger_platform.http.metrics import AsgiApp, AsgiMessage, AsgiReceive, AsgiScope, AsgiSend
+lazy from ledger_platform.http.rate import ClientRate
 lazy from ledger_platform.observability.health import Health
 
 type CallerTrace = Literal["adopt", "link"]
@@ -98,6 +101,24 @@ class Observability:
     caller_trace: CallerTrace = "link"
     """``link`` at a public edge (the default): a caller's trace is linked to, never continued (see the
     module); ``adopt`` behind a trusted one."""
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Edge:
+    """What the app does to a request before it routes it."""
+
+    max_body_bytes: int = MAX_BODY_BYTES
+    """A body over it is refused 413 as it is read (``http.limits``), unless its route declares its own
+    limit (``larger_body``)."""
+    lowercase_prefixes: tuple[str, ...] = ()
+    """Paths under these are routed lower-cased (``http.lowercase``): the receiver's channel keys."""
+    client_rate: ClientRate | None = None
+    """Each client address held to it before anything else runs (``http.rate``): the receiver's."""
+
+
+DEFAULT_EDGE: Final = Edge()
+"""Every app's edge but the receiver's: the public API's body limit, nothing else."""
 
 
 @final
@@ -257,12 +278,12 @@ def create_app(
     observability: Observability,
     lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]],
     routers: Sequence[APIRouter] = (),
-    max_body_bytes: int = MAX_BODY_BYTES,
+    edge: Edge = DEFAULT_EDGE,
 ) -> FastAPI:
     """A FastAPI application with ``routers`` plus ``/livez``, ``/readyz`` and ``/metrics``, traced.
 
-    A request body over ``max_body_bytes`` is refused 413 as it is read (``http.limits``), or over its route's
-    own limit where it declares one (``larger_body``).
+    What it does to a request before routing it is ``edge``'s (see ``Edge``). Every request is measured,
+    refusals included.
 
     Raises ``AmbiguousRouteError`` when one route is mounted under two different templates. Routes must be
     complete before this returns: a route added afterwards, to the app or to a router already included, is
@@ -274,7 +295,7 @@ def create_app(
         lifespan=lifespan,
         telemetry=_telemetry(observability.tracer_provider),
     )
-    require_at_least("http", "max_body_bytes", max_body_bytes)
+    require_at_least("http", "max_body_bytes", edge.max_body_bytes)
     app.caller_trace = observability.caller_trace
     add_probes(app, observability.health, observability.registry)
     for router in routers:
@@ -286,7 +307,13 @@ def create_app(
         ["method", "route", "status"],
         registry=observability.registry,
     )
-    app.add_middleware(BodyLimit, limit=max_body_bytes, routes=route_limits(app.routes))
+    # Starlette runs the middleware added last first: Measure, then the path lower-cased (the body limit
+    # matches its routes on it), then a client's rate, then the body limit, then the router.
+    app.add_middleware(BodyLimit, limit=edge.max_body_bytes, routes=route_limits(app.routes))
+    if edge.client_rate is not None:
+        app.add_middleware(RateByClient, rate=edge.client_rate)
+    if edge.lowercase_prefixes:
+        app.add_middleware(LowercasePath, prefixes=edge.lowercase_prefixes)
     app.add_middleware(Measure, duration=duration, labels=labels)
     install_problem_handlers(app, route_of=labels.of_scope)
     return app

@@ -37,7 +37,8 @@ Start with [docs/handoff/README.md](docs/handoff/README.md): the owner's rules, 
   started, by its PID. Stop containers by id or with `docker compose -p <your project> down -v`; never stop
   containers you did not start.
 - Host port 8000 belongs to another project: never bind it, call it or stop what listens on it. The api is on
-  8100 and the worker on 8101 (`LEDGER_HTTP_PORT` for a host run).
+  8100, the worker on 8101, the signer's probes on 8102 and the receiver on 8103 (`LEDGER_HTTP_PORT` for a host
+  run).
 - Secrets: never print `.env` files or their values (no `cat`, no `docker compose config` without `--quiet`, no
   `env | grep LEDGER`); edit them by variable name. Tax ids, tokens, request bodies and payloads never reach an
   error message, a log line or a span.

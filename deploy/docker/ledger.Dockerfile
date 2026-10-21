@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
-# The ledger platform: one image for every app (ledger-api, ledger-worker, ledger-signer, ledger-migrate; the
-# command picks one). Built from the workspace's lockfile with uv; each app runs under Granian (api, worker,
-# signer) or once (migrate), as an unprivileged user, from a file system it never writes to. The signer runs as a
-# process (a container) of its own (ADR 0010): the image holds its custody code, which only `ledger-signer`
-# assembles. Build from the repository root:
+# The ledger platform: one image for every app (ledger-api, ledger-worker, ledger-receiver, ledger-signer,
+# ledger-migrate; the command picks one). Built from the workspace's lockfile with uv; each app runs under Granian
+# (api, worker, receiver, signer) or once (migrate), as an unprivileged user, from a file system it never writes
+# to. The signer runs as a process (a container) of its own (ADR 0010): the image holds its custody code, which
+# only `ledger-signer` assembles. Build from the repository root:
 #   docker build -f deploy/docker/ledger.Dockerfile -t ledger:local .
 #
 # Deploying it:
@@ -61,7 +61,7 @@ RUN mkdir -p -m 0700 /state/ledger-signer
 # Distroless: glibc, CA certificates and time zones, no shell, no package manager; user nonroot (65532).
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:e792ab3d241a468a4fd7519ddbbebe66b49b5f365771716ea688ad40b6c6f1c2
 LABEL org.opencontainers.image.title="ledger" \
-      org.opencontainers.image.description="The ledger platform: api, worker, signer and migrate entrypoints" \
+      org.opencontainers.image.description="The ledger platform: api, worker, receiver, signer and migrate entrypoints" \
       org.opencontainers.image.source="https://github.com/balegre0/ledger"
 COPY --from=build /python /python
 COPY --from=build /app/.venv /app/.venv

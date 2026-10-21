@@ -8,7 +8,6 @@ hands its gRPC server, consumer, jobs and checks, and refuses to start without i
 ``migrate`` runs its revisions.
 """
 
-import dataclasses
 import os
 import subprocess
 import sys
@@ -88,7 +87,6 @@ class Recorded:
 
     def __init__(self) -> None:
         self.parts: dict[AppRole, ModuleParts] = {}
-        self.contexts: dict[AppRole, ModuleContext] = {}
 
     def module(self) -> Module:
         """signer's module, its assembly recorded."""
@@ -96,7 +94,6 @@ class Recorded:
         def assemble(context: ModuleContext) -> ModuleParts:
             parts = MODULE.assemble(context)
             self.parts[context.role] = parts
-            self.contexts[context.role] = context
             return parts
 
         return Module(
@@ -128,16 +125,9 @@ def recorded() -> Recorded:
 
 
 async def assembled(recorded: Recorded, role: AppRole) -> tuple[App, ModuleParts]:
-    """``role``'s app (its pools closed again: nothing connects) and what signer handed it.
-
-    The receiver's app is not built yet (a later milestone): signer is assembled in the worker's context
-    given the receiver's role, as the receiver's app will.
-    """
-    built: AppRole = "worker" if role == "receiver" else role
-    app = App(built, settings=SETTINGS, discover=recorded.discover)
+    """``role``'s app (its pools closed again: nothing connects) and what signer handed it."""
+    app = App(role, settings=SETTINGS, discover=recorded.discover)
     await app.aclose()
-    if role == "receiver":
-        return app, MODULE.assemble(dataclasses.replace(recorded.contexts[built], role=role))
     return app, recorded.parts[role]
 
 

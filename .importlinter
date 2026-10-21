@@ -4,6 +4,7 @@
 root_packages =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do
@@ -23,7 +24,7 @@ include_external_packages = True
 name = Workspace layers
 type = layers
 layers =
-    ledger_app_api | ledger_app_migrate | ledger_app_signer | ledger_app_worker
+    ledger_app_api | ledger_app_migrate | ledger_app_receiver | ledger_app_signer | ledger_app_worker
     ledger_signer
     ledger_invoicing
     ledger_fiscal
@@ -97,6 +98,7 @@ source_modules =
     ledger_app_api
 forbidden_modules =
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do
@@ -118,6 +120,29 @@ source_modules =
     ledger_app_migrate
 forbidden_modules =
     ledger_app_api
+    ledger_app_receiver
+    ledger_app_signer
+    ledger_app_worker
+    ledger_country_do
+    ledger_country_do_testing
+    ledger_devtools
+    ledger_fiscal
+    ledger_fiscal_kit
+    ledger_identity
+    ledger_invoicing
+    ledger_kernel
+    ledger_signer
+    ledger_testing
+allow_indirect_imports = True
+
+[importlinter:contract:ledger-app-receiver-declared-edges]
+name = ledger-app-receiver imports only the workspace packages it declares
+type = forbidden
+source_modules =
+    ledger_app_receiver
+forbidden_modules =
+    ledger_app_api
+    ledger_app_migrate
     ledger_app_signer
     ledger_app_worker
     ledger_country_do
@@ -140,6 +165,7 @@ source_modules =
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_worker
     ledger_country_do
     ledger_country_do_testing
@@ -161,6 +187,7 @@ source_modules =
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_country_do
     ledger_country_do_testing
@@ -182,6 +209,7 @@ source_modules =
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do_testing
@@ -201,6 +229,7 @@ source_modules =
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_devtools
@@ -218,6 +247,7 @@ source_modules =
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do
@@ -238,6 +268,7 @@ source_modules =
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do
@@ -256,6 +287,7 @@ source_modules =
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do
@@ -276,6 +308,7 @@ source_modules =
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do
@@ -296,6 +329,7 @@ source_modules =
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do
@@ -315,6 +349,7 @@ source_modules =
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do
@@ -337,6 +372,7 @@ source_modules =
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do
@@ -358,6 +394,7 @@ source_modules =
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do
@@ -376,6 +413,7 @@ source_modules =
 forbidden_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do
@@ -408,6 +446,7 @@ forbidden_modules =
     joserfc
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do
@@ -459,6 +498,7 @@ forbidden_modules =
     joserfc
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do._manifest
@@ -526,6 +566,7 @@ forbidden_modules =
     joserfc
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do_testing
@@ -633,6 +674,7 @@ forbidden_modules =
     joserfc
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do
@@ -760,6 +802,7 @@ forbidden_modules =
     joserfc
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do
@@ -887,6 +930,7 @@ forbidden_modules =
     joserfc
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do
@@ -1014,6 +1058,7 @@ forbidden_modules =
     joserfc
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do
@@ -1093,6 +1138,7 @@ type = forbidden
 source_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_worker
     ledger_country_do
     ledger_country_do_testing
@@ -1139,6 +1185,7 @@ type = forbidden
 source_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
     ledger_country_do
@@ -1185,6 +1232,7 @@ type = forbidden
 source_modules =
     ledger_app_api
     ledger_app_migrate
+    ledger_app_receiver
     ledger_app_signer
     ledger_app_worker
 forbidden_modules =

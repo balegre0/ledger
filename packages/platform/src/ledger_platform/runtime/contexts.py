@@ -279,7 +279,9 @@ class ChannelContext:
     telemetry: Telemetry
     auth: Authentication
     """The app's request authentication: the channel's public routers declare ``Depends(context.auth.caller)``
-    (its ``PermissionSource`` is fiscal-kit's ``CompanyDirectory``, Decision 4)."""
+    (its ``PermissionSource`` is fiscal-kit's ``CompanyDirectory``, Decision 4). In the receiver it proves
+    nobody (``Authentication.none``) and a receiver route that declares it fails the start: the channel
+    proves the authority and other emitters by its own seeds, tokens and signatures."""
     http: OutboundHttp
     """The clients the channel calls out with (an authority, buyers): redirects never followed, the
     environment's proxies ignored, every request traced and measured under the client's name."""
@@ -299,7 +301,8 @@ class ChannelParts:
     routers: Sequence[APIRouter] = ()
     """Public routes, mounted by ``api``."""
     receiver_routers: Sequence[APIRouter] = ()
-    """Mounted by ``receiver``."""
+    """Mounted by ``receiver`` (§3.8): API routes under ``/<key>/``, in lower case, proving no token of ours
+    (``runtime.assembly``); a route that takes an inbound document declares its size (``larger_body``)."""
     consumers: Sequence[ConsumerSpec] = ()
     jobs: Sequence[JobSpec] = ()
     checks: Mapping[str, Check] = NO_CHECKS
