@@ -3,6 +3,9 @@ extend-exclude = [
     "uv.lock",
     "countries/do/src/ledger_country_do/channels/ecf_v1/adapters/xsd/",
     "countries/do/tests/contract/golden/",
+    # The program ledgers quote the owner and DGII verbatim, in Spanish, and carry words such as CHECK in capitals.
+    "docs/handoff/PROGRAM.md",
+    "docs/handoff/DECISION-LEDGER-*.md",
 ]
 
 [default]
