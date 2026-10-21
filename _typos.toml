@@ -5,6 +5,9 @@ extend-exclude = [
     "countries/do/tests/contract/golden/",
     # protoc's output (ledger_devtools.protos): serialized descriptors, spelled by the contract, not here.
     "modules/*/src/*/adapters/grpc/_generated/",
+    # The program ledgers quote the owner and DGII verbatim, in Spanish, and carry words such as CHECK in capitals.
+    "docs/handoff/PROGRAM.md",
+    "docs/handoff/DECISION-LEDGER-*.md",
 ]
 
 [default]

@@ -72,7 +72,7 @@ the database-enforced isolation, the custody model and a safe marketplace cannot
 **Two layers:**
 1. **Engine (what exists):** fiscal compliance, custody, tenancy, ledger, public API. Sold directly to POS/ERP vendors and used by our own apps.
 2. **ERP layer:** decided by a 5-day experiment after the first TesteCF run. Run Odoo CE and ERPNext in Docker with a thin connector to
-   the engine; model one Dominican SME month (chart of accounts, ITBIS, a stock item, a POS sale, bank reconciliation, 606/607);
+   the engine; model one Dominican small-business month (chart of accounts, ITBIS, a stock item, a POS sale, bank reconciliation, 606/607);
    measure connector size, what needs Enterprise or OCA modules, upgrade cost, and customization effort. In parallel, a 3-day GL-core spike on the chassis for a cost reference.
    Decision rule: a framework covering at least 80% with a connector under about 1.5k lines is adopted. Record as ADR 0012.
 
@@ -91,7 +91,7 @@ reports (606 and the IT-1 data first; accountants choose the software for small 
 reconciliation, payroll via a partner (regulated, high liability), second country, then extensions/marketplace. CRM and BI: integrate.
 
 **Feasibility, honestly.** Agents can generate ERP-breadth code in 1-2 years. They cannot supply accounting judgment, regulatory
-verification, support, implementation services or sales. A solo founder can realistically reach a deep Dominican SME suite plus the engine
+verification, support, implementation services or sales. A solo founder can realistically reach a deep Dominican small-business suite plus the engine
 by year 3; it needs 3-6 people. Full Odoo/SAP breadth across many countries is a direction, not a plan.
 
 ## 6. Business and regulatory facts the jurors established
