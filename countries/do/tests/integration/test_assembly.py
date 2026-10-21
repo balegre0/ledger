@@ -24,7 +24,6 @@ from ledger_country_do.channels.ecf_v1.application.emission import SettleTooShor
 from ledger_country_do.channels.ecf_v1.assembly import SettingRefusedError, assemble
 from ledger_country_do.channels.ecf_v1.domain.fields import CHANNEL_FIELDS
 from ledger_country_do.channels.ecf_v1.settings import DoEcfSettings
-from ledger_country_do_testing.fiscal import fiscal_draft
 from ledger_fiscal_kit.channels import Channel, ResumeReason
 from ledger_fiscal_kit.drafts import DocumentRef
 from ledger_fiscal_kit.ports import ARCHIVE_PORT, SIGNER_PORT
@@ -78,7 +77,8 @@ def test_the_channel_assembles_with_its_definition_routes_and_migrations(context
     assert definition.sources
     assert [route for router in parts.routers for route in router.routes]  # its ranges
     assert all(router.prefix == PREFIX for router in parts.routers)
-    assert (parts.resources, parts.jobs, parts.consumers, parts.receiver_routers) == ((), (), (), ())
+    assert (parts.resources, parts.consumers, parts.receiver_routers) == ((), (), ())
+    assert [spec.kind for spec in parts.jobs] == ["do_ecf.advance"]
     assert parts.migrations is not None
     assert parts.migrations.schema == "do_ecf"
 
@@ -99,6 +99,7 @@ def test_migrate_reads_no_archive_and_gets_the_channel_s_migrations_alone(
     bound = {name: value for name, value in ports.items() if name != ARCHIVE_PORT.name}
     parts = assemble(contexts(settings=RECEIVED, bound=bound, role="migrate"))
     assert (parts.routers, parts.resources) == ((), ())
+    assert [spec.kind for spec in parts.jobs] == ["do_ecf.advance"]  # declared: every app hands its handler
     assert parts.migrations is not None
     assert parts.migrations.schema == "do_ecf"
     with pytest.raises(BindingMissingError, match="'ArchivePort'"):
@@ -169,18 +170,12 @@ async def test_roots_that_cannot_be_read_stop_the_worker_without_naming_their_fi
     assert caught.value.code == "do_ecf_trusted_roots_unreadable"
 
 
-async def test_until_documents_are_issued_the_channel_answers_nothing_but_its_requirements(
-    contexts: Contexts,
-) -> None:
-    """``check``, ``issue``, ``status``, ``resume``, ``representation``: built by the tasks to come."""
+async def test_the_channel_answers_no_status_resume_or_representation_yet(contexts: Contexts) -> None:
+    """``status``, ``resume``, ``representation``: built by the tasks to come (19, 24)."""
     channel = assemble(contexts(settings=RECEIVED)).channel
     assert isinstance(channel, DoEcfChannel)
     document = DocumentRef(new_id())
-    with pytest.raises(ChannelNotReadyError, match="do-ecf-v1 does not issue documents yet"):
-        await channel.check(CALL, fiscal_draft())
-    with pytest.raises(ChannelNotReadyError):
-        await channel.issue(CALL, fiscal_draft(), sign_within=None)
-    with pytest.raises(ChannelNotReadyError):
+    with pytest.raises(ChannelNotReadyError, match="do-ecf-v1 does not answer this yet"):
         await channel.status(CALL, document)
     with pytest.raises(ChannelNotReadyError):
         await channel.resume(CALL, CompanyId(new_id()), ResumeReason.RANGE_REGISTERED)

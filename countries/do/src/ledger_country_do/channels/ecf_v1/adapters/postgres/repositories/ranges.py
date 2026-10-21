@@ -25,7 +25,13 @@ from ledger_country_do.channels.ecf_v1.adapters.postgres.tables import (
 from ledger_country_do.channels.ecf_v1.application.ranges import NumberingRange, Ranges
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
-from ledger_country_do.channels.ecf_v1.domain.numbering import RangeState, RangeStatus, Released, choose
+from ledger_country_do.channels.ecf_v1.domain.numbering import (
+    NoNumberAvailableError,
+    RangeState,
+    RangeStatus,
+    Released,
+    choose,
+)
 from ledger_kernel.pagination import page_of
 from ledger_platform.data import paged
 lazy from ledger_country_do.channels.ecf_v1.domain.numbering import Allocation
@@ -162,24 +168,52 @@ class PgRanges(Ranges):
         )
         return tuple(registered.range for registered in found)
 
-    @override
-    async def allocate(self, environment: Environment, ecf_type: EcfType, *, now: datetime) -> Allocation:
-        ranges = await self.series(environment, ecf_type)
+    def _of_series(self, environment: Environment, ecf_type: EcfType) -> tuple[ColumnElement[bool], ...]:
         owner = self._owner()
-        of_series = (
+        return (
             ReleasedNumberRecord.organization_id == owner["organization_id"],
             ReleasedNumberRecord.company_id == owner["company_id"],
             ReleasedNumberRecord.mode == owner["mode"],
             ReleasedNumberRecord.environment == environment.value,
             ReleasedNumberRecord.ecf_type == ecf_type.value,
         )
+
+    async def _released(self, environment: Environment, ecf_type: EcfType) -> list[Released]:
         rows = await self._connection.execute(
-            select(ReleasedNumberRecord.sequence, ReleasedNumberRecord.available_at).where(*of_series)
+            select(ReleasedNumberRecord.sequence, ReleasedNumberRecord.available_at).where(
+                *self._of_series(environment, ecf_type)
+            )
         )
-        released = [
+        return [
             Released(ecf_type=ecf_type, sequence=sequence, available_at=available_at)
             for sequence, available_at in rows.all()
         ]
+
+    @override
+    async def available(self, environment: Environment, ecf_type: EcfType, *, now: datetime) -> bool:
+        ranges = await self._ranges(
+            self._selected().where(
+                NumberingRangeRecord.environment == environment.value,
+                NumberingRangeRecord.ecf_type == ecf_type.value,
+            )
+        )
+        released = await self._released(environment, ecf_type)
+        try:
+            choose(
+                ecf_type=ecf_type,
+                ranges=[registered.range for registered in ranges],
+                released=released,
+                now=now,
+            )
+        except NoNumberAvailableError:
+            return False
+        return True
+
+    @override
+    async def allocate(self, environment: Environment, ecf_type: EcfType, *, now: datetime) -> Allocation:
+        ranges = await self.series(environment, ecf_type)
+        of_series = self._of_series(environment, ecf_type)
+        released = await self._released(environment, ecf_type)
         allocation = choose(ecf_type=ecf_type, ranges=ranges, released=released, now=now)
         if allocation.released:
             await self._connection.execute(

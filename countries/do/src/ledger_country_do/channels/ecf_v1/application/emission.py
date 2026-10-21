@@ -1,21 +1,16 @@
-"""Emitting an e-CF end to end: total, route, write, sign, check, send, poll, map (spec §8.5, §8.6.3-§8.6.4).
+"""Emitting an e-CF end to end for the spike CLI: sign, send, poll, map (spec §8.5, §8.6.3-§8.6.4).
 
-Emission is two steps, so a caller can keep what was signed before anything leaves (v2-M3 persists it):
+The channel itself signs in ``Channel.issue`` and its ``do_ecf.advance`` job (``signing``; Task 19's job
+steps submit and poll, one call per run); this module keeps the spike's own loop (``ledger-dgii-spike``,
+retired in Task 27). Emission is two steps, so a caller can keep what was signed before anything leaves:
 
-* ``sign(draft) -> Signed``. Totals with the regime's rates on the issue date; the route (``RFCE`` for a type
-  32 under the threshold). The e-CF written and checked, signed (``FechaHoraFirma`` is the clock's moment of
-  signing) and checked again; its security code is the first six characters of its signature value. On the
-  RFCE route the summary is written with that code, signed and checked too. Nothing is signed unless DGII's
-  side is ready (``Authority.require_ready``: hosts allowed, connections open). The signer is told the moment
-  of signing and the e-NCF; whether the certificate covers that moment is the signer's rule, not asked here
-  first (``Signatures``' errors: ``CertificateNotValidError``, ``CertificateMissingError``...). Nothing is
-  returned whose signature came back more than ``MAX_SIGNING_SKEW`` from that moment (``SigningSkewError``: a
-  queued signer, a clock that jumped). ``sign`` raises, or returns everything signed with its QR.
+* ``sign(draft) -> Signed``: ``signing.Signing.sign``, once DGII's side is ready
+  (``Authority.require_ready``: hosts allowed, connections open), the range expiring when the draft says.
 * ``send(signed) -> Emitted`` **never raises a pack error**: whatever stops it parks the document, ``Emitted``
   carrying the signed documents, any track id and the last answer, and ``unknown`` saying why (``Unknown``:
   the error's code, DGII's failure where there is one, and whether the document left: ``False`` certainly
   not, ``True`` DGII answered about it, ``None`` it may be at DGII). A parked document is never sent again
-  here: whoever resumes it asks DGII first (track ids for an e-CF, ``consultarfce`` for an RFCE: v2-M3).
+  here: whoever resumes it asks DGII first (track ids for an e-CF, ``consultarfce`` for an RFCE).
   **Binding rule:** any other exception escaping ``send`` (a defect: not a pack error) means the outcome is
   unknown: the document may be at DGII, and the caller must never send it again; it resumes it as a parked
   one, asking DGII first.
@@ -29,7 +24,7 @@ Emission is two steps, so a caller can keep what was signed before anything leav
     ``RECEIPT_TOLERANCE`` before the moment of signing (an older one is another, earlier document). Anything
     else (none listed yet, only older ones, CerteCF has no such service, the question fails) parks it: the
     spike never sends a document twice. Then polled on the schedule (1, 2, 5, 10, 30, 60 s) until a final
-    code; after it the document is still pending with its track id (v2-M3's job continues).
+    code; after it the document is still pending with its track id.
   - An answer that names another issuer or e-NCF than ours is never taken as ours (``AnswerMismatchError``).
   - ``budget`` (``SEND_BUDGET``) bounds the whole send, calls, settle delay and polls together: a poll whose
     wait would pass it is not made (still pending), and a call still running when it runs out is cut short
@@ -38,17 +33,14 @@ Emission is two steps, so a caller can keep what was signed before anything leav
     rejection with ``secuenciaUtilizada = false`` releases the number, any other burns it; a refusal at the
     door burns it too (never reuse what DGII may have recorded).
 
-``emit(draft)`` is ``send(await sign(draft))``. The use case holds no state between documents: numbering,
-persistence and retries across processes are v2-M3's (the spike's caller supplies each e-NCF).
+``emit(draft)`` is ``send(await sign(draft))``. The use case holds no state between documents: the spike's
+caller supplies each e-NCF.
 """
 
 import asyncio
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import ClassVar, Final, Required, TypedDict, Unpack, final
 lazy from collections.abc import Awaitable
-lazy from datetime import datetime
-lazy from uuid import UUID
 
 from ledger_country_do.channels.ecf_v1.application.ports import (
     AuthorityUnavailableError,
@@ -57,20 +49,11 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
     Received,
     Refused,
 )
+from ledger_country_do.channels.ecf_v1.application.signing import Signing
 from ledger_country_do.channels.ecf_v1.domain import polling
-from ledger_country_do.channels.ecf_v1.domain.errors import EcfConflictError, EcfError, EcfUnavailableError
-from ledger_country_do.channels.ecf_v1.domain.notation import local_date
-from ledger_country_do.channels.ecf_v1.domain.printed import (
-    OFFICIAL_QR,
-    EcfQrData,
-    RfceQrData,
-    qr_url,
-    rfce_qr_url,
-    security_code,
-)
-from ledger_country_do.channels.ecf_v1.domain.routing import Route, route
+from ledger_country_do.channels.ecf_v1.domain.errors import EcfError, EcfUnavailableError
+from ledger_country_do.channels.ecf_v1.domain.printed import OFFICIAL_QR
 from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiCode, DgiiService, decide
-from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do.regime import REGIME
 lazy from ledger_country_do.channels.ecf_v1.application.ports import (
     Answer,
@@ -78,37 +61,22 @@ lazy from ledger_country_do.channels.ecf_v1.application.ports import (
     EcfFormat,
     Reception,
     Signatures,
-    SignedDocument,
     SigningAs,
 )
+lazy from ledger_country_do.channels.ecf_v1.application.signing import Signed
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 lazy from ledger_country_do.channels.ecf_v1.domain.printed import QrHosts
 lazy from ledger_country_do.channels.ecf_v1.domain.status_map import Outcome
-lazy from ledger_country_do.channels.ecf_v1.domain.totals import Totals
 lazy from ledger_kernel.clock import Clock, Sleep
 lazy from ledger_kernel.regimes import RegimeDef
 
 POLL_SCHEDULE: Final = tuple(float(seconds) for seconds in polling.POLL_SCHEDULE)
-MAX_SIGNING_SKEW: Final = timedelta(minutes=5)
-"""How far a signature may come back from its ``FechaHoraFirma``, either way.
-
-Coupled to the signer: its ``LEDGER_SIGNER_SIGNING_SKEW_SECONDS`` defaults to the same 300 s and must never be
-configured below it (a test pins the value)."""
 SETTLE_DELAY: Final = polling.SETTLE_DELAY.total_seconds()
 """Seconds waited after an unknown outcome before DGII is asked: at least ``Authority.attempt_limit`` (20 s by
 default, ``DgiiTimeouts.total``), which ``Emitter`` checks when it is built."""
 SEND_BUDGET: Final = 300.0
 """Seconds one ``send`` may take in all: the schedule (108 s), the settle delay and the calls' own limits."""
-
-
-class SequenceExpiredError(EcfConflictError):
-    """The number's range ended before the moment of signing: a document parked past it needs a new number."""
-
-    code: ClassVar[str] = "do_ecf_sequence_expired"
-
-    def __init__(self) -> None:
-        super().__init__("the number's range expired before the moment of signing")
 
 
 class SettleTooShortError(EcfError):
@@ -121,20 +89,6 @@ class SettleTooShortError(EcfError):
 
     def __init__(self) -> None:
         super().__init__("the settle delay is shorter than the longest attempt at sending a document")
-
-
-class SigningSkewError(EcfUnavailableError):
-    """A signature came back too far from its stated moment of signing; signing again may succeed.
-
-    The signer's own clock disagreeing with that moment is another matter (``SignerClockSkewError``, a
-    conflict): signing again from the same clock would be refused again.
-    """
-
-    code: ClassVar[str] = "do_ecf_signing_skew"
-
-    def __init__(self) -> None:
-        minutes = int(MAX_SIGNING_SKEW.total_seconds() // 60)
-        super().__init__(f"a signature came back more than {minutes} minutes from its moment of signing")
 
 
 class AnswerMismatchError(EcfUnavailableError):
@@ -167,26 +121,6 @@ class EmitterOptions(TypedDict, total=False):
     settle: float
     budget: float
     regime: RegimeDef
-
-
-@final
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Signed:
-    """A document signed and checked, ready to send and to keep: what a printed representation shows too."""
-
-    draft: EcfDraft
-    totals: Totals
-    route: Route
-    signed_at: datetime
-    signed_ecf: bytes
-    certificate: UUID
-    """The certificate that signed the e-CF (the signer's id), for the archive."""
-    signed_rfce: bytes | None
-    """The signed RFCE on the RFCE route; ``None`` on the reception route."""
-    rfce_certificate: UUID | None
-    """The certificate that signed the RFCE; ``None`` on the reception route."""
-    security_code: str
-    qr: str
 
 
 @final
@@ -262,16 +196,12 @@ class Emitter:
     __slots__ = (
         "_authority",
         "_budget",
-        "_clock",
         "_environment",
-        "_qr_hosts",
-        "_regime",
         "_schedule",
         "_settle",
-        "_signer",
+        "_signing",
         "_sleep",
         "_who",
-        "_xml",
     )
 
     def __init__(
@@ -283,18 +213,16 @@ class Emitter:
         qr_hosts: QrHosts = OFFICIAL_QR,
         **options: Unpack[EmitterOptions],
     ) -> None:
-        self._xml = xml
-        self._signer = signer
+        self._signing = Signing(
+            xml, signer, clock=options["clock"], qr_hosts=qr_hosts, regime=options.get("regime", REGIME)
+        )
         self._authority = authority
         self._who = options["who"]
         self._environment = options["environment"]
-        self._clock = options["clock"]
         self._sleep = options["sleep"]
         self._schedule = options.get("schedule", POLL_SCHEDULE)
         self._settle = options.get("settle", SETTLE_DELAY)
         self._budget = options.get("budget", SEND_BUDGET)
-        self._qr_hosts = qr_hosts
-        self._regime = options.get("regime", REGIME)
         if self._settle < authority.attempt_limit():
             raise SettleTooShortError
         authority.require_ready(self._environment)
@@ -306,55 +234,8 @@ class Emitter:
     async def sign(self, draft: EcfDraft) -> Signed:
         """``draft`` signed and checked, its RFCE too on the RFCE route (see the module)."""
         self._authority.require_ready(self._environment)
-        totals = compute_totals(draft, self._regime)
-        where = route(draft, totals, self._regime)
-        signed_at = self._clock()
-        if draft.sequence_expires_on is not None and local_date(signed_at) > draft.sequence_expires_on:
-            raise SequenceExpiredError  # DGII dates the range: it ran up to that day, in Santo Domingo
-        reference = str(draft.encf)
-        signed = await self._sign(self._xml.ecf(draft, totals, signed_at=signed_at), signed_at, reference)
-        code = security_code(self._xml.signed(draft, signed.document, rfce=False))
-        if where is Route.RFCE:
-            unsigned = self._xml.rfce(draft, totals, security_code=code)
-            summary = await self._sign(unsigned, signed_at, reference)
-            self._xml.signed(draft, summary.document, rfce=True)
-            qr = rfce_qr_url(
-                RfceQrData(draft.issuer.rnc, draft.encf, totals.total, code),
-                environment=self._environment,
-                hosts=self._qr_hosts,
-            )
-            return Signed(
-                draft=draft,
-                totals=totals,
-                route=where,
-                signed_at=signed_at,
-                signed_ecf=signed.document,
-                certificate=signed.certificate,
-                signed_rfce=summary.document,
-                rfce_certificate=summary.certificate,
-                security_code=code,
-                qr=qr,
-            )
-        data = EcfQrData(
-            issuer_rnc=draft.issuer.rnc,
-            buyer_rnc=draft.buyer.rnc,
-            encf=draft.encf,
-            issued_on=draft.issued_on,
-            total=totals.total,
-            signed_at=signed_at,
-            security_code=code,
-        )
-        return Signed(
-            draft=draft,
-            totals=totals,
-            route=where,
-            signed_at=signed_at,
-            signed_ecf=signed.document,
-            certificate=signed.certificate,
-            signed_rfce=None,
-            rfce_certificate=None,
-            security_code=code,
-            qr=qr_url(data, environment=self._environment, hosts=self._qr_hosts),
+        return await self._signing.sign(
+            self._who, draft, environment=self._environment, expires_on=draft.sequence_expires_on
         )
 
     async def send(self, signed: Signed) -> Emitted:
@@ -372,13 +253,6 @@ class Emitter:
         except EcfError as error:
             unknown = Unknown.of(error, sent=progress.sent)
         return Emitted(signed=signed, track_id=progress.track_id, outcome=progress.outcome, unknown=unknown)
-
-    async def _sign(self, document: bytes, signed_at: datetime, reference: str) -> SignedDocument:
-        """``document`` signed, once its signature is back within ``MAX_SIGNING_SKEW`` of ``signed_at``."""
-        signed = await self._signer.document(self._who, document, signed_at=signed_at, reference=reference)
-        if abs(self._clock() - signed_at) > MAX_SIGNING_SKEW:
-            raise SigningSkewError
-        return signed
 
     async def _submitted[R](self, submit: Awaitable[R], progress: _Progress) -> R:
         """``submit``'s answer, ``progress.sent`` saying whether the document left (see ``Unknown.sent``).

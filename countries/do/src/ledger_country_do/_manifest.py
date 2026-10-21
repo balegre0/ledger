@@ -176,6 +176,15 @@ MANIFEST: Final = PackageManifest.model_validate(
                         },
                     ],
                 },
+                "jobs": [
+                    {
+                        "kind": "do_ecf.advance",
+                        "timeout": "3m",
+                        "max_attempts": 50,
+                        "deadline": "15d",
+                        "concurrency": 16,
+                    },
+                ],
             },
         ],
     }

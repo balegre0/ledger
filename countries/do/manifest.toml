@@ -94,3 +94,11 @@ public = "received_document.created"
 [[channels.events.publishes]]
 type = "fiscal_channel.requirements.changed"
 version = 1
+
+# A numbered document's way to DGII: signed (Task 18's step), then submitted and polled (Task 19's).
+[[channels.jobs]]
+kind = "do_ecf.advance"
+timeout = "3m"                       # one outbound call per run (Decision 10)
+max_attempts = 50                    # failures; RunAgain does not count
+deadline = "15d"
+concurrency = 16

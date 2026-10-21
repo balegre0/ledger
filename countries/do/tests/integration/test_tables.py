@@ -11,11 +11,18 @@ from uuid import UUID
 lazy from collections.abc import Callable
 
 import pytest
-from psycopg.errors import CheckViolation, ExclusionViolation, ForeignKeyViolation, InsufficientPrivilege
+from psycopg.errors import (
+    CheckViolation,
+    ExclusionViolation,
+    ForeignKeyViolation,
+    InsufficientPrivilege,
+    UniqueViolation,
+)
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 from ledger_country_do.channels.ecf_v1.adapters.postgres.tables import (
+    DocumentRecord,
     NumberingRangeRecord,
     NumberingSeriesRecord,
     ReleasedNumberRecord,
@@ -76,10 +83,50 @@ def released(tenant: Tenant, sequence: int = 1) -> dict[str, object]:
     )
 
 
+def a_document(tenant: Tenant, **changes: object) -> dict[str, object]:
+    """A numbered 31 of ``RANGE`` (``a_range``), unsigned."""
+    row: dict[str, object] = (
+        owned(tenant)
+        | SERIES
+        | {
+            "id": new_id(),
+            "invoice_id": new_id(),
+            "sequence": 1,
+            "range_id": RANGE,
+            "state": "numbered",
+            "route": "reception",
+            "delivery_state": "not_started",
+            "issued_on": date(2026, 10, 20),
+            "draft": dict[str, object](),
+            "version": 1,
+            "created_at": NOW,
+            "updated_at": NOW,
+        }
+    )
+    return row | changes
+
+
+SIGNED: Final[dict[str, object]] = {
+    "state": "signed",
+    "signed_at": NOW,
+    "security_code": "AbC123",
+    "qr_url": "https://ecf.dgii.gov.do/testecf/consultatimbre?x",
+    "emission_mode": "normal",
+    "ecf_key": "do-ecf-v1/test/o/c/ecf/d.xml",
+    "ecf_sha256": bytes(32),
+}
+"""What a signed document records beside its number."""
+SUMMARIZED: Final = SIGNED | {
+    "route": "rfce",
+    "rfce_key": "do-ecf-v1/test/o/c/rfce/d.xml",
+    "rfce_sha256": bytes(32),
+}
+
 ROWS: Final[dict[str, tuple[type[DoEcfTable], Callable[[Tenant], dict[str, object]]]]] = {
     "numbering_series": (NumberingSeriesRecord, series),
     "numbering_ranges": (NumberingRangeRecord, a_range),
     "released_numbers": (ReleasedNumberRecord, released),
+    "documents": (DocumentRecord, a_document),
 }
 
 
@@ -173,6 +220,8 @@ async def test_a_live_row_is_of_the_live_environment_and_a_test_row_of_a_test_on
     tenant = Tenant(organization, company, mode)
     placed = {"mode": mode.value, "environment": environment}
     rows = [(ROWS[name][0], ROWS[name][1](tenant) | placed)]
+    if name == "documents":  # its range first, as placed
+        rows.insert(0, (NumberingRangeRecord, a_range(tenant) | placed))
     if name != "numbering_series":  # its series first, as placed
         rows.insert(0, (NumberingSeriesRecord, series(tenant) | placed))
     with pytest.raises(IntegrityError) as caught:
@@ -238,3 +287,87 @@ async def test_a_unit_without_a_company_in_a_mode_has_no_channel_view(module_dat
         async with module_database.unit(scope) as unit:
             with pytest.raises(InvalidValueError, match=r"unit\.scope"):
                 bind(unit)
+
+
+async def with_a_range(module_database: BoundDatabase, tenant: Tenant) -> None:
+    rows: list[tuple[type[DoEcfTable], dict[str, object]]] = [
+        (NumberingSeriesRecord, series(tenant)),
+        (NumberingRangeRecord, a_range(tenant)),
+    ]
+    await inserted(module_database, tenant, rows)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"state": "signed"},  # signed without a signature
+        SIGNED | {"state": "numbered"},  # a signature before signing
+        SIGNED | {"security_code": None},
+        SIGNED | {"qr_url": None},
+        SIGNED | {"emission_mode": None},
+        SIGNED | {"ecf_sha256": None},
+        SIGNED | {"ecf_key": None, "ecf_sha256": None},
+        SIGNED | {"ecf_sha256": bytes(31)},
+        SIGNED | {"rfce_key": "do-ecf-v1/test/o/c/rfce/d.xml", "rfce_sha256": bytes(32)},  # not its route
+        SIGNED | {"route": "rfce"},  # a summary signed and not kept
+        SUMMARIZED | {"rfce_sha256": None},
+        SUMMARIZED | {"rfce_sha256": bytes(33)},
+        {"route": "rfce", "rfce_key": "k", "rfce_sha256": bytes(32)},  # a summary before signing
+        {"state": "drafted"},
+        {"route": "email"},
+        {"delivery_state": "lost"},
+        SIGNED | {"emission_mode": "contingency"},
+        {"number_fate": "lost"},
+        {"sequence": 0},
+        {"version": 0},
+    ],
+)
+async def test_a_document_s_words_and_signature_are_checked(
+    module_database: BoundDatabase, change: dict[str, object]
+) -> None:
+    """Signed exactly in the states after signing, with all a signature records; a summary on its route."""
+    tenant = a_tenant()
+    await with_a_range(module_database, tenant)
+    with pytest.raises(IntegrityError) as caught:
+        await inserted(module_database, tenant, [(DocumentRecord, a_document(tenant, **change))])
+    assert isinstance(caught.value.orig, CheckViolation)
+
+
+@pytest.mark.parametrize("state", ["signed", "accepted", "rejected"])
+async def test_a_signed_document_records_its_signature_and_a_summary_its_own(
+    module_database: BoundDatabase, state: str
+) -> None:
+    tenant = a_tenant()
+    await with_a_range(module_database, tenant)
+    full = a_document(tenant, **SIGNED | {"state": state})
+    summary = a_document(tenant, **SUMMARIZED | {"state": state, "sequence": 2})
+    blocked = a_document(tenant, state="blocked", sequence=3)
+    await inserted(module_database, tenant, [(DocumentRecord, row) for row in (full, summary, blocked)])
+
+
+async def test_an_invoice_has_one_document_and_a_number_one_holder_until_released(
+    module_database: BoundDatabase,
+) -> None:
+    """Decision 35; and a number DGII released (``number_fate``) may number another document."""
+    tenant = a_tenant()
+    await with_a_range(module_database, tenant)
+    first = a_document(tenant)
+    await inserted(module_database, tenant, [(DocumentRecord, first)])
+    for twin in (a_document(tenant, invoice_id=first["invoice_id"], sequence=2), a_document(tenant)):
+        with pytest.raises(IntegrityError) as caught:
+            await inserted(module_database, tenant, [(DocumentRecord, twin)])
+        assert isinstance(caught.value.orig, UniqueViolation)
+    async with module_database.unit(tenant) as unit:
+        await unit.connection.execute(update(DocumentRecord).values(number_fate="released"))
+    await inserted(module_database, tenant, [(DocumentRecord, a_document(tenant))])
+    async with module_database.unit(tenant) as unit:
+        found = await unit.connection.execute(select(DocumentRecord.number_fate))
+        assert sorted(found.scalars().all(), key=str) == [None, "released"]
+
+
+async def test_a_document_belongs_to_a_range_of_its_company(module_database: BoundDatabase) -> None:
+    tenant = a_tenant()
+    await with_a_range(module_database, tenant)
+    with pytest.raises(IntegrityError) as caught:
+        await inserted(module_database, tenant, [(DocumentRecord, a_document(tenant, range_id=new_id()))])
+    assert isinstance(caught.value.orig, ForeignKeyViolation)

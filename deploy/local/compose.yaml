@@ -121,6 +121,9 @@ services:
       LEDGER_DATABASE_DIRECT_URL: postgresql+psycopg://ledger_app:ledger_app@postgres:5432/ledger
       LEDGER_SIGNER_ADDRESS: signer:50051
       LEDGER_DO_ECF_TRUSTED_ROOTS: /run/ledger/do-ecf/roots.pem
+      # Its jobs' concurrency, their lease renewals, its runners and headroom (PoolTooSmallError names the
+      # need): do_ecf.advance alone runs 16 at once. Each job kind a channel or module adds raises it.
+      LEDGER_DATABASE_POOL_SIZE: "50"
     volumes:
       # do-ecf-v1's trusted roots, which the worker requires: do/roots.sh writes a development root (local only;
       # a deployment's roots are the owner's, Owner item 7). Missing, compose refuses the stack.

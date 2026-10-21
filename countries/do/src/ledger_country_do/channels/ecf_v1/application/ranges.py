@@ -24,6 +24,7 @@ from ledger_country_do.channels.ecf_v1.domain.numbering import authorized
 from ledger_kernel.errors import NotFoundError
 from ledger_kernel.ids import new_id
 from ledger_kernel.tenancy import Mode
+lazy from ledger_country_do.channels.ecf_v1.application.documents import Advances, Documents, EcfDocument
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 lazy from ledger_country_do.channels.ecf_v1.domain.numbering import Allocation, Authorization, RangeState
@@ -82,6 +83,10 @@ class Ranges(Protocol, metaclass=ABCMeta):
         """Every range of ``environment``, of every type, as it stands."""
 
     @abstractmethod
+    async def available(self, environment: Environment, ecf_type: EcfType, *, now: datetime) -> bool:
+        """Whether a new document of the series would get a number at ``now``: a read, nothing locked."""
+
+    @abstractmethod
     async def allocate(self, environment: Environment, ecf_type: EcfType, *, now: datetime) -> Allocation:
         """The number a new document of the series gets at ``now``, taken (``numbering.choose``).
 
@@ -96,6 +101,10 @@ class Announcements(Protocol, metaclass=ABCMeta):
     @abstractmethod
     def requirements_changed(self) -> None:
         """What the channel requires of the unit's company changed: fiscal reviews its enrollments."""
+
+    @abstractmethod
+    def document_updated(self, document: EcfDocument) -> None:
+        """``document`` is new, or changed: its state at its version (``fiscal_channel.document.updated``)."""
 
 
 type AuditAction = Literal["numbering_range.register"]
@@ -113,10 +122,12 @@ class Audit(Protocol, metaclass=ABCMeta):
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NumberingUnit:
-    """One unit of work: the channel's numbering as one transaction sees it, and what it announces."""
+    """One unit of work: the channel's numbering and documents in one transaction, and what it announces."""
 
     tenant: Tenant
     ranges: Ranges
+    documents: Documents
+    advances: Advances
     announcements: Announcements
     audit: Audit
     now: datetime

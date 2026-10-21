@@ -1,6 +1,6 @@
 """The module fixtures (``ledger_testing.modules``), exercised with the platform as the module under test."""
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from functools import partial
 from http import HTTPStatus
@@ -16,6 +16,7 @@ from ledger_kernel.money import Currency, RoundingMode
 from ledger_kernel.regimes import Locale, RegimeDef, RegimeKey, RoundingPoint, RoundingRule, Source
 from ledger_platform._manifest import MANIFEST
 from ledger_platform.config.manifest import ChannelEntry, load_manifest
+from ledger_platform.data import JobPolicy
 from ledger_platform.data.migrations import SchemaMigrations, platform_migrations
 from ledger_platform.data.notifier import OUTBOX
 from ledger_platform.runtime.contexts import ChannelPack, ChannelParts, Module, ModuleParts
@@ -50,6 +51,10 @@ def test_a_module_s_schemas_are_the_platform_s_then_its_own() -> None:
     books = ModuleUnderTest(MANIFEST, migrations_of("books"))
     assert (books.schema, books.schemas) == ("books", ("platform", "books"))
     assert platform.publishes == frozenset()
+    assert platform.jobs == {
+        decl.kind: JobPolicy(max_attempts=decl.max_attempts, deadline=decl.deadline) for decl in MANIFEST.jobs
+    }
+    assert platform.jobs  # the platform's maintenance
 
 
 def test_the_schemas_of_the_modules_a_module_needs_come_from_their_manifests_before_its_own() -> None:
@@ -242,6 +247,10 @@ tier = "bronze"
 [[channels.events.publishes]]
 type = "fiscal_channel.requirements.changed"
 version = 1
+[[channels.jobs]]
+kind = "uy_ecf.tick"
+max_attempts = 3
+deadline = "1d"
 """
 
 
@@ -254,6 +263,7 @@ def test_a_country_s_channel_is_tested_with_the_modules_that_serve_its_ports() -
     )
     assert (channel.schema, channel.source) == ("uy_ecf", "uy-ecf-v1")
     assert channel.publishes == frozenset({"fiscal_channel.requirements.changed"})
+    assert channel.jobs == {"uy_ecf.tick": JobPolicy(max_attempts=3, deadline=timedelta(days=1))}
     assert [need.schema for need in channel.needs] == ["beta", "alpha"]
     assert channel.schemas == ("platform", "beta", "alpha", "uy_ecf")
     assert channel.owned == ("uy_ecf", "beta", "alpha")
