@@ -20,11 +20,20 @@ or the job first keeps that signature, and this one stays an orphan in the archi
 or the archive unavailable...), leaves the document ``numbered`` for the job (``SigningReport.deferred``).
 What is recorded is never undone by the budget: the recording unit runs after it, never cancelled midway.
 
+Two first requests for one invoice may both find no document: the series' lock orders them, and the
+second's insert meets the first's (``DocumentExistsError``); its unit rolls back, giving its number back,
+and it answers the first's document as a second call would, signing it if it may. A number is allocated at
+the moment the channel's clock reads (``Signing.now``), the one its signature states. A refusal no retry
+mends while the request signs (the signer's, the channel's checks of what came back) is reported
+(``SigningReport.failed``); the signer or the archive out of reach, or the budget spent, only deferred.
+
 ``advance`` is the job's step for a ``numbered`` document (Task 19 adds submission and polling): the same
 signing, then the same recording, from the stored draft. A company that cannot sign (no certificate, one not
 valid then, the signer's clock) parks it (``certificate``); a range that ended before the moment of signing
-blocks it (``blocked``, severity error: it needs another number); the signer or the archive unavailable is
-raised, for the job to run again later. A document past ``numbered`` waits for submission (``submission``).
+blocks it (``blocked``, severity error: it needs another number), and so does a refusal no retry mends,
+reported; the signer or the archive unavailable is raised, for the job to run again later. A document past
+``numbered`` waits for submission (``submission``). A job naming no document is a defect: reported, and a
+conflict (the job is dead at once, never retried).
 """
 
 import asyncio
@@ -36,7 +45,11 @@ from typing import ClassVar, Final, Protocol, final
 lazy from datetime import date
 lazy from uuid import UUID
 
-from ledger_country_do.channels.ecf_v1.application.documents import EcfDocument, Signature
+from ledger_country_do.channels.ecf_v1.application.documents import (
+    DocumentExistsError,
+    EcfDocument,
+    Signature,
+)
 from ledger_country_do.channels.ecf_v1.application.ports import (
     CertificateMissingError,
     CertificateNotValidError,
@@ -50,7 +63,11 @@ from ledger_country_do.channels.ecf_v1.domain.ecf import (
     Step,
     transition,
 )
-from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
+from ledger_country_do.channels.ecf_v1.domain.errors import (
+    EcfConflictError,
+    EcfError,
+    EcfUnavailableError,
+)
 from ledger_country_do.channels.ecf_v1.domain.mapping import (
     DraftObjectedError,
     ecf_draft,
@@ -63,6 +80,7 @@ from ledger_country_do.channels.ecf_v1.domain.routing import route
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do.regime import REGIME
 from ledger_fiscal_kit.objections import Objection
+from ledger_kernel.errors import InvalidInputError
 from ledger_kernel.ids import new_id
 lazy from ledger_country_do.channels.ecf_v1.application.ports import Archive, SigningAs
 lazy from ledger_country_do.channels.ecf_v1.application.ranges import NumberingUnit, NumberingUnits
@@ -96,7 +114,7 @@ class ParkReason(StrEnum):
     """Signed: submission (Task 19's step) takes it on."""
 
 
-class DocumentMissingError(EcfError):
+class DocumentMissingError(EcfConflictError):
     """A document the job or a recording names is not the unit's company's: a defect of whoever named it."""
 
     code: ClassVar[str] = "do_ecf_document_missing"
@@ -110,7 +128,11 @@ class SigningReport(Protocol, metaclass=ABCMeta):
 
     @abstractmethod
     def deferred(self, reason: str) -> None:
-        """A document stays ``numbered``: ``reason`` is the error's code, or ``TIMED_OUT``."""
+        """A document stays ``numbered`` for the job: ``reason`` is the error's code, or ``TIMED_OUT``."""
+
+    @abstractmethod
+    def failed(self, reason: str) -> None:
+        """Signing a document failed in a way no retry mends, or a defect: ``reason`` is the error's code."""
 
 
 @final
@@ -129,12 +151,6 @@ def _references(draft: FiscalDraft) -> tuple[DocumentRef, ...]:
 def _stated(encf: Encf, expires_on: date | None) -> date | None:
     """The expiry an e-CF of ``encf`` states: its range's, for the types DGII dates (none for 32 and 34)."""
     return None if encf.ecf_type in UNDATED_TYPES else expires_on
-
-
-def _present(document: EcfDocument | None) -> EcfDocument:
-    if document is None:
-        raise DocumentMissingError
-    return document
 
 
 def _waiting(document: EcfDocument) -> ParkReason:
@@ -169,7 +185,7 @@ class Issuing:
             accepted = await unit.documents.accepted(_references(draft))
             ecf_type = ecf_type_of(draft)
             missing = ecf_type is not None and not await unit.ranges.available(
-                environment, ecf_type, now=unit.now
+                environment, ecf_type, now=self._signing.now()
             )
         found = objections(draft, accepted=accepted, regime=self._regime)
         return (*found, RANGE_MISSING) if missing else found
@@ -182,15 +198,10 @@ class Issuing:
         ``DraftObjectedError`` for a draft with objections and ``NoNumberAvailableError`` when no number can
         be given: nothing is kept either way.
         """
-        to_sign: EcfDraft | None = None
-        async with self._units.unit(who.tenant) as unit:
-            document = await unit.documents.of_invoice(draft.document)
-            if document is None:
-                document, to_sign = await self._numbered(
-                    unit, draft, environment, delayed=sign_within is not None
-                )
-            elif sign_within is not None and document.state is EcfDocumentState.NUMBERED:
-                to_sign = await self._rebuilt(unit, document)
+        try:
+            document, to_sign = await self._found(draft, environment, who, sign_within=sign_within)
+        except DocumentExistsError:  # another request numbered it first: this unit rolled back
+            document, to_sign = await self._found(draft, environment, who, sign_within=sign_within)
         if sign_within is None or to_sign is None:
             return IssuedDocument(document=document, signed=document.signature is not None)
         try:
@@ -199,8 +210,11 @@ class Issuing:
         except TimeoutError:
             self._report.deferred(TIMED_OUT)
             return IssuedDocument(document=document, signed=False)
-        except EcfError as error:
+        except (EcfConflictError, EcfUnavailableError) as error:
             self._report.deferred(error.code)
+            return IssuedDocument(document=document, signed=False)
+        except (EcfError, InvalidInputError) as error:  # the job blocks it, reporting it again
+            self._report.failed(error.code)
             return IssuedDocument(document=document, signed=False)
         recorded = await self._recorded(who.tenant, document.id, Step.SIGN, signature)
         return IssuedDocument(document=recorded, signed=recorded.signature is not None)
@@ -208,7 +222,7 @@ class Issuing:
     async def advance(self, who: SigningAs, document_id: UUID) -> ParkReason:
         """The job's step for ``document_id`` (see the module); why the job waits next."""
         async with self._units.unit(who.tenant) as unit:
-            document = _present(await unit.documents.get(document_id, lock=False))
+            document = self._present(await unit.documents.get(document_id, lock=False))
             if document.state is not EcfDocumentState.NUMBERED:
                 return _waiting(document)
             to_sign = await self._rebuilt(unit, document)
@@ -218,7 +232,29 @@ class Issuing:
             return ParkReason.CERTIFICATE
         except SequenceExpiredError:
             return _waiting(await self._recorded(who.tenant, document_id, Step.BLOCK, None))
+        except InvalidInputError as error:  # the signer's refusal, or the channel's checks of what came back
+            self._report.failed(error.code)
+            return _waiting(await self._recorded(who.tenant, document_id, Step.BLOCK, None))
         return _waiting(await self._recorded(who.tenant, document_id, Step.SIGN, signature))
+
+    def _present(self, document: EcfDocument | None) -> EcfDocument:
+        """``document``, or ``DocumentMissingError``, reported (see the module)."""
+        if document is None:
+            self._report.failed(DocumentMissingError.code)
+            raise DocumentMissingError
+        return document
+
+    async def _found(
+        self, draft: FiscalDraft, environment: Environment, who: SigningAs, *, sign_within: timedelta | None
+    ) -> tuple[EcfDocument, EcfDraft | None]:
+        """``draft``'s document, numbered now if it has none, and what to sign when the request signs it."""
+        async with self._units.unit(who.tenant) as unit:
+            document = await unit.documents.of_invoice(draft.document)
+            if document is None:
+                return await self._numbered(unit, draft, environment, delayed=sign_within is not None)
+            if sign_within is not None and document.state is EcfDocumentState.NUMBERED:
+                return document, await self._rebuilt(unit, document)
+            return document, None
 
     async def _numbered(
         self, unit: NumberingUnit, draft: FiscalDraft, environment: Environment, *, delayed: bool
@@ -229,7 +265,7 @@ class Issuing:
         ecf_type = ecf_type_of(draft)
         if found or ecf_type is None:
             raise DraftObjectedError(found)
-        allocation = await unit.ranges.allocate(environment, ecf_type, now=unit.now)
+        allocation = await unit.ranges.allocate(environment, ecf_type, now=self._signing.now())
         ecf = ecf_draft(
             draft,
             number=allocation.encf,
@@ -299,7 +335,7 @@ class Issuing:
         """
         to = EcfDocumentState.SIGNED if step is Step.SIGN else EcfDocumentState.BLOCKED
         async with self._units.unit(tenant) as unit:
-            current = _present(await unit.documents.get(document_id, lock=True))
+            current = self._present(await unit.documents.get(document_id, lock=True))
             if current.state is not EcfDocumentState.NUMBERED:
                 return current
             moved = replace(

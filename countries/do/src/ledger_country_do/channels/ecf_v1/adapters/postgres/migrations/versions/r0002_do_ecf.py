@@ -30,6 +30,10 @@ STATES: Final = (
     "'accepted_conditionally', 'rejected', 'blocked', 'voided'"
 )
 UNSIGNED: Final = "'numbered', 'blocked', 'voided'"
+DIGESTS: Final = (
+    "(ecf_sha256 IS NULL OR octet_length(ecf_sha256) = 32) "
+    "AND (rfce_sha256 IS NULL OR octet_length(rfce_sha256) = 32)"
+)
 SIGNATURE: Final = " AND ".join(
     (
         f"(signed_at IS NULL) = (state IN ({UNSIGNED}))",
@@ -45,7 +49,12 @@ RFCE: Final = f"{SUMMARIZED} AND (rfce_key IS NULL) = (rfce_sha256 IS NULL)"
 
 
 def upgrade() -> None:
-    """The documents' table, its keys and checks, its policies; the channel's role deletes none."""
+    """The documents' table, its keys and checks, its policies; the channel's role deletes none.
+
+    A range's id is unique with its series too (``numbering_ranges_series_key``), so that a document's key to
+    its range names the range's environment and type: a 32 never holds a 31's number.
+    """
+    op.create_unique_constraint("numbering_ranges_series_key", "numbering_ranges", [*SERIES, "id"], schema=S)
     op.create_table(
         "documents",
         sa.Column("organization_id", sa.Uuid(), nullable=False),
@@ -77,8 +86,8 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint(*TENANT, "id", name="documents_pkey"),
         sa.UniqueConstraint(*TENANT, "invoice_id", name="documents_invoice_key"),
         sa.ForeignKeyConstraint(
-            [*TENANT, "range_id"],
-            [f"{S}.numbering_ranges.{column}" for column in (*TENANT, "id")],
+            [*SERIES, "range_id"],
+            [f"{S}.numbering_ranges.{column}" for column in (*SERIES, "id")],
             name="fk_documents_range",
         ),
         sa.CheckConstraint("mode IN ('test', 'live')", name="ck_documents_mode"),
@@ -99,9 +108,7 @@ def upgrade() -> None:
         sa.CheckConstraint("sequence BETWEEN 1 AND 9999999999", name="ck_documents_sequence"),
         sa.CheckConstraint(SIGNATURE, name="ck_documents_signature"),
         sa.CheckConstraint(RFCE, name="ck_documents_rfce"),
-        sa.CheckConstraint(
-            "octet_length(ecf_sha256) = 32 AND octet_length(rfce_sha256) = 32", name="ck_documents_digests"
-        ),
+        sa.CheckConstraint(DIGESTS, name="ck_documents_digests"),
         sa.CheckConstraint("version > 0", name="ck_documents_version"),
         schema=S,
     )

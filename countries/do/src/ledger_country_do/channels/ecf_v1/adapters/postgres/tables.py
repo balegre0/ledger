@@ -116,6 +116,7 @@ class NumberingRangeRecord(DoEcfTable):
         ),
         CheckConstraint("version > 0", name="ck_numbering_ranges_version"),
         Index("numbering_ranges_series", *SERIES),
+        UniqueConstraint(*SERIES, "id", name="numbering_ranges_series_key"),
     )
 
     organization_id: Mapped[UUID] = mapped_column(primary_key=True)
@@ -174,7 +175,10 @@ SIGNATURE_CHECK: Final = " AND ".join(
 _SUMMARIZED: Final = "(rfce_key IS NOT NULL) = (route = 'rfce' AND signed_at IS NOT NULL)"
 RFCE_CHECK: Final = f"{_SUMMARIZED} AND (rfce_key IS NULL) = (rfce_sha256 IS NULL)"
 """A summary is archived exactly for a signed document of the RFCE route."""
-DIGESTS_CHECK: Final = "octet_length(ecf_sha256) = 32 AND octet_length(rfce_sha256) = 32"
+DIGESTS_CHECK: Final = (
+    "(ecf_sha256 IS NULL OR octet_length(ecf_sha256) = 32) "
+    "AND (rfce_sha256 IS NULL OR octet_length(rfce_sha256) = 32)"
+)
 HELD_NUMBER: Final = "number_fate IS DISTINCT FROM 'released'"
 """A number a document holds: any but one DGII released (another document may take it again)."""
 
@@ -190,8 +194,8 @@ class DocumentRecord(DoEcfTable):
     __table_args__: tuple[SchemaItem, ...] = (
         UniqueConstraint(*TENANT, "invoice_id", name="documents_invoice_key"),
         ForeignKeyConstraint(
-            [*TENANT, "range_id"],
-            [f"{SCHEMA}.numbering_ranges.{column}" for column in (*TENANT, "id")],
+            [*SERIES, "range_id"],
+            [f"{SCHEMA}.numbering_ranges.{column}" for column in (*SERIES, "id")],
             name="fk_documents_range",
         ),
         *_series_words("documents"),

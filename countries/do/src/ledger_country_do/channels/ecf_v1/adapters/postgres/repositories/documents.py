@@ -3,7 +3,9 @@
 The repository is bound to its unit's tenant (a company in a mode) and names it in every statement;
 row-level security enforces it again (§2). A document is read with its range's last day (a join: a range
 keeps its authorization as registered). Its draft is the platform codec's JSON (``encode``), read back by
-fiscal-kit's ``read_draft``. A signature's columns are all there or none: the table checks it
+fiscal-kit's ``read_draft``. A second document for an invoice (a request that raced the one that
+committed first) is the table's refusal (``documents_invoice_key``), raised as ``DocumentExistsError``.
+A signature's columns are all there or none: the table checks it
 (``ck_documents_signature``), so a row is signed exactly when it has them all.
 """
 
@@ -12,13 +14,20 @@ lazy from collections.abc import Collection, Mapping
 lazy from datetime import date, datetime
 lazy from uuid import UUID
 
+from psycopg.errors import UniqueViolation
 from pydantic import TypeAdapter
 from sqlalchemy import insert, select, update
+from sqlalchemy.exc import IntegrityError
 lazy from sqlalchemy import ColumnElement, Row, Select
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ledger_country_do.channels.ecf_v1.adapters.postgres.tables import DocumentRecord, NumberingRangeRecord
-from ledger_country_do.channels.ecf_v1.application.documents import Documents, EcfDocument, Signature
+from ledger_country_do.channels.ecf_v1.application.documents import (
+    DocumentExistsError,
+    Documents,
+    EcfDocument,
+    Signature,
+)
 from ledger_country_do.channels.ecf_v1.application.ports import Archived
 from ledger_country_do.channels.ecf_v1.domain.ecf import DeliveryState, EcfDocumentState, EmissionMode
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
@@ -31,6 +40,8 @@ from ledger_platform.data.codec import JsonValue, encode
 lazy from ledger_kernel.tenancy import Mode, Tenant
 
 _DRAFT: Final = TypeAdapter[JsonValue](JsonValue)
+ONE_PER_INVOICE: Final = "documents_invoice_key"
+"""The constraint that gives an invoice one document."""
 _SIGNATURE_COLUMNS: Final[tuple[str, ...]] = (
     "signed_at",
     "security_code",
@@ -257,6 +268,15 @@ class PgDocuments(Documents):
 
     @override
     async def add(self, document: EcfDocument) -> None:
+        try:
+            await self._inserted(document)
+        except IntegrityError as error:
+            refusal = error.orig
+            if isinstance(refusal, UniqueViolation) and refusal.diag.constraint_name == ONE_PER_INVOICE:
+                raise DocumentExistsError from error
+            raise
+
+    async def _inserted(self, document: EcfDocument) -> None:
         await self._connection.execute(
             insert(DocumentRecord).values(
                 **self._owner(),

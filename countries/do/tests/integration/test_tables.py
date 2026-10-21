@@ -371,3 +371,17 @@ async def test_a_document_belongs_to_a_range_of_its_company(module_database: Bou
     with pytest.raises(IntegrityError) as caught:
         await inserted(module_database, tenant, [(DocumentRecord, a_document(tenant, range_id=new_id()))])
     assert isinstance(caught.value.orig, ForeignKeyViolation)
+
+
+@pytest.mark.parametrize("change", [{"ecf_type": "32"}, {"environment": "certecf"}])
+async def test_a_document_is_of_its_range_s_type_and_environment(
+    module_database: BoundDatabase, change: dict[str, object]
+) -> None:
+    """A 32 never holds a number of a 31's range, nor a CerteCF document one of TesteCF's."""
+    tenant = a_tenant()
+    await with_a_range(module_database, tenant)
+    other_series = series(tenant) | change
+    await inserted(module_database, tenant, [(NumberingSeriesRecord, other_series)])
+    with pytest.raises(IntegrityError) as caught:
+        await inserted(module_database, tenant, [(DocumentRecord, a_document(tenant, **change))])
+    assert isinstance(caught.value.orig, ForeignKeyViolation)

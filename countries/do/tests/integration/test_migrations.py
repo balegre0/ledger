@@ -133,6 +133,10 @@ def test_a_series_ranges_are_found_by_their_series(migrated: WorkerDatabase) -> 
             "CREATE INDEX numbering_ranges_series ON do_ecf.numbering_ranges "
             "USING btree (organization_id, company_id, mode, environment, ecf_type)"
         ),
+        "numbering_ranges_series_key": (
+            "CREATE UNIQUE INDEX numbering_ranges_series_key ON do_ecf.numbering_ranges "
+            "USING btree (organization_id, company_id, mode, environment, ecf_type, id)"
+        ),
     }
 
 

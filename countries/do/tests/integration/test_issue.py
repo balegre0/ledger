@@ -10,7 +10,7 @@ document: at once, or 5 s later when the request signs.
 
 import asyncio
 from dataclasses import replace
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from typing import Final, Protocol, Unpack, final, override
 lazy from collections.abc import Mapping
 lazy from decimal import Decimal
@@ -19,6 +19,8 @@ lazy from uuid import UUID
 import pytest
 from pydantic import TypeAdapter
 from sqlalchemy import select, update
+from structlog.testing import capture_logs
+lazy import psycopg
 
 from ledger_country_do.channels.ecf_v1.adapters.channel import DoEcfChannel
 from ledger_country_do.channels.ecf_v1.adapters.postgres.tables import DocumentRecord
@@ -38,7 +40,7 @@ from ledger_country_do.channels.ecf_v1.domain.numbering import (
 from ledger_country_do.channels.ecf_v1.settings import DoEcfSettings
 from ledger_country_do_testing.fiscal import Priced, fiscal_draft
 from ledger_fiscal_kit.drafts import DocumentRef, FiscalReference
-from ledger_fiscal_kit.ports import ARCHIVE_PORT, SIGNER_PORT, ArchivePort, SignerPort
+from ledger_fiscal_kit.ports import ARCHIVE_PORT, SIGNER_PORT, ArchivePort, SignatureRefusedError, SignerPort
 from ledger_fiscal_kit.status import FiscalStatus, Severity
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
@@ -69,6 +71,10 @@ EXPIRES: Final = date(2028, 12, 31)
 CHASSIS: Final = chassis_tables("do_ecf")
 PAYLOAD: Final = TypeAdapter(dict[str, JsonValue])
 RUN: Final = TypeAdapter(tuple[datetime, str])
+COUNT: Final = TypeAdapter(int)
+LOCK_WAITS: Final = (
+    "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()"
+)
 CREDIT: Final = EcfType.CREDIT_INVOICE
 CONSUMER: Final = EcfType.CONSUMER_INVOICE
 CREDIT_NOTE: Final = EcfType.CREDIT_NOTE
@@ -87,23 +93,38 @@ class Contexts(Protocol):
     ) -> ChannelContext: ...
 
 
+class CrashedError(Exception):
+    """The process dying right after the archive kept a document (a test's stand-in)."""
+
+
 @final
 class RecordingArchive(ArchivePort):
-    """The app's archive, every ``put_once`` recorded by key."""
+    """The app's archive, every ``put_once`` recorded by key.
 
-    __slots__ = ("_inner", "kept")
+    ``crash_once``: the next ``put_once`` keeps the bytes, then raises ``CrashedError``. ``stall``: every
+    ``put_once`` waits for ever (until cancelled), keeping nothing.
+    """
+
+    __slots__ = ("_inner", "crash_once", "kept", "stall")
 
     def __init__(self, inner: StoreArchive) -> None:
         self._inner = inner
         self.kept: list[str] = []
+        self.crash_once = False
+        self.stall = False
 
     @facade
     @override
     async def put_once(
         self, key: str, content: bytes, *, retain_until: date, media_type: str
     ) -> ArchivedObject:
+        if self.stall:
+            await asyncio.Event().wait()
         stored = await self._inner.put_once(key, content, retain_until=retain_until, media_type=media_type)
         self.kept.append(key)
+        if self.crash_once:
+            self.crash_once = False
+            raise CrashedError
         return stored
 
     @facade
@@ -621,11 +642,10 @@ async def test_the_job_blocks_a_document_whose_range_ended_before_it_was_signed(
     contexts: Contexts, module_database: BoundDatabase, ports: dict[str, object], clock: ManualClock
 ) -> None:
     tenant = a_tenant()
-    today = local_date(datetime.now(UTC))  # the database's day: allocation is the unit's
-    await with_range(module_database, tenant, expires_on=today + timedelta(days=1))
+    await with_range(module_database, tenant, expires_on=local_date(clock.now))  # its last day: today
     await channel_of(contexts).issue(call_of(tenant), draft_of(tenant), sign_within=None)
     document, _ = await document_row(module_database, tenant)
-    clock.now = datetime.combine(today + timedelta(days=3), time(12), tzinfo=UTC)
+    clock.advance(timedelta(days=1))
     assert await advanced(contexts, ports, tenant, document) == Park("blocked")
     assert [row[2:] for row in await documents_of(module_database, tenant)] == [("blocked", 2)]
     (_, blocked) = await updates_of(module_database, tenant)
@@ -636,11 +656,162 @@ async def test_the_job_blocks_a_document_whose_range_ended_before_it_was_signed(
 async def test_the_job_of_a_document_that_is_not_there_is_a_defect(
     contexts: Contexts, ports: dict[str, object]
 ) -> None:
-    with pytest.raises(DocumentMissingError, match="no such e-CF document"):
+    with (
+        capture_logs() as logged,
+        pytest.raises(DocumentMissingError, match="no such e-CF document") as caught,
+    ):
         await advanced(contexts, ports, a_tenant(), new_id())
+    assert caught.value.kind == "conflict"  # the job is dead at once: no retry finds it
+    assert [(line["event"], line["log_level"]) for line in logged] == [("do_ecf.signing_failed", "error")]
     (spec,) = assemble(contexts(settings=RECEIVED, bound=ports)).jobs
     unscoped = replace(
         job_of(a_tenant(), new_id()), scope=Tenant(OrganizationId(new_id()), CompanyId(new_id()), None)
     )
     with pytest.raises(InvalidValueError, match=r"do_ecf\.advance\.scope"):
         await spec.handler(unscoped)
+
+
+# ── review: races, refusals, crashes ─────────────────────────────────────────
+
+
+async def waiting_for_locks(admin: psycopg.AsyncConnection, count: int) -> None:
+    """Until ``count`` sessions of the database wait for a lock (the series' row)."""
+    async with asyncio.timeout(10):
+        while True:
+            answer = await admin.execute(LOCK_WAITS)
+            row = await answer.fetchone()
+            if row is not None and COUNT.validate_python(row[0]) >= count:
+                return
+            await asyncio.sleep(0.02)
+
+
+async def test_two_first_requests_for_one_invoice_number_one_document(
+    contexts: Contexts, module_database: BoundDatabase, admin: psycopg.AsyncConnection
+) -> None:
+    """Both find no document, both wait for the series: the second's insert meets the first's, rolls back
+    (its number given back) and answers the first's document."""
+    tenant = a_tenant()
+    await with_range(module_database, tenant)
+    channel = channel_of(contexts)
+    draft = draft_of(tenant)
+    holding, release = asyncio.Event(), asyncio.Event()
+
+    async def hold() -> None:
+        async with module_database.unit(tenant) as unit:
+            await bind(unit).ranges.series(Environment.TESTECF, CREDIT)
+            holding.set()
+            await release.wait()
+
+    holder = asyncio.create_task(hold())
+    await holding.wait()
+    racing = asyncio.gather(
+        channel.issue(call_of(tenant), draft, sign_within=None),
+        channel.issue(call_of(tenant), draft, sign_within=None),
+    )
+    await waiting_for_locks(admin, 2)
+    release.set()
+    await holder
+    first, second = await racing
+    assert first == second
+    assert (first.status.authority_number, first.status.version) == ("E310000000001", 1)
+    assert await documents_of(module_database, tenant) == [(str(draft.document), 1, "numbered", 1)]
+    after = await channel.issue(call_of(tenant), draft_of(tenant), sign_within=None)
+    assert after.status.authority_number == "E310000000002"  # the loser's number was given back
+
+
+@pytest.mark.parametrize(
+    "unable",
+    [TestSigner(failures=[SignatureRefusedError("xml_document_signed")]), TestSigner()],
+    ids=["refused-by-the-signer", "fails-its-own-check"],
+)
+async def test_the_job_blocks_a_document_that_cannot_be_signed_and_says_so(
+    contexts: Contexts, module_database: BoundDatabase, ports: dict[str, object], unable: TestSigner
+) -> None:
+    """A refusal no retry mends (the signer's, or the channel's own check of what came back) blocks it."""
+    tenant = a_tenant()
+    await with_range(module_database, tenant)
+    await channel_of(contexts).issue(call_of(tenant), draft_of(tenant), sign_within=None)
+    document, _ = await document_row(module_database, tenant)
+    with capture_logs() as logged:
+        assert await advanced(contexts, ports | {SIGNER_PORT.name: unable}, tenant, document) == Park(
+            "blocked"
+        )
+    assert [row[2:] for row in await documents_of(module_database, tenant)] == [("blocked", 2)]
+    assert [(line["event"], line["log_level"]) for line in logged] == [("do_ecf.signing_failed", "error")]
+
+
+async def test_a_request_whose_signature_fails_the_channel_s_check_leaves_it_numbered_and_says_so(
+    contexts: Contexts, module_database: BoundDatabase, ports: dict[str, object]
+) -> None:
+    tenant = a_tenant()
+    await with_range(module_database, tenant)
+    channel = channel_of(contexts, ports | {SIGNER_PORT.name: TestSigner()})  # signs nothing
+    with capture_logs() as logged:
+        issued = await channel.issue(call_of(tenant), draft_of(tenant), sign_within=BUDGET)
+    assert (issued.signed, issued.status.state) == (False, "numbered")
+    assert [(line["event"], line["log_level"], line["reason"]) for line in logged] == [
+        ("do_ecf.signing_failed", "error", "xml_schema_invalid")
+    ]
+
+
+async def test_a_request_the_signer_cannot_serve_now_leaves_it_to_the_job(
+    contexts: Contexts, module_database: BoundDatabase, ports: dict[str, object]
+) -> None:
+    tenant = a_tenant()
+    await with_range(module_database, tenant)
+    channel = channel_of(contexts, ports | {SIGNER_PORT.name: TestSigner(validity=None)})
+    with capture_logs() as logged:
+        issued = await channel.issue(call_of(tenant), draft_of(tenant), sign_within=BUDGET)
+    assert issued.status.state == "numbered"
+    assert [(line["event"], line["log_level"], line["reason"]) for line in logged] == [
+        ("do_ecf.signing_deferred", "warning", "do_ecf_certificate_missing")
+    ]
+
+
+async def test_a_crash_between_archiving_and_recording_leaves_an_orphan_and_the_job_signs_again(
+    contexts: Contexts, module_database: BoundDatabase, ports: dict[str, object], clock: ManualClock
+) -> None:
+    tenant = a_tenant()
+    await with_range(module_database, tenant)
+    recording = ports[ARCHIVE_PORT.name]
+    assert isinstance(recording, RecordingArchive)
+    recording.crash_once = True
+    with pytest.raises(CrashedError):
+        await channel_of(contexts).issue(call_of(tenant), draft_of(tenant), sign_within=BUDGET)
+    assert [row[2:] for row in await documents_of(module_database, tenant)] == [("numbered", 1)]
+    clock.advance(timedelta(seconds=5))  # the job's run: another moment of signing, other bytes
+    document, _ = await document_row(module_database, tenant)
+    assert await advanced(contexts, ports, tenant, document) == Park("submission")
+    orphan, kept = recording.kept
+    async with module_database.unit(tenant) as unit:
+        referenced = (await unit.connection.execute(select(DocumentRecord.ecf_key))).scalar_one()
+    assert (referenced, orphan != kept) == (kept, True)
+
+
+async def test_the_job_signs_and_archives_a_consumer_invoice_summarized(
+    contexts: Contexts, module_database: BoundDatabase, ports: dict[str, object], recording: RecordingArchive
+) -> None:
+    tenant = a_tenant()
+    await with_range(module_database, tenant, CONSUMER)
+    await channel_of(contexts).issue(call_of(tenant), draft_of(tenant, counterparty=None), sign_within=None)
+    document, _ = await document_row(module_database, tenant)
+    assert await advanced(contexts, ports, tenant, document) == Park("submission")
+    assert [key.split("/")[4] for key in recording.kept] == ["ecf", "rfce"]
+    async with module_database.unit(tenant) as unit:
+        rfce = (await unit.connection.execute(select(DocumentRecord.rfce_key))).scalar_one()
+    assert rfce == recording.kept[1]
+
+
+async def test_a_budget_that_runs_out_while_archiving_leaves_the_document_numbered(
+    contexts: Contexts, module_database: BoundDatabase, recording: RecordingArchive, test_signer: TestSigner
+) -> None:
+    tenant = a_tenant()
+    await with_range(module_database, tenant)
+    recording.stall = True
+    with capture_logs() as logged:
+        issued = await channel_of(contexts).issue(
+            call_of(tenant), draft_of(tenant), sign_within=timedelta(milliseconds=50)
+        )
+    assert (issued.signed, issued.status.state, recording.kept) == (False, "numbered", [])
+    assert len(test_signer.calls) == 1  # signed, never kept: the put was cut short
+    assert [(line["event"], line["reason"]) for line in logged] == [("do_ecf.signing_deferred", "timed_out")]

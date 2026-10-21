@@ -31,6 +31,7 @@ MANIFEST: Final = PackageManifest.model_validate(
                 "fastapi>=0.143.0",
                 "httpx>=0.28.1",
                 "lxml>=6.1.3",
+                "psycopg>=3.3.6",
                 "pydantic>=2.14.1",
                 "pydantic-settings>=2.15.0",
                 "sqlalchemy>=2.1.4",

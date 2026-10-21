@@ -122,6 +122,10 @@ class Signing:
         self._qr_hosts = qr_hosts
         self._regime = regime
 
+    def now(self) -> datetime:
+        """The moment its clock reads: what a number is allocated at, as a signature states it."""
+        return self._clock()
+
     async def sign(
         self, who: SigningAs, draft: EcfDraft, *, environment: Environment, expires_on: date | None
     ) -> Signed:

@@ -11,11 +11,12 @@ its ``Signature``: when, its security code and QR, and where the archive keeps w
 
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
-from typing import Protocol, final
+from typing import ClassVar, Protocol, final
 lazy from collections.abc import Collection, Mapping
 lazy from datetime import date, datetime
 lazy from uuid import UUID
 
+from ledger_country_do.channels.ecf_v1.domain.errors import EcfConflictError
 lazy from ledger_country_do.channels.ecf_v1.application.ports import Archived
 lazy from ledger_country_do.channels.ecf_v1.domain.ecf import DeliveryState, EcfDocumentState, EmissionMode
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
@@ -63,6 +64,15 @@ class EcfDocument:
     updated_at: datetime
 
 
+class DocumentExistsError(EcfConflictError):
+    """The invoice got its document in another unit first (Decision 35): this one rolls back and reads it."""
+
+    code: ClassVar[str] = "do_ecf_document_exists"
+
+    def __init__(self) -> None:
+        super().__init__("the invoice already has its e-CF document")
+
+
 class Documents(Protocol, metaclass=ABCMeta):
     """The documents of the unit's company in the unit's mode."""
 
@@ -76,7 +86,11 @@ class Documents(Protocol, metaclass=ABCMeta):
 
     @abstractmethod
     async def add(self, document: EcfDocument) -> None:
-        """Keep a new document, numbered in this unit."""
+        """Keep a new document, numbered in this unit.
+
+        ``DocumentExistsError`` when its invoice has one already (kept by a unit that committed meanwhile):
+        the unit is then to be rolled back.
+        """
 
     @abstractmethod
     async def changed(self, document: EcfDocument) -> None:
