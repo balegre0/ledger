@@ -74,3 +74,4 @@ Log:
 - 2026-10-20: M3b Task 18 (9fe3774, 987b251; gate x2 green) merged into feat/signer. Not to main without Task 19. Launching Task 19.
 - 2026-10-21: PUSHED to github (owner asked): main 9f61dff, feat/signer 1dc2029, feat/m3b-receiver deb866c. Handoff in docs/handoff/ (README.md index). Task 19 still uncommitted in ledger-m19 (not pushed). Further pushes need owner permission.
 - 2026-10-21 (late): owner chose to stop pushing and continue locally. PR #2 merged on GitHub (main be3b9c0); close PR #3. Receiver merge in progress in ledger-final (feat/everything, agent a1c47cf8330444879); Task 19 WIP snapshot on wip/m3b-advance-snapshot (b0da2d2). Gate on merged tree rerun after starting Docker (gate-main-after-pr2-b.log). RESUME: read docs/handoff/HANDOFF.md.
+- 2026-10-21: full gate on the merged tree (== GitHub main be3b9c0 tree) GREEN (exit 0) after Docker was started (gate-main-after-pr2-b.log).
