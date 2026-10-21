@@ -75,7 +75,8 @@ from ledger_fiscal_kit.xml.hardened import XmlDocumentError
 from ledger_fiscal_kit.xml.schemas import SchemaDriftError, SchemaViolationError
 from ledger_kernel.errors import ConflictError, InvalidInputError
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import Resolve
-lazy from ledger_country_do.channels.ecf_v1.application.emission import Emitted, Signed
+lazy from ledger_country_do.channels.ecf_v1.application.emission import Emitted
+lazy from ledger_country_do.channels.ecf_v1.application.signing import Signed
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
 lazy from ledger_platform.http.outbound import OutboundHttp

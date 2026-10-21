@@ -14,9 +14,11 @@ from ledger_country_do.channels.ecf_v1.domain.ecf import (
     Step,
     answered,
     is_final,
+    status_of,
     transition,
 )
 from ledger_country_do.channels.ecf_v1.domain.status_map import EcfState
+from ledger_fiscal_kit.status import FiscalStatus, Severity
 
 S: Final = EcfDocumentState
 DECIDED: Final = frozenset({S.ACCEPTED, S.ACCEPTED_CONDITIONALLY, S.REJECTED})
@@ -147,3 +149,23 @@ def test_delivery_is_its_own_column() -> None:
         DeliveryState.DELIVERED: "delivered",
         DeliveryState.FAILED: "failed",
     }
+
+
+STATUSES: Final = {
+    S.NUMBERED: (FiscalStatus.PENDING, Severity.INFO),
+    S.SIGNED: (FiscalStatus.PENDING, Severity.INFO),
+    S.SUBMITTED: (FiscalStatus.PENDING, Severity.INFO),
+    S.IN_PROCESS: (FiscalStatus.PENDING, Severity.INFO),
+    S.OUTCOME_UNKNOWN: (FiscalStatus.PENDING, Severity.INFO),
+    S.BLOCKED: (FiscalStatus.PENDING, Severity.ERROR),
+    S.ACCEPTED: (FiscalStatus.ACCEPTED, Severity.INFO),
+    S.ACCEPTED_CONDITIONALLY: (FiscalStatus.ACCEPTED_WITH_OBSERVATIONS, Severity.WARNING),
+    S.REJECTED: (FiscalStatus.REJECTED, Severity.ERROR),
+    S.VOIDED: (FiscalStatus.VOIDED, Severity.INFO),
+}
+
+
+@pytest.mark.parametrize("state", list(S))
+def test_every_state_is_a_fiscal_status_with_its_severity(state: EcfDocumentState) -> None:
+    """Pending until DGII decides; a blocked document is an error a person resolves (spec 8.3, severity)."""
+    assert status_of(state) == STATUSES[state]

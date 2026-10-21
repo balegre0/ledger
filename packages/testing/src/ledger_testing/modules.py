@@ -25,7 +25,7 @@ ports and a schema that a module's suite does not give it.
 import graphlib
 from dataclasses import dataclass
 from typing import ClassVar, final
-lazy from collections.abc import Sequence
+lazy from collections.abc import Mapping, Sequence
 
 from pydantic import SecretStr
 
@@ -33,6 +33,7 @@ from ledger_kernel.errors import LedgerError
 from ledger_platform.config.manifest import PackageKind
 from ledger_platform.config.names import PLATFORM
 from ledger_platform.config.settings import Settings
+from ledger_platform.data import JobPolicy
 from ledger_platform.data.migrations import platform_migrations
 from ledger_platform.runtime.packs import Channels, installed_modules, load_modules
 from ledger_platform.runtime.registries import CHANNELS, MODULES, Regimes, installed
@@ -161,6 +162,15 @@ class ModuleUnderTest:
         channel = self._channel()
         events = self.manifest.events if channel is None else channel.events
         return frozenset(event.type for event in events.publishes)
+
+    @property
+    def jobs(self) -> Mapping[str, JobPolicy]:
+        """The job kinds the schema's units may enqueue, and their limits: the package's or its channel's."""
+        channel = self._channel()
+        declared = self.manifest.jobs if channel is None else channel.jobs
+        return {
+            decl.kind: JobPolicy(max_attempts=decl.max_attempts, deadline=decl.deadline) for decl in declared
+        }
 
     def discovering(self) -> Discover:
         """Its ``discover`` as the app that serves its tests finds it: this package and what it needs.

@@ -255,6 +255,7 @@ def module_database(
         source=module_under_test.source,
         signals=signals,
         publishes=module_under_test.publishes,
+        jobs=module_under_test.jobs,
     )
 
 

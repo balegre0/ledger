@@ -1,13 +1,15 @@
 """do-ecf-v1's assembly (§3.10): what the apps make of the channel, and the pack its entry point names.
 
-Every app builds the channel fiscal routes to (``DoEcfChannel``) over the channel's units and the signer's
-port (``DocumentSigner``), and checks its settings: DGII's hosts (``DgiiHosts``), an attempt no longer than
-the settle delay (``SettleTooShortError``), no test stand-in in production. It reads the ports it needs from
-the app (fiscal-kit's keys): the signer, fiscal's company directory (who may do what, and who is enrolled),
-the archive in the roles that archive (none: the channel does not start there, since every document it signs
-is archived first; ``migrate`` reads none and gets the channel's revisions alone). The ``api`` app mounts its
-routes (``/v1/do``); the worker opens its DGII and buyer clients at start (their trusted roots,
-which it requires, read then). ``migrate`` runs its revisions; every app checks its schema is current.
+Every app builds the channel fiscal routes to (``DoEcfChannel``) over the channel's units, the signer's
+port (``DocumentSigner``) and the archive, with its ``do_ecf.advance`` job, and checks its settings: DGII's
+hosts (``DgiiHosts``), an attempt no longer than the settle delay (``SettleTooShortError``), no test
+stand-in in production. It reads the ports it needs from the app (fiscal-kit's keys): the signer, fiscal's
+company directory (who may do what, and who is enrolled), the archive in the roles that archive (none: the
+channel does not start there, since every document it signs is archived first; ``migrate`` reads none,
+keeps nothing, and gets the channel's revisions alone). The ``api`` app mounts its routes (``/v1/do``); the
+worker opens its DGII and buyer clients at start (their trusted roots, which it requires, read then).
+``migrate`` runs its revisions; every app checks its schema is current. Documents are signed with the QR's
+hosts of the DGII hosts configured (a test's fake's, or DGII's).
 """
 
 from dataclasses import replace
@@ -15,18 +17,24 @@ from enum import StrEnum
 from typing import ClassVar, Final
 
 from ledger_country_do._manifest import MANIFEST
+from ledger_country_do.channels.ecf_v1.adapters.archive import PortArchive, UnboundArchive
 from ledger_country_do.channels.ecf_v1.adapters.channel import DoEcfChannel
 from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts
 from ledger_country_do.channels.ecf_v1.adapters.enrollments import DirectoryEnrollments
 from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
+from ledger_country_do.channels.ecf_v1.adapters.jobs import advance_job
+from ledger_country_do.channels.ecf_v1.adapters.logs import SigningLog
 from ledger_country_do.channels.ecf_v1.adapters.outbound import DgiiAccess, Outbound
 from ledger_country_do.channels.ecf_v1.adapters.postgres.schema import migrations
 from ledger_country_do.channels.ecf_v1.adapters.postgres.unit import PgUnits
 from ledger_country_do.channels.ecf_v1.adapters.routes import ranges
 from ledger_country_do.channels.ecf_v1.adapters.signing.port import DocumentSigner
+from ledger_country_do.channels.ecf_v1.adapters.xml.documents import DgiiXml
 from ledger_country_do.channels.ecf_v1.application.emission import SettleTooShortError
+from ledger_country_do.channels.ecf_v1.application.issuing import Issuing
 from ledger_country_do.channels.ecf_v1.application.ranges import Ranging
 from ledger_country_do.channels.ecf_v1.application.requirements import Requiring
+from ledger_country_do.channels.ecf_v1.application.signing import Signing
 from ledger_country_do.channels.ecf_v1.domain.channel import KEY
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 from ledger_country_do.channels.ecf_v1.domain.fields import CHANNEL_FIELDS
@@ -100,11 +108,19 @@ def assemble(context: ChannelContext) -> ChannelParts:
         authentication=context.auth,
         permissions=directory,
     )
-    channel = DoEcfChannel(definition, requiring)
-    if context.role not in ARCHIVING_ROLES:  # migrate: its revisions, nothing to serve or open
-        return ChannelParts(channel=channel, migrations=migrations())
-    _ = context.ports.get(ARCHIVE_PORT)  # required now: a document is archived once it is signed (Task 18)
-    parts = ChannelParts(channel=channel, routers=(ranges.router(api),), migrations=migrations())
+    archiving = context.role in ARCHIVING_ROLES
+    issuing = Issuing(
+        units,
+        Signing(DgiiXml(), signer, clock=context.clock, qr_hosts=hosts.qr, regime=context.regime),
+        PortArchive(context.ports.get(ARCHIVE_PORT), clock=context.clock) if archiving else UnboundArchive(),
+        SigningLog(context.telemetry),
+        regime=context.regime,
+    )
+    channel = DoEcfChannel(definition, requiring, issuing)
+    jobs = (advance_job(issuing),)
+    if not archiving:  # migrate: its revisions, nothing to serve, open or keep
+        return ChannelParts(channel=channel, jobs=jobs, migrations=migrations())
+    parts = ChannelParts(channel=channel, routers=(ranges.router(api),), jobs=jobs, migrations=migrations())
     if context.role != "worker":
         return parts
     roots = settings.trusted_roots

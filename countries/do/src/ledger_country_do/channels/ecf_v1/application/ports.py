@@ -337,6 +337,41 @@ class Authority(Protocol, metaclass=ABCMeta):
         """
 
 
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Archived:
+    """Where the archive keeps a document, and the SHA-256 it was kept with: PostgreSQL keeps both."""
+
+    key: str
+    sha256: bytes = field(repr=False)
+
+
+class ArchiveUnavailableError(EcfUnavailableError):
+    """The archive could not keep a document now: nothing is recorded as signed until it does."""
+
+    code: ClassVar[str] = "do_ecf_archive_unavailable"
+
+    def __init__(self) -> None:
+        super().__init__("the archive is unavailable")
+
+
+class Archive(Protocol, metaclass=ABCMeta):
+    """The legal archive (§6.8, Decisions 11-13): a company's signed documents, kept once, for ten years.
+
+    A document is kept under a key its bytes name, so keeping the same bytes again is the same object, and
+    other bytes are another; nothing kept is ever changed or removed. Each method raises
+    ``ArchiveUnavailableError`` when the archive cannot be reached (keeping it again later may succeed).
+    """
+
+    @abstractmethod
+    async def ecf(self, tenant: Tenant, signed: bytes) -> Archived:
+        """``signed``, an e-CF of ``tenant``'s, kept."""
+
+    @abstractmethod
+    async def rfce(self, tenant: Tenant, signed: bytes) -> Archived:
+        """``signed``, a consumer-invoice summary (RFCE) of ``tenant``'s, kept."""
+
+
 class EcfFormat(Protocol, metaclass=ABCMeta):
     """DGII's XML formats: documents written and checked against DGII's schemas.
 

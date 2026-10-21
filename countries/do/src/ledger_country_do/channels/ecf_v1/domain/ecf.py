@@ -26,6 +26,10 @@ numbered ─SIGN─► signed ─SUBMIT─► submitted ─POLL─► in_process
   (an accepted ANECF) happen only before signing; an operator ``UNBLOCK``s.
 * The final states (``FINAL_STATES``) lead nowhere: delivery to the buyer is a column of its own
   (``DeliveryState``).
+
+What fiscal shows of a state is ``status_of``'s: pending until DGII decides, then DGII's verdict; a blocked
+document is pending with severity ``error`` (a person acts, spec §8.3), a conditional acceptance valid with a
+warning.
 """
 
 from enum import StrEnum
@@ -35,6 +39,13 @@ lazy from collections.abc import Mapping
 
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 from ledger_country_do.channels.ecf_v1.domain.status_map import EcfState
+from ledger_fiscal_kit.status import FiscalStatus, Severity
+
+
+class EmissionMode(StrEnum):
+    """How a document was signed (Decision 36): in the normal way until contingency is built (Task 28)."""
+
+    NORMAL = "normal"
 
 
 class EcfDocumentState(StrEnum):
@@ -135,3 +146,30 @@ def answered(state: EcfState) -> EcfDocumentState:
         case _:
             assert_type(state, Literal[EcfState.OUTCOME_UNKNOWN])
             return _S.OUTCOME_UNKNOWN
+
+
+def status_of(state: EcfDocumentState) -> tuple[FiscalStatus, Severity]:
+    """What fiscal shows of ``state``, and how grave it is (see the module)."""
+    match state:
+        case _S.ACCEPTED:
+            return FiscalStatus.ACCEPTED, Severity.INFO
+        case _S.ACCEPTED_CONDITIONALLY:
+            return FiscalStatus.ACCEPTED_WITH_OBSERVATIONS, Severity.WARNING
+        case _S.REJECTED:
+            return FiscalStatus.REJECTED, Severity.ERROR
+        case _S.VOIDED:
+            return FiscalStatus.VOIDED, Severity.INFO
+        case _S.BLOCKED:
+            return FiscalStatus.PENDING, Severity.ERROR
+        case _:
+            assert_type(
+                state,
+                Literal[
+                    EcfDocumentState.NUMBERED,
+                    EcfDocumentState.SIGNED,
+                    EcfDocumentState.SUBMITTED,
+                    EcfDocumentState.IN_PROCESS,
+                    EcfDocumentState.OUTCOME_UNKNOWN,
+                ],
+            )
+            return FiscalStatus.PENDING, Severity.INFO

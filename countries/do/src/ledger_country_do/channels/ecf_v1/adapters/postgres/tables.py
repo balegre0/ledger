@@ -8,9 +8,10 @@ leading its keys (§6.3), in schema ``do_ecf`` (§6.2):
 - ``numbering_ranges``: DGII's authorized ranges of a series, ``next`` the number each gives next (``last +
   1``: spent), within ten digits;
 - ``released_numbers``: numbers DGII rejected without using them, allocatable from ``available_at`` on
-  (Decision 9).
-
-The documents numbered from them are the next revision's, with the code that keeps them.
+  (Decision 9);
+- ``documents``: the e-CF numbered from them, one per invoice (Decision 35), each number held by one document
+  until DGII releases it; the draft it was numbered for (``draft``, the platform codec's JSON), where it
+  stands and, once signed, the keys and SHA-256 of what the archive keeps (§6.8: never the bytes).
 """
 
 from datetime import date, datetime
@@ -25,14 +26,21 @@ from sqlalchemy import (
     DateTime,
     ForeignKeyConstraint,
     Index,
+    LargeBinary,
     Text,
+    UniqueConstraint,
+    text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.schema import SchemaItem
 
+from ledger_country_do.channels.ecf_v1.domain.ecf import DeliveryState, EcfDocumentState, EmissionMode
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 from ledger_country_do.channels.ecf_v1.domain.numbering import RangeStatus
+from ledger_country_do.channels.ecf_v1.domain.routing import Route
+from ledger_country_do.channels.ecf_v1.domain.status_map import NumberFate
 from ledger_kernel.tenancy import Mode
 from ledger_platform.data import ModuleTable
 
@@ -108,6 +116,7 @@ class NumberingRangeRecord(DoEcfTable):
         ),
         CheckConstraint("version > 0", name="ck_numbering_ranges_version"),
         Index("numbering_ranges_series", *SERIES),
+        UniqueConstraint(*SERIES, "id", name="numbering_ranges_series_key"),
     )
 
     organization_id: Mapped[UUID] = mapped_column(primary_key=True)
@@ -147,3 +156,88 @@ class ReleasedNumberRecord(DoEcfTable):
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     document_id: Mapped[UUID] = mapped_column()
     """The document whose rejection released it: its track ids are never adopted by the next one."""
+
+
+UNSIGNED: Final = (EcfDocumentState.NUMBERED, EcfDocumentState.BLOCKED, EcfDocumentState.VOIDED)
+"""The states of a document that holds no signature: before signing, or kept from it."""
+_UNSIGNED: Final = ", ".join(f"'{state}'" for state in UNSIGNED)
+SIGNATURE_CHECK: Final = " AND ".join(
+    (
+        f"(signed_at IS NULL) = (state IN ({_UNSIGNED}))",
+        "(signed_at IS NULL) = (security_code IS NULL)",
+        "(signed_at IS NULL) = (qr_url IS NULL)",
+        "(signed_at IS NULL) = (emission_mode IS NULL)",
+        "(signed_at IS NULL) = (ecf_key IS NULL)",
+        "(ecf_key IS NULL) = (ecf_sha256 IS NULL)",
+    )
+)
+"""A document is signed exactly in the states after signing, and then with all a signature records."""
+_SUMMARIZED: Final = "(rfce_key IS NOT NULL) = (route = 'rfce' AND signed_at IS NOT NULL)"
+RFCE_CHECK: Final = f"{_SUMMARIZED} AND (rfce_key IS NULL) = (rfce_sha256 IS NULL)"
+"""A summary is archived exactly for a signed document of the RFCE route."""
+DIGESTS_CHECK: Final = (
+    "(ecf_sha256 IS NULL OR octet_length(ecf_sha256) = 32) "
+    "AND (rfce_sha256 IS NULL OR octet_length(rfce_sha256) = 32)"
+)
+HELD_NUMBER: Final = "number_fate IS DISTINCT FROM 'released'"
+"""A number a document holds: any but one DGII released (another document may take it again)."""
+
+
+class DocumentRecord(DoEcfTable):
+    """An e-CF: the invoice it is of, its number, where it stands, what the archive keeps of it once signed.
+
+    The number is its series' (``environment``, ``ecf_type``) ``sequence``, from the range ``range_id``.
+    Nothing deletes a document: its number is accounted for for ever (§8.6.3).
+    """
+
+    __tablename__: str = "documents"
+    __table_args__: tuple[SchemaItem, ...] = (
+        UniqueConstraint(*TENANT, "invoice_id", name="documents_invoice_key"),
+        ForeignKeyConstraint(
+            [*SERIES, "range_id"],
+            [f"{SCHEMA}.numbering_ranges.{column}" for column in (*SERIES, "id")],
+            name="fk_documents_range",
+        ),
+        *_series_words("documents"),
+        _one_of("state", EcfDocumentState, name="ck_documents_state"),
+        _one_of("route", Route, name="ck_documents_route"),
+        _one_of("delivery_state", DeliveryState, name="ck_documents_delivery_state"),
+        _one_of("emission_mode", EmissionMode, name="ck_documents_emission_mode"),
+        _one_of("number_fate", NumberFate, name="ck_documents_number_fate"),
+        CheckConstraint("sequence BETWEEN 1 AND 9999999999", name="ck_documents_sequence"),
+        CheckConstraint(SIGNATURE_CHECK, name="ck_documents_signature"),
+        CheckConstraint(RFCE_CHECK, name="ck_documents_rfce"),
+        CheckConstraint(DIGESTS_CHECK, name="ck_documents_digests"),
+        CheckConstraint("version > 0", name="ck_documents_version"),
+        Index("documents_number", *SERIES, "sequence", unique=True, postgresql_where=text(HELD_NUMBER)),
+    )
+
+    organization_id: Mapped[UUID] = mapped_column(primary_key=True)
+    company_id: Mapped[UUID] = mapped_column(primary_key=True)
+    mode: Mapped[str] = mapped_column(Text, primary_key=True)
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    invoice_id: Mapped[UUID] = mapped_column()
+    """The commercial document (invoicing's invoice) it is the e-CF of."""
+    environment: Mapped[str] = mapped_column(Text)
+    ecf_type: Mapped[str] = mapped_column(Text)
+    sequence: Mapped[int] = mapped_column(BigInteger)
+    range_id: Mapped[UUID] = mapped_column()
+    state: Mapped[str] = mapped_column(Text)
+    route: Mapped[str] = mapped_column(Text)
+    delivery_state: Mapped[str] = mapped_column(Text)
+    issued_on: Mapped[date] = mapped_column(Date)
+    signed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    security_code: Mapped[str | None] = mapped_column(Text)
+    qr_url: Mapped[str | None] = mapped_column(Text)
+    emission_mode: Mapped[str | None] = mapped_column(Text)
+    ecf_key: Mapped[str | None] = mapped_column(Text)
+    ecf_sha256: Mapped[bytes | None] = mapped_column(LargeBinary)
+    rfce_key: Mapped[str | None] = mapped_column(Text)
+    rfce_sha256: Mapped[bytes | None] = mapped_column(LargeBinary)
+    number_fate: Mapped[str | None] = mapped_column(Text)
+    """What became of its number once DGII decided (burned, released); ``None`` while it holds it."""
+    draft: Mapped[dict[str, object]] = mapped_column(JSONB)
+    """The ``FiscalDraft`` it was numbered for, in the platform codec's JSON: what every signature signs."""
+    version: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
