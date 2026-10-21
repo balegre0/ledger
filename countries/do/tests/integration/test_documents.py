@@ -27,8 +27,10 @@ from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 from ledger_country_do.channels.ecf_v1.domain.numbering import RangeState, RangeStatus
 from ledger_country_do.channels.ecf_v1.domain.references import AcceptedEcf
 from ledger_country_do.channels.ecf_v1.domain.routing import Route
+from ledger_country_do.channels.ecf_v1.domain.status_map import NumberFate
 from ledger_country_do_testing.fiscal import fiscal_draft
 from ledger_fiscal_kit.drafts import DocumentRef, FiscalReference
+from ledger_fiscal_kit.status import AuthorityMessage
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.regimes import DocumentKind
 from ledger_kernel.tenancy import Mode, Tenant
@@ -139,7 +141,20 @@ async def test_a_signed_document_reads_back_with_its_signature_and_counts_once_a
         ecf=Archived(key="do-ecf-v1/test/o/c/ecf/a.xml", sha256=bytes(32)),
         rfce=Archived(key="do-ecf-v1/test/o/c/rfce/b.xml", sha256=bytes(range(32))),
     )
-    accepted = replace(numbered, state=EcfDocumentState.ACCEPTED, signature=signature, version=3)
+    accepted = replace(
+        numbered,
+        state=EcfDocumentState.ACCEPTED,
+        signature=signature,
+        version=3,
+        delivery=DeliveryState.NOT_APPLICABLE,
+        submission_started_at=NOW,
+        track_id_since=NOW,
+        polls=2,
+        outcome_code=1,
+        sequence_used=True,
+        number_fate=NumberFate.USED,
+        messages=(AuthorityMessage(code="613", message="Fuera de tolerancia", lang="es"),),
+    )
     async with module_database.unit(tenant) as unit:
         documents = bind(unit).documents
         await documents.add(numbered)

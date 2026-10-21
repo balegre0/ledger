@@ -6,14 +6,16 @@ the migrate app runs the channel's revisions on a fresh database and the worker'
 """
 
 import re
+from datetime import UTC, datetime
 from typing import Final
 
 import pytest
 from pydantic import TypeAdapter
-from sqlalchemy import CheckConstraint, String, column, create_engine, select, table
+from sqlalchemy import CheckConstraint, String, column, create_engine, insert, select, table, text
 from sqlalchemy.pool import NullPool
 lazy import psycopg
 
+from ledger_country_do.channels.ecf_v1.adapters.postgres.migrations.versions import r0003_do_ecf
 from ledger_country_do.channels.ecf_v1.adapters.postgres.schema import MIGRATIONS
 from ledger_country_do.channels.ecf_v1.adapters.postgres.tables import DoEcfTable
 from ledger_country_do.channels.ecf_v1.domain.ecf import DeliveryState, EcfDocumentState, EmissionMode
@@ -36,11 +38,14 @@ from ledger_testing.migrations import (
     tables_of,
 )
 lazy from ledger_platform.config.settings import Settings
+lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_testing.modules import ModuleUnderTest
 lazy from ledger_testing.postgres import WorkerDatabase
 
 S: Final = "do_ecf"
-TENANT_TABLES: Final = frozenset({"numbering_series", "numbering_ranges", "released_numbers", "documents"})
+TENANT_TABLES: Final = frozenset(
+    {"numbering_series", "numbering_ranges", "released_numbers", "documents", "submissions"}
+)
 CHASSIS_TABLES: Final = frozenset(
     {"outbox", "inbox", "jobs", "subscriptions", "idempotency_keys", "audit_events"}
 )
@@ -76,7 +81,7 @@ def test_the_migrate_app_brings_the_channel_s_schema_to_head_from_nothing_and_ag
     assert tables_of(fresh_admin_url, schema=S) == set()
     App("migrate", settings=fresh, discover=module_under_test.discovering()).migrate()
     assert tables_of(fresh_admin_url, schema=S) == {*TENANT_TABLES, *CHASSIS_TABLES, "alembic_version"}
-    assert version_of(fresh_admin_url) == MIGRATIONS.head == "0002"
+    assert version_of(fresh_admin_url) == MIGRATIONS.head == "0003"
     App("migrate", settings=fresh, discover=module_under_test.discovering()).migrate()
     assert pending_changes(fresh_admin_url, MODELS, schema=S) is None
 
@@ -159,6 +164,20 @@ def test_a_document_is_found_by_its_invoice_and_its_number_held_once(migrated: W
     }
 
 
+def test_a_document_s_track_ids_are_found_by_its_number(migrated: WorkerDatabase) -> None:
+    """Decision 9: the track ids of every document that held an e-NCF, asked for by the number."""
+    assert indexes_of(superuser(migrated), "submissions", schema=S) == {
+        "submissions_pkey": (
+            "CREATE UNIQUE INDEX submissions_pkey ON do_ecf.submissions "
+            "USING btree (organization_id, company_id, mode, document_id, track_id)"
+        ),
+        "submissions_number": (
+            "CREATE INDEX submissions_number ON do_ecf.submissions "
+            "USING btree (organization_id, company_id, mode, environment, ecf_type, sequence)"
+        ),
+    }
+
+
 def test_every_tenant_table_is_under_its_tenant_s_policies_forced_on_its_owner(
     migrated: WorkerDatabase,
 ) -> None:
@@ -199,4 +218,37 @@ async def test_the_channel_s_role_deletes_nothing_but_a_released_number_taken(
     assert await granted(admin, "numbering_ranges") == {"SELECT", "INSERT", "UPDATE"}
     assert await granted(admin, "released_numbers") == {"SELECT", "INSERT", "DELETE"}
     assert await granted(admin, "documents") == {"SELECT", "INSERT", "UPDATE"}
+    assert await granted(admin, "submissions") == {"SELECT", "INSERT"}
     assert await granted(admin, "audit_events") == {"SELECT", "INSERT"}
+
+
+async def test_revision_0003_takes_on_the_signed_documents_task_18_s_job_left_waiting(
+    module_database: BoundDatabase,
+) -> None:
+    """Task 18's handler parked a signed document for submission (``submission``); 0003 makes it ready."""
+    jobs = chassis_tables(S).jobs
+    now = datetime.now(UTC)
+    waiting = {"kind": "do_ecf.advance", "status": "parked", "parked_reason": "submission"}
+    rows = [
+        waiting | {"key": "waiting"},
+        waiting | {"key": "blocked", "parked_reason": "blocked"},
+        waiting | {"key": "other kind", "kind": "do_ecf.deliver"},
+    ]
+    async with module_database.unit(None) as unit:
+        for row in rows:
+            await unit.connection.execute(
+                insert(jobs).values(
+                    **row, run_at=now, max_attempts=50, payload={}, created_at=now, updated_at=now
+                )
+            )
+        await unit.connection.execute(text(r0003_do_ecf.WAITING))
+        found = await unit.connection.execute(
+            select(jobs.c.key, jobs.c.status, jobs.c.parked_reason).where(
+                jobs.c.key.in_([row["key"] for row in rows])
+            )
+        )
+        assert sorted(found.all()) == [
+            ("blocked", "parked", "blocked"),
+            ("other kind", "parked", "submission"),
+            ("waiting", "ready", None),
+        ]

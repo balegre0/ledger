@@ -26,6 +26,7 @@ from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts
 lazy from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
 lazy from ledger_country_do.channels.ecf_v1.adapters.signing.port import DocumentSigner
+lazy from ledger_country_do.channels.ecf_v1.application.ports import Authority
 lazy from ledger_platform.http.outbound import OutboundHttp
 
 
@@ -47,6 +48,11 @@ class OutboundClosedError(EcfError):
 
     def __init__(self) -> None:
         super().__init__("DGII's and buyers' clients are open only while the app runs")
+
+
+def unopened() -> Authority:
+    """DGII's client of an app that has none (every role but the worker's): reaching it is a defect."""
+    raise OutboundClosedError
 
 
 def _read_roots(path: Path) -> tuple[x509.Certificate, ...]:
@@ -96,6 +102,10 @@ class Outbound:
         if self._dgii is None:
             raise OutboundClosedError
         return self._dgii
+
+    def authority(self) -> Authority:
+        """DGII's client, open, as the use cases see it (``Advancing``'s ``authority``)."""
+        return self.dgii
 
     @property
     def buyers(self) -> BuyerClient:

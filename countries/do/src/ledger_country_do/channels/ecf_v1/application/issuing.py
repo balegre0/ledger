@@ -27,22 +27,21 @@ the moment the channel's clock reads (``Signing.now``), the one its signature st
 mends while the request signs (the signer's, the channel's checks of what came back) is reported
 (``SigningReport.failed``); the signer or the archive out of reach, or the budget spent, only deferred.
 
-``advance`` is the job's step for a ``numbered`` document (Task 19 adds submission and polling): the same
-signing, then the same recording, from the stored draft. A company that cannot sign (no certificate, one not
-valid then, the signer's clock) parks it (``certificate``); a range that ended before the moment of signing
-blocks it (``blocked``, severity error: it needs another number), and so does a refusal no retry mends,
-reported; the signer or the archive unavailable is raised, for the job to run again later. A document past
-``numbered`` waits for submission (``submission``). A job naming no document is a defect: reported, and a
-conflict (the job is dead at once, never retried).
+``advance`` is the job's step for a ``numbered`` document (``advancing`` takes it on from there): the same
+signing, then the same recording, from the stored draft, and the job runs again at once to submit it. A
+company that cannot sign (no certificate, one not valid then, the signer's clock) waits (``certificate``); a
+range that ended before the moment of signing blocks it (``blocked``, severity error: it needs another
+number), and so does a refusal no retry mends, reported; the signer or the archive unavailable is raised, for
+the job to run again later. A document another run moved past ``numbered`` meanwhile is taken from where it
+is. A job naming no document is a defect: reported, and a conflict (the job is dead at once, never retried).
 """
 
 import asyncio
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass, replace
 from datetime import timedelta
-from enum import StrEnum
 from typing import ClassVar, Final, Protocol, final
-lazy from datetime import date
+lazy from datetime import date, datetime
 lazy from uuid import UUID
 
 from ledger_country_do.channels.ecf_v1.application.documents import (
@@ -56,6 +55,7 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
     SignerClockSkewError,
 )
 from ledger_country_do.channels.ecf_v1.application.signing import SequenceExpiredError
+from ledger_country_do.channels.ecf_v1.application.steps import Again, ParkReason, Wait
 from ledger_country_do.channels.ecf_v1.domain.ecf import (
     DeliveryState,
     EcfDocumentState,
@@ -85,6 +85,7 @@ from ledger_kernel.ids import new_id
 lazy from ledger_country_do.channels.ecf_v1.application.ports import Archive, SigningAs
 lazy from ledger_country_do.channels.ecf_v1.application.ranges import NumberingUnit, NumberingUnits
 lazy from ledger_country_do.channels.ecf_v1.application.signing import Signing
+lazy from ledger_country_do.channels.ecf_v1.application.steps import Next
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
@@ -101,17 +102,6 @@ RANGE_MISSING: Final = Objection(
 )
 TIMED_OUT: Final = "timed_out"
 """``SigningReport.deferred``'s reason when the signer did not answer within the budget."""
-
-
-class ParkReason(StrEnum):
-    """Why the job waits, and what wakes it."""
-
-    CERTIFICATE = "certificate"
-    """The company cannot sign: a certificate installed (``Channel.resume``) wakes it."""
-    BLOCKED = "blocked"
-    """It needs a person: an operator."""
-    SUBMISSION = "submission"
-    """Signed: submission (Task 19's step) takes it on."""
 
 
 class DocumentMissingError(EcfConflictError):
@@ -153,9 +143,11 @@ def _stated(encf: Encf, expires_on: date | None) -> date | None:
     return None if encf.ecf_type in UNDATED_TYPES else expires_on
 
 
-def _waiting(document: EcfDocument) -> ParkReason:
-    """Why the job waits for ``document``, past ``numbered``."""
-    return ParkReason.BLOCKED if document.state is EcfDocumentState.BLOCKED else ParkReason.SUBMISSION
+def _next(document: EcfDocument) -> Next:
+    """What the job does next for ``document``, past ``numbered``: a person if blocked, else its next step."""
+    if document.state is EcfDocumentState.BLOCKED:
+        return Wait(ParkReason.BLOCKED)
+    return Again(document.updated_at)
 
 
 @final
@@ -219,25 +211,30 @@ class Issuing:
         recorded = await self._recorded(who.tenant, document.id, Step.SIGN, signature)
         return IssuedDocument(document=recorded, signed=recorded.signature is not None)
 
-    async def advance(self, who: SigningAs, document_id: UUID) -> ParkReason:
-        """The job's step for ``document_id`` (see the module); why the job waits next."""
+    async def advance(self, who: SigningAs, document: EcfDocument) -> Next:
+        """The job's step for ``document``, read ``numbered`` (see the module); what the job does next.
+
+        A document another request or run moved on meanwhile is recorded as it is, and taken from there.
+        """
+        document_id = document.id
         async with self._units.unit(who.tenant) as unit:
-            document = self._present(await unit.documents.get(document_id, lock=False))
-            if document.state is not EcfDocumentState.NUMBERED:
-                return _waiting(document)
             to_sign = await self._rebuilt(unit, document)
         try:
             signature = await self._signature(who, document, to_sign)
         except CertificateMissingError, CertificateNotValidError, SignerClockSkewError:
-            return ParkReason.CERTIFICATE
+            return Wait(ParkReason.CERTIFICATE)
         except SequenceExpiredError:
-            return _waiting(await self._recorded(who.tenant, document_id, Step.BLOCK, None))
+            return _next(await self._recorded(who.tenant, document_id, Step.BLOCK, None))
         except InvalidInputError as error:  # the signer's refusal, or the channel's checks of what came back
             self._report.failed(error.code)
-            return _waiting(await self._recorded(who.tenant, document_id, Step.BLOCK, None))
-        return _waiting(await self._recorded(who.tenant, document_id, Step.SIGN, signature))
+            return _next(await self._recorded(who.tenant, document_id, Step.BLOCK, None))
+        return _next(await self._recorded(who.tenant, document_id, Step.SIGN, signature))
 
-    def _present(self, document: EcfDocument | None) -> EcfDocument:
+    def now(self) -> datetime:
+        """The channel's clock: what numbers are allocated, and released, by (``Signing.now``)."""
+        return self._signing.now()
+
+    def present(self, document: EcfDocument | None) -> EcfDocument:
         """``document``, or ``DocumentMissingError``, reported (see the module)."""
         if document is None:
             self._report.failed(DocumentMissingError.code)
@@ -335,7 +332,7 @@ class Issuing:
         """
         to = EcfDocumentState.SIGNED if step is Step.SIGN else EcfDocumentState.BLOCKED
         async with self._units.unit(tenant) as unit:
-            current = self._present(await unit.documents.get(document_id, lock=True))
+            current = self.present(await unit.documents.get(document_id, lock=True))
             if current.state is not EcfDocumentState.NUMBERED:
                 return current
             moved = replace(

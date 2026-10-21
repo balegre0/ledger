@@ -11,7 +11,9 @@ leading its keys (§6.3), in schema ``do_ecf`` (§6.2):
   (Decision 9);
 - ``documents``: the e-CF numbered from them, one per invoice (Decision 35), each number held by one document
   until DGII releases it; the draft it was numbered for (``draft``, the platform codec's JSON), where it
-  stands and, once signed, the keys and SHA-256 of what the archive keeps (§6.8: never the bytes).
+  stands and, once signed, the keys and SHA-256 of what the archive keeps (§6.8: never the bytes); once
+  submitted, the submission's mark, DGII's track id and answer;
+- ``submissions``: every track id a document was given or adopted, by its number (Decision 9).
 """
 
 from datetime import date, datetime
@@ -21,11 +23,13 @@ lazy from enum import StrEnum
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     Date,
     DateTime,
     ForeignKeyConstraint,
     Index,
+    Integer,
     LargeBinary,
     Text,
     UniqueConstraint,
@@ -181,6 +185,32 @@ DIGESTS_CHECK: Final = (
 )
 HELD_NUMBER: Final = "number_fate IS DISTINCT FROM 'released'"
 """A number a document holds: any but one DGII released (another document may take it again)."""
+SUBMITTED: Final = (
+    EcfDocumentState.SUBMITTED,
+    EcfDocumentState.IN_PROCESS,
+    EcfDocumentState.OUTCOME_UNKNOWN,
+    EcfDocumentState.ACCEPTED,
+    EcfDocumentState.ACCEPTED_CONDITIONALLY,
+    EcfDocumentState.REJECTED,
+)
+"""The states a document reaches only through a submission, which marked it first."""
+_SUBMITTED: Final = ", ".join(f"'{state}'" for state in SUBMITTED)
+SUBMISSION_CHECK: Final = (
+    f"(state IN ({_UNSIGNED}) AND submission_started_at IS NULL) OR state = 'signed' "
+    f"OR (state IN ({_SUBMITTED}) AND submission_started_at IS NOT NULL)"
+)
+"""Marked only once signed, and on every document past a submission (Decision 8)."""
+TRACKED_CHECK: Final = "state NOT IN ('submitted', 'in_process') OR track_id IS NOT NULL"
+"""DGII deliberates about a document by its track id."""
+UNKNOWN_CHECK: Final = "state <> 'outcome_unknown' OR track_id_since IS NOT NULL"
+"""An outcome unknown since a moment: the track-id window runs from it (Decision 7)."""
+_DECIDED: Final = "'accepted', 'accepted_conditionally', 'rejected'"
+FATE_CHECK: Final = (
+    f"(number_fate IS NOT NULL) = (state IN ({_DECIDED})) "
+    "AND (state <> 'rejected' OR number_fate IN ('burned', 'released')) "
+    "AND (state NOT IN ('accepted', 'accepted_conditionally') OR number_fate = 'used')"
+)
+"""A number's fate is known exactly once DGII decided: used if accepted, burned or released if rejected."""
 
 
 class DocumentRecord(DoEcfTable):
@@ -209,6 +239,11 @@ class DocumentRecord(DoEcfTable):
         CheckConstraint(RFCE_CHECK, name="ck_documents_rfce"),
         CheckConstraint(DIGESTS_CHECK, name="ck_documents_digests"),
         CheckConstraint("version > 0", name="ck_documents_version"),
+        CheckConstraint(SUBMISSION_CHECK, name="ck_documents_submission"),
+        CheckConstraint(TRACKED_CHECK, name="ck_documents_track_id"),
+        CheckConstraint(UNKNOWN_CHECK, name="ck_documents_unknown"),
+        CheckConstraint(FATE_CHECK, name="ck_documents_fate"),
+        CheckConstraint("polls >= 0", name="ck_documents_polls"),
         Index("documents_number", *SERIES, "sequence", unique=True, postgresql_where=text(HELD_NUMBER)),
     )
 
@@ -241,3 +276,49 @@ class DocumentRecord(DoEcfTable):
     version: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    submission_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    """The submission's mark, committed before the one call that sends it: never sent again once set."""
+    track_id: Mapped[str | None] = mapped_column(Text)
+    track_id_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    """When its outcome first became unknown: the track-id window runs from it, never reset."""
+    polls: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    """How often DGII was asked about it, or could not be reached: the next wait grows with it."""
+    outcome_code: Mapped[int | None] = mapped_column(Integer)
+    """DGII's last code about it, as the service that answered reads it."""
+    sequence_used: Mapped[bool | None] = mapped_column(Boolean)
+    """DGII's ``secuenciaUtilizada``, once it said."""
+    messages: Mapped[list[dict[str, str]]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    """DGII's messages about it (``code``, ``text``), verbatim within the kit's bounds."""
+
+
+class SubmissionRecord(DoEcfTable):
+    """A track id a document was given or adopted, under its number: never adopted by another document.
+
+    Nothing changes or deletes a row: a released number's next document must know its predecessor's.
+    """
+
+    __tablename__: str = "submissions"
+    __table_args__: tuple[SchemaItem, ...] = (
+        ForeignKeyConstraint(
+            [*TENANT, "document_id"],
+            [f"{SCHEMA}.documents.{column}" for column in (*TENANT, "id")],
+            name="fk_submissions_document",
+        ),
+        *_series_words("submissions"),
+        CheckConstraint("sequence BETWEEN 1 AND 9999999999", name="ck_submissions_sequence"),
+        CheckConstraint("length(track_id) > 0", name="ck_submissions_track_id"),
+        Index("submissions_number", *SERIES, "sequence"),
+    )
+
+    organization_id: Mapped[UUID] = mapped_column(primary_key=True)
+    company_id: Mapped[UUID] = mapped_column(primary_key=True)
+    mode: Mapped[str] = mapped_column(Text, primary_key=True)
+    document_id: Mapped[UUID] = mapped_column(primary_key=True)
+    track_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    environment: Mapped[str] = mapped_column(Text)
+    ecf_type: Mapped[str] = mapped_column(Text)
+    sequence: Mapped[int] = mapped_column(BigInteger)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    """When it was recorded (the unit's time)."""
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    """When DGII says it received the document, where DGII listed it (``consultatrackids``)."""

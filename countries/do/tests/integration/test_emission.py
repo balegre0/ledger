@@ -8,10 +8,10 @@ from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
 from ledger_country_do.channels.ecf_v1.adapters.signing.port import DocumentSigner
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import verify_enveloped
 from ledger_country_do.channels.ecf_v1.adapters.xml.documents import DgiiXml
+from ledger_country_do.channels.ecf_v1.application.advancing import SettleTooShortError
 from ledger_country_do.channels.ecf_v1.application.emission import (
     SETTLE_DELAY,
     Emitter,
-    SettleTooShortError,
     Unknown,
 )
 from ledger_country_do.channels.ecf_v1.application.ports import AuthorityUnavailableError, Failure

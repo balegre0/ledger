@@ -159,6 +159,14 @@ def _present(text: str | None) -> str:
     return "" if text is None else text
 
 
+def issuer_rnc(draft: FiscalDraft) -> str:
+    """The issuer's RNC (or cédula) ``draft`` states: what DGII files its documents under.
+
+    Blank when it states none, which ``objections`` refuses: a numbered draft always has one.
+    """
+    return _present(_rnc(draft.issuer.tax_id))
+
+
 def _default_type(draft: FiscalDraft) -> EcfType | None:
     note = _DEFAULT_OF_NOTE.get(draft.kind)
     if note is not None:

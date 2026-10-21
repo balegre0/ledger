@@ -9,6 +9,7 @@ lazy from uuid import UUID
 from ledger_country_do.channels.ecf_v1.adapters.jobs import ADVANCE
 from ledger_country_do.channels.ecf_v1.adapters.postgres.repositories.documents import PgDocuments
 from ledger_country_do.channels.ecf_v1.adapters.postgres.repositories.ranges import PgRanges
+from ledger_country_do.channels.ecf_v1.adapters.postgres.repositories.submissions import PgSubmissions
 from ledger_country_do.channels.ecf_v1.adapters.statuses import update_of
 from ledger_country_do.channels.ecf_v1.application.documents import Advances
 from ledger_country_do.channels.ecf_v1.application.ranges import (
@@ -23,6 +24,7 @@ from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.tenancy import Tenant
 lazy from ledger_country_do.channels.ecf_v1.application.documents import EcfDocument
 lazy from ledger_country_do.channels.ecf_v1.application.ranges import AuditAction
+lazy from ledger_country_do.channels.ecf_v1.application.steps import ParkReason
 lazy from ledger_platform.data import BoundDatabase, UnitOfWork
 
 
@@ -47,16 +49,24 @@ class UnitAnnouncements(Announcements):
 
 @final
 class UnitAdvances(Advances):
-    """The ``do_ecf.advance`` jobs, in the unit's queue: enqueued with the document, or not at all."""
+    """The ``do_ecf.advance`` jobs, in the unit's queue: enqueued with the document, or not at all.
 
-    __slots__ = ("_unit",)
+    Woken for the unit's company, in its mode (the unit's scope), once the unit commits.
+    """
 
-    def __init__(self, unit: UnitOfWork) -> None:
+    __slots__ = ("_tenant", "_unit")
+
+    def __init__(self, unit: UnitOfWork, tenant: Tenant) -> None:
         self._unit = unit
+        self._tenant = tenant
 
     @override
     def enqueue(self, document: UUID, *, at: datetime) -> None:
         self._unit.jobs.enqueue(ADVANCE, str(document), run_at=at)
+
+    @override
+    def wake(self, reason: ParkReason) -> None:
+        self._unit.jobs.wake_all(ADVANCE, self._tenant.company, reason.value)
 
 
 @final
@@ -82,7 +92,8 @@ def bind(unit: UnitOfWork) -> NumberingUnit:
         tenant=scope,
         ranges=PgRanges(unit.connection, scope, scope.mode),
         documents=PgDocuments(unit.connection, scope, scope.mode),
-        advances=UnitAdvances(unit),
+        submissions=PgSubmissions(unit.connection, scope, scope.mode),
+        advances=UnitAdvances(unit, scope),
         announcements=UnitAnnouncements(unit, scope),
         audit=UnitAudit(unit),
         now=unit.now,

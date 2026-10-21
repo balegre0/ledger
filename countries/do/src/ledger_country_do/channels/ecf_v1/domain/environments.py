@@ -24,3 +24,8 @@ class Environment(StrEnum):
     def live(self) -> bool:
         """Whether documents sent there are legally issued."""
         return self is Environment.ECF
+
+    @property
+    def lists_track_ids(self) -> bool:
+        """Whether DGII lists an e-NCF's track ids there (``consultatrackids``: not in CerteCF, DT-DGII)."""
+        return self is not Environment.CERTECF

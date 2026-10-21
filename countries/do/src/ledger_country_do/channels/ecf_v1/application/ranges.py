@@ -4,8 +4,8 @@ A range is registered in one of the channel's environments, in the mode that env
 range numbers live documents only, a test one never does), for an environment the company is enrolled in
 (fiscal's enrollments, asked outside any unit). In the unit that registers it, the series' row is locked
 (``Ranges.series``), so two registrations of a series, or a registration and an allocation, never interleave;
-the range is checked against its series (``numbering.authorized``), kept, audited, and fiscal is told that
-what the channel requires of the company changed.
+the range is checked against its series (``numbering.authorized``), kept, audited, fiscal is told that
+what the channel requires of the company changed, and the company's jobs waiting for a range are woken.
 
 A unit is one transaction scoped to a company in a mode: row-level security limits what its repositories see
 to that tenant, and they name the tenant in every statement too (tenancy is checked twice, §2). The ports'
@@ -19,13 +19,19 @@ lazy from contextlib import AbstractAsyncContextManager
 lazy from datetime import datetime
 lazy from uuid import UUID
 
+from ledger_country_do.channels.ecf_v1.application.steps import ParkReason
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError, EcfInvalidError
 from ledger_country_do.channels.ecf_v1.domain.numbering import authorized
 from ledger_kernel.errors import NotFoundError
 from ledger_kernel.ids import new_id
 from ledger_kernel.tenancy import Mode
-lazy from ledger_country_do.channels.ecf_v1.application.documents import Advances, Documents, EcfDocument
-lazy from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
+lazy from ledger_country_do.channels.ecf_v1.application.documents import (
+    Advances,
+    Documents,
+    EcfDocument,
+    Submissions,
+)
+lazy from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 lazy from ledger_country_do.channels.ecf_v1.domain.numbering import Allocation, Authorization, RangeState
 lazy from ledger_kernel.pagination import Page, PageRequest
@@ -94,6 +100,18 @@ class Ranges(Protocol, metaclass=ABCMeta):
         ``NoNumberAvailableError`` when there is none.
         """
 
+    @abstractmethod
+    async def release(
+        self,
+        environment: Environment,
+        encf: Encf,
+        *,
+        document: UUID,
+        released_at: datetime,
+        available_at: datetime,
+    ) -> None:
+        """``encf``, rejected by DGII and not used (``document``'s): allocatable from ``available_at``."""
+
 
 class Announcements(Protocol, metaclass=ABCMeta):
     """What the unit tells others once it commits (its outbox)."""
@@ -127,6 +145,7 @@ class NumberingUnit:
     tenant: Tenant
     ranges: Ranges
     documents: Documents
+    submissions: Submissions
     advances: Advances
     announcements: Announcements
     audit: Audit
@@ -208,6 +227,7 @@ class Ranging:
         await unit.ranges.add(registered)
         unit.audit.record("numbering_range.register", registered.id, before=None, after=registered)
         unit.announcements.requirements_changed()
+        unit.advances.wake(ParkReason.RANGE_MISSING)
         return registered
 
     async def page(

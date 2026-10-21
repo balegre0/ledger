@@ -1,10 +1,10 @@
 """A document's ``StatusUpdate`` (fiscal-kit): what ``fiscal_channel.document.updated`` and ``Issued`` carry.
 
 The state is the channel's own (``signed``...), the fiscal status and severity ``ecf.status_of``'s, the
-authority number the e-NCF. ``details["do"]`` is what a client prints and follows: the e-NCF, the route,
-delivery to the buyer, and once signed its moment of signing (ISO 8601), security code, QR URL and emission
-mode (``None`` before). DGII's track id and messages, and the buyer's commercial approval, join it with the
-steps that record them (Tasks 19, 21, 23).
+authority number the e-NCF, the messages DGII's about it. ``details["do"]`` is what a client prints and
+follows: the e-NCF, the route, delivery to the buyer, once signed its moment of signing (ISO 8601), security
+code, QR URL and emission mode (``None`` before), and DGII's track id once it gave one (``None`` before, and
+for a summary). The buyer's commercial approval joins it with the step that records it (Task 23).
 """
 
 from typing import Final
@@ -31,6 +31,7 @@ def update_of(document: EcfDocument) -> StatusUpdate:
         "security_code": None if signature is None else signature.security_code,
         "qr_url": None if signature is None else signature.qr_url,
         "emission_mode": None if signature is None else signature.emission_mode.value,
+        "track_id": document.track_id,
     }
     return StatusUpdate(
         document=document.invoice,
@@ -41,7 +42,7 @@ def update_of(document: EcfDocument) -> StatusUpdate:
         severity=severity,
         version=document.version,
         authority_number=str(document.encf),
-        messages=(),
+        messages=document.messages,
         details={REGIME_KEY: details},
         occurred_at=document.updated_at,
     )
