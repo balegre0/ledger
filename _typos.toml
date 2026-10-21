@@ -3,6 +3,8 @@ extend-exclude = [
     "uv.lock",
     "countries/do/src/ledger_country_do/channels/ecf_v1/adapters/xsd/",
     "countries/do/tests/contract/golden/",
+    # protoc's output (ledger_devtools.protos): serialized descriptors, spelled by the contract, not here.
+    "modules/*/src/*/adapters/grpc/_generated/",
     # The program ledgers quote the owner and DGII verbatim, in Spanish, and carry words such as CHECK in capitals.
     "docs/handoff/PROGRAM.md",
     "docs/handoff/DECISION-LEDGER-*.md",
@@ -13,6 +15,8 @@ extend-exclude = [
 extend-ignore-identifiers-re = ["^CPY[0-9]{3}$"]
 
 [default.extend-words]
+# The Python package of Mozilla's CA bundle, which httpx verifies TLS against.
+certifi = "certifi"
 # Spanish: a DGII e-invoice status ("Aceptado Condicional"), not an English typo.
 condicional = "condicional"
 # Spanish: DGII's own words (element names, document titles, sample addresses) its files and the DO pack quote.
@@ -23,8 +27,11 @@ descripcion = "descripcion"
 direccion = "direccion"
 emision = "emision"
 excede = "excede"
+informacion = "informacion"
 informe = "informe"
 instructivo = "instructivo"
+limite = "limite"
+modificacion = "modificacion"
 
 [default.extend-identifiers]
 # ISO 3166-1 and ISO 4217 codes the kernel lists (Bosnia, the Faroe Islands, Pitcairn; the Jordanian dinar).

@@ -12,6 +12,14 @@ ROLE_GRANTS: Final = MappingProxyType(
     {
         Role.OWNER: frozenset(
             {
+                Permission("do_ecf.deliveries.manage"),
+                Permission("do_ecf.ranges.manage"),
+                Permission("do_ecf.ranges.read"),
+                Permission("do_ecf.ranges.void"),
+                Permission("do_ecf.received_documents.manage"),
+                Permission("do_ecf.received_documents.read"),
+                Permission("fiscal.enrollments.manage"),
+                Permission("fiscal.enrollments.read"),
                 Permission("identity.companies.manage"),
                 Permission("identity.companies.read"),
                 Permission("identity.memberships.manage"),
@@ -21,10 +29,20 @@ ROLE_GRANTS: Final = MappingProxyType(
                 Permission("invoicing.invoices.issue"),
                 Permission("invoicing.invoices.read"),
                 Permission("invoicing.invoices.void"),
+                Permission("signer.certificates.manage"),
+                Permission("signer.certificates.read"),
             }
         ),
         Role.ADMIN: frozenset(
             {
+                Permission("do_ecf.deliveries.manage"),
+                Permission("do_ecf.ranges.manage"),
+                Permission("do_ecf.ranges.read"),
+                Permission("do_ecf.ranges.void"),
+                Permission("do_ecf.received_documents.manage"),
+                Permission("do_ecf.received_documents.read"),
+                Permission("fiscal.enrollments.manage"),
+                Permission("fiscal.enrollments.read"),
                 Permission("identity.companies.manage"),
                 Permission("identity.companies.read"),
                 Permission("identity.memberships.manage"),
@@ -33,30 +51,45 @@ ROLE_GRANTS: Final = MappingProxyType(
                 Permission("invoicing.invoices.issue"),
                 Permission("invoicing.invoices.read"),
                 Permission("invoicing.invoices.void"),
+                Permission("signer.certificates.manage"),
+                Permission("signer.certificates.read"),
             }
         ),
         Role.ACCOUNTANT: frozenset(
             {
+                Permission("do_ecf.deliveries.manage"),
+                Permission("do_ecf.ranges.read"),
+                Permission("do_ecf.received_documents.manage"),
+                Permission("do_ecf.received_documents.read"),
+                Permission("fiscal.enrollments.read"),
                 Permission("identity.companies.read"),
                 Permission("identity.memberships.read"),
                 Permission("invoicing.invoices.create"),
                 Permission("invoicing.invoices.issue"),
                 Permission("invoicing.invoices.read"),
                 Permission("invoicing.invoices.void"),
+                Permission("signer.certificates.read"),
             }
         ),
         Role.ISSUER: frozenset(
             {
+                Permission("do_ecf.ranges.read"),
+                Permission("fiscal.enrollments.read"),
                 Permission("identity.companies.read"),
                 Permission("invoicing.invoices.create"),
                 Permission("invoicing.invoices.issue"),
                 Permission("invoicing.invoices.read"),
+                Permission("signer.certificates.read"),
             }
         ),
         Role.VIEWER: frozenset(
             {
+                Permission("do_ecf.ranges.read"),
+                Permission("do_ecf.received_documents.read"),
+                Permission("fiscal.enrollments.read"),
                 Permission("identity.companies.read"),
                 Permission("invoicing.invoices.read"),
+                Permission("signer.certificates.read"),
             }
         ),
     }

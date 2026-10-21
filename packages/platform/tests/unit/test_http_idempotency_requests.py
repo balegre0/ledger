@@ -17,13 +17,12 @@ lazy from fastapi import Request
 from ledger_kernel.access import Principal, PrincipalKind, SubjectId
 from ledger_kernel.ids import CompanyId
 from ledger_platform.auth.providers.zitadel import organization_of
+from ledger_platform.data.idempotency import MAX_KEY_LENGTH, InvalidIdempotencyKeyError
 from ledger_platform.http.app import ApiInfo, Observability, create_app
 from ledger_platform.http.idempotency import (
-    MAX_KEY_LENGTH,
     REPLAYED_HEADER,
     Attempt,
     CanonicalBody,
-    InvalidIdempotencyKeyError,
     Outcome,
     Target,
     UnlabelledRouteError,

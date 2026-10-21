@@ -24,6 +24,16 @@ def test_dgii_s_documented_urls() -> None:
     assert OFFICIAL_HOSTS.url(Service.VALIDATE_SEED, Environment.ECF) == (
         "https://ecf.dgii.gov.do/ecf/autenticacion/api/autenticacion/validarsemilla"
     )
+    # The RFCE and its query on the fc host (06 quick reference); voids and approvals on the ecf host.
+    assert OFFICIAL_HOSTS.url(Service.RFCE_QUERY, Environment.TESTECF) == (
+        "https://fc.dgii.gov.do/testecf/consultarfce/api/consultas/consulta"
+    )
+    assert OFFICIAL_HOSTS.url(Service.VOID_RANGES, Environment.ECF) == (
+        "https://ecf.dgii.gov.do/ecf/anulacionrangos/api/operaciones/anularrango"
+    )
+    assert OFFICIAL_HOSTS.url(Service.APPROVAL, Environment.CERTECF) == (
+        "https://ecf.dgii.gov.do/certecf/aprobacioncomercial/api/aprobacioncomercial"
+    )
 
 
 def test_certecf_publishes_neither_track_ids_nor_the_directory() -> None:
@@ -114,6 +124,19 @@ def test_plain_http_reaches_a_fake_on_this_machine_for_testecf_and_certecf_only(
     assert not fake.official
     with pytest.raises(LiveHostRefusedError):
         fake.url(Service.SEED, Environment.ECF)
+
+
+def test_a_seed_s_audience_is_the_ecf_host_with_its_port() -> None:
+    assert OFFICIAL_HOSTS.audience == "ecf.dgii.gov.do"
+    assert DgiiHosts(ecf="https://ecf.fake.test:8443").audience == "ecf.fake.test:8443"
+    assert DgiiHosts(ecf="http://[::1]:8471").audience == "[::1]:8471"
+
+
+@pytest.mark.parametrize("host", ["https://ecf_dgii.fake.test", "https://ecf.fake.test:8443%2F"])
+def test_an_ecf_host_the_signer_could_not_audit_as_an_audience_is_refused(host: str) -> None:
+    # Checked once, when the hosts are configured, never at the first seed signed.
+    with pytest.raises(HostRefusedError, match="https origin"):
+        DgiiHosts(ecf=host)
 
 
 def test_the_qr_s_hosts_are_the_checked_hosts_documents_go_to() -> None:

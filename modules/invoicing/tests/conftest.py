@@ -16,14 +16,16 @@ later tax point.
 
 from datetime import date
 from decimal import Decimal
+from functools import partial
 from typing import Final
-lazy from collections.abc import Iterator
+lazy from collections.abc import Iterator, Sequence
 
 import pytest
 lazy import httpx
 
 from ledger_invoicing._manifest import MANIFEST
 from ledger_invoicing.adapters.postgres.schema import MIGRATIONS
+from ledger_invoicing.api import ISSUE_POLICY, RENDERER
 from ledger_kernel.dated import Since, Timeline
 from ledger_kernel.jurisdiction import parse_jurisdiction
 from ledger_kernel.money import Currency, RoundingMode
@@ -41,9 +43,16 @@ from ledger_kernel.regimes import (
     TaxCategoryKey,
     TaxCategoryKind,
 )
+from ledger_platform.config.manifest import load_manifest
 from ledger_platform.data.audit import Actor, acting_as
+from ledger_platform.data.migrations import SchemaMigrations
+from ledger_platform.runtime import App, Module, ModuleParts
+from ledger_platform.runtime.registries import MODULES, Discovered
 from ledger_testing.api import TestPrincipal, created
 from ledger_testing.modules import ModuleUnderTest
+lazy from ledger_invoicing.api import IssuePolicy, Renderer
+lazy from ledger_platform.config.settings import Settings
+lazy from ledger_platform.runtime import ModuleContext
 lazy from ledger_testing.issuer import LocalIssuer
 lazy from ledger_testing.postgres import Template
 
@@ -163,3 +172,65 @@ def owner(local_issuer: LocalIssuer) -> TestPrincipal:
 async def company(client: httpx.AsyncClient, owner: TestPrincipal) -> str:
     """The public id of a company ``owner`` registered through identity's API (``COMPANY``)."""
     return await created(client, "/v1/companies", COMPANY, owner.posting("company-1"))
+
+
+# ── Modules of a test's own, implementing invoicing's extension points ──────────
+
+type Implementation = tuple[str, int, IssuePolicy | None, Renderer | None]
+"""A module of a test's own: its name, its order in the chains, and what it implements of each point."""
+
+
+def _extension(name: str, order: int, policy: IssuePolicy | None, renderer: Renderer | None) -> Module:
+    """A module after invoicing implementing its points at ``order``; it owns a schema it never uses."""
+    points = [
+        point for point, given in (("IssuePolicy", policy), ("Renderer", renderer)) if given is not None
+    ]
+    implements = ", ".join(f'"invoicing.{point}"' for point in points)
+    orders = "\n".join(f'"invoicing.{point}" = {order}' for point in points)
+    text = "\n".join(
+        (
+            "[package]",
+            f'name = "{name}"',
+            'kind = "module"',
+            'summary = "A test module."',
+            'owners = ["@o"]',
+            "[dependencies]",
+            'packages = ["kernel", "platform"]',
+            'modules = ["invoicing"]',
+            "[data]",
+            f'schema = "{name}"',
+            "[extension_points]",
+            f"implements = [{implements}]",
+            "[extension_points.order]",
+            orders,
+        )
+    )
+
+    def assemble(context: ModuleContext) -> ModuleParts:
+        bound = (
+            *(() if policy is None else (ISSUE_POLICY.bind(policy),)),
+            *(() if renderer is None else (RENDERER.bind(renderer),)),
+        )
+        return ModuleParts(
+            implements=bound,
+            migrations=SchemaMigrations(schema=context.database.schema, scripts="unused_by_tests:migrations"),
+        )
+
+    return Module(manifest=load_manifest(text), assemble=assemble)
+
+
+@pytest.fixture
+def extended_api(
+    settings: Settings, module_under_test: ModuleUnderTest, implementations: Sequence[Implementation]
+) -> App:
+    """The ``api`` app with the test file's ``implementations`` installed: the file names it its ``api``."""
+    discover = module_under_test.discovering()
+    added = tuple(
+        Discovered(name, partial(_extension, name, order, policy, renderer))
+        for name, order, policy, renderer in implementations
+    )
+
+    def found(group: str) -> Sequence[Discovered]:
+        return (*discover(group), *added) if group == MODULES else discover(group)
+
+    return App("api", settings=settings, discover=found)

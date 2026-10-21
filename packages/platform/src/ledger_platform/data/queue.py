@@ -22,6 +22,10 @@ their leases cleared, instead of waiting for the leases to run out. A row whose 
 its attempt back; one whose handler started (and was stopped) keeps it, as a crash would. Its loop then ends
 in ``parked`` (a worker never returns: the runtime's ``Supervisor`` cancels it), and a loop that carries on
 past every ``Exception`` asks ``being_cancelled`` whether the one it caught is really its own cancellation.
+
+A handler that runs outside the unit that claimed its row (a job's, an outside consumer's) keeps its lease by
+renewing it while it runs (``renewing``): a renewal that finds the row taken over, or that fails, stops the
+handler, since an unrenewed lease runs out and another worker would run the row too.
 """
 
 import asyncio
@@ -29,8 +33,9 @@ from dataclasses import dataclass
 from datetime import timedelta
 from types import MappingProxyType
 from typing import Final, Never, NotRequired, TypedDict, Unpack, final
-lazy from collections.abc import Mapping, Sequence
+lazy from collections.abc import Awaitable, Callable, Mapping, Sequence
 
+import structlog
 from pydantic import TypeAdapter
 from sqlalchemy import case, func, select, tuple_, update
 lazy from sqlalchemy import ColumnElement, RowMapping, Update
@@ -63,6 +68,7 @@ WORKER_LOST: Final = "worker_lost"
 RECOVERY_BATCH: Final = 100
 """Expired rows a recovery takes at most (the rest at the next claim)."""
 _STATUSES: Final = TypeAdapter(list[str])
+_logger = structlog.stdlib.get_logger(__name__)
 
 
 class Window(TypedDict):
@@ -245,6 +251,45 @@ async def recover(
         .all()
     )
     return Recovered(dead=statuses.count("dead"), ready=statuses.count("ready"))
+
+
+async def renewing[R](
+    work: Awaitable[R], *, renew: Callable[[], Awaitable[bool]], every: float, lost: Callable[[], Exception]
+) -> R:
+    """``work``'s result, ``renew`` awaited every ``every`` seconds while it runs (see the module).
+
+    A renewal that answers ``False``, or raises, cancels ``work`` and raises ``lost()`` instead of the
+    cancellation (a failed renewal cannot vouch for the lease; ``renew`` logs its failures itself). The
+    cancellation of the task awaiting this is raised as it is.
+    """
+    running = asyncio.ensure_future(work)
+    gone = asyncio.Event()
+    keeper = asyncio.create_task(_keep(running, renew, every, gone))
+    try:
+        return await running
+    except asyncio.CancelledError:
+        if gone.is_set() and not being_cancelled():
+            raise lost() from None
+        raise
+    finally:
+        keeper.cancel()
+        await asyncio.gather(keeper, return_exceptions=True)
+
+
+async def _keep[R](
+    running: asyncio.Future[R], renew: Callable[[], Awaitable[bool]], every: float, gone: asyncio.Event
+) -> None:
+    while True:
+        await asyncio.sleep(every)
+        try:
+            kept = await renew()
+        except Exception:  # the lease cannot be vouched for: as good as lost; a cancellation is no Exception
+            _logger.exception("queue.lease_renewal_failed")
+            kept = False
+        if not kept:
+            gone.set()
+            running.cancel()
+            return
 
 
 async def parked() -> Never:

@@ -2,9 +2,11 @@
 
 *Formato Resumen Factura Consumo Electrónica v1.0*: the invoice's identification, issuer, buyer and totals (no
 rates), and the security code of the full, signed e-CF (``CodigoSeguridadeCF``), which the company keeps (IT
-§9.1). The summary is signed in its turn.
+§9.1). The summary is signed in its turn. It holds what its format has room for, in pesos: no address, no
+due date, no discount and no other currency, all of which the full e-CF keeps.
 """
 
+from dataclasses import replace
 from typing import ClassVar, Final
 
 from ledger_country_do.channels.ecf_v1.adapters.xml.ecf import write_buyer, write_totals
@@ -44,7 +46,7 @@ def render(draft: EcfDraft, totals: Totals, *, security_code: str) -> bytes:
     issuing.text("rncemisor", draft.issuer.rnc)
     issuing.text("razonsocialemisor", draft.issuer.legal_name)
     issuing.text("fechaemision", dgii_date(draft.issued_on))
-    write_buyer(header, draft.buyer)
+    write_buyer(header, replace(draft.buyer, address=None), required=True)
     write_totals(header, totals, rates=False)
     header.text("codigoseguridadecf", security_code)
     return root.document()

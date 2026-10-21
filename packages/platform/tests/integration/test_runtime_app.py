@@ -287,7 +287,7 @@ def probe(tmp_path: Path) -> ProbeModule:
 def fresh(chassis: WorkerDatabase, postgres: PostgresServer) -> Iterator[Fresh]:
     """The roles come from the template (``chassis``): a fresh database gets only its schemas."""
     del chassis
-    name = fresh_database(postgres, ("platform", "probe", "other"))
+    name = fresh_database(postgres, ("platform", "probe", "other"), isolated=())
     yield Fresh(postgres, name)
     with psycopg.connect(postgres.libpq(), autocommit=True) as admin:
         admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))

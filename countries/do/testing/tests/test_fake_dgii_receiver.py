@@ -8,17 +8,17 @@ from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import (
     verify_enveloped,
 )
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import texts
-from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import violations
+from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.answers import json_list, json_object
 from ledger_country_do_testing.fake_dgii.app import DEFAULT_PUBLIC_URL
 from ledger_country_do_testing.fake_dgii.state import DirectoryEntry
 from ledger_country_do_testing.samples import SIGNED_AT, credit_invoice
+from ledger_fiscal_kit.xml.hardened import texts
 lazy from ledger_country_do_testing.fake_dgii.app import FakeDgii
 lazy from ledger_country_do_testing.local_signer import KeyPairSigner
-lazy from ledger_country_do_testing.pki import Issued
+lazy from ledger_testing.pki import Issued
 
 SIMULATOR: Final = "/testecf/emisorreceptor/fe"
 ACECF: Final = (
@@ -36,15 +36,18 @@ def xml(document: bytes) -> dict[str, tuple[str, bytes, str]]:
 
 async def receiver_token(http: httpx.AsyncClient, signer: KeyPairSigner) -> dict[str, str]:
     seed = (await http.get(f"{SIMULATOR}/autenticacion/api/semilla")).content
-    answer = await http.post(
-        f"{SIMULATOR}/autenticacion/api/validacioncertificado", files=xml(await signer.sign_seed(seed))
-    )
+    signed_seed = signer.sign(seed)
+    answer = await http.post(f"{SIMULATOR}/autenticacion/api/validacioncertificado", files=xml(signed_seed))
     return {"Authorization": f"Bearer {json_object(answer)['token']}"}
+
+
+async def signed(signer: KeyPairSigner, document: bytes) -> bytes:
+    return signer.sign(document)
 
 
 async def signed_credit_invoice(signer: KeyPairSigner, sequence: int = 1) -> bytes:
     draft = credit_invoice(sequence)
-    return await signer.sign_document(ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT))
+    return await signed(signer, ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT))
 
 
 async def test_testecf_s_directory_answers_dgii_s_simulator_for_any_rnc(
@@ -100,7 +103,7 @@ async def test_the_simulator_receives_an_e_cf_and_answers_a_signed_arecf(
         files=xml(await signed_credit_invoice(signer)),
         headers=await receiver_token(http, signer),
     )
-    assert violations(Format.ARECF, answer.content) == ()
+    assert DO_SCHEMAS.violations(Format.ARECF, answer.content) == ()
     assert verify_enveloped(answer.content).certificate == receiver_identity.certificate
     detail = "DetalleAcusedeRecibo/"
     found = texts(
@@ -166,7 +169,7 @@ async def test_the_simulator_takes_a_signed_commercial_approval(
     http: httpx.AsyncClient, signer: KeyPairSigner, fake: FakeDgii
 ) -> None:
     headers = await receiver_token(http, signer)
-    approval = await signer.sign_document(ACECF)
+    approval = await signed(signer, ACECF)
     assert (
         await http.post(f"{SIMULATOR}/aprobacioncomercial/api/ecf", files=xml(approval), headers=headers)
     ).status_code == 200
@@ -174,7 +177,7 @@ async def test_the_simulator_takes_a_signed_commercial_approval(
     assert (
         await http.post(f"{SIMULATOR}/aprobacioncomercial/api/ecf", files=xml(ACECF), headers=headers)
     ).status_code == 400
-    not_an_approval = (b"<a>", b"<ACECF />", await signer.sign_document(b"<ACECF><Otro>1</Otro></ACECF>"))
+    not_an_approval = (b"<a>", b"<ACECF />", await signed(signer, b"<ACECF><Otro>1</Otro></ACECF>"))
     for sent in not_an_approval:
         answer = await http.post(f"{SIMULATOR}/aprobacioncomercial/api/ecf", files=xml(sent), headers=headers)
         assert answer.status_code == 400

@@ -216,7 +216,7 @@ needs. Apps contain no business code (import-linter: an app imports only `ledger
 |---|---|---|---|
 | `api` | `ledger-api` | every module's routers, channels' public routes (`/v1/do/...`), the countries API, the synchronous numbering-and-signing path (§8.5) | stateless, N replicas, public behind ingress |
 | `worker` | `ledger-worker` | outbox fan-out for every schema (the signer's included), consumers, jobs and schedules of every module and channel except the signer's | N replicas; work shared through `SKIP LOCKED`; pools by job kind later |
-| `signer` | `ledger-signer` | the signer's gRPC server, its own consumer runner (`signer.company_deactivations`) and schedules (`signer.expiry_watch`) | 2 replicas, private network, own credentials (§3.7) |
+| `signer` | `ledger-signer` | the signer's gRPC server, its own consumer runner (`signer.company_deactivations`), its jobs (`signer.expiry_notice`, planned per certificate at import, instead of an expiry-watch schedule) and its own purges (`signer.purge_idempotency_keys`, `signer.purge_done_jobs`: no other role's login enters its schema) | 2 replicas, private network, own credentials (§3.7) |
 | `receiver` | `ledger-receiver` | channels' authority- and emitter-facing routes | N replicas, public, own host name and rate limits (§3.8) |
 | `migrate` | `ledger-migrate` | every schema's migrations in dependency order; subscriptions upsert; routing version bump | one-shot job before each rollout |
 
@@ -322,7 +322,16 @@ type wait in the inbox for the next roll forward (alerted by age), never fail.
   runner deletes the row in a second unit under its token, the facade command carrying the event id as its
   idempotency token), a consumer writes its own schema and enqueues a job for any cross-module call. The
   consumers §8.5 shows calling `InvoicingApi.apply_fiscal_status` (`fiscal.channel_documents`) need the outside
-  style first.
+  style first. **As built (v2-M3b):** a consumer declared `style = "outside"` (never with `ordered = true`) hands
+  `ConsumerSpec(outside=handler)`, a handler of the event alone that runs with no unit open (so it may call
+  facades) as `system:consumer:<name>`, its lease extended under its token before it starts and renewed every
+  third of it while it runs (a renewal that finds the row taken over or fails stops it), its row then deleted,
+  or its failure recorded by the retry, `dead` and replay rules above, in another unit fenced by the token (a
+  lost lease records nothing, `inbox_lease_lost`): its effects are at least once, so what it calls takes the
+  event id as idempotency token or a version (rule 4), a version-monotonic facade answering a stale version as a
+  no-op success (a `CONFLICT` that reaches the runner is retried, like any but `INVALID`). A run past the
+  consumer's `timeout` (manifest, default 60 s) is stopped and retried as `inbox_handler_timed_out` (dead once
+  its attempts are spent), so a hung call never holds the consumer, nor a stopping worker, longer than that.
 - **Exactly-once effects over at-least-once delivery.** Fan-out inserts and the outbox delete commit together,
   so one outbox row is fanned out once; the inbox primary key `(consumer, event_id)` absorbs any repeat. A
   handled inbox row is deleted in the handler's transaction (nothing can deliver it again: its outbox row is
@@ -415,7 +424,7 @@ state machines** (ADR 0003).
 Rule 7, ADR 0010.
 
 - **Process**: `ledger-signer`, its own Deployment, its own PostgreSQL login (`ledger_signer`, member of
-  `signer_rw` only), its own KMS and certification-entity credentials. Network policy: only `api`, `worker` and
+  `signer_rw`, `signer_purge` and, for its schedule leases, `platform_rw`: §6.2), its own KMS and certification-entity credentials. Network policy: only `api`, `worker` and
   `receiver` pods reach its gRPC port; it reaches only PostgreSQL, KMS and the certification entity.
 - **Backends** (`SigningBackend` port inside the signer; one per certificate, chosen at import):
   - `local`: the `.p12` is parsed in the signer; the private key is encrypted with a per-certificate data key
@@ -426,20 +435,43 @@ Rule 7, ADR 0010.
   Both produce the same `SignXml`/`SignSeed` answers, so channels and callers do not know which is used.
 - **Contract**: `contracts/proto/ledger/signer/v1/signer.proto`, `SignerService`: `ImportCertificate`
   (bytes + password streamed through `api`, never parsed outside the signer; carries the client's
-  `Idempotency-Key`, stored in `signer.idempotency_keys`), `DescribeCertificates`, `SignXml` (enveloped XMLDSig,
-  RSA-SHA256, the channel's profile id), `SignSeed`. Importing a certificate while one is active installs the
-  new one and retires the old (a compare-and-set `RotateCertificate` is deferred). One certificate may serve
-  both modes (`modes = {test, live}`). Deadlines set by the caller (≤ 10 s); stable error codes in trailing
-  metadata.
+  `Idempotency-Key`, stored in `signer.idempotency_keys`), `DescribeCertificates`, `RetireCertificate`
+  (naturally idempotent), `SignXml` (enveloped XMLDSig, RSA-SHA256, the channel's profile id), `SignSeed`.
+  Importing a certificate while one is active installs the new one and retires the old (a compare-and-set
+  `RotateCertificate` is deferred). One certificate may serve both modes (`modes = {test, live}`); a test-mode
+  request installs for test alone and never retires a certificate that serves live (ADR 0007). Deadlines set
+  by the caller (≤ 10 s; an import, whose bundle streams, ≤ 30 s, the signer waiting at most 28 s for its
+  stream); stable error codes in trailing metadata.
+- **Signing is two-phase and the validity is the signer's**: fiscal-kit's `xml.dsig` prepares the document
+  (hardened parse, C14N, digest of `SignedInfo`) in the signer, custody signs (or the entity signs the
+  SHA-256 of `SignedInfo`), `dsig` completes the document. The signer refuses a signature unless its
+  certificate covers the document's `signed_at` to `signed_at + skew` and `signed_at` is within the skew of
+  its clock (`LEDGER_SIGNER_SIGNING_SKEW_SECONDS`, 300 to 900). A channel reads a certificate's validity
+  through `DescribeCertificates` (`SignerPort.certificate_validity`).
 - **Callers authenticate** with per-caller tokens (`LEDGER_SIGNER_TOKEN_API`, `_WORKER`, `_RECEIVER`, rotated
-  by the secret manager) and a **method allowlist** per caller: `api` → `ImportCertificate`,
-  `DescribeCertificates`; `worker`, `receiver` → `SignXml`, `SignSeed`. mTLS from the mesh replaces tokens later.
+  by the secret manager; during a rotation the signer also accepts `LEDGER_SIGNER_TOKEN_<CALLER>_PREVIOUS`;
+  each at least 32 visible ASCII characters, none shared, compared as SHA-256 digests in constant time) and a
+  **method allowlist** per caller: `api` → `ImportCertificate`, `DescribeCertificates`, `RetireCertificate`;
+  `worker`, `receiver` → `SignXml`, `SignSeed`, `DescribeCertificates`. A client process holds its own token
+  only. The signer trusts the organization, company, mode and actor its caller forwards (the api asserts
+  them before it calls) and binds the caller's name from the token: a residual risk until mTLS from the mesh
+  replaces the tokens (ADR 0010, accepted risk 8). The port is plaintext until then.
+- **Bounds**: imports `LEDGER_SIGNER_IMPORT_CONCURRENCY` at once (default 2), signatures
+  `LEDGER_SIGNER_SIGNING_CONCURRENCY` (default 4), at most 64 calls in flight, messages at most 5 MiB, a bundle
+  at most 2 MiB; a PKCS#12 bundle naming more than 1,000,000 key-derivation or MAC iterations is refused
+  unopened (a key bag inside an encrypted safe is the residual).
+- **Isolation in the manifest**: `[data] isolated_in = "signer"` (§4.2) makes the signer's role the only one
+  that assembles the module's server side; the client roles bind its gRPC client, or, without
+  `LEDGER_SIGNER_ADDRESS` and their own token, stand-ins answering `signer_unavailable`.
+- **KMS**: until a cloud KMS adapter exists, only the local-file KMS does, refused outside `local` and `test`:
+  no shared environment can run the signer before that adapter (and, for `remote`, a certification entity's).
 - **Audit**: every signature (who, company, mode, document SHA-256, reference such as an e-NCF) is written to
   `signer.audit_events` and the signature is returned only after the audit commits (M3 decisions 5, 7, 9, 10
   kept: bounded signing pool, data-key cache off by default).
 - **Faces**: the signer module's HTTP adapter (`/v1/certificates`) is mounted in `api` and forwards to gRPC;
-  the gRPC server, consumer runner and schedules are mounted only in `signer`. import-linter forbids every app
-  but `signer` from importing `ledger_signer.adapters.custody`.
+  the gRPC server, consumer runner, jobs and purges are mounted only in `signer`. import-linter forbids every
+  package but the signer's own and its app from importing `ledger_signer.adapters.custody`, which the assembly
+  imports lazily, in the signer's role only.
 - `api`'s readiness does **not** depend on the signer (a signer outage must not take the API out of rotation;
   certificate routes answer 503 `signer_unavailable`, and the synchronous signing path falls back to the job).
 
@@ -669,6 +701,7 @@ test = ["hypothesis>=6.168.5"]                    # what its tests and type chec
 
 [data]
 schema = "invoicing"                # PostgreSQL schema == role prefix; unique across the repo
+# isolated_in = "signer"            # optional: the one role whose own login holds the schema's roles (ADR 0010)
 
 [[ids]]                             # public TypeID prefixes this package mints; unique across the repo
 prefix = "inv"
@@ -819,7 +852,7 @@ enqueues = "do_ecf.range_watch"
 | Country field (wire) | `fiscal.<regime>.<field>` (regime law-level fields and channel format fields share the regime namespace) | `fiscal.do.income_type` |
 | Error code | `<thing>_<problem>`, snake_case, unique across the repo | `range_exhausted` |
 | Env var | `LEDGER_<SETTING>`; module or channel settings `LEDGER_<MODULE>_<SETTING>` | `LEDGER_DO_ECF_DGII_TIMEOUT_SECONDS` |
-| Proto package | `ledger.<module>.v<N>` | `ledger.signer.v1` |
+| Proto package | `ledger.<module>.v<N>`, in `contracts/proto/ledger/<module>/v<N>/`; its Python code generated into `ledger_<module>.adapters.grpc._generated.v<N>` | `ledger.signer.v1`, `ledger_signer.adapters.grpc._generated.v1` |
 | Python modules | nouns, `lower_with_under`; never `utils`, `helpers`, `common`, `misc`, `shared` | `numbering.py` |
 | Tests | `tests/unit|integration|contract/test_<subject>.py`; support modules prefixed by package (`invoicing_samples.py`) | |
 | ADR | `docs/adr/NNNN-kebab-title.md` | `0005-regime-channel-split.md` |
@@ -1384,6 +1417,15 @@ needs them, and then move here with both channels as tests.
 | `xml` | hardened parser (no entities, DTDs, network; size limits), `SchemaSet` (vendored XSDs, SHA-256 pins, load-time corrections pinned by count), C14N helpers |
 | `events` | kit-owned event types every channel publishes: `fiscal_channel.document.updated` (invoice id, channel, state, `FiscalStatus`, version, authority number, authority messages ≤ 20 × 500 chars) and `fiscal_channel.received_document.recorded` |
 
+As built in v2-M2b (ahead of v2-M3): the kit started minimal with `ports.SignerPort` and `xml` (`xml.hardened`,
+`xml.dsig`, moved from the DO channel). `SignerPort` signs a document (`XmlToSign`: tenant with its mode,
+profile, document, the `signed_at` it states, a reference) or a seed (`SeedToSign`: tenant, profile, seed,
+audience), answers `Signed` (the document and the certificate's id) and reads `certificate_validity`; it raises
+five errors only (`SigningCertificateNotValidError`, `SigningClockSkewError`, `SigningCertificateMissingError`,
+`SignatureRefusedError`, `SignerUnavailableError`). This is the DGII spike's integration checklist item 2 as
+built: the channel's `XmlSigner` became `SignerPort`, the signing half moved to `modules/signer`, and
+verification, trust, certificates and names stay in the channel.
+
 ### 8.5 How a document flows (any country)
 
 ```
@@ -1671,7 +1713,9 @@ cannot be probed by type. Internal UUIDs never appear in the API.
 
 `application/problem+json` with `type` (`urn:ledger:error:<code>`), `title`, `status`, `code`, `detail`,
 `request_id` (also the `Request-Id` header), and extension members per code (`errors[]` ≤ 20 for
-`invalid_request`, `authority_messages[]` (`{code, message, lang}`, verbatim) for fiscal rejections, `existing_id`
+`invalid_request`, each `{location, type, message}`; `errors[]` ≤ 20 for `invalid_document` (the
+`IssuePolicy` chain's objections, M3b), each `{code, field, message}`, `field` a path or `null`; both with
+`omitted_errors`, the count left out; `authority_messages[]` (`{code, message, lang}`, verbatim) for fiscal rejections, `existing_id`
 for business-key conflicts). Problems are English; clients translate by `code` (§7.10). One kind → status table
 shared by HTTP and gRPC:
 
@@ -1761,7 +1805,7 @@ v1 §9 holds except where noted.
 |---|---|
 | Identity provider | Zitadel v4, unmodified (AGPL network use). Token verification generic (issuer, audience, asymmetric algorithms only, leeway, RFC 9068 access-token shape); provider claims only in `auth.providers.zitadel`: organization from `urn:zitadel:iam:user:resourceowner:id`, roles only from the audience project's claim (v1 kept) |
 | API credentials | Zitadel machine users (private-key JWT or client credentials) registered in `identity.api_clients` with organization, mode and pinned version. A principal is a person or a machine (`Principal.kind`). The signed claim `urn:ledger:principal_kind` (`human`/`machine`) decides where a token carries it: a v1 Action of the organization's Complement Token flow, trigger Pre access token creation, sets it from the user's type (`deploy/local/zitadel/bootstrap.sh` installs it locally; a **deployment step** in every other environment), a token whose claim contradicts its shape or names no kind is refused (401 `principal_kind`), and `LEDGER_TOKEN_KIND_CLAIM_REQUIRED` makes it mandatory, which `Settings` requires in staging and production. Without the claim the shape decides (checked against Zitadel v4.19.2): a token whose `client_id` is one of its audiences, other than the project itself, was issued to an application a person signed in through; a machine user's own credentials name the machine as `client_id` and no application. A machine acts only as an active API client of its organization (403 `api_client_unregistered` otherwise, 401 `api_client_revoked` once revoked). Whoever an API client names is bound to its mode and revocation whatever its token's kind: a person registered by mistake is held to that client until it is revoked (accepted), and a machine passing for a person gains nothing; registering refuses a subject known to be a person (the registering person, 422 `api_client_human`) |
-| Certificate custody | §3.7: signer process only. `local` backend: KMS envelope encryption, requires our INDOTEL authorization; `remote` backend: keys stay with an INDOTEL-authorized certification entity (Decreto 587-24 Art. 22, [06] §6). Subject must match the company (M3 decision 1); validity window; chain to an accepted DR certification authority; revocation checks in v2-M5 |
+| Certificate custody | §3.7: signer process only. `local` backend: KMS envelope encryption, requires our INDOTEL authorization; `remote` backend: keys stay with an INDOTEL-authorized certification entity (Decreto 587-24 Art. 22, [06] §6). As built (v2-M2b), a certificate is admitted at import if its key is RSA of 2048 bits or more, it is a signing certificate (digital-signature key usage, no authority) of the key it came with, and it is valid now and for at least the signing skew; a stopgap refuses one its issuer signed with anything but a SHA-2 hash (it looks at the one certificate only, until path validation replaces it). Deferred: the subject matching the company (M3 decision 1; v2-M3b, the channel's requirements), the chain to an accepted DR certification authority and revocation checks (v2-M5). The signer does not check that a document it signs names the certificate's company (ADR 0010, accepted risk 9) |
 | Signer data | the signer's **business tables** are reachable only by `ledger_signer`; its `outbox` and `inbox` are also reachable by `ledger_relay` (fan-out); `api` reaches the signer only through gRPC with a per-caller token and method allowlist |
 | Secrets | from the cloud secret manager (External Secrets Operator); never in images, repos, `repr`, logs or errors |
 | Telemetry leaks | v1 rules kept verbatim: excerpts only, exception type only on spans, no locals in tracebacks, DB/validation errors logged by SQLSTATE/locations, never values |
@@ -1966,7 +2010,7 @@ brackets.
 | empty `*_pb2_grpc.py(i)` | D | stubs generated only for protos with services |
 | `buf.yaml` | Mv | `contracts/buf.yaml` |
 | tests | D | envelope tests rewritten in platform; proto round trips are `buf breaking`'s job [05 §3.3] |
-| — | new | `contracts/proto/ledger/signer/v1/signer.proto`, generated into `ledger_signer.adapters.grpc._generated` |
+| — | new | `contracts/proto/ledger/signer/v1/signer.proto`, generated into `ledger_signer.adapters.grpc._generated.v1` |
 
 **`libs/platform` → `packages/platform`** (target subpackage per §5.2)
 

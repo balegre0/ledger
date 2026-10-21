@@ -1,10 +1,11 @@
 import logging
 import threading
-from typing import Final, Literal
+from typing import Final, Literal, NoReturn
 lazy from collections.abc import AsyncGenerator
 
 import pytest
 import structlog
+from botocore.exceptions import ClientError, EndpointConnectionError
 from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.trace import format_span_id, format_trace_id
@@ -14,6 +15,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError, StatementError
 lazy from structlog.typing import EventDict
 
+from ledger_platform.blobs.s3 import BlobStoreRefusedError
 from ledger_platform.config.settings import LogFormat, Settings
 from ledger_platform.data.database import Database
 from ledger_platform.observability.logs import configure_logging
@@ -369,3 +371,57 @@ def test_an_exception_of_another_type_keeps_its_message(capsys: pytest.CaptureFi
     """Ours, or a library's that carries no data: what it says is what the reader needs."""
     shown = exception_values(logged(KeyError("payments-ledger"), LogFormat.JSON, capsys))
     assert shown == {"KeyError": "'payments-ledger'"}
+
+
+ARN: Final = "arn:aws:iam::123456789012:role/ledger-archive"
+S3_BUCKET: Final = "ledger-archive-s3cret"
+S3_KEY: Final = "do-ecf-v1/live/org/company/ecf/0a1b.xml"
+
+
+def deny() -> NoReturn:
+    """What S3 answers a write IAM refuses: a message naming who and what."""
+    said = f"User: {ARN} is not authorized to perform: s3:PutObject on arn:aws:s3:::{S3_BUCKET}/{S3_KEY}"
+    raise ClientError(
+        {
+            "Error": {"Code": "AccessDenied", "Message": said},
+            "ResponseMetadata": {
+                "RequestId": "R",
+                "HostId": "H",
+                "HTTPStatusCode": 403,
+                "HTTPHeaders": {},
+                "RetryAttempts": 0,
+            },
+        },
+        "PutObject",
+    )
+
+
+def refuse(cause: ClientError) -> NoReturn:
+    raise BlobStoreRefusedError(cause.response.get("Error", {}).get("Code", "")) from cause
+
+
+def refused_put() -> BlobStoreRefusedError:
+    """What the S3 store raises for a write IAM refuses, raised as it raises it: S3's answer is its cause."""
+    with pytest.raises(ClientError) as denied:
+        deny()
+    with pytest.raises(BlobStoreRefusedError) as refused:
+        refuse(denied.value)
+    return refused.value
+
+
+@pytest.mark.parametrize("log_format", [LogFormat.JSON, LogFormat.CONSOLE])
+def test_what_s3_answers_is_logged_by_operation_code_and_status_alone(
+    capsys: pytest.CaptureFixture[str], log_format: LogFormat
+) -> None:
+    """S3's messages name roles, accounts, buckets and keys: the log keeps the operation, code and status."""
+    output = logged(refused_put(), log_format, capsys)
+    for named in (ARN, "123456789012", S3_BUCKET, S3_KEY):
+        assert named not in output
+    assert "S3 PutObject: AccessDenied (403)" in output
+    assert "the object store refused the request (AccessDenied)" in output
+
+
+def test_a_failure_of_botocore_is_logged_by_its_type_alone(capsys: pytest.CaptureFixture[str]) -> None:
+    lost = EndpointConnectionError(endpoint_url=f"https://{S3_BUCKET}.s3.amazonaws.com/{S3_KEY}")
+    shown = exception_values(logged(lost, LogFormat.JSON, capsys))
+    assert shown == {"EndpointConnectionError": "botocore: EndpointConnectionError"}

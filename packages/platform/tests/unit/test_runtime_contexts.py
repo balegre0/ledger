@@ -5,6 +5,7 @@ from opentelemetry.sdk.trace import ReadableSpan
 from prometheus_client import CollectorRegistry
 from structlog.testing import capture_logs
 
+from ledger_platform.observability.telemetry import Telemetry
 from ledger_platform.observability.tracing import Tracing
 from ledger_platform.runtime.contexts import (
     AssembledChannels,
@@ -14,7 +15,6 @@ from ledger_platform.runtime.contexts import (
     ChannelUnknownError,
     DuplicateChannelError,
     ModuleParts,
-    Telemetry,
 )
 
 
@@ -30,6 +30,18 @@ def test_telemetry_is_scoped_to_its_package() -> None:
         assert isinstance(span, ReadableSpan)
         assert span.instrumentation_scope is not None
         assert span.instrumentation_scope.name == "invoicing"
+
+
+def test_unexported_telemetry_keeps_its_spans_and_metrics_in_the_process() -> None:
+    first, second = Telemetry.unexported("spike"), Telemetry.unexported("spike")
+    assert first.registry is not second.registry  # each its own: one tool's metrics never meet another's
+    with capture_logs() as logs:
+        first.logger.info("probe.said")
+    assert logs == [{"event": "probe.said", "package": "spike", "log_level": "info"}]
+    with first.tracer.start_as_current_span("probe") as span:
+        assert isinstance(span, ReadableSpan)
+        assert span.instrumentation_scope is not None
+        assert span.instrumentation_scope.name == "spike"
 
 
 def test_parts_contribute_nothing_by_default() -> None:

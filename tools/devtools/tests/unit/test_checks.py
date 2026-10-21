@@ -318,6 +318,37 @@ def test_a_package_never_depends_on_itself(tree: Path, edit: Editor) -> None:
     ]
 
 
+NAMESAKE_APP: Final = """
+[package]
+name = "identity"
+kind = "app"
+summary = "An app named like a module."
+owners = ["@o"]
+
+[dependencies]
+packages = ["platform"]
+modules = ["identity"]
+
+[app]
+script = "ledger-identity"
+role = "worker"
+"""
+
+
+def test_an_app_may_be_named_like_a_module_and_depend_on_it(tree: Path, write: Writer) -> None:
+    """Apps are named by no manifest: ``identity`` in a manifest is the module, never the app."""
+    write("apps/identity", NAMESAKE_APP, ())
+    assert messages(tree) == []
+
+
+def test_a_name_names_one_package_a_manifest_can_depend_on(tree: Path, write: Writer) -> None:
+    write("packages/identity", NESTED.replace('name = "testing"', 'name = "identity"'), ())
+    assert messages(tree) == [
+        f"packages/identity/manifest.toml: {clash('identity', 'modules/identity')}",
+        "packages/identity/manifest.toml: package.name 'identity' is modules/identity/manifest.toml's too",
+    ]
+
+
 def test_packages_never_depend_on_each_other_in_a_cycle(tree: Path) -> None:
     kernel = tree / "packages/kernel/manifest.toml"
     kernel.write_text(
@@ -409,3 +440,72 @@ def test_a_country_s_code_is_its_directory_and_its_regimes_are_its_own(tree: Pat
             "its key starts with the country's code"
         ),
     ]
+
+
+VAULT: Final = """
+[package]
+name = "vault"
+kind = "module"
+summary = "Keys, isolated in the signer's role."
+owners = ["@o"]
+
+[dependencies]
+packages = ["kernel", "platform"]
+
+[data]
+schema = "vault"
+isolated_in = "signer"
+"""
+CUSTODY_IMPORTS: Final = (
+    "import ledger_vault.adapters.custody\n",
+    "from ledger_vault.adapters.custody import sealing\n",
+    "from ledger_vault.adapters import custody\n",
+    "from .adapters.custody import sealing\n",
+    "from .adapters import custody\n",
+    "lazy from .adapters.custody.sealing import Key\n",
+)
+
+
+def test_what_loads_with_an_isolated_module_never_imports_its_custody(tree: Path, write: Writer) -> None:
+    """Importing any of the module loads its root (and ``adapters`` its package): neither may load custody."""
+    source = write("modules/vault", VAULT, ("adapters",))
+    root, adapters = source / "__init__.py", source / "adapters" / "__init__.py"
+    root.write_text(
+        '"""Vault."""\n\nfrom ledger_vault.api import Keys\nfrom . import api\n', encoding="utf-8"
+    )
+    adapters.write_text('"""Adapters."""\n\nfrom .postgres import tables\n', encoding="utf-8")
+    assert messages(tree) == []
+    rule = "loads ledger_vault.adapters.custody into every process that imports any of ledger_vault"
+    for line in CUSTODY_IMPORTS:
+        root.write_text(f'"""Vault."""\n\n{line}', encoding="utf-8")
+        assert messages(tree) == [f"modules/vault/manifest.toml: ledger_vault/__init__.py {rule}"], line
+    root.write_text('"""Vault."""\n', encoding="utf-8")
+    adapters.write_text('"""Adapters."""\n\nfrom . import custody\n', encoding="utf-8")
+    assert messages(tree) == [f"modules/vault/manifest.toml: ledger_vault/adapters/__init__.py {rule}"]
+    adapters.unlink()
+    root.unlink()
+    assert messages(tree) == []  # namespace packages: nothing to load
+
+
+def clash(name: str, earlier: str) -> str:
+    """The problem of the package ``ledger-<name>`` whose import package is ``earlier``'s too."""
+    distribution = f"ledger-{name}"
+    imported = distribution.replace("-", "_")
+    return f"distribution '{distribution}' (import package '{imported}') is {earlier}/manifest.toml's too"
+
+
+def plain_module(name: str) -> str:
+    return f'[package]\nname = "{name}"\nkind = "module"\nsummary = "A module."\nowners = ["@o"]\n'
+
+
+def test_a_module_whose_distribution_is_an_app_s_is_refused(tree: Path, write: Writer) -> None:
+    """``modules/app-api`` would be ``ledger-app-api``, the distribution of ``apps/api``."""
+    write("modules/app-api", plain_module("app-api"), ())
+    assert messages(tree) == [f"modules/app-api/manifest.toml: {clash('app-api', 'apps/api')}"]
+
+
+def test_two_packages_whose_import_names_clash_are_refused(tree: Path, write: Writer) -> None:
+    """``bill-ing`` and ``bill_ing`` are two names and two distributions, but one import package."""
+    write("modules/bill-ing", plain_module("bill-ing"), ())
+    write("modules/bill_ing", plain_module("bill_ing"), ())
+    assert messages(tree) == [f"modules/bill_ing/manifest.toml: {clash('bill_ing', 'modules/bill-ing')}"]

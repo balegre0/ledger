@@ -16,10 +16,10 @@ from cryptography.hazmat.primitives.serialization import BestAvailableEncryption
 from ledger_country_do_testing import spike
 from ledger_country_do_testing.fake_dgii.app import DEFAULT_PUBLIC_URL, FakeDgii
 from ledger_country_do_testing.fake_dgii.state import DirectoryEntry, Scripted, Status, dgii_check
-from ledger_country_do_testing.pki import bundle, pem
 from ledger_country_do_testing.transports import FAKE_HOSTS, BreaksAfterSending
 from ledger_testing.clock import ManualClock
-lazy from ledger_country_do_testing.pki import Authority, Issued
+from ledger_testing.pki import bundle, pem
+lazy from ledger_testing.pki import Authority, Issued
 
 PASSWORD: Final = "a password nobody prints"
 ISSUER_RNC: Final = "101850043"
@@ -256,7 +256,24 @@ async def test_a_buyer_the_directory_does_not_list_under_its_own_rnc_is_not_deli
     code, output = await run(
         fake, environ, "emit", "--type", "31", "--sequence", "31", "--deliver", clock=clock
     )
-    assert (code, "buyer: not applicable: the buyer is not an electronic receiver" in output) == (0, True)
+    assert (code, "buyer: not applicable: entry_names_another_rnc" in output) == (0, True)
+    assert [each.kind for each in fake.received] == ["ecf"]
+
+
+async def test_a_buyer_whose_endpoint_may_not_be_reached_is_reported(
+    fake: FakeDgii, environ: dict[str, str], clock: ManualClock
+) -> None:
+    fake.state.directory["131098193"] = DirectoryEntry(
+        name="COMPRADOR",
+        rnc="131098193",
+        reception="http://buyer.example.com",
+        approval="",
+        authentication=None,
+    )
+    code, output = await run(
+        fake, environ, "emit", "--type", "31", "--sequence", "32", "--deliver", clock=clock
+    )
+    assert (code, "buyer: do_ecf_buyer_endpoint_refused" in output) == (1, True)
     assert [each.kind for each in fake.received] == ["ecf"]
 
 
@@ -270,7 +287,7 @@ async def test_a_buyer_that_refuses_the_document_is_reported(
     assert (code, "buyer: not received (reason" in output) == (1, True)
 
 
-async def test_a_receipt_that_fails_is_reported_and_not_kept(
+async def test_a_receipt_refused_is_reported_and_kept_apart(
     fake: FakeDgii, environ: dict[str, str], clock: ManualClock
 ) -> None:
     fake.state.tamper_arecf = True
@@ -279,8 +296,9 @@ async def test_a_receipt_that_fails_is_reported_and_not_kept(
     )
     assert code == 1
     assert "DGII: codigo 1 Aceptado" in output
-    assert "buyer: do_ecf_signature_invalid" in output
+    assert "buyer: receipt refused: do_ecf_signature_invalid" in output
     assert not (out_of(environ) / f"{ISSUER_RNC}E310000000006.arecf.xml").exists()
+    assert (out_of(environ) / f"{ISSUER_RNC}E310000000006.arecf-refused.xml").exists()
 
 
 async def test_delivery_needs_the_trusted_roots_before_anything_is_signed(

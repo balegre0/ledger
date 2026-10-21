@@ -43,10 +43,16 @@ from cryptography import x509
 from cryptography.x509.oid import NameOID
 lazy import httpx
 
-from ledger_country_do.channels.ecf_v1.adapters.buyers.client import BuyerClient, Delivered
+from ledger_country_do.channels.ecf_v1.adapters.buyers.client import (
+    BuyerClient,
+    DeliveryDocument,
+    NotApplicable,
+    ReceiptRefused,
+)
 from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import system_resolve
 from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
 from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts
+from ledger_country_do.channels.ecf_v1.adapters.signing.port import DocumentSigner
 from ledger_country_do.channels.ecf_v1.adapters.signing.trust import CounterpartyTrust
 from ledger_country_do.channels.ecf_v1.adapters.xml.documents import DgiiXml
 from ledger_country_do.channels.ecf_v1.application.emission import Emitter
@@ -60,14 +66,20 @@ from ledger_country_do.channels.ecf_v1.domain.environments import (
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 from ledger_country_do.channels.ecf_v1.domain.notation import local_date
 from ledger_country_do.channels.ecf_v1.domain.routing import Route
-from ledger_country_do.channels.ecf_v1.domain.status_map import DOCUMENTED, FiscalStatus
-from ledger_country_do_testing.local_signer import BundleIncompleteError, KeyPairSigner
+from ledger_country_do_testing.local_signer import SIGNING_AS, BundleIncompleteError, KeyPairSigner
 from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
+from ledger_country_do_testing.transports import outbound_over
+from ledger_fiscal_kit.status import FiscalStatus
+from ledger_fiscal_kit.xml.dsig import NotAnRsaKeyError, SigningPairError
+from ledger_fiscal_kit.xml.hardened import XmlDocumentError
+from ledger_fiscal_kit.xml.schemas import SchemaDriftError, SchemaViolationError
 from ledger_kernel.errors import ConflictError, InvalidInputError
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import Resolve
-lazy from ledger_country_do.channels.ecf_v1.application.emission import Emitted, Signed
+lazy from ledger_country_do.channels.ecf_v1.application.emission import Emitted
+lazy from ledger_country_do.channels.ecf_v1.application.signing import Signed
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
+lazy from ledger_platform.http.outbound import OutboundHttp
 
 PREFIX: Final = "LEDGER_DO_ECF_SPIKE_"
 USED_FILE: Final = "used-encf.txt"
@@ -80,6 +92,17 @@ _ALLOWED: Final = frozenset({Environment.TESTECF, Environment.CERTECF})
 _ACCEPTED: Final = frozenset({FiscalStatus.ACCEPTED, FiscalStatus.ACCEPTED_WITH_OBSERVATIONS})
 _USAGE: Final = 2
 _NOT_ACCEPTED: Final = 1
+_REPORTED: Final = (
+    EcfError,
+    XmlDocumentError,
+    SchemaViolationError,
+    SchemaDriftError,
+    NotAnRsaKeyError,
+    SigningPairError,
+)
+"""What a run reports by its code instead of a traceback: the pack's errors and the kit's XML errors."""
+SPIKE_AS: Final = replace(SIGNING_AS, reason="do-ecf-v1.spike")
+"""Whom the spike signs and calls DGII as: its key ignores the tenant, the reason names the calls."""
 _AUTH_PROBE: Final = "ledger-spike-authentication-check"
 """A track id that does not exist: ``consultaresultado`` needs a token, so asking about it proves one."""
 _RFCE_NOT_DELIVERED: Final = "a consumer invoice sent as an RFCE is not delivered (spec 8.6.5)"
@@ -408,11 +431,10 @@ def _report(emitted: Emitted, settings: SpikeSettings, out: TextIO) -> None:
         )
     else:
         number = "" if outcome.number is None else f" (number {outcome.number.value})"
-        words = DOCUMENTED[outcome.code.value]
-        _say(out, f"DGII: codigo {outcome.code.value} {words} -> {outcome.status.value}{number}")
+        _say(out, f"DGII: codigo {outcome.code.value} {outcome.words} -> {outcome.status.value}{number}")
     messages = () if outcome is None else outcome.messages
     for message in messages:
-        _say(out, f"  {message.code}: {message.text}")
+        _say(out, f"  {message.code}: {message.message}")
     _say(out, f"security code: {signed.security_code}")
     _say(out, f"QR: {signed.qr}")
     parked = (
@@ -431,7 +453,7 @@ def _report(emitted: Emitted, settings: SpikeSettings, out: TextIO) -> None:
         "parked": parked,
         "codigo": None if outcome is None else outcome.code.value,
         "status": None if outcome is None else outcome.status.value,
-        "messages": [[message.code, message.text] for message in messages],
+        "messages": [[message.code, message.message] for message in messages],
         "security_code": signed.security_code,
         "qr": signed.qr,
     }
@@ -496,11 +518,12 @@ DEFAULT_WIRING: Final = Wiring()
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _Run:
-    """One run's settings, signer, DGII's client, wiring and output."""
+    """One run's settings, signer, DGII's client, outbound clients, wiring and output."""
 
     settings: SpikeSettings
-    signer: KeyPairSigner
+    signer: DocumentSigner
     dgii: DgiiClient
+    http: OutboundHttp
     wiring: Wiring
     out: TextIO
 
@@ -512,20 +535,31 @@ async def _delivered(signed: Signed, trust: CounterpartyTrust, context: _Run) ->
         context.signer,
         context.dgii.directory,
         trust=trust,
-        transport=context.wiring.transport,
+        http=context.http,
         resolve=context.wiring.resolve,
         clock=context.wiring.clock,
     )
     try:
+        # The draft's rules name the buyer of every document delivered in full; a missing one is refused.
+        document = DeliveryDocument(
+            issuer_rnc=draft.issuer.rnc, buyer_rnc=draft.buyer.rnc or "", encf=draft.encf
+        )
         async with buyers.opened() as opened:
-            delivery = await opened.deliver(settings.environment, draft, signed.signed_ecf)
-    except EcfError as error:
+            delivery = await opened.deliver(
+                SPIKE_AS, settings.environment, document, signed.signed_ecf, authenticate=True
+            )
+    except _REPORTED as error:
         _say(out, f"buyer: {error.code}: {error}")
         return _NOT_ACCEPTED
-    if not isinstance(delivery, Delivered):
+    stem = f"{settings.issuer.rnc}{draft.encf}"
+    if isinstance(delivery, NotApplicable):
         _say(out, f"buyer: not applicable: {delivery.reason}")
         return 0
-    path = _write(settings.out / f"{settings.issuer.rnc}{draft.encf}.arecf.xml", delivery.arecf)
+    if isinstance(delivery, ReceiptRefused):
+        _say(out, f"buyer: receipt refused: {delivery.reason}")
+        _say(out, f"written: {_write(settings.out / f'{stem}.arecf-refused.xml', delivery.arecf)}")
+        return _NOT_ACCEPTED
+    path = _write(settings.out / f"{stem}.arecf.xml", delivery.arecf)
     state = "received" if delivery.received else f"not received (reason {delivery.reason})"
     _say(out, f"buyer: {state}; receipt certificate identity: {_identity(delivery.certificate)}")
     _say(out, f"written: {path}")
@@ -550,6 +584,7 @@ async def _emitted(draft: EcfDraft, trust: CounterpartyTrust | None, context: _R
         xml=DgiiXml(),
         signer=context.signer,
         authority=context.dgii,
+        who=SPIKE_AS,
         environment=settings.environment,
         clock=context.wiring.clock,
         sleep=context.wiring.sleep,
@@ -579,27 +614,28 @@ async def run(
         return _USAGE if refused.code else 0
     try:
         settings = SpikeSettings.from_environ(environ, root=Path.cwd())
-        signer = settings.signer()
+        signer = DocumentSigner(settings.signer())
         _say(out, f"environment: {settings.environment.value}")
+        http = outbound_over(wiring.transport)
         dgii = DgiiClient(
             signer,
             hosts=settings.hosts,
             clock=wiring.clock,
             sleep=wiring.sleep,
-            transport=wiring.transport,
+            http=http,
         )
         async with dgii.opened():
             if options.command == "auth":
-                answer = await dgii.result(settings.environment, _AUTH_PROBE)
+                answer = await dgii.result(SPIKE_AS, settings.environment, _AUTH_PROBE)
                 issued = f"authenticated with {settings.environment.value}: a token was issued (not shown)"
                 _say(out, f"{issued}; consultaresultado answered codigo {answer.code}")
                 return 0
-            context = _Run(settings=settings, signer=signer, dgii=dgii, wiring=wiring, out=out)
+            context = _Run(settings=settings, signer=signer, dgii=dgii, http=http, wiring=wiring, out=out)
             return await _emit(options, context)
     except (SettingsError, JournalError) as error:
         _say(out, f"error: {error}")
         return _USAGE
-    except EcfError as error:
+    except _REPORTED as error:
         _say(out, f"error: {error.code}: {error}")
         return _USAGE if error.kind == "invalid" else _NOT_ACCEPTED
 

@@ -170,6 +170,24 @@ async def test_done_jobs_are_purged_in_short_batches(
     assert len(deletes(statements)) == 3 + 1 + 1  # probe: 3, 3, then none left; other and platform: none
 
 
+async def test_maintenance_jobs_take_their_kinds(database: Database, admin: psycopg.AsyncConnection) -> None:
+    """A module running its own purges (the signer's, Decision 11) names them; they purge its schema alone."""
+    kinds = ("probe.purge_idempotency_keys", "probe.purge_done_jobs")
+    policies = {kind: JobPolicy(max_attempts=3, deadline=None) for kind in kinds}
+    probe = BoundDatabase(database, schema="probe", source="probe", jobs=policies, signals=Silent())
+    specs = maintenance_jobs([probe], kinds=kinds)
+    assert tuple(spec.kind for spec in specs) == kinds
+    for schema in SCHEMAS:
+        await admin.execute(KEY.format(schema=schema).encode(), (A, "a-old", "-1 day"))
+    async with probe.unit(None) as uow:
+        uow.jobs.enqueue(kinds[0], "once")
+    handlers = {spec.kind: (JobDecl(kind=spec.kind), spec.handler) for spec in specs}
+    assert await JobRunner(database=probe, kinds=handlers, registry=CollectorRegistry()).run_due() == 1
+    assert await table(admin, KEYS["probe"]) == []
+    assert await table(admin, KEYS["other"]) == [("a-old",)]
+    assert await table(admin, "SELECT kind, status FROM probe.jobs") == [(kinds[0], "done")]
+
+
 @pytest.mark.parametrize("batch", [0, -1])
 def test_a_batch_below_one_is_refused(batch: int) -> None:
     with pytest.raises(InvalidOptionError):

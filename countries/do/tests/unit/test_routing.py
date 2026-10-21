@@ -1,11 +1,13 @@
 from dataclasses import replace
+from datetime import date
 from decimal import Decimal
 
 import pytest
 
 from ledger_country_do.channels.ecf_v1.domain.drafts import BillingIndicator, Buyer, DraftInvalidError, Line
-from ledger_country_do.channels.ecf_v1.domain.routing import Route, route
+from ledger_country_do.channels.ecf_v1.domain.routing import Route, rfce_threshold, route
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
+from ledger_country_do.regime import REGIME
 from ledger_country_do_testing.samples import BUYER, consumer_invoice, credit_invoice
 
 
@@ -52,3 +54,7 @@ def test_the_threshold_is_compared_with_the_total_itbis_included() -> None:
 
 def test_a_zero_rate_line_of_exactly_the_threshold_goes_in_full() -> None:
     assert taxed_consumer_invoice("250000.00", BillingIndicator.ITBIS_3, BUYER) is Route.RECEPTION
+
+
+def test_the_rfce_threshold_is_the_regime_s_on_the_day() -> None:
+    assert rfce_threshold(REGIME, date(2026, 10, 13)) == Decimal("250000.00")

@@ -26,11 +26,14 @@ lazy from ledger_testing.postgres import PostgresServer, Template, WorkerDatabas
 
 SCHEMAS = ("platform", "probe", "other")
 """The platform's schema, and two test schemas with the chassis's tables: one unit's and another module's."""
+ISOLATED: Final = "vault"
+"""The schema of a test module isolated in the signer's role, its roles ``ledger_signer``'s. Only the roles
+are the template's: the tests of the signer's role make databases of their own with it."""
 
 
 def pytest_ledger_template(template: Template) -> None:
     """The roles, the platform's schema migrated, and the chassis's tables in ``probe`` and ``other``."""
-    bootstrap(template, SCHEMAS)
+    bootstrap(template, (*SCHEMAS, ISOLATED), isolated=(ISOLATED,))
     migrate(template, PLATFORM_MIGRATIONS)
     create_chassis(template, "probe")
     create_chassis(template, "other")

@@ -179,8 +179,9 @@ DGII's emisor-receptor simulator), and `.dgii/out/<RNC>E310000000002.arecf.xml`.
 - **F14**, to ask DGII: a buyer's seed has DGII's own `SemillaModel` format, so a hostile buyer endpoint could
   relay DGII's seed for our RNC, have us sign it, and obtain a DGII token as us. Does DGII bind its seeds to
   their audience, or recommend issuers refuse to sign a buyer seed that also validates at DGII? Every buyer
-  seed the spike signs is audit-logged (`ledger_country_do.audit.buyer_seeds`: issuer, buyer, endpoint host,
-  time).
+  seed signed is returned to the caller as a `SeedSigned` (buyer, endpoint host, time) for its audit; the
+  spike authenticates whenever a buyer publishes an authentication URL, the stack only when the company
+  switched it on (Decision 19).
 
 ## 8. TesteCF: a large consumer invoice, in full
 

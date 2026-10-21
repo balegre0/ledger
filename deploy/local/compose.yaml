@@ -1,8 +1,14 @@
-# The local stack: PostgreSQL, the migrate job, the api and the worker, and Zitadel behind a profile.
+# The local stack: PostgreSQL, the migrate job, the api, the worker and the signer, and Zitadel behind a profile.
+# Before the first `up`: `sh deploy/local/signer/tokens.sh` (without the signer's file compose refuses the stack)
+# and `sh deploy/local/do/roots.sh` (the worker's trusted roots for do-ecf-v1, mounted read-only).
 #
 # What an app running on the host is configured with (the LEDGER_* variables of Settings), beside ledger.env's:
 #   LEDGER_DATABASE_URL=postgresql+psycopg://ledger_app:ledger_app@127.0.0.1:5432/ledger (or LEDGER_POSTGRES_PORT)
 #   LEDGER_HTTP_PORT=8101 for the worker (the api's 8100 is the default): never 8000, another project's here
+#   LEDGER_ARCHIVE_PATH=<an absolute directory of the host> (ledger.env's /archive is the containers'), or
+#   LEDGER_ARCHIVE_BACKEND unset: then no archive is bound, and a channel that reads one does not start
+# The containers have no /archive volume yet: nothing archives until the DO channel does (v2-M3b Task 18), and
+# the volume (owned by the image's user, 65532, beside the read-only root) arrives with Task 26.
 # An app that runs inside this network uses the same URL with the host name `postgres` in place of 127.0.0.1.
 #
 # PostgreSQL's administrator is `postgres`. A service never connects as that role: a superuser bypasses
@@ -23,7 +29,22 @@
 # and the worker's probes and metrics on 127.0.0.1:${LEDGER_WORKER_PORT:-8101} (8000 is another project's on this
 # machine). Each runs one Granian worker (scale by replicas); Granian kills one still stopping after 30 s, so
 # compose waits 40 s before its own kill.
-# The profile `zitadel` adds a local identity provider (zitadel/README.md).
+#
+# The signer (ADR 0010) is a container of its own from the same image: `ledger-signer`, the login `ledger_signer`
+# (the only one that enters the schema `signer`), its probes and metrics on 127.0.0.1:${LEDGER_SIGNER_PORT:-8102}
+# and its gRPC service on signer:50051 (never published on the host; it has no gRPC health service: compose and
+# orchestrators probe /readyz over HTTP). It is on two networks and not on `default`: `signer`, internal, which it
+# shares with its callers (the api, the worker) and PostgreSQL alone, so nothing else reaches 50051 (not migrate,
+# not Zitadel); and `signer-edge`, its alone, which carries the published probe port and, locally, gives it a route
+# out. A deployment gives it none: a NetworkPolicy admits gRPC from the api and the worker only, and lets it reach
+# PostgreSQL and the KMS only. Each caller holds a token of its own: deploy/local/signer/tokens.sh writes three
+# random ones into signer/.local/ (git ignores it), the signer reads all three, the api and the worker their own
+# (without theirs, they start and answer signer_unavailable). The signer offers the local backend only (never
+# `remote`: no certification entity's adapter exists) and keeps its KMS's master key in the volume `signer-kms`,
+# which it creates on its first start; `down -v` deletes it with the database it protects. That KMS is a file,
+# refused outside the environments `local` and `test`: this stack is the only place the signer runs yet.
+# The profile `zitadel` adds a local identity provider (zitadel/README.md); the profile `localstack` adds an S3
+# with object lock for the archive's s3 backend (ledger.env says how to point the apps at it).
 name: ledger
 
 x-ledger: &ledger
@@ -42,10 +63,14 @@ services:
   postgres:
     # The tag the platform's tests run on: a service meets locally the PostgreSQL it will be tested against.
     image: postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+    # Room for every app's pool and its overflow (each up to twice LEDGER_DATABASE_POOL_SIZE): api 30, worker
+    # 50, signer 30, and zitadel's (docs/runbooks/platform/database-connections.md).
+    command: ["postgres", "-c", "max_connections=300"]
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports: ["127.0.0.1:${LEDGER_POSTGRES_PORT:-5432}:5432"]
+    networks: [default, signer]  # the signer reaches it on its internal network
     volumes:
       - postgres:/var/lib/postgresql
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/10-ledger.sql:ro
@@ -71,18 +96,70 @@ services:
   api:
     <<: *ledger
     command: ["/app/.venv/bin/ledger-api"]
+    env_file:
+      - ledger.env
+      - path: zitadel/.local/ledger.env
+        required: false
+      - path: signer/.local/api.env  # LEDGER_SIGNER_TOKEN_API: its own token, no other caller's
+        required: false  # without it the api starts, its certificate routes answering 503
+    environment:
+      LEDGER_SIGNER_ADDRESS: signer:50051
+      LEDGER_SIGNER_IMPORT_DEADLINE_SECONDS: "28"  # the signer's; the api waits 2 s more for its answer
     ports: ["127.0.0.1:${LEDGER_API_PORT:-8100}:8000"]
+    networks: [default, signer]
     stop_grace_period: 40s
-    depends_on:
+    depends_on:  # not on the signer: its readiness is not the api's (the routes answer 503 without it)
       migrate: {condition: service_completed_successfully}
 
   worker:
     <<: *ledger
     command: ["/app/.venv/bin/ledger-worker"]
+    env_file:
+      - ledger.env
+      - path: zitadel/.local/ledger.env
+        required: false
+      - path: signer/.local/worker.env  # LEDGER_SIGNER_TOKEN_WORKER: its own token, no other caller's
+        required: false  # without it the worker starts, its signatures answering signer_unavailable
     environment:
       LEDGER_DATABASE_DIRECT_URL: postgresql+psycopg://ledger_app:ledger_app@postgres:5432/ledger
+      LEDGER_SIGNER_ADDRESS: signer:50051
+      LEDGER_DO_ECF_TRUSTED_ROOTS: /run/ledger/do-ecf/roots.pem
+      # Its jobs' concurrency, their lease renewals, its runners and headroom (PoolTooSmallError names the
+      # need): do_ecf.advance alone runs 16 at once. Each job kind a channel or module adds raises it.
+      LEDGER_DATABASE_POOL_SIZE: "50"
+    volumes:
+      # do-ecf-v1's trusted roots, which the worker requires: do/roots.sh writes a development root (local only;
+      # a deployment's roots are the owner's, Owner item 7). Missing, compose refuses the stack.
+      - {type: bind, source: ./do/.local/roots.pem, target: /run/ledger/do-ecf/roots.pem, read_only: true, bind: {create_host_path: false}}
     ports: ["127.0.0.1:${LEDGER_WORKER_PORT:-8101}:8000"]
+    networks: [default, signer]
     stop_grace_period: 40s
+    depends_on:  # not on the signer: its readiness is not the worker's
+      migrate: {condition: service_completed_successfully}
+
+  signer:
+    <<: *ledger
+    command: ["/app/.venv/bin/ledger-signer"]
+    user: "65532:65532"  # the image's nonroot, said again: the volume and the key in it are its
+    env_file:
+      - ledger.env
+      - signer/.local/signer.env  # LEDGER_SIGNER_TOKEN_API, _WORKER, _RECEIVER: 48 random characters each
+    environment:
+      LEDGER_ENVIRONMENT: local  # the local-file KMS is refused anywhere else
+      # local only: the login's password is its name, as postgres/init.sql makes it
+      LEDGER_DATABASE_URL: postgresql+psycopg://ledger_signer:ledger_signer@postgres:5432/ledger
+      LEDGER_DATABASE_DIRECT_URL: postgresql+psycopg://ledger_signer:ledger_signer@postgres:5432/ledger
+      LEDGER_SIGNER_GRPC_PORT: "50051"  # a fixed port: 0 (any free one) is refused outside local and test
+      LEDGER_SIGNER_BACKENDS: local  # never `remote`: no certification entity's adapter exists yet
+      LEDGER_SIGNER_KMS_KEY_FILE: /var/lib/ledger-signer/kms.key
+      LEDGER_SIGNER_IMPORT_DEADLINE_SECONDS: "28"  # at most 28 s: the api's 30 s less its 2 s margin
+    volumes: ["signer-kms:/var/lib/ledger-signer"]
+    ports: ["127.0.0.1:${LEDGER_SIGNER_PORT:-8102}:8000"]  # probes and metrics only; 50051 is never published
+    networks: [signer, signer-edge]  # not `default`: only its callers and PostgreSQL share a network with it
+    stop_grace_period: 40s
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 512M, pids: 128}
     depends_on:
       migrate: {condition: service_completed_successfully}
 
@@ -128,6 +205,39 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
 
+  localstack:
+    # S3 with object lock, optional: `docker compose --profile localstack up -d --wait localstack`. The pinned
+    # image (images.toml: the last LocalStack that starts without an auth token) runs S3 alone; at its first
+    # start localstack/init-s3.sh makes the bucket `ledger-archive` with object lock and a ten-year default
+    # retention in compliance mode, as production's is made. On the host it answers on
+    # 127.0.0.1:${LEDGER_LOCALSTACK_PORT:-4566}, in this network as http://localstack:4566. It keeps nothing
+    # past its container, and takes any credentials (the apps sign with AWS_ACCESS_KEY_ID=test and
+    # AWS_SECRET_ACCESS_KEY=test, which are no secret). Nothing here is required by default.
+    profiles: [localstack]
+    image: localstack/localstack:4.14.0@sha256:3ebc37595918b8accb852f8048fef2aff047d465167edd655528065b07bc364a
+    environment:
+      SERVICES: s3
+    ports: ["127.0.0.1:${LEDGER_LOCALSTACK_PORT:-4566}:4566"]
+    volumes:
+      - ./localstack/init-s3.sh:/etc/localstack/init/ready.d/init-s3.sh:ro
+    healthcheck:
+      # Healthy once the init script has run and the bucket has object lock enabled, not merely once S3 answers.
+      test:
+        - CMD-SHELL
+        - >-
+          curl -sf http://127.0.0.1:4566/_localstack/init/ready | grep -q '"completed": true'
+          && awslocal s3api get-object-lock-configuration --bucket ledger-archive
+          | grep -q '"ObjectLockEnabled": "Enabled"'
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
+
+networks:
+  signer: {internal: true}  # the signer, its callers and PostgreSQL: no route out, nothing published
+  signer-edge: {}  # the signer's alone: its published probe port (and, locally, its route out)
+
 volumes:
   postgres: {}
+  signer-kms: {}
   zitadel-bootstrap: {}

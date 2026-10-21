@@ -5,9 +5,9 @@ import pytest
 
 from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
 from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
+from ledger_country_do.channels.ecf_v1.adapters.signing.port import DocumentSigner
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import verify_enveloped
 from ledger_country_do.channels.ecf_v1.adapters.xml.documents import DgiiXml
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import texts
 from ledger_country_do.channels.ecf_v1.application.emission import (
     SETTLE_DELAY,
     Emitter,
@@ -17,16 +17,13 @@ from ledger_country_do.channels.ecf_v1.application.emission import (
 from ledger_country_do.channels.ecf_v1.application.ports import AuthorityUnavailableError, Failure
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 from ledger_country_do.channels.ecf_v1.domain.routing import Route
-from ledger_country_do.channels.ecf_v1.domain.status_map import (
-    DgiiMessage,
-    EcfState,
-    FiscalStatus,
-    NumberFate,
-    Severity,
-)
+from ledger_country_do.channels.ecf_v1.domain.status_map import EcfState, NumberFate
 from ledger_country_do_testing.fake_dgii.state import Scripted, Status
+from ledger_country_do_testing.local_signer import SIGNING_AS
 from ledger_country_do_testing.samples import consumer_invoice, credit_invoice
-from ledger_country_do_testing.transports import FAKE_HOSTS, BreaksAfterSending, Counting
+from ledger_country_do_testing.transports import FAKE_HOSTS, BreaksAfterSending, Counting, outbound_over
+from ledger_fiscal_kit.status import AuthorityMessage, FiscalStatus, Severity
+from ledger_fiscal_kit.xml.hardened import texts
 lazy from ledger_country_do.channels.ecf_v1.application.emission import Emitted
 lazy from ledger_country_do_testing.fake_dgii.app import FakeDgii
 lazy from ledger_country_do_testing.local_signer import KeyPairSigner
@@ -44,7 +41,8 @@ def emitter(dgii: DgiiClient, signer: KeyPairSigner, clock: ManualClock, sleeps:
 
     return Emitter(
         xml=DgiiXml(),
-        signer=signer,
+        signer=DocumentSigner(signer),
+        who=SIGNING_AS,
         authority=dgii,
         environment=Environment.TESTECF,
         clock=clock,
@@ -126,7 +124,9 @@ async def test_aceptado_condicional_after_en_proceso_is_valid_with_its_messages(
         FiscalStatus.ACCEPTED_WITH_OBSERVATIONS,
         Severity.WARNING,
     )
-    assert emitted.outcome.messages == (DgiiMessage("613", "Fuera de tolerancia"),)
+    assert emitted.outcome.messages == (
+        AuthorityMessage(code="613", message="Fuera de tolerancia", lang="es"),
+    )
     assert emitted.outcome.number is NumberFate.USED
     assert sleeps == [1.0, 2.0, 5.0]
 
@@ -190,11 +190,12 @@ async def emitted_over(
         sleeps.append(seconds)
 
     async with DgiiClient(
-        signer, hosts=FAKE_HOSTS, clock=clock, sleep=sleep, transport=transport
+        DocumentSigner(signer), hosts=FAKE_HOSTS, clock=clock, sleep=sleep, http=outbound_over(transport)
     ).opened() as dgii:
         emitter = Emitter(
             xml=DgiiXml(),
-            signer=signer,
+            signer=DocumentSigner(signer),
+            who=SIGNING_AS,
             authority=dgii,
             environment=Environment.TESTECF,
             clock=clock,
@@ -244,11 +245,17 @@ async def test_a_document_lost_before_dgii_recorded_it_is_parked_never_sent_agai
 async def test_an_emitter_is_built_only_over_an_open_client(
     signer: KeyPairSigner, fake: FakeDgii, clock: ManualClock
 ) -> None:
-    client = DgiiClient(signer, hosts=FAKE_HOSTS, clock=clock, transport=httpx.ASGITransport(app=fake.app))
+    client = DgiiClient(
+        DocumentSigner(signer),
+        hosts=FAKE_HOSTS,
+        clock=clock,
+        http=outbound_over(httpx.ASGITransport(app=fake.app)),
+    )
     with pytest.raises(AuthorityUnavailableError, match="not_open"):
         Emitter(
             xml=DgiiXml(),
-            signer=signer,
+            signer=DocumentSigner(signer),
+            who=SIGNING_AS,
             authority=client,
             environment=Environment.TESTECF,
             clock=clock,
@@ -262,12 +269,13 @@ async def test_an_emitter_waits_out_at_least_its_client_s_longest_attempt_before
     longer = DgiiTimeouts(total=SETTLE_DELAY + 10, call=SETTLE_DELAY * 4)
     transport = httpx.ASGITransport(app=fake.app)
     async with DgiiClient(
-        signer, hosts=FAKE_HOSTS, clock=clock, timeouts=longer, transport=transport
+        DocumentSigner(signer), hosts=FAKE_HOSTS, clock=clock, timeouts=longer, http=outbound_over(transport)
     ).opened() as dgii:
         with pytest.raises(SettleTooShortError):
             Emitter(
                 xml=DgiiXml(),
-                signer=signer,
+                signer=DocumentSigner(signer),
+                who=SIGNING_AS,
                 authority=dgii,
                 environment=Environment.TESTECF,
                 clock=clock,
@@ -275,7 +283,8 @@ async def test_an_emitter_waits_out_at_least_its_client_s_longest_attempt_before
             )
         Emitter(
             xml=DgiiXml(),
-            signer=signer,
+            signer=DocumentSigner(signer),
+            who=SIGNING_AS,
             authority=dgii,
             environment=Environment.TESTECF,
             clock=clock,
@@ -289,11 +298,12 @@ async def test_an_rfce_whose_connection_broke_after_sending_is_parked_not_resent
 ) -> None:
     broken = Counting(BreaksAfterSending(httpx.ASGITransport(app=fake.app), "recepcionfc"))
     async with DgiiClient(
-        signer, hosts=FAKE_HOSTS, clock=clock, sleep=no_sleep, transport=broken
+        DocumentSigner(signer), hosts=FAKE_HOSTS, clock=clock, sleep=no_sleep, http=outbound_over(broken)
     ).opened() as dgii:
         emitter = Emitter(
             xml=DgiiXml(),
-            signer=signer,
+            signer=DocumentSigner(signer),
+            who=SIGNING_AS,
             authority=dgii,
             environment=Environment.TESTECF,
             clock=clock,
@@ -318,11 +328,12 @@ async def test_an_e_cf_whose_outcome_certecf_cannot_tell_is_parked_with_the_sign
 ) -> None:
     broken = Counting(BreaksAfterSending(httpx.ASGITransport(app=fake.app), RECEPTION))
     async with DgiiClient(
-        signer, hosts=FAKE_HOSTS, clock=clock, sleep=no_sleep, transport=broken
+        DocumentSigner(signer), hosts=FAKE_HOSTS, clock=clock, sleep=no_sleep, http=outbound_over(broken)
     ).opened() as dgii:
         emitter = Emitter(
             xml=DgiiXml(),
-            signer=signer,
+            signer=DocumentSigner(signer),
+            who=SIGNING_AS,
             authority=dgii,
             environment=Environment.CERTECF,
             clock=clock,

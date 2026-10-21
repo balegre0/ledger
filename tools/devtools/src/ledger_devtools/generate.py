@@ -14,14 +14,16 @@ from typing import Final, TypeIs, final
 lazy from collections.abc import Callable, Iterator, Mapping, Sequence
 
 from ledger_devtools.names import LOADED_BY_OTHERS, TEST_TOOLING, distribution_of, import_names, renamed
+from ledger_devtools.protos import GENERATED_DIRECTORIES, GENERATED_FILES, contracts
+from ledger_devtools.protos import generated as grpc_code
 from ledger_devtools.roles import role_grants_path, role_grants_text
 from ledger_devtools.root import ROOT_PYPROJECT, root_text
 from ledger_devtools.sql import init_sql_text
-from ledger_devtools.workspace import MANIFEST_GLOBS, MODULE_LAYERS
+from ledger_devtools.workspace import CUSTODY, HTTP_ADAPTER, KEY_LIBRARY, MANIFEST_GLOBS, MODULE_LAYERS
 from ledger_platform.config.manifest import PackageKind
 from ledger_platform.config.names import PLATFORM
 from ledger_platform.config.settings import SETTINGS_GROUP
-lazy from ledger_devtools.openapi import api_document, openapi_text, require_installed
+lazy from ledger_devtools.openapi import api_document, api_prefixes, openapi_text, require_installed
 lazy from ledger_devtools.workspace import Package, Workspace
 
 GENERATED_HEADER: Final = (
@@ -51,7 +53,7 @@ PLATFORM_LAYERS: Final = (
     "http | grpc",
     "events | jobs",
     "auth",
-    "data",
+    "data | blobs",
     "observability",
     "_manifest",
     "config",
@@ -59,6 +61,7 @@ PLATFORM_LAYERS: Final = (
 """The chassis's own layering (§5.2): fixed by the platform's design, not by a manifest.
 
 ``_manifest`` sits above ``config``: the generated file validates its data with ``config.manifest``'s model.
+``blobs`` (immutable objects) is beside ``data``: neither knows the other; the runtime binds the archive.
 """
 PROVING: Final = "ledger_platform.http.proving"
 """The chassis's token-only caller: every route's caller applies how its caller stands, so nothing but the
@@ -69,10 +72,16 @@ _INNER: Final = ("domain", "application", "adapters")
 """A module's layers an app never imports (contract 14)."""
 _PURE: Final = ("domain", "events")
 """A module's layers that import nothing but the kernel and the standard library (contract 11)."""
-_CHANNEL_LAYERS: Final = ("adapters", "application", "domain")
-"""A channel's layers, top to bottom (§4.6 contract 10)."""
+_CHANNEL_LAYERS: Final = ("assembly", "settings", "adapters", "application", "domain")
+"""A channel's layers, top to bottom (§4.6 contract 10): its assembly (the ``ChannelPack``) and its settings
+section above the three layers every package has, as a module's assembly is above its own."""
 _CHANNEL_PURE: Final = ("application", "domain")
 """A channel's layers that know no third party (§4.6 contract 11)."""
+_CHANNEL_MIGRATIONS: Final = ("adapters", "postgres", "migrations")
+"""Where a channel's revisions are, under its package (``channels/<channel>/``)."""
+_KIT: Final = "ledger_fiscal_kit"
+_KIT_VALUES: Final = ("drafts", "objections", "status")
+"""fiscal-kit's value types a channel's pure layers import: the kernel and the standard library only."""
 _BARE_KEY: Final = re.compile(r"[A-Za-z0-9_-]+", re.ASCII)
 _PYTEST_PLUGIN: Final = ("ledger", "ledger_testing.plugin")
 """The shared pytest plugin's entry point (group ``pytest11``): the package named ``testing`` declares it."""
@@ -100,12 +109,23 @@ def has_manifest_module(package: Package) -> bool:
     return package.kind is PackageKind.MODULE or manifest.schema_name is not None or bool(manifest.channels)
 
 
-def _migrations_directory(package: Package) -> str | None:
+def _migrations_directories(package: Package, workspace: Workspace) -> list[str]:
+    """Where ``package``'s revisions are: its schema's, or each of its channels' on disk (a country's).
+
+    Alembic loads a revision by its path, not as a module of the package: coverage measures them by path.
+    """
+    if package.kind is PackageKind.COUNTRY:
+        channels = package.source / "channels"
+        return sorted(
+            path.as_posix()
+            for path in workspace.seen.directories
+            if path.parts[-3:] == _CHANNEL_MIGRATIONS and path.parent.parent.parent.parent == channels
+        )
     if package.manifest.schema_name is None:
-        return None
+        return []
     if package.kind is PackageKind.PACKAGE:
-        return (package.source / "data" / "revisions").as_posix()
-    return (package.source / "adapters" / "postgres" / "migrations").as_posix()
+        return [(package.source / "data" / "revisions").as_posix()]
+    return [(package.source / "adapters" / "postgres" / "migrations").as_posix()]
 
 
 def _entry_points(group: str, entries: Sequence[tuple[str, str]]) -> str | None:
@@ -173,7 +193,7 @@ def pyproject_text(package: Package, workspace: Workspace) -> str:
             if package.kind is PackageKind.MODULE
             else [],
         ),
-        _entry_points("pytest11", [_PYTEST_PLUGIN] if package.name == "testing" else []),
+        _entry_points("pytest11", [_PYTEST_PLUGIN] if _is_the_test_kit(package) else []),
         _entry_points(
             "ledger.countries.regimes", [(regime.key, regime.entry_point) for regime in manifest.regimes]
         ),
@@ -187,20 +207,31 @@ def pyproject_text(package: Package, workspace: Workspace) -> str:
         if workspace_deps and package.nested_country is None
         else None,
         _BUILD,
-        _coverage(package),
+        _coverage(package, workspace),
         _COVERAGE_REPORT,
         _deptry(package),
     ]
     return "\n".join(section for section in sections if section is not None)
 
 
-def _coverage(package: Package) -> str:
+def _is_the_test_kit(package: Package) -> bool:
+    """Whether ``package`` is the package named ``testing``, which declares the shared pytest plugin."""
+    return package.name == "testing" and package.kind is PackageKind.PACKAGE
+
+
+def _coverage(package: Package, workspace: Workspace) -> str:
+    """What coverage measures: the import package and its migrations, not the code of the contract."""
     text = (
         '[tool.coverage.run]\nbranch = true\ncore = "sysmon"\n'
         f"source_pkgs = [{_string(package.import_name)}]\n"
     )
-    migrations = _migrations_directory(package)
-    return text if migrations is None else f"{text}source = [{_string(migrations)}]\n"
+    migrations = _migrations_directories(package, workspace)
+    if migrations:
+        text += f"source = [{', '.join(_string(directory) for directory in migrations)}]\n"
+    served = package.kind is PackageKind.MODULE and any(
+        contract.module == package.name for contract in contracts(workspace.seen.files)
+    )
+    return f"{text}omit = [{_string(GENERATED_FILES)}]\n" if served else text
 
 
 def _deptry(package: Package) -> str | None:
@@ -356,7 +387,8 @@ class _Facts:
     third_party: tuple[str, ...]
     countries: tuple[str, ...]
     layers: Mapping[str, frozenset[str]]
-    """Each package's submodules once synced: those on disk, and ``_manifest`` when it is generated."""
+    """Each package's submodules once synced, by distribution (a name may be an app's and a module's): those
+    on disk, and ``_manifest`` when it is generated."""
 
     @classmethod
     def of(cls, workspace: Workspace) -> _Facts:
@@ -364,7 +396,9 @@ class _Facts:
         layers: dict[str, frozenset[str]] = {}
         for package in workspace.packages:
             on_disk = frozenset(workspace.children(package)) - {"_manifest"}
-            layers[package.name] = on_disk | {"_manifest"} if has_manifest_module(package) else on_disk
+            layers[package.distribution] = (
+                on_disk | {"_manifest"} if has_manifest_module(package) else on_disk
+            )
         return cls(
             workspace=workspace,
             roots=tuple(sorted(package.import_name for package in workspace.packages)),
@@ -373,16 +407,18 @@ class _Facts:
             layers=layers,
         )
 
+    def layers_of(self, package: Package) -> frozenset[str]:
+        """``package``'s submodules once synced."""
+        return self.layers[package.distribution]
+
     def submodules(self, package: Package, names: Sequence[str]) -> list[str]:
         """Those of ``names`` that ``package`` has (once synced), as module paths."""
-        return [f"{package.import_name}.{name}" for name in names if name in self.layers[package.name]]
+        return [f"{package.import_name}.{name}" for name in names if name in self.layers_of(package)]
 
-    def source_exists(self, name: str) -> bool:
-        """Whether the package named ``name`` is in the workspace with its import package on disk."""
-        return any(
-            package.name == name and (self.workspace.root / package.source).is_dir()
-            for package in self.workspace.packages
-        )
+    def present(self, name: str) -> Package | None:
+        """The package a manifest means by ``name`` (never an app), if its import package is on disk."""
+        found = [package for package in self.workspace.named if package.name == name]
+        return next((package for package in found if (self.workspace.root / package.source).is_dir()), None)
 
 
 def _workspace_contracts(facts: _Facts) -> Iterator[str | None]:
@@ -391,12 +427,12 @@ def _workspace_contracts(facts: _Facts) -> Iterator[str | None]:
         " | ".join(app.import_name for app in workspace.apps),
         *(module.import_name for module in reversed(workspace.module_order())),
         " | ".join(facts.countries),
-        *(name for name in ("ledger_fiscal_kit", "ledger_platform", "ledger_kernel") if name in facts.roots),
+        *(name for name in (_KIT, "ledger_platform", "ledger_kernel") if name in facts.roots),
     ]
     yield _contract(
         "workspace-layers", "Workspace layers", "layers", ("layers", [name for name in layers if name])
     )
-    if facts.source_exists("kernel"):
+    if facts.present("kernel") is not None:
         yield _contract(
             "kernel-is-stdlib-only",
             "Kernel is standard library only",
@@ -404,8 +440,9 @@ def _workspace_contracts(facts: _Facts) -> Iterator[str | None]:
             ("source_modules", ["ledger_kernel"]),
             ("forbidden_modules", sorted({*facts.third_party, *TEST_TOOLING})),
         )
-    if facts.source_exists(PLATFORM):
-        present = facts.layers[PLATFORM]
+    platform = facts.present(PLATFORM)
+    if platform is not None:
+        present = facts.layers_of(platform)
         platform_layers = (
             " | ".join(name for name in layer.split(" | ") if name in present) for layer in PLATFORM_LAYERS
         )
@@ -431,8 +468,8 @@ def _edge_contracts(facts: _Facts) -> Iterator[str | None]:
             *(dependency.import_name for dependency in workspace_dependencies(package, workspace)),
         }
         yield _contract(
-            f"{package.name}-declared-edges",
-            f"{package.name} imports only the workspace packages it declares",
+            f"{package.distribution}-declared-edges",  # a name may be an app's and a module's: not unique
+            f"{package.distribution} imports only the workspace packages it declares",
             "forbidden",
             ("source_modules", [package.import_name]),
             ("forbidden_modules", [root for root in facts.roots if root not in declared]),
@@ -450,10 +487,14 @@ def _channels(facts: _Facts, country: Package) -> tuple[str, ...]:
 def _channel_contracts(facts: _Facts, country: Package) -> Iterator[str | None]:
     """Each channel of ``country`` is layered, and its domain and use cases know no third party."""
     root = facts.workspace.root / country.source / "channels"
-    allowed = {country.import_name, "ledger_kernel", "ledger_fiscal_kit"}
+    allowed = {country.import_name, "ledger_kernel", _KIT}
     for channel in _channels(facts, country):
         container = f"{country.import_name}.channels.{channel}"
-        present = [layer for layer in _CHANNEL_LAYERS if (root / channel / layer).is_dir()]
+        present = [
+            layer
+            for layer in _CHANNEL_LAYERS
+            if (root / channel / layer).is_dir() or (root / channel / f"{layer}.py").is_file()
+        ]
         yield _contract(
             f"{country.name}-channel-{channel}-layers",
             f"Channel {channel} of {country.name} is layered",
@@ -471,9 +512,21 @@ def _channel_contracts(facts: _Facts, country: Package) -> Iterator[str | None]:
         )
 
 
+def _kit_contracts(facts: _Facts) -> Iterator[str | None]:
+    """fiscal-kit's value types stay pure: a channel's domain reaches nothing else through them."""
+    for kit in (package for package in facts.workspace.packages if package.import_name == _KIT):
+        yield _contract(
+            "fiscal-kit-values-are-pure",
+            "fiscal-kit's value types import the kernel and the standard library only",
+            "forbidden",
+            ("source_modules", facts.submodules(kit, _KIT_VALUES)),
+            ("forbidden_modules", sorted({*facts.third_party, *facts.roots} - {_KIT, "ledger_kernel"})),
+        )
+
+
 def _country_contracts(facts: _Facts) -> Iterator[str | None]:
     for country in facts.workspace.countries:
-        others = facts.submodules(country, sorted(facts.layers[country.name] - {"regime"}))
+        others = facts.submodules(country, sorted(facts.layers_of(country) - {"regime"}))
         yield _contract(
             f"{country.name}-regime-is-pure",
             f"Regime {country.name} is pure",
@@ -529,7 +582,7 @@ def _module_contracts(facts: _Facts, module: Package) -> Iterator[str | None]:
         "layers",
         ("containers", [module.import_name]),
         ("exhaustive", "True"),
-        ("layers", [layer for layer in MODULE_LAYERS if layer in facts.layers[module.name]]),
+        ("layers", [layer for layer in MODULE_LAYERS if layer in facts.layers_of(module)]),
     )
     yield _contract(
         f"{module.name}-domain-is-pure",
@@ -552,6 +605,63 @@ def _module_contracts(facts: _Facts, module: Package) -> Iterator[str | None]:
         ),
         ("allow_indirect_imports", "True"),
     )
+
+
+def _custody_contracts(facts: _Facts) -> Iterator[str | None]:
+    """Each isolated module's custody is reached by the module and the apps of its role only (ADR 0010).
+
+    Nothing else reaches it, even through another package (a module importing a module that imports it): no
+    app, module, country or package. The apps of the module's role import its assembly, which imports the
+    custody: they may reach it that way, never directly. What Python loads besides the import graph (a
+    package's ``__init__`` with any of its submodules) is ``check``'s (``ledger_devtools.checks``).
+    """
+    workspace = facts.workspace
+    for module in workspace.modules:
+        role = module.manifest.isolated_in
+        if role is None:
+            continue
+        serving = {
+            app.import_name
+            for app in workspace.apps
+            if app.manifest.app is not None and app.manifest.app.role == role
+        }
+        custody = [f"{module.import_name}.{CUSTODY}"]
+        yield _contract(
+            f"{module.name}-custody",
+            (
+                f"Nothing but {module.name} and the apps of the {role} role reaches {module.name}'s custody, "
+                "even indirectly"
+            ),
+            "forbidden",
+            ("source_modules", [root for root in facts.roots if root not in {module.import_name, *serving}]),
+            ("forbidden_modules", custody),
+        )
+        yield _contract(
+            f"{module.name}-custody-{role}-apps",
+            f"The apps of the {role} role reach {module.name}'s custody through its assembly only",
+            "forbidden",
+            ("source_modules", sorted(serving)),
+            ("forbidden_modules", custody),
+            ("allow_indirect_imports", "True"),
+        )
+        if module.manifest.http is None:
+            continue
+        http = [f"{module.import_name}.{HTTP_ADAPTER}"]  # its routes forward secrets to its role unread
+        yield _contract(
+            f"{module.name}-http-holds-no-key",
+            f"{module.name}'s HTTP adapter reaches no custody, even indirectly",
+            "forbidden",
+            ("source_modules", http),
+            ("forbidden_modules", custody),
+        )
+        yield _contract(
+            f"{module.name}-http-opens-no-key",
+            f"{module.name}'s HTTP adapter imports no {KEY_LIBRARY} itself (its use cases' types may)",
+            "forbidden",
+            ("source_modules", http),
+            ("forbidden_modules", [KEY_LIBRARY]),
+            ("allow_indirect_imports", "True"),
+        )
 
 
 def _closing_contracts(facts: _Facts) -> Iterator[str | None]:
@@ -579,12 +689,12 @@ def _closing_contracts(facts: _Facts) -> Iterator[str | None]:
         ("allow_indirect_imports", "True"),
     )
     inner = [name for module in workspace.modules for name in facts.submodules(module, _INNER)]
-    below_runtime = [
-        name
-        for platform in workspace.packages
-        if platform.name == PLATFORM
-        for name in facts.submodules(platform, sorted(facts.layers[platform.name] - {"runtime"}))
-    ]
+    platform = next((package for package in workspace.named if package.name == PLATFORM), None)
+    below_runtime = (
+        []
+        if platform is None
+        else facts.submodules(platform, sorted(facts.layers_of(platform) - {"runtime"}))
+    )
     yield _contract(
         "apps-only-compose",
         "Apps only compose",
@@ -602,19 +712,22 @@ def importlinter_text(workspace: Workspace) -> str:
         _section("importlinter", [("root_packages", facts.roots), ("include_external_packages", "True")]),
         *_workspace_contracts(facts),
         *_edge_contracts(facts),
+        *_kit_contracts(facts),
         *_country_contracts(facts),
         *(contract for module in workspace.modules for contract in _module_contracts(facts, module)),
+        *_custody_contracts(facts),
         *_closing_contracts(facts),
     )
     return GENERATED_HEADER + "\n" + "\n".join(contract for contract in contracts if contract is not None)
 
 
 def mounted(workspace: Workspace) -> list[Package]:
-    """The modules whose routes the ``api`` app mounts: each has an OpenAPI snapshot."""
+    """The packages whose routes the ``api`` app mounts, each with an OpenAPI snapshot.
+
+    The modules mounted there, and the countries whose channels have public routes (``api`` mounts those).
+    """
     return [
-        module
-        for module in workspace.modules
-        if module.manifest.http is not None and "api" in module.manifest.http.mounted_in
+        package for package in (*workspace.modules, *workspace.countries) if api_prefixes(package.manifest)
     ]
 
 
@@ -637,16 +750,18 @@ def static_targets(workspace: Workspace) -> dict[Path, str]:
         generated[package.directory / "pyproject.toml"] = pyproject_text(package, workspace)
         if has_manifest_module(package):
             generated[package.source / "_manifest.py"] = manifest_module_text(package)
+    # protoc's output is ASCII but for a contract's comments, which are UTF-8 as every source here
+    generated.update((path, code.decode("utf-8")) for path, code in grpc_code(workspace.root).items())
     return generated
 
 
 def openapi_targets(workspace: Workspace, document: Callable[[], Mapping[str, object]]) -> dict[Path, str]:
-    """Each mounted module's ``openapi.json``, from ``document`` (the ``api`` app's), called if one is."""
-    modules = mounted(workspace)
-    if not modules:
+    """Each mounted package's ``openapi.json``, from ``document`` (the ``api`` app's), called if one is."""
+    packages = mounted(workspace)
+    if not packages:
         return {}
     whole = document()
-    return {module.directory / "openapi.json": openapi_text(module, whole) for module in modules}
+    return {package.directory / "openapi.json": openapi_text(package, whole) for package in packages}
 
 
 def targets(
@@ -666,11 +781,13 @@ def targets(
 
 
 def orphans(workspace: Workspace, generated: Mapping[Path, str]) -> list[Path]:
-    """Files ``sync`` once wrote that no manifest implies any more (any ``_manifest.py`` counts).
+    """Files ``sync`` once wrote that no manifest or contract implies any more.
 
-    A ``pyproject.toml`` is one when it carries the generated header; one written by hand is never touched.
+    Any ``_manifest.py`` counts, and any file of a module's generated gRPC package; a ``pyproject.toml`` does
+    when it carries the generated header (one written by hand is never touched).
     """
     places = (pattern.removesuffix("/manifest.toml") for pattern in MANIFEST_GLOBS)
+    code_of_contracts = f"{GENERATED_DIRECTORIES}/**"
     found = sorted(
         {
             path
@@ -678,13 +795,14 @@ def orphans(workspace: Workspace, generated: Mapping[Path, str]) -> list[Path]:
             for pattern in (f"{place}/pyproject.toml", f"{place}/src/*/_manifest.py")
             for path in workspace.matching(pattern)
         }
+        | set(workspace.matching(code_of_contracts))
     )
     return [
         path
         for path in found
         if path not in generated
         and (
-            path.name == "_manifest.py"
+            path.name != "pyproject.toml"
             or (workspace.root / path).read_text(encoding="utf-8").startswith(GENERATED_HEADER)
         )
     ]

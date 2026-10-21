@@ -323,7 +323,8 @@ async def test_a_document_in_another_currency_carries_its_functional_totals(
             "invalid_tax_id",
         ),
         ({"external_reference": f" {MARK}"}, "invalid_text"),
-        ({"fiscal": {"do": {"ecf_type": MARK}}}, "field_unknown"),
+        ({"fiscal": {"do": {MARK.lower(): "31"}}}, "field_unknown"),
+        ({"fiscal": {"do": {"ecf_type": {MARK: MARK}}}}, "field_invalid"),
         ({"establishment": "NOPE"}, "establishment_unknown"),
         ({"colour": MARK}, "invalid_request"),
     ],
@@ -335,6 +336,7 @@ async def test_a_document_in_another_currency_carries_its_functional_totals(
         "tax-id",
         "reference",
         "field",
+        "field-value",
         "establishment",
         "unknown",
     ],
@@ -448,13 +450,13 @@ async def test_a_retry_after_a_downgrade_to_viewer_replays_and_a_new_request_is_
     issued = await client.post(issue, headers=posting(clerk, company, "issue-1", version=1))
     assert issued.status_code == 200
     await granted(client, owner, company, clerk.subject, "viewer")
-    for path, key, version, answered in (
-        ("/v1/invoices", "d-1", None, created_),
-        (issue, "issue-1", 1, issued),
-    ):
+    for path, key, version, status in (("/v1/invoices", "d-1", None, 201), (issue, "issue-1", 1, 200)):
         body = DRAFT if version is None else None
         retried = await client.post(path, json=body, headers=posting(clerk, company, key, version=version))
-        assert (retried.content, retried.headers["idempotent-replayed"]) == (answered.content, "true")
+        # The answer's status and headers, and the document as it is now (M3b Decision 23): issued since.
+        assert (retried.status_code, retried.headers["idempotent-replayed"]) == (status, "true")
+        assert (retried.content, retried.headers["etag"]) == (issued.content, '"2"')
+        assert ("location" in retried.headers) == (status == 201)  # a creation's answer names where it lives
     fresh = await client.post("/v1/invoices", json=DRAFT, headers=posting(clerk, company, "d-2"))
     assert code_of(fresh) == (403, "permission_denied")
 

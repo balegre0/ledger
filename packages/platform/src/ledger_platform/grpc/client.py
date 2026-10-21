@@ -1,7 +1,8 @@
 """Calls to other services' gRPC methods: always with a deadline, their errors back as ledger errors.
 
 A chassis server ends a failed call with the status of the error's kind and the error's code in the trailing
-metadata ``ledger-error-code`` (``grpc.server``). ``call_unary`` turns that back into a ``RemoteError`` of the
+metadata ``ledger-error-code`` (``grpc.server``). ``call_unary`` (and ``call_stream_unary``, for a method that
+takes its request as a stream) turns that back into a ``RemoteError`` of the
 matching kind, keeping the remote code, so that a route that called another service answers as if the error
 were its own: a company the other service does not have is a 404 here too. What the other side wrote in its
 details is not repeated (it may quote what was asked), and the message names no call: a client that gets it
@@ -21,9 +22,10 @@ other side cannot take); anything else, a passed deadline and the other side's o
 unavailable: a dependency failed, and a retry may work.
 """
 
+import asyncio
 import re
-from typing import ClassVar, Final
-lazy from collections.abc import Mapping
+from typing import ClassVar, Final, final
+lazy from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 
 import grpc
 
@@ -35,6 +37,8 @@ _COMPONENT: Final = "gRPC client"
 
 ERROR_CODE_KEY: Final = "ledger-error-code"
 """The trailing metadata that carries a failed call's stable code."""
+INTERNAL_CODE: Final = LedgerError.code
+"""The code a chassis server sends beside ``INTERNAL`` for a defect of its own, whatever the defect was."""
 DEFAULT_DEADLINE: Final = 2.0
 MAX_DEADLINE: Final = 30.0
 """No call between services waits longer: a request's own deadline is shorter."""
@@ -138,14 +142,69 @@ async def call_unary[Request, Response](
     *,
     rpc: str,
     deadline: float = DEFAULT_DEADLINE,
+    metadata: Sequence[tuple[str, str]] = (),
 ) -> Response:
     """Call ``method`` (named ``rpc``, ``/package.Service/Method``) within ``deadline`` seconds.
 
-    A failure is the ``RemoteError`` the module describes; the deadline must be positive and at most
-    ``MAX_DEADLINE``.
+    ``metadata`` goes with the call: to a guarded server, its caller's ``grpc.metadata.call_metadata``. A
+    failure is the ``RemoteError`` the module describes (a guard's refusal is ``RemoteForbiddenError``); the
+    deadline must be positive and at most ``MAX_DEADLINE``.
     """
     require_deadline(deadline)
     try:
-        return await method(request, timeout=deadline)
+        return await method(request, timeout=deadline, metadata=tuple(metadata))
     except grpc.aio.AioRpcError as error:
         raise remote_error(error, rpc) from error
+
+
+@final
+class _Feed[Request]:
+    """A request stream handed to grpc that keeps its source's failure.
+
+    grpc cancels a call whose request stream raises (never half-closing it, so the other side keeps nothing
+    of a request it never saw end), but drops the error: the caller would see a ``CancelledError``, never
+    why. The feed keeps the error for the caller and lets it reach grpc, which cancels.
+    """
+
+    __slots__ = ("_source", "failure")
+
+    def __init__(self, source: AsyncIterator[Request]) -> None:
+        self._source = source
+        self.failure: Exception | None = None
+
+    async def requests(self) -> AsyncGenerator[Request]:
+        """The source's requests; its failure is kept, then raised for grpc to cancel the call."""
+        try:
+            async for request in self._source:
+                yield request
+        except Exception as error:
+            self.failure = error
+            raise
+
+
+async def call_stream_unary[Request, Response](
+    method: grpc.aio.StreamUnaryMultiCallable[Request, Response],
+    requests: AsyncIterator[Request],
+    *,
+    rpc: str,
+    deadline: float = DEFAULT_DEADLINE,
+    metadata: Sequence[tuple[str, str]] = (),
+) -> Response:
+    """Call ``method`` (named ``rpc``) with the stream ``requests`` within ``deadline`` seconds.
+
+    The deadline covers the whole call, the stream sent included; a failure is the ``RemoteError`` the module
+    describes. When ``requests`` itself raises, the call is cancelled (the other side keeps nothing of a
+    request it never saw end) and its error is raised as it is, unless the caller is being cancelled.
+    """
+    require_deadline(deadline)
+    feed = _Feed(requests)
+    try:
+        return await method(feed.requests(), timeout=deadline, metadata=tuple(metadata))
+    except (asyncio.CancelledError, grpc.aio.AioRpcError) as error:
+        task = asyncio.current_task()
+        failure = feed.failure
+        if failure is not None and not (task is not None and task.cancelling()):
+            raise failure from None
+        if isinstance(error, grpc.aio.AioRpcError):
+            raise remote_error(error, rpc) from error
+        raise

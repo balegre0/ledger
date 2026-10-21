@@ -1,12 +1,21 @@
 """An app's assembly (§3.10 steps 1-3): packages found, schemas claimed, modules then channels assembled.
 
-Every package's settings section is read first (``runtime.sections``). What every package hands back is
-checked against its manifest before anything starts: a schema of its own with its own migrations, a handler
-for every consumer and job kind it declares and none it does not, an implementation for every extension point
-required and a provider for every port declared, facades on what other packages call. Every failure is a
-defect of a package or of the deployment, found at the start (internal errors, never a client's). The
-standings a module provides (``StandingsPort``, identity's) are bound to the app's request authentication,
-so every route's caller applies them.
+What a role assembles (Decision 2). A module isolated in a role (``[data] isolated_in``, spec §3.7) is run by
+that role's app alone: the ``signer`` app assembles its isolated modules and nothing else (no other module, no
+channel, no platform job or schedule; the platform's schema only for its schedule leases), each reading no
+other module's API, and refuses to start without one. Every other role assembles an isolated module as a
+client (its API, the ports it provides, its routers and checks) and *relays* it: the worker's fan-out moves
+its outbox and inbox, and nothing else of that role touches its schema, which its login cannot enter (no
+consumer, job, schedule, purge or readiness check of it). An isolated module that hands a consumer or a job
+handler to another role is a defect.
+
+Every settings section of the packages the role assembles is read first (``runtime.sections``). What every
+package hands back is checked against its manifest before anything starts: a schema of its own with its own
+migrations, a handler for every consumer and job kind it declares and none it does not, an implementation for
+every extension point required and a provider for every port declared, facades on what other packages call.
+Every failure is a defect of a package or of the deployment, found at the start (internal errors, never a
+client's). The standings a module provides (``StandingsPort``, identity's) are bound to the app's request
+authentication, so every route's caller applies them.
 """
 
 import graphlib
@@ -17,28 +26,31 @@ lazy from contextlib import AbstractAsyncContextManager
 
 from pydantic import TypeAdapter
 lazy from fastapi import APIRouter
-lazy from prometheus_client import CollectorRegistry
+lazy from prometheus_client import CollectorRegistry, Gauge
 
 from ledger_kernel.errors import LedgerError
 from ledger_platform._manifest import MANIFEST as PLATFORM_MANIFEST
+from ledger_platform.blobs.archive import ARCHIVE_PORT_NAME
 from ledger_platform.config.manifest import PackageStatus
 from ledger_platform.config.names import PLATFORM
 from ledger_platform.data.bound import BoundDatabase
 from ledger_platform.data.migrations import platform_migrations
 from ledger_platform.data.unit_of_work import JobPolicy
 from ledger_platform.events.consumers import Consumer
+from ledger_platform.http.outbound import OutboundHttp
 from ledger_platform.jobs.maintenance import maintenance_jobs
 from ledger_platform.jobs.schedules import Schedule
+from ledger_platform.observability.metrics import gauge
+from ledger_platform.observability.telemetry import Telemetry
 from ledger_platform.runtime.contexts import (
     AssembledChannels,
     ChannelContext,
     ModuleContext,
-    Telemetry,
     api_view,
     bind_parts,
     extension_view,
 )
-from ledger_platform.runtime.keys import ChainDirectory, Directory
+from ledger_platform.runtime.keys import Binding, ChainDirectory, Directory
 from ledger_platform.runtime.packs import Channels, installed_modules
 from ledger_platform.runtime.registries import Regimes
 from ledger_platform.runtime.sections import Declared, read_sections
@@ -52,7 +64,7 @@ lazy from ledger_platform.config.manifest import (
     PackageManifest,
     ScheduleDecl,
 )
-lazy from ledger_platform.config.settings import PackageSettings
+lazy from ledger_platform.config.settings import Environment, PackageSettings
 lazy from ledger_platform.data.database import Database
 lazy from ledger_platform.data.migrations import SchemaMigrations
 lazy from ledger_platform.data.notifier import Signals
@@ -61,10 +73,13 @@ lazy from ledger_platform.http.authentication import Authentication
 lazy from ledger_platform.jobs.outcomes import JobHandler, JobSpec
 lazy from ledger_platform.observability.health import Check
 lazy from ledger_platform.observability.tracing import Tracing
+lazy from ledger_platform.runtime.archiving import StoreArchive
 lazy from ledger_platform.runtime.contexts import ChannelPack, Module
 lazy from ledger_platform.runtime.registries import Discover
 
 _CYCLE: Final = TypeAdapter(list[str])
+ISOLATING_ROLES: Final[frozenset[AppRole]] = frozenset({"signer"})
+"""The roles whose app runs the modules isolated in it, and nothing else (Decision 2)."""
 
 
 class SchemaMissingError(LedgerError):
@@ -168,6 +183,38 @@ class HandlerDuplicateError(LedgerError):
         super().__init__(f"{label} {name!r} has two handlers")
 
 
+class IsolatedModuleMissingError(LedgerError):
+    """An app of a role that runs only its isolated modules, with none of them installed and active."""
+
+    code: ClassVar[str] = "isolated_module_missing"
+
+    def __init__(self, role: AppRole) -> None:
+        super().__init__(
+            f"the {role} app runs the modules isolated in its role, and none is installed and active"
+        )
+
+
+class IsolatedPartsError(LedgerError):
+    """A module isolated in a role handing consumers or job handlers to another role's app (Decision 2)."""
+
+    code: ClassVar[str] = "isolated_parts_outside_role"
+
+    def __init__(self, module: str, isolated_in: AppRole, role: AppRole) -> None:
+        where = f"{module!r} is isolated in the {isolated_in}'s role"
+        super().__init__(
+            f"{where} and hands over consumers or jobs in the {role} app: only its own role runs them"
+        )
+
+
+class PortReservedError(LedgerError):
+    """A module that provides a port the app binds itself (the archive): a defect of the module."""
+
+    code: ClassVar[str] = "port_reserved"
+
+    def __init__(self, module: str, port: str) -> None:
+        super().__init__(f"{module!r} provides port {port!r}, which the app binds: no module may provide it")
+
+
 class CronScheduleError(LedgerError):
     """A ``cron`` schedule: refused until a schedule needs one (Decision 15)."""
 
@@ -183,12 +230,15 @@ class Shared:
     """What every package's context is made of: the app's own."""
 
     role: AppRole
+    environment: Environment
     clock: Clock
     database: Database
     signals: Signals
     tracing: Tracing
     registry: CollectorRegistry
     authentication: Authentication
+    archive: StoreArchive | None = None
+    """The archive the settings configure, bound for channels as ``ArchivePort``; none, none is bound."""
 
 
 @final
@@ -207,6 +257,9 @@ class Member:
     checks: Mapping[str, Check]
     resources: tuple[AbstractAsyncContextManager[object], ...]
     migrations: SchemaMigrations
+    relay_only: bool = False
+    """A module isolated in another role: the fan-out moves its outbox and inbox, and the app nothing more of
+    its schema (no consumer, job, schedule, purge or readiness check; ``ledger_app`` cannot enter it)."""
 
 
 @final
@@ -225,6 +278,8 @@ class Handed:
     checks: Mapping[str, Check]
     resources: Sequence[AbstractAsyncContextManager[object]]
     migrations: SchemaMigrations | None
+    relay_only: bool = False
+    """Its consumers and jobs are not matched (it hands none), its schedules are not run."""
 
 
 @final
@@ -238,6 +293,24 @@ class Assembled:
     """The platform first, then the modules in assembly order, then the channels."""
     bound: Mapping[str, BoundDatabase]
     schedules: tuple[Schedule, ...]
+    archive: StoreArchive | None = None
+    """The archive the app opens: the settings', once bound to a channel this role assembles; else none (a
+    role without channels never opens one: the signer's, ``migrate``)."""
+
+
+def _served(registry: CollectorRegistry) -> Gauge:
+    """Whether this app serves an isolated module it installs (1: its role's app) or only relays it (0).
+
+    Installed and served by no live app (``max by (module, isolated_in) (...) == 0``): the module's role is
+    absent, and the fan-out keeps filling its inbox with no unrouted flag
+    (``docs/runbooks/signer/signer-unavailable.md``).
+    """
+    return gauge(
+        registry,
+        "ledger_isolated_module_served",
+        "1 when this app serves the isolated module, 0 when it installs it as a client and relays its events",
+        ["module", "isolated_in"],
+    )
 
 
 def _ordered(modules: Iterable[Module]) -> tuple[Module, ...]:
@@ -347,6 +420,20 @@ def _member(handed: Handed) -> Member:
         raise MigrationsMissingError(handed.name, handed.schema)
     if migrations.schema != handed.schema:
         raise ForeignSchemaError(handed.name, migrations.schema)
+    if handed.relay_only:
+        return Member(
+            name=handed.name,
+            schema=handed.schema,
+            events=handed.events,
+            schedules=(),
+            consumers=(),
+            kinds={},
+            routers=tuple(handed.routers),
+            checks=handed.checks,
+            resources=tuple(handed.resources),
+            migrations=migrations,
+            relay_only=True,
+        )
     consumers = _matched(
         handed.name,
         {decl.consumer: decl for decl in handed.events.consumes},
@@ -406,27 +493,47 @@ class _Assembly:
         self._extensions = ChainDirectory("extension")
         self._ports = Directory("port")
         self._channels = AssembledChannels()
+        if shared.archive is not None:  # the app's own port: no module provides it (``PortReservedError``)
+            self._ports.add(
+                Binding(ARCHIVE_PORT_NAME, shared.archive),
+                by=PLATFORM,
+                declared=frozenset({ARCHIVE_PORT_NAME}),
+            )
 
     def module(self, module: Module) -> Handed:
-        """Assemble ``module`` with the APIs of its dependencies; bind what it hands over."""
+        """Assemble ``module`` with the APIs of its dependencies; bind what it hands over.
+
+        A module isolated in the app's role reads no other module's API (none is assembled there); one
+        isolated in another role is relayed only, and hands that role no consumer and no job
+        (``IsolatedPartsError``).
+        """
         shared, manifest = self._shared, module.manifest
-        name = manifest.package.name
+        name, isolated_in = manifest.package.name, manifest.isolated_in
+        if ARCHIVE_PORT_NAME in manifest.extension_points.provides:  # configured or not, it is the app's
+            raise PortReservedError(name, ARCHIVE_PORT_NAME)
         database = self._bound[_schema_of(manifest)]
+        own = isolated_in == shared.role
+        relayed_from = None if own else isolated_in  # the role it is isolated in, when that is another
+        if isolated_in is not None:
+            _served(shared.registry).labels(module=name, isolated_in=isolated_in).set(1 if own else 0)
         context = ModuleContext(
             manifest=manifest,
             role=shared.role,
+            environment=shared.environment,
             settings=self._sections.get(name),
             database=database,
             clock=shared.clock,
             regimes=self._regimes,
             channels=self._channels,
             channel_entries=self._entries,
-            apis=api_view(manifest, self._apis),
+            apis=self._apis.view(frozenset()) if own else api_view(manifest, self._apis),
             extensions=extension_view(manifest, self._extensions),
             telemetry=Telemetry.of(name, shared.tracing, shared.registry),
             auth=shared.authentication,
         )
         parts = module.assemble(context)
+        if relayed_from is not None and (parts.consumers or parts.jobs):
+            raise IsolatedPartsError(name, relayed_from, shared.role)
         bind_parts(manifest, parts, apis=self._apis, extensions=self._extensions, ports=self._ports)
         mounted = manifest.http is not None and shared.role in manifest.http.mounted_in
         return Handed(
@@ -435,6 +542,7 @@ class _Assembly:
             events=manifest.events,
             jobs=manifest.jobs,
             schedules=manifest.schedules,
+            relay_only=relayed_from is not None,
             consumers=parts.consumers,
             handlers=parts.jobs,
             routers=parts.routers if mounted else (),
@@ -468,15 +576,19 @@ class _Assembly:
     def channel(self, pack: ChannelPack, provided: frozenset[str]) -> Handed:
         """Assemble the channel ``pack`` with the ports modules provide; add it to the assembled channels."""
         shared, entry = self._shared, pack.entry
+        telemetry = Telemetry.of(pack.key, shared.tracing, shared.registry)
         context = ChannelContext(
             definition=entry,
             regime=self._regimes.get(pack.regime),
             role=shared.role,
+            environment=shared.environment,
             settings=self._sections.get(pack.key),
             database=self._bound[entry.schema_name],
             clock=shared.clock,
             ports=self._ports.view(provided),
-            telemetry=Telemetry.of(pack.key, shared.tracing, shared.registry),
+            telemetry=telemetry,
+            auth=shared.authentication,
+            http=OutboundHttp(telemetry=telemetry),
         )
         parts = pack.assemble(context)
         self._channels.add(pack.key, parts.channel)
@@ -510,13 +622,24 @@ def _schedules(members: Sequence[Member], bound: Mapping[str, BoundDatabase]) ->
 
 
 def assemble(shared: Shared, discover: Discover) -> Assembled:
-    """Load, assemble and check every package (see the module)."""
+    """Load, assemble and check every package the app's role assembles (see the module)."""
+    role = shared.role
+    isolating = role in ISOLATING_ROLES
     regimes = Regimes.load(discover)
-    packs = Channels.load(regimes, discover).packs
-    every = installed_modules(discover)
-    modules = _ordered(
+    packs = () if isolating else Channels.load(regimes, discover).packs
+    every = tuple(
+        module
+        for module in installed_modules(discover)
+        if not isolating or module.manifest.isolated_in == role
+    )
+    active = tuple(
         module for module in every if module.manifest.package.status is not PackageStatus.SUSPENDED
     )
+    if (
+        isolating and not active
+    ):  # every other role warns of no module (``app.no_modules``): this one has no use
+        raise IsolatedModuleMissingError(role)
+    modules = active if isolating else _ordered(active)  # in its own role, a module depends on nothing
     sections = read_sections(
         (
             *(
@@ -536,18 +659,31 @@ def assemble(shared: Shared, discover: Discover) -> Assembled:
     )
     handed = [assembly.module(module) for module in modules]
     assembly.require_bindings(modules)
-    provided = frozenset(port for module in modules for port in module.manifest.extension_points.provides)
+    # The archive is the app's own port: unconfigured, a channel that reads it finds nothing bound.
+    provided = frozenset(
+        (
+            ARCHIVE_PORT_NAME,
+            *(port for module in modules for port in module.manifest.extension_points.provides),
+        )
+    )
     assembly.bind_standings(provided)
     handed += [assembly.channel(pack, provided) for pack in packs]
     assembly.seal()
+    relayed = frozenset(
+        _schema_of(module.manifest)
+        for module in modules
+        if module.manifest.isolated_in is not None and module.manifest.isolated_in != role
+    )
     platform = Handed(
         name=PLATFORM,
         schema=PLATFORM,
         events=PLATFORM_MANIFEST.events,
-        jobs=PLATFORM_MANIFEST.jobs,
-        schedules=PLATFORM_MANIFEST.schedules,
+        jobs=() if isolating else PLATFORM_MANIFEST.jobs,
+        schedules=() if isolating else PLATFORM_MANIFEST.schedules,
         consumers=(),
-        handlers=maintenance_jobs(tuple(bound.values())),
+        handlers=()
+        if isolating
+        else maintenance_jobs(tuple(database for schema, database in bound.items() if schema not in relayed)),
         routers=(),
         checks={},
         resources=(),
@@ -564,4 +700,5 @@ def assemble(shared: Shared, discover: Discover) -> Assembled:
         members=members,
         bound=bound,
         schedules=_schedules(members, bound),
+        archive=shared.archive if packs else None,
     )

@@ -17,10 +17,10 @@ from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import (
     SignatureInvalidError,
     verify_enveloped,
 )
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import UnreadableDocumentError
 from ledger_country_do_testing.signatures import verify_with_signxml
+from ledger_fiscal_kit.xml.hardened import XmlDocumentError
 lazy from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import VerificationProfile
-lazy from ledger_country_do_testing.pki import Issued
+lazy from ledger_testing.pki import Issued
 
 TOKEN_LIFETIME: Final = timedelta(hours=1)
 """DT-DGII: a token lasts one hour, "for now" (its words)."""
@@ -92,7 +92,7 @@ class VerifierCheck(SignatureCheck):
     def verify(self, signed: bytes) -> bool:
         try:
             verified = verify_enveloped(signed, self._profile)
-        except SignatureInvalidError, UnreadableDocumentError:
+        except SignatureInvalidError, XmlDocumentError:
             return False
         return self._trusted is None or verified.certificate in self._trusted
 
@@ -209,9 +209,16 @@ class Credentials:
         expires = self._tokens.get(value) if scheme.lower() == "bearer" else None
         return expires is not None and expires > self._clock()
 
-    def revoke(self) -> None:
-        """Forget every token issued."""
-        self._tokens.clear()
+    def revoke(self, token: str | None = None) -> None:
+        """Forget ``token``, or every token issued."""
+        if token is None:
+            self._tokens.clear()
+        else:
+            self._tokens.pop(token, None)
+
+    def issued(self) -> tuple[str, ...]:
+        """Every live token, oldest first."""
+        return tuple(self._tokens)
 
 
 @final
@@ -223,6 +230,7 @@ class FakeState:
         "check",
         "clock",
         "dgii",
+        "dgii_approvals",
         "directory",
         "public_url",
         "received",
@@ -232,6 +240,7 @@ class FakeState:
         "receiver_rncs",
         "script",
         "tamper_arecf",
+        "voids",
     )
 
     def __init__(
@@ -247,6 +256,11 @@ class FakeState:
         self.received: list[Received] = []
         self.directory: dict[str, DirectoryEntry] = {}
         self.approvals: list[bytes] = []
+        """ACECFs the emisor-receptor simulator received."""
+        self.dgii_approvals: list[bytes] = []
+        """ACECFs sent to DGII's own ``aprobacioncomercial``."""
+        self.voids: list[bytes] = []
+        """ANECFs DGII took (``anularrango``)."""
         self.receiver_requires_auth: bool = True
         self.receiver_rncs: frozenset[str] | None = None
         """The buyers the simulator receives for; ``None``: any."""

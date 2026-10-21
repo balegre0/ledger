@@ -8,6 +8,7 @@ runtime's ``Regimes`` loads it, and every module reads tax ids with its schemes.
 from typing import Final
 
 from ledger_country_do.regime.document_types import TYPES
+from ledger_country_do.regime.fields import FIELDS
 from ledger_country_do.regime.parameters import PARAMETERS
 from ledger_country_do.regime.rounding import ROUNDING
 from ledger_country_do.regime.sources import ALL
@@ -27,7 +28,7 @@ REGIME: Final = RegimeDef(
     tax_categories=CATEGORIES,
     document_types=TYPES,
     rounding=ROUNDING,
-    fields=(),
+    fields=FIELDS,
     parameters=PARAMETERS,
     sources=ALL,
 )

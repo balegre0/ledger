@@ -109,6 +109,36 @@ def test_an_unknown_name_is_a_key_error(tree: Path) -> None:
         Workspace.load(tree).by_name("ghost")
 
 
+NAMESAKE: Final = """
+[package]
+name = "identity"
+kind = "app"
+summary = "An app named like a module."
+owners = ["@o"]
+
+[dependencies]
+packages = ["platform"]
+
+[app]
+script = "ledger-identity"
+role = "worker"
+"""
+
+
+def test_a_name_a_manifest_depends_on_never_names_an_app(tree: Path, write: Writer) -> None:
+    """Apps are named by no manifest: an app named like a module is a package of its own, found as an app."""
+    write("apps/identity", NAMESAKE, ())
+    workspace = Workspace.load(tree)
+    assert workspace.by_name("identity").distribution == "ledger-identity"
+    assert workspace.app("identity").distribution == "ledger-app-identity"
+    assert [package.name for package in workspace.named] == ["identity", "kernel", "platform"]
+    assert [package.name for package in workspace.module_order()] == ["identity"]
+    with pytest.raises(KeyError, match="api"):
+        workspace.by_name("api")
+    with pytest.raises(KeyError, match="kernel"):
+        workspace.app("kernel")
+
+
 def test_a_tree_without_manifests_is_refused(tmp_path: Path) -> None:
     with pytest.raises(WorkspaceError, match=r"no manifest\.toml") as caught:
         Workspace.load(tmp_path)
@@ -152,4 +182,4 @@ def test_children_are_the_layers_on_disk(tree: Path) -> None:
     assert workspace.children(workspace.by_name("identity")) == ("adapters", "application", "domain")
     (tree / "apps/api/src/ledger_app_api/__init__.py").unlink()
     (tree / "apps/api/src/ledger_app_api").rmdir()
-    assert workspace.children(workspace.by_name("api")) == ()
+    assert workspace.children(workspace.app("api")) == ()

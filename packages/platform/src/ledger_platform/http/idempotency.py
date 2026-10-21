@@ -20,11 +20,17 @@ platform's job (Decision 6).
   rolls back), nor a body over the module's limit (``max_stored_body``, by default ``DEFAULT_STORED_BODY``:
   a defect of the route).
 * Times are the database's (the unit's ``now``, its transaction's start).
+* A route may answer a replay by reading its resource again instead of repeating the stored body (invoicing's
+  ``POST``s do, M3b Decision 23): the stored status and headers still say what the first use did.
+* ``stored`` looks a key's answer up without claiming it, waiting for nothing and writing nothing: for work
+  whose preparation must not run again for a replay (the signer's import opens a bundle and calls a KMS
+  before its unit). A use still in flight is unseen by it; ``once`` then waits for it as a twin.
+
+What a key may be is the transport-neutral ``data.idempotency``'s rule.
 """
 
 import hashlib
 import json
-import re
 from dataclasses import dataclass
 from datetime import timedelta
 from types import MappingProxyType
@@ -44,6 +50,7 @@ lazy from sqlalchemy import Select
 
 from ledger_kernel.errors import ConflictError, InvalidInputError, LedgerError
 from ledger_platform.config.options import InvalidOptionError
+from ledger_platform.data.idempotency import MAX_KEY_LENGTH, InvalidIdempotencyKeyError, is_idempotency_key
 from ledger_platform.http.metrics import full_template
 lazy from ledger_kernel.access import Principal
 lazy from ledger_kernel.ids import CompanyId
@@ -53,7 +60,6 @@ lazy from ledger_platform.data.unit_of_work import UnitOfWork
 _COMPONENT: Final = "idempotency"
 """What this module's option errors name (``InvalidOptionError.component``)."""
 DEFAULT_RETENTION: Final = timedelta(days=7)
-MAX_KEY_LENGTH: Final = 255
 DEFAULT_STORED_BODY: Final = 1024 * 1024
 """Bytes of a response body a key keeps at most, unless its module says more (``max_stored_body``): 1 MiB. A
 write's answer is a document, never a download; a module whose answers outgrow their requests (a document
@@ -81,21 +87,10 @@ _UNSTORED_HEADERS: Final = frozenset(
 
 """Headers (lowercase) a replay must not repeat: a session or a credential handed to whoever retries, what the
 server sets anew on every response (the date, the length), and the hop-by-hop headers of one connection."""
-_KEY: Final = re.compile(rf"[!-~]{{1,{MAX_KEY_LENGTH}}}", re.ASCII)
-"""Visible ASCII without spaces: what a client can put in a header and see back unchanged."""
 _LENGTH_BYTES: Final = 8
 _NO_HEADERS: Final[Mapping[str, str]] = MappingProxyType({})
 _STORED: Final = TypeAdapter(tuple[bytes, int | None, bytes | None, list[tuple[str, str]] | None])
-"""A key's row as ``_stored`` reads it: the request's hash, then the answer (``None`` until it is stored)."""
-
-
-class InvalidIdempotencyKeyError(InvalidInputError):
-    """A key that is not 1 to ``MAX_KEY_LENGTH`` visible ASCII characters (never repeated)."""
-
-    code: ClassVar[str] = "invalid_idempotency_key"
-
-    def __init__(self) -> None:
-        super().__init__(f"an Idempotency-Key is 1 to {MAX_KEY_LENGTH} visible ASCII characters")
+"""A key's row as ``_answer`` reads it: the request's hash, then the answer (``None`` until it is stored)."""
 
 
 class IdempotencyKeyReusedError(InvalidInputError):
@@ -245,7 +240,7 @@ class Attempt:
         the body, each length-prefixed: the same key on another resource of the route, or for another company
         named by a header, is another request (422).
         """
-        if _KEY.fullmatch(key) is None:
+        if not is_idempotency_key(key):
             raise InvalidIdempotencyKeyError
         digest = hashlib.sha256()
         company = b"" if target.company is None else str(target.company).encode()
@@ -342,6 +337,17 @@ class Idempotency:
             )
         )
         return Outcome(response, replayed=False)
+
+    async def stored(self, unit: UnitOfWork, attempt: Attempt) -> StoredResponse | None:
+        """The response stored for ``attempt``'s key, or ``None``: nothing is claimed, waited for or written.
+
+        ``None`` before a first use, after the key expired, and while a first use is in flight (uncommitted,
+        so unseen). ``unit`` is scoped as ``once``'s (``UnmodedIdempotencyScopeError`` otherwise); another
+        request under a used key is ``IdempotencyKeyReusedError``, as it is for ``once``. The answer
+        ``replayed`` gives, without its envelope: for work outside HTTP that keeps its own.
+        """
+        outcome = await self.replayed(unit, attempt)
+        return None if outcome is None else outcome.response
 
     async def replayed(self, unit: UnitOfWork, attempt: Attempt) -> Outcome | None:
         """The answer a committed first use of ``attempt``'s key stored, replayed; ``None`` if there is none.

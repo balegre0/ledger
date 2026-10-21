@@ -28,6 +28,8 @@ MANIFEST: Final = PackageManifest.model_validate(
             ],
             "python": [
                 "alembic>=1.20.0",
+                "boto3>=1.43.100",
+                "botocore>=1.43.100",
                 "fastapi>=0.143.0",
                 "granian[uvloop]>=2.8.4",
                 "grpcio>=1.84.0",
@@ -43,7 +45,11 @@ MANIFEST: Final = PackageManifest.model_validate(
                 "sqlalchemy[asyncio]>=2.1.4",
                 "starlette>=1.7.0",
                 "structlog>=26.1.0",
+                "types-boto3-s3>=1.43.100",
                 "tzdata>=2025.2",
+            ],
+            "test": [
+                "types-boto3>=1.43.100",
             ],
         },
         "data": {

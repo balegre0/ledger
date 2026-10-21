@@ -1,13 +1,16 @@
 [package]
 name = "testing"
 kind = "package"
-summary = "The shared test harness: a pytest plugin, PostgreSQL, a local OpenID provider, clocks. Dev-only."
+summary = "The shared test harness: a pytest plugin, PostgreSQL, a local OpenID provider, clocks, a test PKI. Dev-only."
 owners = ["@balegre0"]
 
 [dependencies]
-packages = ["kernel", "platform"]
+packages = ["kernel", "platform", "fiscal-kit"]
 python = [
     "alembic>=1.20.0",
+    "boto3>=1.43.100",
+    "botocore>=1.43.100",
+    "cryptography>=50.0.2",
     "httpx>=0.28.1",
     "joserfc>=1.7.5",
     "psycopg[binary]>=3.3.6",
@@ -16,4 +19,5 @@ python = [
     "sqlalchemy>=2.1.4",
     "structlog>=26.1.0",
     "testcontainers>=4.15.0",
+    "types-boto3-s3>=1.43.100",
 ]

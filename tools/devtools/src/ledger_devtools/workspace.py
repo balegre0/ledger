@@ -25,6 +25,13 @@ DEV_ONLY: Final = frozenset({"ledger-testing", "ledger-devtools"})
 """Distributions never shipped in the image (with every ``*-testing`` one)."""
 MODULE_LAYERS: Final = ("assembly", "adapters", "application", "api", "domain", "events", "_manifest")
 """What a module's import package may hold, top to bottom (§4.5)."""
+CUSTODY: Final = "adapters.custody"
+"""What a module isolated in a role holds key material in: only the module and the apps of its role reach it
+(§4.6 contract 12, ADR 0010)."""
+HTTP_ADAPTER: Final = "adapters.http"
+"""Where a module's routes live: an isolated module's forward secrets to its role, never opening them."""
+KEY_LIBRARY: Final = "cryptography"
+"""What opens key material (PKCS#12, keys): no isolated module's HTTP adapter may reach it."""
 _NESTED_DEPTH: Final = 3
 """``countries/<cc>/testing``."""
 
@@ -121,11 +128,30 @@ class Workspace:
             packages.append(Package(path.parent.relative_to(root), manifest, tomllib.loads(text)))
         if problems:
             raise WorkspaceError(tuple(problems))
-        return cls(root, tuple(sorted(packages, key=lambda package: package.distribution)), seen)
+        ordered = sorted(packages, key=lambda package: (package.distribution, package.manifest_path))
+        return cls(root, tuple(ordered), seen)
+
+    @property
+    def named(self) -> tuple[Package, ...]:
+        """The packages a manifest can name (every kind but apps), in distribution order.
+
+        A manifest names what it depends on by name; an app is depended on by nothing, so its name is in a
+        namespace of its own: an app may be named like the module it runs (``apps/signer`` beside
+        ``modules/signer``). Whatever is keyed per package is keyed by distribution, which no two share.
+        """
+        return tuple(package for package in self.packages if package.kind is not PackageKind.APP)
 
     def by_name(self, name: str) -> Package:
-        """The package named ``name`` (``KeyError`` if none)."""
-        for package in self.packages:
+        """The package a manifest means by ``name``, never an app (``KeyError`` if none)."""
+        return self._find(self.named, name)
+
+    def app(self, name: str) -> Package:
+        """The app named ``name`` (``KeyError`` if none)."""
+        return self._find(self.apps, name)
+
+    @staticmethod
+    def _find(packages: tuple[Package, ...], name: str) -> Package:
+        for package in packages:
             if package.name == name:
                 return package
         raise KeyError(name)
@@ -182,7 +208,7 @@ class Workspace:
 
     def schemas(self) -> tuple[str, ...]:
         """Every schema in migration order: the platform's, then each module's, then each channel's."""
-        platform = tuple(package for package in self.packages if package.name == PLATFORM)
+        platform = tuple(package for package in self.named if package.name == PLATFORM)
         names: list[str] = []
         for package in (*platform, *self.module_order(), *self.countries):
             if package.manifest.schema_name is not None:

@@ -33,9 +33,13 @@ from ledger_kernel.events import parse_event_type
 from ledger_kernel.ids import parse_id_prefix
 from ledger_platform.config.names import is_schema_name
 
+CHANNEL_KEY: Final = r"^[a-z]{2}-[a-z0-9]+-v[0-9]+$"
+"""A channel's key, ``<cc>-<name>-v<n>``: its manifest entry's, and what fiscal-kit builds paths from."""
 type AppRole = Literal["api", "worker", "signer", "receiver", "migrate"]
 """What an app process runs (§3.3)."""
 type Tier = Literal["bronze", "silver", "gold"]
+type ConsumerStyle = Literal["inside", "outside"]
+"""Where a consumer's handler runs: in the unit its inbox row is deleted in, or with no unit open (§3.5)."""
 
 _FROZEN: Final = ConfigDict(extra="forbid", frozen=True)
 _VALUE_ERROR: Final = "Value error, "
@@ -182,6 +186,10 @@ class DataSection(_Section):
     """``[data]``: the PostgreSQL schema the package owns, which is also its roles' prefix."""
 
     schema_name: SchemaName = Field(alias="schema")
+    isolated_in: Literal["signer"] | None = None
+    """The one role whose app runs the module's consumers, jobs, schedules and server, and whose login alone
+    reaches its schema (spec §3.7, ADR 0010); every other role assembles it as a client and only relays its
+    outbox and inbox. ``signer`` is the only such role."""
 
 
 class IdPrefix(_Section):
@@ -209,12 +217,38 @@ class PublishedEvent(_Section):
 
 
 class ConsumerDecl(_Section):
-    """``[[events.consumes]]``: a consumer and the event types it handles."""
+    """``[[events.consumes]]``: a consumer and the event types it handles.
+
+    ``style``: ``inside``, the handler runs in the unit its inbox row is deleted in; ``outside``, it runs with
+    no unit open, so it may call other modules' facades, and its row is deleted afterwards under its lease
+    (§3.5). An ordered consumer runs inside: a long outside handler would hold its subject's head.
+    ``timeout``: the longest one run of an outside handler may take; past it the run is stopped and retried
+    (an inside handler is bounded by its unit's statement and transaction timeouts).
+    """
 
     consumer: Dotted
     types: tuple[EventType, ...] = Field(min_length=1)
     max_attempts: int = Field(default=10, ge=1)
     ordered: bool = False
+    style: ConsumerStyle = "inside"
+    timeout: Duration = Field(default=timedelta(seconds=60), gt=timedelta(0))
+
+    @model_validator(mode="after")
+    def unordered_when_outside(self) -> Self:
+        """An outside consumer is not ordered (see the class): the error is located at its ``style``."""
+        if self.ordered and self.style == "outside":
+            raise ValidationError.from_exception_data(
+                type(self).__name__,
+                [
+                    {
+                        "type": "value_error",
+                        "loc": ("style",),
+                        "input": self.style,
+                        "ctx": {"error": _OrderedOutsideError()},
+                    }
+                ],
+            )
+        return self
 
 
 class EventsSection(_Section):
@@ -250,6 +284,11 @@ class ScheduleDecl(_Section):
         if (self.every is None) == (self.cron is None):
             raise _CadenceError
         return self
+
+
+class _OrderedOutsideError(ValueError):
+    def __init__(self) -> None:
+        super().__init__("an ordered consumer runs inside its unit: it cannot be outside")
 
 
 class _OrderWithoutImplementationError(ValueError):
@@ -344,7 +383,7 @@ class RegimeEntry(_Section):
 class ChannelEntry(_Section):
     """``[[channels]]``: treated like a module by devtools (schema, roles, grants, routing)."""
 
-    key: str = Field(pattern=r"^[a-z]{2}-[a-z0-9]+-v[0-9]+$")
+    key: str = Field(pattern=CHANNEL_KEY)
     entry_point: ObjectPath
     """The ``ChannelPack``: its manifest entry, the regime it serves and its assembly."""
     schema_name: SchemaName = Field(alias="schema")
@@ -378,6 +417,7 @@ class _KindRule(StrEnum):
     REGIMES = "regimes"
     COUNTRY_MODULES = "dependencies.modules"
     DATA = "data"
+    ISOLATED = "data.isolated_in"
     SETTINGS = "package.settings"
 
 
@@ -387,6 +427,7 @@ _KIND_RULES: Final[Mapping[_KindRule, str]] = {
     _KindRule.REGIMES: "only a country declares regimes and channels",
     _KindRule.COUNTRY_MODULES: "a country may not depend on a module",
     _KindRule.DATA: "only a module or the platform owns a schema, events, jobs or schedules",
+    _KindRule.ISOLATED: "only a module may be isolated",
     _KindRule.SETTINGS: "only a module declares a settings section of its own",
 }
 
@@ -446,6 +487,8 @@ class PackageManifest(_Section):
         )
         if owns_data and kind not in {PackageKind.MODULE, PackageKind.PACKAGE}:
             raise _KindRuleError(_KindRule.DATA)
+        if self.isolated_in is not None and kind is not PackageKind.MODULE:
+            raise _KindRuleError(_KindRule.ISOLATED)
         if self.package.settings and kind is not PackageKind.MODULE:
             raise _KindRuleError(_KindRule.SETTINGS)
         return self
@@ -459,6 +502,11 @@ class PackageManifest(_Section):
     def schema_name(self) -> str | None:
         """The schema the package owns, if any."""
         return None if self.data is None else self.data.schema_name
+
+    @property
+    def isolated_in(self) -> AppRole | None:
+        """The role a module is isolated in (``[data] isolated_in``), if any; ``None`` for anything else."""
+        return None if self.data is None else self.data.isolated_in
 
     @property
     def distribution(self) -> str:

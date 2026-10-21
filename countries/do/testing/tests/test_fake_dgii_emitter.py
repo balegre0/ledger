@@ -1,4 +1,5 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Final
 lazy from collections.abc import AsyncIterator
 
@@ -8,9 +9,12 @@ lazy import httpx
 
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import INBOUND
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf, rfce
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import MAX_DOCUMENT, texts
-from ledger_country_do.channels.ecf_v1.adapters.xml.schemas import violations
+from ledger_country_do.channels.ecf_v1.adapters.xml.acecf import render_acecf
+from ledger_country_do.channels.ecf_v1.adapters.xml.anecf import render_anecf
+from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
+from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
+from ledger_country_do.channels.ecf_v1.domain.exchanges import CommercialApproval, VoidedRange
 from ledger_country_do.channels.ecf_v1.domain.notation import SANTO_DOMINGO
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.answers import json_list, json_object, objects
@@ -25,11 +29,13 @@ from ledger_country_do_testing.fake_dgii.state import (
     dgii_check,
 )
 from ledger_country_do_testing.local_signer import KeyPairSigner
-from ledger_country_do_testing.pki import Authority, person
+from ledger_country_do_testing.pki import person
 from ledger_country_do_testing.samples import SIGNED_AT, SIGNER_VALID_FROM, consumer_invoice, credit_invoice
 from ledger_country_do_testing.signatures import forge
-lazy from ledger_country_do_testing.pki import Issued
+from ledger_fiscal_kit.xml.hardened import MAX_DOCUMENT, texts
+from ledger_testing.pki import Authority
 lazy from ledger_testing.clock import ManualClock
+lazy from ledger_testing.pki import Issued
 
 AUTH: Final = "/testecf/autenticacion/api/autenticacion"
 RECEPTION: Final = "/testecf/recepcion/api/facturaselectronicas"
@@ -37,6 +43,8 @@ RESULT: Final = "/testecf/consultaresultado/api/consultas/estado"
 TRACK_IDS: Final = "/testecf/consultatrackids/api/trackids/consulta"
 RFCE: Final = "/testecf/recepcionfc/api/recepcion/ecf"
 RFCE_QUERY: Final = "/testecf/consultarfce/api/Consultas/Consulta"
+VOID: Final = "/testecf/anulacionrangos/api/operaciones/anularrango"
+APPROVAL: Final = "/testecf/aprobacioncomercial/api/aprobacioncomercial"
 
 
 def xml(document: bytes, name: str = "101850043E310000000001.xml") -> dict[str, tuple[str, bytes, str]]:
@@ -47,7 +55,7 @@ async def token(http: httpx.AsyncClient, signer: KeyPairSigner, environment: str
     seed = (await http.get(f"/{environment}/autenticacion/api/autenticacion/semilla")).content
     answer = await http.post(
         f"/{environment}/autenticacion/api/autenticacion/validarsemilla",
-        files=xml(await signer.sign_seed(seed)),
+        files=xml(signer.sign(seed)),
     )
     assert answer.status_code == 200, answer.text
     return str(json_object(answer)["token"])
@@ -62,13 +70,17 @@ def unsigned_credit_invoice(sequence: int = 1) -> bytes:
     return ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT)
 
 
+async def signed(signer: KeyPairSigner, document: bytes) -> bytes:
+    return signer.sign(document)
+
+
 async def signed_credit_invoice(signer: KeyPairSigner, sequence: int = 1) -> bytes:
-    return await signer.sign_document(unsigned_credit_invoice(sequence))
+    return await signed(signer, unsigned_credit_invoice(sequence))
 
 
 async def signed_summary(signer: KeyPairSigner, sequence: int = 1, *, large: bool = False) -> bytes:
     draft = consumer_invoice(sequence, large=large)
-    return await signer.sign_document(rfce.render(draft, compute_totals(draft), security_code="dcp79q"))
+    return await signed(signer, rfce.render(draft, compute_totals(draft), security_code="dcp79q"))
 
 
 def rsa(issued: Issued) -> RSAPrivateKey:
@@ -86,9 +98,9 @@ async def test_a_signed_seed_buys_a_token_valid_an_hour(
     now = clock()
     seed = await http.get(f"{AUTH}/semilla")
     assert seed.headers["content-type"].startswith("text/xml")
-    assert violations(Format.SEED, seed.content, unsigned=True) == ()
+    assert DO_SCHEMAS.violations(Format.SEED, seed.content, unsigned=True) == ()
     assert texts(seed.content, "fecha") == (now.astimezone(SANTO_DOMINGO).isoformat(),)
-    answer = await http.post(f"{AUTH}/validarsemilla", files=xml(await signer.sign_seed(seed.content)))
+    answer = await http.post(f"{AUTH}/validarsemilla", files=xml(signer.sign(seed.content)))
     body = json_object(answer)
     later = now + timedelta(hours=1)
     assert (body["expedido"], body["expira"]) == (f"{now:%Y-%m-%dT%H:%M:%SZ}", f"{later:%Y-%m-%dT%H:%M:%SZ}")
@@ -97,10 +109,10 @@ async def test_a_signed_seed_buys_a_token_valid_an_hour(
 async def test_a_seed_serves_once_and_for_five_minutes(
     http: httpx.AsyncClient, signer: KeyPairSigner, clock: ManualClock
 ) -> None:
-    signed = await signer.sign_seed((await http.get(f"{AUTH}/semilla")).content)
-    assert (await http.post(f"{AUTH}/validarsemilla", files=xml(signed))).status_code == 200
-    assert (await http.post(f"{AUTH}/validarsemilla", files=xml(signed))).status_code == 400
-    late = await signer.sign_seed((await http.get(f"{AUTH}/semilla")).content)
+    signed_seed = signer.sign((await http.get(f"{AUTH}/semilla")).content)
+    assert (await http.post(f"{AUTH}/validarsemilla", files=xml(signed_seed))).status_code == 200
+    assert (await http.post(f"{AUTH}/validarsemilla", files=xml(signed_seed))).status_code == 400
+    late = signer.sign((await http.get(f"{AUTH}/semilla")).content)
     clock.advance(timedelta(minutes=6))
     assert (await http.post(f"{AUTH}/validarsemilla", files=xml(late))).status_code == 400
 
@@ -109,8 +121,8 @@ async def test_a_seed_signed_by_a_stranger_or_not_xml_buys_nothing(http: httpx.A
     stranger = KeyPairSigner.from_issued(
         Authority.root(now=SIGNER_VALID_FROM).issue(person(), not_before=SIGNER_VALID_FROM)
     )
-    signed = await stranger.sign_seed((await http.get(f"{AUTH}/semilla")).content)
-    refused = await http.post(f"{AUTH}/validarsemilla", files=xml(signed))
+    signed_seed = stranger.sign((await http.get(f"{AUTH}/semilla")).content)
+    refused = await http.post(f"{AUTH}/validarsemilla", files=xml(signed_seed))
     assert (refused.status_code, json_object(refused)["mensaje"]) == (400, "La firma del XML no es válida")
     assert (await http.post(f"{AUTH}/validarsemilla", files=xml(b"not xml"))).status_code == 400
     assert (await http.post(f"{AUTH}/validarsemilla", data={"other": "x"})).status_code == 400
@@ -247,9 +259,7 @@ async def test_reception_refuses_what_is_not_an_e_cf_it_takes(
     other = (await signed_credit_invoice(signer)).replace(b"<TipoeCF>31</TipoeCF>", b"<TipoeCF>99</TipoeCF>")
     assert (await http.post(RECEPTION, files=xml(other), headers=live)).status_code == 400
     small_draft = consumer_invoice()
-    small = await signer.sign_document(
-        ecf.render(small_draft, compute_totals(small_draft), signed_at=SIGNED_AT)
-    )
+    small = await signed(signer, ecf.render(small_draft, compute_totals(small_draft), signed_at=SIGNED_AT))
     refused = await http.post(RECEPTION, files=xml(small), headers=live)
     assert (refused.status_code, json_object(refused)["trackId"]) == (400, None)
 
@@ -259,7 +269,7 @@ async def test_a_consumer_invoice_whose_total_is_not_a_number_is_received_and_re
 ) -> None:
     live = bearer(await token(http, signer))
     draft = consumer_invoice(large=True)
-    full = await signer.sign_document(ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT))
+    full = await signed(signer, ecf.render(draft, compute_totals(draft), signed_at=SIGNED_AT))
     odd = full.replace(b"<MontoTotal>295000.00</MontoTotal>", b"<MontoTotal>many</MontoTotal>")
     assert odd != full
     track_id = str(json_object(await http.post(RECEPTION, files=xml(odd), headers=live))["trackId"])
@@ -454,3 +464,93 @@ async def test_a_body_beyond_the_document_limit_is_refused_before_it_is_read(
     seed_too_large = await http.post(f"{AUTH}/validarsemilla", files=xml(file_too_large))
     assert seed_too_large.status_code == 413
     assert fake.received == []
+
+
+def anecf(signer: KeyPairSigner | None) -> bytes:
+    """An ANECF voiding E310000000051-100, signed by ``signer`` (``None``: unsigned)."""
+    document = render_anecf(
+        issuer_rnc="101850043", ranges=(VoidedRange(EcfType.CREDIT_INVOICE, 51, 100),), at=SIGNED_AT
+    )
+    return document if signer is None else signer.sign(document)
+
+
+def acecf(signer: KeyPairSigner | None) -> bytes:
+    """An ACECF approving E310000000001, signed by ``signer`` (``None``: unsigned)."""
+    approval = CommercialApproval(
+        issuer_rnc="101850043",
+        buyer_rnc="131098193",
+        encf=Encf(EcfType.CREDIT_INVOICE, 1),
+        issued_on=date(2026, 10, 13),
+        total=Decimal("4887.58"),
+        approved=True,
+        reason=None,
+        at=SIGNED_AT,
+    )
+    document = render_acecf(approval)
+    return document if signer is None else signer.sign(document)
+
+
+async def test_a_signed_anecf_is_taken_and_kept(
+    http: httpx.AsyncClient, signer: KeyPairSigner, fake: FakeDgii
+) -> None:
+    live = bearer(await token(http, signer))
+    document = anecf(signer)
+    answer = await http.post(VOID, files=xml(document, "ANECF.xml"), headers=live)
+    assert json_object(answer) == {
+        "rnc": "101850043",
+        "codigo": "1",
+        "nombre": "Anulación de rango recibida",
+        "mensajes": [],
+    }
+    assert fake.state.voids == [document]
+    assert fake.received == []
+
+
+async def test_an_anecf_unsigned_unread_or_by_a_stranger_is_refused_at_the_door(
+    http: httpx.AsyncClient, signer: KeyPairSigner, fake: FakeDgii, issued: Issued
+) -> None:
+    live = bearer(await token(http, signer))
+    stranger = KeyPairSigner.from_issued(Authority.root(now=SIGNER_VALID_FROM).issue(person()))
+    for document in (anecf(None), b"not xml", anecf(stranger)):
+        refused = await http.post(VOID, files=xml(document, "ANECF.xml"), headers=live)
+        assert (refused.status_code, json_object(refused)["error"]) == (400, "400")
+    assert (await http.post(VOID, data={"other": "x"}, headers=live)).status_code == 400
+    assert fake.state.voids == []
+    assert issued.certificate != stranger.certificate
+
+
+async def test_certecf_voids_no_range_and_every_service_wants_a_token(
+    http: httpx.AsyncClient, signer: KeyPairSigner
+) -> None:
+    live = bearer(await token(http, signer, "certecf"))
+    certecf = VOID.replace("testecf", "certecf")
+    assert (await http.post(certecf, files=xml(anecf(signer)), headers=live)).status_code == 404
+    assert (await http.post(VOID, files=xml(anecf(signer)))).status_code == 401
+    assert (await http.post(APPROVAL, files=xml(acecf(signer)))).status_code == 401
+
+
+async def test_a_buyer_s_signed_acecf_is_taken_by_dgii_and_kept(
+    http: httpx.AsyncClient, signer: KeyPairSigner, fake: FakeDgii
+) -> None:
+    live = bearer(await token(http, signer))
+    document = acecf(signer)
+    answer = await http.post(APPROVAL, files=xml(document, "ACECF.xml"), headers=live)
+    assert json_object(answer) == {"mensaje": ["Aprobación comercial recibida"], "estado": "Aprobado"}
+    assert fake.state.dgii_approvals == [document]
+    assert fake.state.approvals == []  # the simulator's own inbox is another receiver's
+    refused = await http.post(APPROVAL, files=xml(acecf(None), "ACECF.xml"), headers=live)
+    assert refused.status_code == 400
+    assert fake.state.dgii_approvals == [document]
+
+
+async def test_a_token_is_revoked_alone_or_with_every_other(
+    http: httpx.AsyncClient, signer: KeyPairSigner, fake: FakeDgii
+) -> None:
+    first, second = await token(http, signer), await token(http, signer)
+    assert fake.state.dgii.issued() == (first, second)
+    fake.state.dgii.revoke(first)
+    fake.state.dgii.revoke("never issued")
+    assert (await http.get(RESULT, params={"trackid": "x"}, headers=bearer(first))).status_code == 401
+    assert (await http.get(RESULT, params={"trackid": "x"}, headers=bearer(second))).status_code == 200
+    fake.state.dgii.revoke()
+    assert fake.state.dgii.issued() == ()

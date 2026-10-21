@@ -3,6 +3,7 @@
 from importlib.metadata import EntryPoint
 from typing import ClassVar, Final
 lazy from collections.abc import Mapping
+lazy from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -397,3 +398,205 @@ def test_a_section_is_frozen() -> None:
     field = "limit"  # a variable: the type checkers rightly refuse a plain assignment
     with pytest.raises(ValidationError):
         setattr(BooksSettings(), field, 1)
+
+
+def test_no_archive_is_configured_unless_a_backend_is_named(monkeypatch: pytest.MonkeyPatch) -> None:
+    environment(monkeypatch, REQUIRED)
+    settings = Settings()
+    assert (settings.archive_backend, settings.archive_path, settings.archive_retention_years) == (
+        None,
+        None,
+        10,
+    )
+
+
+def test_the_file_archive_is_a_directory_named_absolutely(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = tmp_path / "archive"
+    environment(
+        monkeypatch,
+        {
+            **REQUIRED,
+            "LEDGER_ARCHIVE_BACKEND": "file",
+            "LEDGER_ARCHIVE_PATH": str(archive),
+            "LEDGER_ARCHIVE_RETENTION_YEARS": "12",
+        },
+    )
+    settings = Settings()
+    assert (settings.archive_backend, settings.archive_path, settings.archive_retention_years) == (
+        "file",
+        archive,
+        12,
+    )
+
+
+@pytest.mark.parametrize("path", [None, "archive"])
+def test_the_file_archive_needs_an_absolute_path(monkeypatch: pytest.MonkeyPatch, path: str | None) -> None:
+    environment(monkeypatch, {**REQUIRED, "LEDGER_ARCHIVE_BACKEND": "file"})
+    if path is not None:
+        monkeypatch.setenv("LEDGER_ARCHIVE_PATH", path)
+    with pytest.raises(ValidationError, match="archive_path must be an absolute path") as caught:
+        Settings()
+    assert "'archive'" not in str(caught.value)
+
+
+def test_production_never_archives_to_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    secret = tmp_path / "s3cret-archive"
+    environment(
+        monkeypatch,
+        {
+            **REQUIRED,
+            "LEDGER_ENVIRONMENT": "production",
+            "LEDGER_TOKEN_KIND_CLAIM_REQUIRED": "true",
+            "LEDGER_ARCHIVE_BACKEND": "file",
+            "LEDGER_ARCHIVE_PATH": str(secret),
+        },
+    )
+    with pytest.raises(ValidationError, match="archive_backend file is refused in production") as caught:
+        Settings()
+    assert "s3cret" not in str(caught.value)
+    monkeypatch.setenv("LEDGER_ENVIRONMENT", "staging")
+    assert Settings().archive_path == secret
+
+
+@pytest.mark.parametrize("years", ["0", "101"])
+def test_the_retention_is_one_to_a_hundred_years(monkeypatch: pytest.MonkeyPatch, years: str) -> None:
+    environment(monkeypatch, {**REQUIRED, "LEDGER_ARCHIVE_RETENTION_YEARS": years})
+    with pytest.raises(ValidationError) as caught:
+        Settings()
+    assert problems(caught.value) == {"archive_retention_years"}
+
+
+@pytest.mark.parametrize("environment_name", ["staging", "production"])
+def test_beyond_a_laptop_the_archive_keeps_what_the_law_requires(
+    monkeypatch: pytest.MonkeyPatch, environment_name: str
+) -> None:
+    """Ten years (Código Tributario art. 50 h) at least; a laptop or a test may keep less."""
+    environment(
+        monkeypatch,
+        {
+            **REQUIRED,
+            "LEDGER_ENVIRONMENT": environment_name,
+            "LEDGER_TOKEN_KIND_CLAIM_REQUIRED": "true",
+            "LEDGER_ARCHIVE_RETENTION_YEARS": "9",
+        },
+    )
+    with pytest.raises(ValidationError, match="archive_retention_years must be at least 10"):
+        Settings()
+    monkeypatch.setenv("LEDGER_ARCHIVE_RETENTION_YEARS", "10")
+    assert Settings().archive_retention_years == 10
+    monkeypatch.setenv("LEDGER_ENVIRONMENT", "local")
+    monkeypatch.setenv("LEDGER_ARCHIVE_RETENTION_YEARS", "1")
+    assert Settings().archive_retention_years == 1
+
+
+S3: Final = {
+    "LEDGER_ARCHIVE_BACKEND": "s3",
+    "LEDGER_ARCHIVE_BUCKET": "ledger-archive",
+    "LEDGER_ARCHIVE_REGION": "us-east-1",
+}
+PRODUCTION: Final = {
+    **REQUIRED,
+    "LEDGER_ENVIRONMENT": "production",
+    "LEDGER_TOKEN_KIND_CLAIM_REQUIRED": "true",
+}
+
+
+def test_the_s3_archive_is_a_bucket_in_a_region_encrypted_by_s3_unless_told(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment(monkeypatch, {**PRODUCTION, **S3})
+    settings = Settings()
+    assert (settings.archive_backend, settings.archive_bucket, settings.archive_region) == (
+        "s3",
+        "ledger-archive",
+        "us-east-1",
+    )
+    assert (settings.archive_endpoint_url, settings.archive_encryption, settings.archive_kms_key_id) == (
+        None,
+        "AES256",
+        None,
+    )
+    monkeypatch.setenv("LEDGER_ARCHIVE_ENCRYPTION", "aws:kms")
+    monkeypatch.setenv("LEDGER_ARCHIVE_KMS_KEY_ID", "alias/ledger-archive")
+    assert (Settings().archive_encryption, Settings().archive_kms_key_id) == (
+        "aws:kms",
+        "alias/ledger-archive",
+    )
+
+
+@pytest.mark.parametrize("missing", ["LEDGER_ARCHIVE_BUCKET", "LEDGER_ARCHIVE_REGION"])
+def test_the_s3_archive_needs_its_bucket_and_region(monkeypatch: pytest.MonkeyPatch, missing: str) -> None:
+    environment(monkeypatch, {**REQUIRED, **S3})
+    monkeypatch.delenv(missing)
+    with pytest.raises(ValidationError, match="archive_bucket and archive_region must be set"):
+        Settings()
+
+
+@pytest.mark.parametrize(
+    ("variable", "value", "field"),
+    [
+        ("LEDGER_ARCHIVE_BUCKET", "Ledger_Archive", "archive_bucket"),
+        ("LEDGER_ARCHIVE_BUCKET", "ab", "archive_bucket"),
+        ("LEDGER_ARCHIVE_REGION", "Mars", "archive_region"),
+        ("LEDGER_ARCHIVE_ENCRYPTION", "none", "archive_encryption"),
+        ("LEDGER_ARCHIVE_ENDPOINT_URL", "ftp://localstack:4566", "archive_endpoint_url"),
+    ],
+)
+def test_s3_options_are_checked_without_echoing_them(
+    monkeypatch: pytest.MonkeyPatch, variable: str, value: str, field: str
+) -> None:
+    environment(monkeypatch, {**REQUIRED, **S3, variable: value})
+    with pytest.raises(ValidationError) as caught:
+        Settings()
+    assert problems(caught.value) == {field}
+    assert value not in str(caught.value)
+
+
+def test_a_kms_key_is_named_only_for_kms_encryption(monkeypatch: pytest.MonkeyPatch) -> None:
+    environment(monkeypatch, {**REQUIRED, **S3, "LEDGER_ARCHIVE_KMS_KEY_ID": "alias/s3cret-key"})
+    with pytest.raises(
+        ValidationError, match="archive_kms_key_id is only for archive_encryption aws:kms"
+    ) as caught:
+        Settings()
+    assert "s3cret" not in str(caught.value)
+
+
+@pytest.mark.parametrize("environment_name", ["staging", "production"])
+def test_beyond_a_laptop_the_archive_is_aws_s_s3(
+    monkeypatch: pytest.MonkeyPatch, environment_name: str
+) -> None:
+    """An endpoint of our naming (LocalStack) is a laptop's and the tests', never the law's archive."""
+    endpoint = "http://s3cret-host:4566"
+    environment(
+        monkeypatch,
+        {**PRODUCTION, **S3, "LEDGER_ENVIRONMENT": environment_name, "LEDGER_ARCHIVE_ENDPOINT_URL": endpoint},
+    )
+    with pytest.raises(
+        ValidationError, match="archive_endpoint_url is refused in staging and production"
+    ) as caught:
+        Settings()
+    assert "s3cret" not in str(caught.value)
+    monkeypatch.setenv("LEDGER_ENVIRONMENT", "test")
+    assert Settings().archive_endpoint_url == endpoint
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [("LEDGER_ARCHIVE_KMS_KEY_ID", "alias/s3cret"), ("LEDGER_ARCHIVE_ENDPOINT_URL", "http://s3cret:4566")],
+)
+@pytest.mark.parametrize("backend", ["file", None])
+def test_s3_options_are_refused_for_another_archive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, variable: str, value: str, backend: str | None
+) -> None:
+    """An S3 option beside another backend is a mistake: the operator meant one of the two."""
+    environment(monkeypatch, {**REQUIRED, variable: value})
+    if backend is not None:
+        monkeypatch.setenv("LEDGER_ARCHIVE_BACKEND", backend)
+        monkeypatch.setenv("LEDGER_ARCHIVE_PATH", str(tmp_path))
+    if variable == "LEDGER_ARCHIVE_KMS_KEY_ID":
+        monkeypatch.setenv("LEDGER_ARCHIVE_ENCRYPTION", "aws:kms")
+    with pytest.raises(ValidationError, match="are only for archive_backend s3") as caught:
+        Settings()
+    assert "s3cret" not in str(caught.value)

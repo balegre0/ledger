@@ -1,20 +1,24 @@
 """The manifest rules that need the whole workspace (§4.7 ``check``): one function per rule.
 
 A single manifest is validated by the platform's model when the workspace is loaded; what is checked here is
-how manifests agree: names and directories, unique values, dependencies that exist, an acyclic module graph,
-consumers with a producer, schedules with a job kind, modules made of layers only, countries named by their
-directories, settings sections apart.
+how manifests agree: names and directories, one package per name a manifest can depend on, one per
+distribution and import package, unique values, dependencies that exist, an acyclic module graph, consumers
+with a producer, schedules with a job kind, modules made of layers only, countries named by their directories,
+settings sections apart, one isolated module per role, an isolated module's custody out of what loads with any
+of it.
 """
 
+import ast
 from dataclasses import dataclass
 from enum import StrEnum
 from graphlib import CycleError, TopologicalSorter
+from pathlib import Path
 from typing import Final, final
 lazy from collections.abc import Callable, Iterator, Mapping
 
 from pydantic import TypeAdapter
 
-from ledger_devtools.workspace import MODULE_LAYERS
+from ledger_devtools.workspace import CUSTODY, MODULE_LAYERS
 from ledger_kernel.access import Role
 from ledger_platform.config.manifest import PackageKind
 from ledger_platform.config.settings import Settings, section_prefix
@@ -134,6 +138,41 @@ def _names_are_directories(workspace: Workspace) -> Iterator[Problem]:
             )
 
 
+def _names_name_one_package(workspace: Workspace) -> Iterator[Problem]:
+    """A name a manifest can depend on names one package (``Workspace.named``).
+
+    No module, package, tool or country shares its name with another: their distributions would clash, or a
+    dependency would be ambiguous. An app is named by no manifest: its name may be a module's.
+    """
+    first: dict[str, Package] = {}
+    for package in workspace.named:
+        earlier = first.setdefault(package.name, package)
+        if earlier is not package:
+            yield Problem(
+                package.manifest_path, f"package.name '{package.name}' is {earlier.manifest_path}'s too"
+            )
+
+
+def _distributions_are_unique(workspace: Workspace) -> Iterator[Problem]:
+    """No two packages share a distribution or an import package, whatever their kinds and names.
+
+    A module ``app-api`` is ``ledger-app-api``, the app ``api``'s distribution; ``bill-ing`` and ``bill_ing``
+    are two distributions but one import package (``ledger_bill_ing``). Either would make one package
+    install, or import, as the other.
+    """
+    first: dict[str, Package] = {}
+    for package in workspace.packages:
+        earlier = first.setdefault(package.import_name, package)
+        if earlier is not package:
+            yield Problem(
+                package.manifest_path,
+                (
+                    f"distribution '{package.distribution}' (import package '{package.import_name}') "
+                    f"is {earlier.manifest_path}'s too"
+                ),
+            )
+
+
 def _values_are_unique(workspace: Workspace) -> Iterator[Problem]:
     scopes = tuple(_scopes(workspace))
     for unique in _Unique:
@@ -159,10 +198,15 @@ def _names_start_with_their_owner(workspace: Workspace) -> Iterator[Problem]:
                 yield scope.problem(f"{what} '{name}' {rule}")
 
 
+def _is_itself(package: Package, name: str) -> bool:
+    """Whether ``name``, in ``package``'s manifest, names ``package`` itself (an app's name names nothing)."""
+    return name == package.name and package.kind is not PackageKind.APP
+
+
 def _dependency_problem(package: Package, name: str, kinds: Mapping[str, PackageKind]) -> str | None:
     """What is wrong with ``package`` naming ``name`` in ``dependencies.packages``, if anything."""
     kind = kinds.get(name)
-    if name == package.name:
+    if _is_itself(package, name):
         return f"dependencies.packages names '{name}', which is the package itself"
     if kind not in _DEPENDED_ON:
         return f"dependencies.packages names '{name}', which is not a package"
@@ -175,7 +219,7 @@ def _dependency_problem(package: Package, name: str, kinds: Mapping[str, Package
 
 
 def _dependencies_exist(workspace: Workspace) -> Iterator[Problem]:
-    kinds: Mapping[str, PackageKind] = {package.name: package.kind for package in workspace.packages}
+    kinds: Mapping[str, PackageKind] = {package.name: package.kind for package in workspace.named}
     for package in workspace.packages:
         dependencies = package.manifest.dependencies
         for name in dependencies.packages:
@@ -183,7 +227,7 @@ def _dependencies_exist(workspace: Workspace) -> Iterator[Problem]:
             if problem is not None:
                 yield Problem(package.manifest_path, problem)
         for name in dependencies.modules:
-            if name == package.name:
+            if _is_itself(package, name):
                 yield Problem(
                     package.manifest_path, f"dependencies.modules names '{name}', which is the package itself"
                 )
@@ -221,9 +265,10 @@ def _modules_are_acyclic(workspace: Workspace) -> Iterator[Problem]:
 
 
 def _packages_are_acyclic(workspace: Workspace) -> Iterator[Problem]:
-    names = {package.name for package in workspace.packages}
+    names = {package.name for package in workspace.named}
     graph = {
-        package.name: tuple(
+        # an app is depended on by nothing, so it closes no cycle: keyed apart from a module of its name
+        (package.distribution if package.kind is PackageKind.APP else package.name): tuple(
             name for name in package.manifest.dependencies.packages if name in names and name != package.name
         )
         for package in workspace.packages
@@ -320,8 +365,66 @@ def _the_owner_holds_every_permission(workspace: Workspace) -> Iterator[Problem]
                 )
 
 
+def _imported(tree: ast.Module, package: str) -> Iterator[str]:
+    """Every module an ``__init__`` of ``package`` may import: each named, and each ``from`` name under it."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            yield from (alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            parts = package.split(".")
+            base = ".".join(parts[: len(parts) - node.level + 1]) if node.level else ""
+            module = ".".join(part for part in (base, node.module or "") if part)
+            yield module
+            yield from (f"{module}.{alias.name}" for alias in node.names)
+
+
+def _custody_stays_out_of_what_loads_first(workspace: Workspace) -> Iterator[Problem]:
+    """An isolated module's root and ``adapters`` packages import nothing of its custody (ADR 0010).
+
+    Python runs a package's ``__init__`` before any of its submodules: a client importing the module's
+    ``api`` runs its root ``__init__``, an adapter's import runs ``adapters/__init__``. import-linter's graph
+    has no such edge, so its custody contract cannot see a key loaded that way; this rule does.
+    """
+    visible = frozenset(workspace.seen.files)
+    for package in workspace.modules:
+        if package.manifest.isolated_in is None:
+            continue
+        custody = f"{package.import_name}.{CUSTODY}"
+        rule = f"loads {custody} into every process that imports any of {package.import_name}"
+        for dotted in (package.import_name, f"{package.import_name}.adapters"):
+            relative = Path(*dotted.split("."), "__init__.py")
+            path = package.source.parent / relative
+            if path not in visible:
+                continue
+            tree = ast.parse((workspace.root / path).read_text(encoding="utf-8"))
+            if any(name == custody or name.startswith(f"{custody}.") for name in _imported(tree, dotted)):
+                yield Problem(package.manifest_path, f"{relative.as_posix()} {rule}")
+
+
+def _a_role_isolates_one_module(workspace: Workspace) -> Iterator[Problem]:
+    """A role isolates one module at most (rule of two, Decision 2): a second is reported, naming both.
+
+    The runtime runs a role's isolated modules side by side without their dependencies; until a second one is
+    needed, that is decided by its own design, not by this one's.
+    """
+    first: dict[str, Package] = {}
+    for package in sorted(workspace.modules, key=lambda module: module.name):
+        role = package.manifest.isolated_in
+        if role is None:
+            continue
+        earlier = first.setdefault(role, package)
+        if earlier is not package:
+            both = f"modules '{earlier.name}' and '{package.name}'"
+            yield Problem(
+                package.manifest_path,
+                f"{both} are both isolated in the {role}'s role: a role isolates one module",
+            )
+
+
 _RULES: Final[tuple[Callable[[Workspace], Iterator[Problem]], ...]] = (
     _names_are_directories,
+    _names_name_one_package,
+    _distributions_are_unique,
     _values_are_unique,
     _the_owner_holds_every_permission,
     _names_start_with_their_owner,
@@ -333,6 +436,8 @@ _RULES: Final[tuple[Callable[[Workspace], Iterator[Problem]], ...]] = (
     _modules_are_layers,
     _countries_are_their_directories,
     _settings_sections_are_apart,
+    _a_role_isolates_one_module,
+    _custody_stays_out_of_what_loads_first,
 )
 
 

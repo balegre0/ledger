@@ -15,24 +15,22 @@ from typing import ClassVar, Final, final
 lazy from collections.abc import Callable, Mapping, Sequence
 lazy from contextlib import AbstractAsyncContextManager
 
-import structlog
 lazy from fastapi import APIRouter
-lazy from opentelemetry.trace import Tracer
-lazy from prometheus_client import CollectorRegistry
 
 from ledger_kernel.errors import LedgerError
 from ledger_platform.runtime.facade import require_facades
 lazy from ledger_kernel.clock import Clock
 lazy from ledger_kernel.regimes import RegimeDef
 lazy from ledger_platform.config.manifest import AppRole, ChannelEntry, PackageManifest
-lazy from ledger_platform.config.settings import PackageSettings
+lazy from ledger_platform.config.settings import Environment, PackageSettings
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.migrations import SchemaMigrations
 lazy from ledger_platform.events.consumers import ConsumerSpec
 lazy from ledger_platform.http.authentication import Authentication
+lazy from ledger_platform.http.outbound import OutboundHttp
 lazy from ledger_platform.jobs.outcomes import JobSpec
 lazy from ledger_platform.observability.health import Check
-lazy from ledger_platform.observability.tracing import Tracing
+lazy from ledger_platform.observability.telemetry import Telemetry
 lazy from ledger_platform.runtime.keys import (
     ApiDirectory,
     Binding,
@@ -100,28 +98,6 @@ class ChannelUnknownError(LedgerError):
 
 
 @final
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Telemetry:
-    """A package's logger, tracer and metrics registry."""
-
-    logger: structlog.stdlib.BoundLogger
-    """Bound to ``package=<name>``."""
-    tracer: Tracer
-    """Named after the package."""
-    registry: CollectorRegistry
-    """The app's registry: a package's metrics are exported with the app's."""
-
-    @classmethod
-    def of(cls, name: str, tracing: Tracing, registry: CollectorRegistry) -> Telemetry:
-        """Telemetry scoped to the package ``name``."""
-        return cls(
-            logger=structlog.stdlib.get_logger(name).bind(package=name),
-            tracer=tracing.provider.get_tracer(name),
-            registry=registry,
-        )
-
-
-@final
 class AssembledChannels:
     """The assembled channels by key: filled and sealed by the app, read by modules at call time."""
 
@@ -169,6 +145,9 @@ class ModuleContext:
     """The module's manifest (its generated ``_manifest.py``)."""
     role: AppRole
     """The app assembling it: what it mounts depends on it."""
+    environment: Environment
+    """Where the app runs (``LEDGER_ENVIRONMENT``): a module refuses a local-only adapter outside ``local``
+    and ``test`` (a local-file KMS in production)."""
     settings: PackageSettings | None
     """Its own settings section (``LEDGER_<MODULE>_*``), validated; ``None`` if its manifest declares none."""
     database: BoundDatabase
@@ -288,6 +267,8 @@ class ChannelContext:
     regime: RegimeDef
     """The regime it serves."""
     role: AppRole
+    environment: Environment
+    """Where the app runs (``LEDGER_ENVIRONMENT``): a channel refuses its test-only settings in production."""
     settings: PackageSettings | None
     """Its own settings section (``LEDGER_<SCHEMA>_*``), validated; ``None`` if its entry declares none."""
     database: BoundDatabase
@@ -296,6 +277,12 @@ class ChannelContext:
     ports: Ports
     """What modules provide to channels; fiscal-kit defines the keys."""
     telemetry: Telemetry
+    auth: Authentication
+    """The app's request authentication: the channel's public routers declare ``Depends(context.auth.caller)``
+    (its ``PermissionSource`` is fiscal-kit's ``CompanyDirectory``, Decision 4)."""
+    http: OutboundHttp
+    """The clients the channel calls out with (an authority, buyers): redirects never followed, the
+    environment's proxies ignored, every request traced and measured under the client's name."""
 
     def section[S: PackageSettings](self, model: type[S]) -> S:
         """Its settings section, read by ``model`` (``SectionMissingError`` if it has none of that model)."""

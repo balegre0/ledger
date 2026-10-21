@@ -15,11 +15,14 @@ lazy from collections.abc import Mapping
 
 _DISTRIBUTION: Final = re.compile(r"[a-z0-9][a-z0-9_.-]*", re.ASCII)
 _SEPARATORS: Final = re.compile(r"[-_.]+")
-LOADED_BY_OTHERS: Final = frozenset({"python-multipart", "tzdata"})
+LOADED_BY_OTHERS: Final = frozenset({"boto3", "grpcio-tools", "mypy-protobuf", "python-multipart", "tzdata"})
 """Distributions no module imports by name, installed for another to load.
 
-``zoneinfo`` reads ``tzdata`` where the system has no time zone database (Windows); Starlette's form parser
-imports ``multipart``. deptry would call them unused.
+``types-boto3-s3``'s modules import ``boto3`` (the S3 store imports them for its annotations, which a process
+that makes every import eager loads); ``zoneinfo`` reads ``tzdata`` where the system has no time zone database
+(Windows); Starlette's form parser imports ``multipart``; devtools loads protoc from ``grpcio-tools`` by its
+entry point (it ships no types), and protoc runs ``mypy-protobuf``'s plugins as programs. deptry would call
+them unused.
 """
 TEST_TOOLING: Final = ("pytest", "hypothesis", "testcontainers", "xdist", "ledger_testing")
 """What production code never imports (contract 13)."""

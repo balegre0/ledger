@@ -18,13 +18,17 @@ lazy from collections.abc import Mapping, Sequence
 from ledger_devtools.checks import check
 from ledger_devtools.generate import mounted, openapi_targets, orphans, static_targets
 from ledger_devtools.openapi import NotInstalledError, api_document, require_installed
+from ledger_devtools.protos import PROTO_ROOT, ProtocFailedError, ProtocUnavailableError, proto_problems
 from ledger_devtools.repository import repository_problems
 from ledger_devtools.workspace import Workspace, WorkspaceError
 from ledger_kernel.errors import LedgerError
 
 _PROBLEMS: Final = 1
 _UNREADABLE: Final = 2
-_ORPHAN: Final = "generated, but no manifest implies it any more: run `uv run ledger-devtools sync`"
+_BEHIND: Final = "installed packages are behind: run `uv sync --all-packages`, then sync again"
+_ORPHAN: Final = (
+    "generated, but no manifest or contract implies it any more: run `uv run ledger-devtools sync`"
+)
 
 
 class SnapshotsUnavailableError(RuntimeError):
@@ -87,12 +91,16 @@ def _write(root: Path, generated: Mapping[Path, str], stale: Sequence[Path]) -> 
 def main(arguments: Sequence[str] | None = None) -> int:
     """Run ``sync`` or ``check`` on ``--root`` (the current directory by default); the exit status.
 
-    ``check`` exits 1 when a manifest breaks a rule, a generated file is stale, a generated file is one no
-    manifest implies any more, or the repository around the manifests disagrees with them (the root's lists,
-    the image pins); ``sync`` writes the stale files and deletes those, but writes nothing while
-    a manifest breaks a rule (what it writes follows from the manifests) and exits 1. Both exit 2 when the
-    tree has no readable manifest, a module the ``api`` app mounts is not installed, or the snapshots could
-    not be made.
+    ``check`` exits 1 when a manifest breaks a rule, a ``.proto`` is not the sound contract of a module,
+    generated gRPC code is out of place, a generated file is stale, a generated file is one no manifest or
+    contract implies any more, or the repository around the manifests disagrees with them (the root's lists,
+    the image pins); ``sync`` writes the stale files and deletes those, but writes nothing while a manifest or
+    a contract breaks a rule (what it writes follows from them) and exits 1. Both exit 1 too when protoc
+    refuses contracts it accepted a moment before. Both exit 2 when the tree has no readable manifest, protoc
+    or its plugins are not installed, a module the ``api`` app mounts is not installed, or the snapshots could
+    not be made. A module the ``api`` app mounts that is not installed stops ``check`` before anything, and
+    ``sync`` only before the snapshots: a new module is installed from the ``pyproject.toml`` sync writes, so
+    sync writes every other file first and asks for ``uv sync --all-packages``, after which it completes.
     """
     parser = argparse.ArgumentParser(prog="ledger-devtools")
     parser.add_argument("command", choices=_Arguments.commands)
@@ -104,14 +112,28 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except WorkspaceError as error:
         sys.stderr.write(f"{error}\n")
         return _UNREADABLE
-    problems = [f"{problem.where}: {problem.message}" for problem in check(workspace)]
-    if problems:
-        return _report(problems)
     try:
-        require_installed(mounted(workspace))
-    except NotInstalledError as error:
+        return _checked(command, root, workspace)
+    except ProtocFailedError as error:
+        return _report([f"{PROTO_ROOT.as_posix()}: {error}"])
+    except ProtocUnavailableError as error:
         sys.stderr.write(f"{error}\n")
         return _UNREADABLE
+
+
+def _checked(command: str, root: Path, workspace: Workspace) -> int:
+    """``command`` on a workspace that loaded: its rules first, then ``_run`` (see ``main``)."""
+    problems = [
+        f"{problem.where}: {problem.message}" for problem in (*check(workspace), *proto_problems(workspace))
+    ]
+    if problems:
+        return _report(problems)
+    if command == "check":
+        try:
+            require_installed(mounted(workspace))
+        except NotInstalledError as error:
+            sys.stderr.write(f"{error}\n")
+            return _UNREADABLE
     try:
         return _run(command, root, workspace)
     except SnapshotsUnavailableError as error:
@@ -139,6 +161,11 @@ def _run(command: str, root: Path, workspace: Workspace) -> int:
     for path in unwanted:
         (root / path).unlink()
         sys.stdout.write(f"deleted {path.as_posix()}\n")
+    try:  # a new module installs from the pyproject just written: its snapshot waits for that
+        require_installed(mounted(workspace))
+    except NotInstalledError as error:
+        sys.stderr.write(f"{error.manifest}: {error.distribution} is not installed: {_BEHIND}\n")
+        return _UNREADABLE
     documents = openapi_documents(root)
     _write(root, documents, _stale(root, documents))
     return 0

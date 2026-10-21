@@ -10,15 +10,21 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Final, final, override
 from uuid import UUID
-lazy from collections.abc import AsyncGenerator, Callable, Mapping
+lazy from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 
 import pytest
 
 from ledger_identity.api import CompanyInactiveError, CompanyInfo
+from ledger_invoicing.api import IssuePolicy, Objection
 from ledger_invoicing.application.commands import Creation, InvoicingCommands
+from ledger_invoicing.application.infos import info_of
+from ledger_invoicing.application.issuing import IssuePolicies
+from ledger_invoicing.application.mirror import FiscalMirroring
 from ledger_invoicing.application.ports import (
+    AfterIssueReport,
     Audit,
     Events,
+    FiscalMirror,
     ForeignTenantError,
     IdentityLookup,
     InvoiceFilters,
@@ -26,15 +32,16 @@ from ledger_invoicing.application.ports import (
     InvoicingUnit,
     InvoicingUnits,
     StaleWriteError,
-    UnmirroredAcceptanceError,
 )
-from ledger_invoicing.application.queries import InvoicingQueries
+from ledger_invoicing.application.queries import InvoicingQueries, Kept
 from ledger_invoicing.domain.errors import (
     CorrectionInvalidError,
     CorrectionRequiredError,
     CorrectionUnexpectedError,
+    DocumentInvalidError,
     EstablishmentUnknownError,
     ExternalReferenceTakenError,
+    FieldUnknownError,
     InvoiceChangedError,
     InvoiceNotFoundError,
     InvoiceNotIssuableError,
@@ -42,13 +49,14 @@ from ledger_invoicing.domain.errors import (
     InvoiceVersionStaleError,
     RegimeMissingError,
 )
+from ledger_invoicing.domain.fiscal import RELEASING, Applied, FiscalStatus, FiscalStatusName
 from ledger_invoicing.domain.ids import INVOICE_PREFIX, InvoiceId
 from ledger_invoicing.domain.invoice import InvoiceStatus
 from ledger_invoicing.domain.lines import LineTerms
 from ledger_invoicing.domain.parties import Seller
 from ledger_invoicing.domain.pricing import EstablishmentRef
 from ledger_invoicing.domain.text import parse_external_reference, parse_reason
-from ledger_invoicing.events import InvoiceIssued, InvoiceVoided
+from ledger_invoicing.events import InvoiceFiscalUpdated, InvoiceIssued, InvoiceVoided
 from ledger_kernel.access import CompanyNotFoundError, Principal, PrincipalKind, SubjectId
 from ledger_kernel.dated import Since, Timeline
 from ledger_kernel.errors import ErrorKind, InvalidValueError
@@ -59,7 +67,8 @@ from ledger_kernel.pagination import PageRequest, page_of
 from ledger_kernel.regimes import Direction, DocumentKind
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Mode, OrganizationScope, Tenant
-from ledger_platform.runtime.calls import Call
+from ledger_platform.runtime.calls import Call, SystemCall
+lazy from ledger_invoicing.api import InvoiceInfo
 lazy from ledger_invoicing.application.commands import Change
 lazy from ledger_invoicing.application.ports import AuditAction
 lazy from ledger_invoicing.domain.invoice import Invoice
@@ -133,6 +142,7 @@ class State:
 
     def __init__(self) -> None:
         self.invoices: dict[InvoiceId, Invoice] = {}
+        self.fiscal: dict[tuple[InvoiceId, str], FiscalStatus] = {}
         self.events: list[InvoicingEvent] = []
         self.audited: list[Audited] = []
         self.while_waiting: Callable[[], None] = _nothing_happens
@@ -147,11 +157,13 @@ class Staged:
     def __init__(self, state: State) -> None:
         self.state = state
         self.invoices: dict[InvoiceId, Invoice] = dict(state.invoices)
+        self.fiscal: dict[tuple[InvoiceId, str], FiscalStatus] = dict(state.fiscal)
         self.events: list[InvoicingEvent] = []
         self.audited: list[Audited] = []
 
     def commit(self) -> None:
         self.state.invoices = self.invoices
+        self.state.fiscal = self.fiscal
         self.state.events.extend(self.events)
         self.state.audited.extend(self.audited)
 
@@ -176,11 +188,9 @@ class MemoryInvoices(Invoices):
         self._tenant = tenant
 
     def _require_own(self, invoice: Invoice) -> None:
-        """What ``PgInvoices`` refuses before any statement: another tenant's document, an accepted one."""
+        """What ``PgInvoices`` refuses before any statement: another tenant's document."""
         if invoice.tenant != self._tenant:
             raise ForeignTenantError
-        if invoice.accepted_by:
-            raise UnmirroredAcceptanceError
 
     @override
     async def add(self, invoice: Invoice) -> InvoiceId | None:
@@ -245,6 +255,47 @@ class MemoryInvoices(Invoices):
 
 
 @final
+class MemoryMirror(FiscalMirror):
+    """The fiscal mirror of the unit's tenant: a newer version per document and channel wins."""
+
+    def __init__(self, staged: Staged, tenant: Tenant) -> None:
+        self._staged = staged
+        self._tenant = tenant
+
+    def _mine(self, invoice: InvoiceId) -> bool:
+        found = self._staged.invoices.get(invoice)
+        return found is not None and found.tenant == self._tenant
+
+    @override
+    async def of(self, invoices: Sequence[InvoiceId]) -> Mapping[InvoiceId, tuple[FiscalStatus, ...]]:
+        return {
+            invoice: tuple(
+                status
+                for (held, _), status in sorted(self._staged.fiscal.items())
+                if held == invoice and self._mine(invoice)
+            )
+            for invoice in invoices
+        }
+
+    @override
+    async def held(self, invoice: InvoiceId) -> bool:
+        statuses = (await self.of([invoice]))[invoice]
+        return any(status.status not in RELEASING for status in statuses)
+
+    @override
+    async def apply(self, invoice: InvoiceId, status: FiscalStatus) -> Applied | None:
+        if not self._mine(invoice):
+            return None
+        if self._staged.invoices[invoice].status is InvoiceStatus.VOIDED:
+            return Applied.DOCUMENT_VOIDED
+        kept = self._staged.fiscal.get((invoice, status.channel))
+        if kept is not None and kept.version >= status.version:
+            return Applied.STALE
+        self._staged.fiscal[invoice, status.channel] = status
+        return Applied.APPLIED
+
+
+@final
 class MemoryEvents(Events):
     def __init__(self, staged: Staged) -> None:
         self._staged = staged
@@ -285,6 +336,7 @@ class MemoryUnits(InvoicingUnits):
         self._state.units += 1
         yield InvoicingUnit(
             invoices=MemoryInvoices(staged, tenant),
+            fiscal=MemoryMirror(staged, tenant),
             events=MemoryEvents(staged),
             audit=MemoryAudit(staged),
             now=self._clock(),
@@ -319,6 +371,36 @@ class Lookup(IdentityLookup):
 
 
 @final
+class Quiet(AfterIssueReport):
+    @override
+    def timed_out(self, policy: str) -> None:
+        raise AssertionError(policy)
+
+    @override
+    def exception(self, policy: str, error: str) -> None:
+        raise AssertionError(policy)
+
+
+@final
+class Checking(IssuePolicy):
+    """A policy that objects as told and records the documents it was asked to check."""
+
+    def __init__(self, *objections: Objection) -> None:
+        self.objections = objections
+        self.checked: list[InvoiceInfo] = []
+
+    @override
+    async def check(self, call: Call, document: InvoiceInfo) -> Sequence[Objection]:
+        assert call == CALL
+        self.checked.append(document)
+        return self.objections
+
+    @override
+    async def after_issue(self, call: Call, document: InvoiceInfo, *, budget: timedelta) -> None:
+        raise AssertionError(document)
+
+
+@final
 class World:
     """The use cases and the ports they run over, with a clock a test moves."""
 
@@ -328,14 +410,17 @@ class World:
         self.now = NOON
         self.regimes: dict[str, RegimeDef] = {"DO": regime}
         self.ids: list[UUID] = []
+        self.policies: list[IssuePolicy] = []
         self.commands = InvoicingCommands(
             units=MemoryUnits(self.state, self.clock),
             lookup=self.directory,
             regime_of=self.regime_of,
             clock=self.clock,
             new_id=self.new_id,
+            policies=IssuePolicies(chain=lambda: tuple(self.policies), log=Quiet()),
         )
         self.queries = InvoicingQueries(units=self.commands.units)
+        self.mirroring = FiscalMirroring(units=self.commands.units)
 
     async def create(self, call: Call, creation: Creation) -> Invoice:
         """The document ``creation`` asks for, made as the HTTP edge makes it: prepared, then applied."""
@@ -677,7 +762,7 @@ async def test_issuing_a_draft_needs_its_company_active(world: World) -> None:
 async def test_a_note_whose_invoice_was_voided_while_it_was_priced_is_not_issued(world: World) -> None:
     original = await issued_one(world)
     note = await world.create(CALL, replace(DRAFT, kind=DocumentKind.CREDIT_NOTE, corrects=original.id))
-    voided, _ = original.void(reason=None, corrected_by_a_note=False, now=NOON)
+    voided, _ = original.void(reason=None, corrected_by_a_note=False, held=False, now=NOON)
 
     def voided_meanwhile() -> None:
         world.state.invoices[original.id] = voided
@@ -825,6 +910,7 @@ def test_a_business_key_s_conflict_names_its_holder_in_a_member_of_its_problem()
 async def test_a_document_is_read_in_its_tenant_only(world: World) -> None:
     issued = await issued_one(world)
     assert await world.queries.document(CALL, issued.id) == issued
+    assert await world.queries.kept(CALL, issued.id) == Kept(issued, ())
     live = replace(CALL, scope=Tenant(ORGANIZATION, COMPANY, Mode.LIVE))
     for call, invoice in ((live, issued.id), (CALL, InvoiceId(UUID(int=9)))):
         with pytest.raises(InvoiceNotFoundError):
@@ -835,8 +921,175 @@ async def test_documents_are_listed_as_the_filters_name_them_page_by_page(world:
     first, second = await issued_one(world), await issued_one(world)
     draft = await world.create(CALL, DRAFT)
     every = await world.queries.documents(CALL, PageRequest(), InvoiceFilters())
-    assert every.items == tuple(sorted((first, second, draft), key=lambda invoice: invoice.id))
+    in_order = sorted((first, second, draft), key=lambda invoice: invoice.id)
+    assert every.items == tuple(Kept(invoice, ()) for invoice in in_order)
     drafts = await world.queries.documents(CALL, PageRequest(), InvoiceFilters(status=InvoiceStatus.DRAFT))
-    assert drafts.items == (draft,)
+    assert drafts.items == (Kept(draft, ()),)
     before = await world.queries.documents(CALL, PageRequest(size=1, before=draft.id), InvoiceFilters())
-    assert before.items == (second,)
+    assert before.items == (Kept(second, ()),)
+
+
+# ── The IssuePolicy chain (§8.5 step 2) ─────────────────────────────────────────
+
+
+async def test_the_chain_checks_the_document_as_it_will_be_issued_before_any_unit(world: World) -> None:
+    policy = Checking()
+    world.policies.append(policy)
+    change = await world.commands.prepare_create(
+        CALL, replace(INVOICE, fiscal={"do": {"modification_code": "3"}})
+    )
+    assert world.state.units == 0  # checked before any unit: nothing is held while the chain runs
+    [checked] = policy.checked
+    created = await world.applied(change)
+    assert checked == info_of(created)  # the very document the unit stores (its times are the clock's)
+    assert (checked.status, checked.version, checked.seller) == (
+        InvoiceStatus.ISSUED,
+        1,
+        info_of(created).seller,
+    )
+    assert checked.fields == {"do": {"modification_code": "3"}}  # Decision 24: the chain's to judge
+
+
+async def test_an_objection_refuses_the_document_and_nothing_is_stored(world: World) -> None:
+    pending = Objection(code="fiscal_enrollment_pending", field=None, message="the enrollment is pending")
+    world.policies.append(Checking(pending))
+    with pytest.raises(DocumentInvalidError) as caught:
+        await world.create(CALL, INVOICE)
+    assert caught.value.problem_members()["errors"] == [
+        {"code": "fiscal_enrollment_pending", "field": None, "message": "the enrollment is pending"}
+    ]
+    assert (world.stored(), world.state.events, world.state.units) == ([], [], 0)
+
+
+async def test_a_draft_is_checked_when_it_is_issued_not_when_it_is_made(world: World) -> None:
+    policy = Checking()
+    world.policies.append(policy)
+    draft = await world.create(CALL, DRAFT)
+    assert policy.checked == []
+    issued = await world.issue(CALL, draft.id)
+    [checked] = policy.checked
+    assert checked == info_of(issued)
+    refusing = Checking(Objection(code="do_ecf_range_missing", field=None, message="no range"))
+    world.policies[:] = [refusing]
+    other = await world.create(CALL, DRAFT)
+    with pytest.raises(DocumentInvalidError):
+        await world.issue(CALL, other.id)
+    assert world.state.invoices[other.id] == other  # still the draft it was
+
+
+async def test_a_note_is_checked_against_its_invoice_as_read_before_any_unit(world: World) -> None:
+    original = await issued_one(world)
+    policy = Checking()
+    world.policies.append(policy)
+    note = await world.create(CALL, replace(INVOICE, kind=DocumentKind.CREDIT_NOTE, corrects=original.id))
+    assert [checked.corrects for checked in policy.checked] == [original.id]
+    assert note.corrects == original.id
+
+
+async def test_without_a_chain_a_field_the_regime_does_not_declare_is_refused(world: World) -> None:
+    with pytest.raises(FieldUnknownError):
+        await world.create(CALL, replace(INVOICE, fiscal={"do": {"modification_code": "3"}}))
+    world.policies.append(Checking())
+    kept = await world.create(CALL, replace(INVOICE, fiscal={"do": {"modification_code": "3"}}))
+    assert kept.pricing.fiscal == {"modification_code": "3"}
+
+
+# ── The fiscal mirror (§7.5) ─────────────────────────────────────────────────────
+
+
+SYSTEM: Final = SystemCall(reason="fiscal.channel_documents", scope=TENANT)
+
+
+def status_of(version: int, status: FiscalStatusName = FiscalStatusName.PENDING) -> FiscalStatus:
+    return FiscalStatus(
+        channel="do-ecf-v1",
+        environment="testecf",
+        status=status,
+        version=version,
+        authority_number="E310000000001",
+        messages=(),
+        regime="do",
+        details={"encf": "E310000000001"},
+        updated_at=NOON,
+    )
+
+
+async def test_a_newer_status_is_kept_and_announced_an_older_one_changes_nothing(world: World) -> None:
+    invoice = await issued_one(world)
+    announced = len(world.state.events)
+    third = status_of(3, FiscalStatusName.ACCEPTED)
+    assert await world.mirroring.apply(SYSTEM, invoice.id, third) is Applied.APPLIED
+    assert await world.mirroring.apply(SYSTEM, invoice.id, status_of(2)) is Applied.STALE
+    assert await world.mirroring.apply(SYSTEM, invoice.id, third) is Applied.STALE  # a redelivery
+    assert await world.queries.kept(CALL, invoice.id) == Kept(invoice, (third,))
+    assert world.state.events[announced:] == [
+        InvoiceFiscalUpdated(
+            scope=TENANT,
+            subject=invoice.id,
+            aggregate_version=None,  # not the document's version: ordered consumers sort by it
+            channel="do-ecf-v1",
+            status="accepted",
+            version=3,
+        )
+    ]
+    assert world.state.invoices[invoice.id] == invoice  # the document's own version is not bumped
+
+
+async def test_statuses_applied_in_order_are_each_announced(world: World) -> None:
+    invoice = await issued_one(world)
+    announced = len(world.state.events)
+    for version in (2, 3):
+        assert await world.mirroring.apply(SYSTEM, invoice.id, status_of(version)) is Applied.APPLIED
+    versions = [
+        event.version for event in world.state.events[announced:] if isinstance(event, InvoiceFiscalUpdated)
+    ]
+    assert versions == [2, 3]
+
+
+async def test_a_status_for_a_document_the_tenant_does_not_have_is_not_found(world: World) -> None:
+    invoice = await issued_one(world)
+    elsewhere = SystemCall(reason="test", scope=Tenant(ORGANIZATION, COMPANY, Mode.LIVE))
+    for call, document in ((SYSTEM, InvoiceId(UUID(int=9))), (elsewhere, invoice.id)):
+        with pytest.raises(InvoiceNotFoundError):
+            await world.mirroring.apply(call, document, status_of(1))
+    with pytest.raises(InvalidValueError, match=r"^call\.scope must be a company in a mode$"):
+        await world.mirroring.apply(SystemCall(reason="test", scope=None), invoice.id, status_of(1))
+
+
+async def test_a_document_a_channel_holds_is_not_voided(world: World) -> None:
+    """Pending, accepted or accepted with observations: the channel has the document (a number, a
+    submission), so a credit note corrects it. Rejected or voided in every channel, it may be voided."""
+    for status in (
+        FiscalStatusName.PENDING,
+        FiscalStatusName.ACCEPTED,
+        FiscalStatusName.ACCEPTED_WITH_OBSERVATIONS,
+    ):
+        invoice = await issued_one(world)
+        await world.mirroring.apply(SYSTEM, invoice.id, status_of(4, status))
+        with pytest.raises(InvoiceNotVoidableError):
+            await world.void(CALL, invoice.id, None)
+    released = await issued_one(world)
+    await world.mirroring.apply(SYSTEM, released.id, status_of(4, FiscalStatusName.REJECTED))
+    await world.mirroring.apply(
+        SYSTEM, released.id, replace(status_of(1), channel="do-other-v1", status=FiscalStatusName.VOIDED)
+    )
+    assert (await world.void(CALL, released.id, None)).status is InvoiceStatus.VOIDED
+
+
+async def test_a_status_for_a_voided_document_is_refused_as_such_and_kept_nowhere(world: World) -> None:
+    """fiscal applies ``pending`` before it numbers a document: a voided one is not numbered."""
+    invoice = await issued_one(world)
+    await world.void(CALL, invoice.id, None)
+    announced = len(world.state.events)
+    assert await world.mirroring.apply(SYSTEM, invoice.id, status_of(1)) is Applied.DOCUMENT_VOIDED
+    assert (await world.queries.kept(CALL, invoice.id)).fiscal == ()
+    assert len(world.state.events) == announced
+
+
+async def test_a_status_is_applied_in_a_unit_of_its_own(world: World) -> None:
+    invoice = await issued_one(world)
+    async with world.commands.units.unit(TENANT):
+        pass
+    units = world.state.units
+    await world.mirroring.apply(SYSTEM, invoice.id, status_of(1))
+    assert world.state.units == units + 1

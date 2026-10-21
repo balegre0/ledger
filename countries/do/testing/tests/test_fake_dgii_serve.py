@@ -8,8 +8,9 @@ from granian.constants import Interfaces
 from ledger_country_do_testing.fake_dgii import serve
 from ledger_country_do_testing.fake_dgii.app import create_app
 from ledger_country_do_testing.local_signer import KeyPairSigner
-from ledger_country_do_testing.pki import Authority, person
+from ledger_country_do_testing.pki import person
 from ledger_country_do_testing.signatures import forge
+from ledger_testing.pki import Authority
 
 AUTH = "/testecf/autenticacion/api/autenticacion"
 
@@ -83,7 +84,7 @@ async def test_the_factory_s_fake_takes_any_signer_but_only_dgii_s_signature_pro
         transport=httpx.ASGITransport(app=create_app()), base_url="http://127.0.0.1:8471"
     ) as http:
         seeds = [(await http.get(f"{AUTH}/semilla")).content for _ in range(2)]
-        signed = await signer.sign_seed(seeds[0])
+        signed = signer.sign(seeds[0])
         with_an_id = forge(
             seeds[1],
             stranger.key,

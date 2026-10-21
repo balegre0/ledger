@@ -15,8 +15,10 @@ that it does not declare). Secrets are ``SecretStr`` and errors never echo the i
 """
 
 import os
+import re
 from enum import StrEnum
 from importlib.metadata import entry_points
+from pathlib import Path
 from typing import Annotated, ClassVar, Final, Literal, Self, final, override
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -27,6 +29,9 @@ SETTINGS_GROUP: Final = "ledger.settings"
 """The entry point group naming the installed packages' settings sections (``sync`` writes it)."""
 DATABASE_URL_SCHEME: Final = "postgresql+psycopg://"
 """The chassis talks to PostgreSQL through SQLAlchemy's asynchronous psycopg driver, and only that one."""
+
+type Environment = Literal["local", "test", "staging", "production"]
+"""Where an app runs (``LEDGER_ENVIRONMENT``); its modules are told too (``ModuleContext.environment``)."""
 
 
 class LogFormat(StrEnum):
@@ -100,6 +105,27 @@ An ordinary alias, not a ``type`` statement: the verifier reads its values at ru
 value of a ``type`` alias is typed ``Any``, which the type checkers refuse."""
 
 _HTTPS_ENVIRONMENTS: Final = frozenset({"staging", "production"})
+LEGAL_RETENTION_YEARS: Final = 10
+"""The least the legal archive keeps an object in staging and production (Código Tributario art. 50 h)."""
+_BUCKET: Final = re.compile(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", re.ASCII)
+_ADDRESS: Final = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}", re.ASCII)
+_REGION: Final = r"^[a-z]{2}(?:-[a-z]+)+-\d{1,2}$"
+_ENDPOINT: Final = r"^https?://[^\s/]+/?$"
+
+
+def is_bucket_name(name: str) -> bool:
+    """Whether ``name`` is an S3 bucket name AWS accepts in every region and addressing style.
+
+    3 to 63 characters of lower-case letters, digits, dots and hyphens, led and ended by a letter or a
+    digit; no two dots, nor a dot beside a hyphen, together; not an IP address.
+    """
+    return (
+        _BUCKET.fullmatch(name) is not None
+        and ".." not in name
+        and ".-" not in name
+        and "-." not in name
+        and _ADDRESS.fullmatch(name) is None
+    )
 
 
 class _InsecureKeysUrlError(ValueError):
@@ -114,6 +140,67 @@ class _KindClaimOptionalError(ValueError):
 
     def __init__(self) -> None:
         super().__init__("token_kind_claim_required must be true outside the local and test environments")
+
+
+class _ArchivePathError(ValueError):
+    """The file archive without a directory named absolutely: where it writes would depend on the process."""
+
+    def __init__(self) -> None:
+        super().__init__("archive_path must be an absolute path when archive_backend is file")
+
+
+class _FileArchiveInProductionError(ValueError):
+    """Files can be changed by whoever holds the disk: production's archive is S3 with object lock (§6.8)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "archive_backend file is refused in production: its legal archive is s3 (object lock)"
+        )
+
+
+class _IncompleteS3ArchiveError(ValueError):
+    """The S3 archive without its bucket or its region: the objects would go nowhere, or anywhere."""
+
+    def __init__(self) -> None:
+        super().__init__("archive_bucket and archive_region must be set when archive_backend is s3")
+
+
+class _BucketNameError(ValueError):
+    """A bucket name S3 refuses, said before the first request does."""
+
+    def __init__(self) -> None:
+        super().__init__("archive_bucket must be an S3 bucket name")
+
+
+class _KmsKeyWithoutKmsError(ValueError):
+    """A KMS key named for objects S3 encrypts with its own keys: one of the two is a mistake."""
+
+    def __init__(self) -> None:
+        super().__init__("archive_kms_key_id is only for archive_encryption aws:kms")
+
+
+class _S3OptionsElsewhereError(ValueError):
+    """An S3 option beside another archive: the operator meant one of the two, and only knows which."""
+
+    def __init__(self) -> None:
+        super().__init__("archive_endpoint_url and archive_kms_key_id are only for archive_backend s3")
+
+
+class _ArchiveEndpointError(ValueError):
+    """An S3 of our own naming (LocalStack) holds nothing the law can rely on: a laptop's and tests' only."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "archive_endpoint_url is refused in staging and production: their archive is AWS S3 itself"
+        )
+
+
+class _ShortRetentionError(ValueError):
+    """Beyond a laptop the archive keeps what the law requires: ten years (Código Tributario art. 50 h)."""
+
+    def __init__(self) -> None:
+        years = LEGAL_RETENTION_YEARS
+        super().__init__(f"archive_retention_years must be at least {years} in staging and production")
 
 
 class _ClosedSettings(BaseSettings):
@@ -174,7 +261,7 @@ class Settings(_ClosedSettings):
 
     model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(env_prefix="LEDGER_")
 
-    environment: Literal["local", "test", "staging", "production"] = Field(default=...)
+    environment: Environment = Field(default=...)
     """Required: a process that forgot to say where it runs must not run with local defaults in production."""
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: LogFormat = LogFormat.CONSOLE
@@ -215,6 +302,27 @@ class Settings(_ClosedSettings):
     token_kind_claim_required: bool = False
     """Whether every token must carry the signed ``urn:ledger:principal_kind`` (an Action of the identity
     provider adds it): required in staging and production, optional on a laptop and in tests."""
+    archive_backend: Literal["file", "s3"] | None = None
+    """Where the legal archive is (§6.8): ``s3`` (a bucket with object lock: production's), ``file`` (a
+    directory: local runs, tests, certification work, staging included; refused in production) or none, and
+    then no archive is bound and a channel that reads one does not start."""
+    archive_path: Path | None = None
+    """The file archive's directory, absolute (required by ``file``)."""
+    archive_retention_years: Annotated[int, Field(ge=1, le=100)] = 10
+    """The least an archived object is kept, from the day it is stored: ten years by the Código Tributario
+    (art. 50 h), and never less in staging and production; a laptop or a test may keep less."""
+    archive_bucket: str | None = None
+    """The S3 archive's bucket (required by ``s3``), made with object lock enabled (``blobs.s3``)."""
+    archive_region: str | None = Field(default=None, pattern=_REGION)
+    """The bucket's AWS region, ``us-east-1`` for instance (required by ``s3``)."""
+    archive_endpoint_url: str | None = Field(default=None, max_length=2048, pattern=_ENDPOINT)
+    """Another S3 than AWS's, ``http://localstack:4566``: local runs and tests only (refused in staging and
+    production). The credentials are never settings: AWS's own chain finds them (``AWS_*``, a profile, a
+    web identity, an instance role)."""
+    archive_encryption: Literal["AES256", "aws:kms"] = "AES256"
+    """How S3 encrypts the archive at rest: its own keys (SSE-S3) or a KMS key (SSE-KMS)."""
+    archive_kms_key_id: str | None = Field(default=None, min_length=1, max_length=2048)
+    """The KMS key of ``aws:kms`` (an id, an alias or an ARN); without one, the account's key for S3."""
 
     @field_validator("database_url", "database_direct_url")
     @classmethod
@@ -237,6 +345,66 @@ class Settings(_ClosedSettings):
         """Refuse settings that let staging or production tell a person from a machine by heuristic alone."""
         if self.environment in _HTTPS_ENVIRONMENTS and not self.token_kind_claim_required:
             raise _KindClaimOptionalError
+        return self
+
+    @model_validator(mode="after")
+    def require_an_absolute_file_archive(self) -> Self:
+        """Refuse the file archive without an absolute directory: never one relative to where it runs."""
+        if self.archive_backend == "file" and (
+            self.archive_path is None or not self.archive_path.is_absolute()
+        ):
+            raise _ArchivePathError
+        return self
+
+    @field_validator("archive_bucket")
+    @classmethod
+    def require_a_bucket_name(cls, bucket: str | None) -> str | None:
+        """Refuse a bucket name S3 would refuse, without echoing it."""
+        if bucket is not None and not is_bucket_name(bucket):
+            raise _BucketNameError
+        return bucket
+
+    @model_validator(mode="after")
+    def require_the_s3_archive_s_bucket(self) -> Self:
+        """Refuse the S3 archive without a bucket and a region."""
+        if self.archive_backend == "s3" and (self.archive_bucket is None or self.archive_region is None):
+            raise _IncompleteS3ArchiveError
+        return self
+
+    @model_validator(mode="after")
+    def refuse_a_kms_key_without_kms(self) -> Self:
+        """Refuse a KMS key named for SSE-S3 encryption."""
+        if self.archive_kms_key_id is not None and self.archive_encryption != "aws:kms":
+            raise _KmsKeyWithoutKmsError
+        return self
+
+    @model_validator(mode="after")
+    def refuse_s3_options_for_another_archive(self) -> Self:
+        """Refuse an S3 endpoint or KMS key when the archive is not S3, naming the options, not the values."""
+        named = self.archive_endpoint_url is not None or self.archive_kms_key_id is not None
+        if named and self.archive_backend != "s3":
+            raise _S3OptionsElsewhereError
+        return self
+
+    @model_validator(mode="after")
+    def refuse_another_s3_beyond_a_laptop(self) -> Self:
+        """Refuse an S3 endpoint of our naming in staging and production, naming the option, not the URL."""
+        if self.environment in _HTTPS_ENVIRONMENTS and self.archive_endpoint_url is not None:
+            raise _ArchiveEndpointError
+        return self
+
+    @model_validator(mode="after")
+    def require_the_legal_retention_beyond_a_laptop(self) -> Self:
+        """Refuse a retention shorter than the law's in staging and production."""
+        if self.environment in _HTTPS_ENVIRONMENTS and self.archive_retention_years < LEGAL_RETENTION_YEARS:
+            raise _ShortRetentionError
+        return self
+
+    @model_validator(mode="after")
+    def refuse_a_file_archive_in_production(self) -> Self:
+        """Refuse the file archive in production, naming the option and never the path."""
+        if self.environment == "production" and self.archive_backend == "file":
+            raise _FileArchiveInProductionError
         return self
 
     @property

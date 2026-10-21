@@ -7,30 +7,26 @@ import psycopg
 import pytest
 from psycopg import sql
 
-from ledger_platform._manifest import MANIFEST as PLATFORM
 from ledger_platform.data.roles import APP, MIGRATOR
-from ledger_platform.runtime.packs import load_modules
 from ledger_testing.database import TEST_LOGINS, bootstrap, fresh_database
+from ledger_testing.modules import installed_schemas
 lazy from ledger_testing.postgres import PostgresServer, Template, WorkerDatabase
 
-SCHEMAS: Final = tuple(
-    schema
-    for schema in (PLATFORM.schema_name, *(module.manifest.schema_name for module in load_modules()))
-    if schema is not None
-)
-"""The schemas of every package installed here, from their manifests: the platform's, then each module's."""
+INSTALLED: Final = installed_schemas()
+"""The schemas of every package installed here, from their manifests: the platform's, each module's, then each
+channel's; a module isolated in the signer's role has its schema ``ledger_signer``'s, as in production."""
 
 
 def pytest_ledger_template(template: Template) -> None:
     """The roles of the installed packages' schemas (``ledger-migrate`` makes everything else)."""
-    bootstrap(template, SCHEMAS)
+    bootstrap(template, INSTALLED.schemas, isolated=INSTALLED.isolated)
 
 
 @pytest.fixture
 def fresh(worker_database: WorkerDatabase, postgres: PostgresServer) -> Iterator[str]:
     """A new database with the schemas, empty, as a first rollout finds it; dropped after the test."""
     del worker_database  # its template made the roles the schemas are owned by
-    name = fresh_database(postgres, SCHEMAS)
+    name = fresh_database(postgres, INSTALLED.schemas, isolated=INSTALLED.isolated)
     yield name
     with psycopg.connect(postgres.libpq(), autocommit=True) as connection:
         connection.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))

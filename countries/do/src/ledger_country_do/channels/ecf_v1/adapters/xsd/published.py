@@ -6,7 +6,8 @@ to the SHA-256 it had when fetched: a file that changed fails ``test_xsd_pins``,
 deliberate change of this module (a new hash, a new date), never a silent download.
 
 Three of the fifteen do not compile as DGII publishes them; ``CORRECTIONS`` holds the least edit that makes
-each compile, applied when the schema is loaded and never to the file.
+each compile, applied when the schema is loaded (fiscal-kit's ``SchemaSet``, ``adapters.xml.schema_set``) and
+never to the file.
 """
 
 from dataclasses import dataclass
@@ -14,6 +15,8 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Final, final
 lazy from collections.abc import Mapping
+
+from ledger_fiscal_kit.xml.schemas import Correction
 
 SOURCE: Final = (
     "https://dgii.gov.do/cicloContribuyente/facturacion/comprobantesFiscalesElectronicosE-CF/"
@@ -170,40 +173,36 @@ PUBLISHED: Final[Mapping[Format, Published]] = MappingProxyType(
 )
 
 
-@final
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Correction:
-    """The least edit that makes a published schema compile: ``wrong``, ``count`` times, becomes ``right``."""
-
-    format: Format
-    wrong: str
-    right: str
-    count: int
-    reason: str
-
-
-CORRECTIONS: Final[tuple[Correction, ...]] = (
-    Correction(
-        format=Format.ECF_31,
-        wrong='name=" IndicadorServicioTodoIncluidoType"',
-        right='name="IndicadorServicioTodoIncluidoType"',
-        count=1,
-        reason="a space before the type's name leaves the element that uses it without a type",
-    ),
-    Correction(
-        format=Format.ACECF,
-        wrong="(?:",
-        right="(",
-        count=1,
-        reason="a non-capturing group is Perl's, not XML Schema's: the date pattern does not compile",
-    ),
-    Correction(
-        format=Format.RFCE,
-        wrong="(?:",
-        right="(",
-        count=4,
-        reason="a non-capturing group is Perl's, not XML Schema's: date and amount patterns do not compile",
-    ),
+CORRECTIONS: Final[Mapping[Format, tuple[Correction, ...]]] = MappingProxyType(
+    {
+        Format.ECF_31: (
+            Correction(
+                wrong='name=" IndicadorServicioTodoIncluidoType"',
+                right='name="IndicadorServicioTodoIncluidoType"',
+                count=1,
+                reason="a space before the type's name leaves the element that uses it without a type",
+            ),
+        ),
+        Format.ACECF: (
+            Correction(
+                wrong="(?:",
+                right="(",
+                count=1,
+                reason="a non-capturing group is Perl's, not XML Schema's: the date pattern does not compile",
+            ),
+        ),
+        Format.RFCE: (
+            Correction(
+                wrong="(?:",
+                right="(",
+                count=4,
+                reason=(
+                    "a non-capturing group is Perl's, not XML Schema's: "
+                    "date and amount patterns do not compile"
+                ),
+            ),
+        ),
+    }
 )
-"""Every correction, each checked to apply exactly ``count`` times: when DGII fixes a file its hash changes,
-and ``test_xsd_pins`` says so before a correction could silently stop applying."""
+"""Every correction, by the schema it corrects, each checked to apply exactly ``count`` times: when DGII fixes
+a file its hash changes, and ``test_xsd_pins`` says so before a correction could silently stop applying."""

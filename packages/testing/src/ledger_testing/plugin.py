@@ -5,11 +5,16 @@
 - ``worker_database``: this worker's own database, a clone of a template that the packages'
   ``pytest_ledger_template`` hooks prepare once per server.
 - ``issuer_keys`` (session) and ``local_issuer`` (per test): an OpenID provider whose RSA key is made once.
+- ``localstack`` (session): LocalStack's S3 (``ledger_testing.localstack``), started for the first test of a
+  process that asks for it.
 - ``clock``: a wall clock the test moves. ``restore_logging`` (autouse): the plain logging baseline.
+- ``archive_store`` and ``archive``: an immutable store in memory, and the archive the app would bind over it
+  (fiscal-kit's ``ArchivePort``, its retention counted from ``clock``). ``test_signer``: a ``SignerPort`` that
+  signs nothing (``ledger_testing.signer``); a pack's conftest overrides it with one that signs.
 - A module's fixtures, for a suite whose conftest returns its ``ModuleUnderTest`` from ``module_under_test``
-  (``ledger_testing.modules``): ``migrated``, ``database``, ``signals``, ``module_database``, ``admin``,
-  ``settings``, ``api``, ``client``, ``fresh_database_name``, ``fresh``, ``fresh_admin_url``. A conftest's own
-  fixture of one of these names wins over the plugin's.
+  (``ledger_testing.modules``): ``migrated``, ``database``, ``app_database``, ``signals``,
+  ``module_database``, ``admin``, ``settings``, ``api``, ``client``, ``fresh_database_name``, ``fresh``,
+  ``fresh_admin_url``. A conftest's own fixture of one of these names wins over the plugin's.
 - A selector event loop: psycopg's async driver cannot run on Windows' proactor loop.
 
 pytest imports this module, and what its hook specification names, before coverage starts: the names it uses
@@ -37,9 +42,12 @@ lazy from ledger_platform.data.database import Database
 lazy from ledger_platform.data.notifier import Signals
 lazy from ledger_platform.data.roles import APP, MIGRATOR
 lazy from ledger_platform.runtime.app import App
+lazy from ledger_platform.runtime.archiving import StoreArchive
+lazy from ledger_testing.blobs import MemoryImmutableStore
 lazy from ledger_testing.clock import ManualClock
-lazy from ledger_testing.database import TEST_LOGINS, app_url, fresh_database, migrator_url
+lazy from ledger_testing.database import TEST_LOGINS, app_url, fresh_database, migrator_url, signer_url
 lazy from ledger_testing.issuer import IssuerKeys, LocalIssuer
+lazy from ledger_testing.localstack import LocalStack, started_localstack
 lazy from ledger_testing.logs import restored_logging
 lazy from ledger_testing.modules import ModuleUnderTest, QuietSignals, app_settings
 lazy from ledger_testing.postgres import (
@@ -51,6 +59,7 @@ lazy from ledger_testing.postgres import (
     ensure_template,
     started_postgres,
 )
+lazy from ledger_testing.signer import TestSigner
 
 _SERVER_INPUT: Final = "ledger_postgres"
 _WORKER_INPUT: Final = TypeAdapter(dict[str, object])
@@ -159,10 +168,39 @@ async def local_issuer(issuer_keys: IssuerKeys) -> AsyncGenerator[LocalIssuer]:
         yield started
 
 
+@pytest.fixture(scope="session")
+def localstack() -> Iterator[LocalStack]:
+    """LocalStack's S3, one container for the process.
+
+    Under xdist each worker that asks starts its own: a package's S3 tests group themselves on one worker
+    (``xdist_group("localstack")``).
+    """
+    with started_localstack() as started:
+        yield started
+
+
 @pytest.fixture
 def clock() -> ManualClock:
     """A wall clock the test moves (``Clock``)."""
     return ManualClock()
+
+
+@pytest.fixture
+def archive_store() -> MemoryImmutableStore:
+    """An immutable store in memory, empty."""
+    return MemoryImmutableStore()
+
+
+@pytest.fixture
+def archive(archive_store: MemoryImmutableStore, clock: ManualClock) -> StoreArchive:
+    """The archive over ``archive_store``, as the app binds it: ten years' retention from ``clock``."""
+    return StoreArchive(archive_store, retention_years=10, clock=clock)
+
+
+@pytest.fixture
+def test_signer() -> TestSigner:
+    """A ``SignerPort`` of the test's own: it signs nothing and its certificate covers any moment."""
+    return TestSigner()
 
 
 # ── A module's fixtures (``ledger_testing.modules``) ────────────────────────────
@@ -176,9 +214,24 @@ def migrated(worker_database: WorkerDatabase, module_under_test: ModuleUnderTest
 
 
 @pytest.fixture
-async def database(migrated: WorkerDatabase) -> AsyncGenerator[Database]:
-    """A pool of four connections as ``ledger_app``."""
-    opened = Database.create(app_url(migrated), pool_size=4)
+async def database(migrated: WorkerDatabase, module_under_test: ModuleUnderTest) -> AsyncGenerator[Database]:
+    """A pool of four connections as the module's login.
+
+    ``ledger_signer`` for a module isolated in the signer's role, whose schema no other login reaches; else
+    ``ledger_app``.
+    """
+    url = signer_url(migrated) if module_under_test.is_isolated else app_url(migrated)
+    opened = Database.create(url, pool_size=4)
+    try:
+        yield opened
+    finally:
+        await opened.aclose()
+
+
+@pytest.fixture
+async def app_database(migrated: WorkerDatabase) -> AsyncGenerator[Database]:
+    """A pool of two connections as ``ledger_app``: the login of every app but the signer."""
+    opened = Database.create(app_url(migrated), pool_size=2)
     try:
         yield opened
     finally:
@@ -199,9 +252,10 @@ def module_database(
     return BoundDatabase(
         database,
         schema=module_under_test.schema,
-        source=module_under_test.manifest.package.name,
+        source=module_under_test.source,
         signals=signals,
         publishes=module_under_test.publishes,
+        jobs=module_under_test.jobs,
     )
 
 
@@ -243,7 +297,7 @@ def fresh_database_name(
 ) -> Iterator[str]:
     """A database of the test's own with the module's schemas, empty, as a first rollout finds it; dropped."""
     del worker_database  # its template made the roles a fresh database's schemas are owned by
-    name = fresh_database(postgres, module_under_test.schemas)
+    name = fresh_database(postgres, module_under_test.schemas, isolated=module_under_test.isolated)
     yield name
     with psycopg.connect(postgres.libpq(), autocommit=True) as connection:
         connection.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))

@@ -1,11 +1,12 @@
 """signxml as the second implementation of XML signatures; and documents signed as other signers sign them.
 
-signxml shares no code with ``adapters.signing``; the fake DGII uses it to check what it receives and to sign
-the ARECFs it answers. ``excise_empty_xmlns_declarations`` makes signxml undo lxml's spurious ``xmlns=""``
-(its issue 193), without which it cannot verify a signature in the default namespace. signxml resolves
-``URI=""`` to the root element, so a document with nodes outside its root is verified by xmlsec1 instead
-(``XMLSEC1_ONLY``); nor does it carry the root's ``xml:`` attributes onto ``SignedInfo`` as C14N 1.0 says
-(xmlsec1 does). The signing key is handed to signxml as an object: it is never serialized.
+signxml shares no code with fiscal-kit's ``xml.dsig`` or the channel's verifier; the fake DGII uses it to
+check what it receives and to sign the ARECFs it answers. ``excise_empty_xmlns_declarations`` makes signxml
+undo lxml's spurious ``xmlns=""`` (its issue 193), without which it cannot verify a signature in the default
+namespace. signxml resolves ``URI=""`` to the root element, so a document with nodes outside its root is
+verified by xmlsec1 instead (``XMLSEC1_ONLY``); nor does it carry the root's ``xml:`` attributes onto
+``SignedInfo`` as C14N 1.0 says (xmlsec1 does). The signing key is handed to signxml as an object: it is
+never serialized.
 
 ``forge`` signs a document with any variation of DGII's ``Signature`` a test asks for (an ``Id``, a
 ``KeyValue``, a chain, ``xml:`` attributes on the root), as counterparties' tools sign: the inbound profile's
@@ -38,10 +39,10 @@ lazy from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 lazy from cryptography.hazmat.primitives.asymmetric.types import PrivateKeyTypes
 lazy from signxml.verifier import VerifyResult
 
-from ledger_country_do.channels.ecf_v1.adapters.signing.profile import XML_NAMESPACE, signature
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import DSIG, parser, require_readable, texts
+from ledger_fiscal_kit.xml.dsig import XML_NAMESPACE, signature
+from ledger_fiscal_kit.xml.hardened import DSIG, parser, require_readable, texts
 from ledger_kernel.errors import LedgerError
-lazy from ledger_country_do_testing.pki import Issued
+lazy from ledger_testing.pki import Issued
 
 OUTSIDE_ROOT: Final = "outside-root"
 XMLSEC1_ONLY: Final = frozenset({OUTSIDE_ROOT})

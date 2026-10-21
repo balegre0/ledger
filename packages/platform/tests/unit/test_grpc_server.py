@@ -10,6 +10,7 @@ import pytest
 from hypothesis import example, given
 from hypothesis import strategies as st
 from prometheus_client import CollectorRegistry
+from pydantic import SecretStr
 from structlog.testing import capture_logs
 
 from ledger_kernel.errors import (
@@ -24,14 +25,42 @@ from ledger_kernel.errors import (
 )
 from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.grpc.client import ERROR_CODE_KEY
+from ledger_platform.grpc.guard import CallerPolicy, CallerTokens
+from ledger_platform.grpc.metadata import call_metadata
 from ledger_platform.grpc.server import (
+    DEFAULT_MAX_CONCURRENT_RPCS,
+    MAX_CONCURRENT_RPCS,
+    MAX_MESSAGE_BYTES,
     GrpcBindError,
     GuardInterceptor,
+    ServerOptions,
     serve_grpc,
 )
 from ledger_testing.ports import occupy_a_port, port_of
 
 TIMEOUT: Final = 5
+TOKEN: Final = "probe-token-0123456789abcdefghijklmnopq"
+CALLERS: Final = CallerTokens(
+    [
+        CallerPolicy(
+            name="probe",
+            tokens=(SecretStr(TOKEN),),
+            methods=frozenset(
+                {
+                    "/test.Echo/Say",
+                    "/test.Echo/SayWithoutWaiting",
+                    "/test.Stream/Repeat",
+                    "/test.Stream/WriteTwice",
+                    "/test.Collect/Join",
+                    "/test.Relay/Pass",
+                    "/test.Wait/For",
+                }
+            ),
+        )
+    ]
+)
+"""The test server's one caller, who may call every method it serves."""
+METADATA: Final = call_metadata(SecretStr(TOKEN), call_id="test")
 SECRET: Final = "card 4111111111111111"
 MESSAGE: Final = "it went wrong"
 GENERIC_DETAILS: Final = "internal error"
@@ -194,14 +223,14 @@ def channel_to(port: int) -> grpc.aio.Channel:
 async def call_named(port: int, method: str) -> bytes:
     async with channel_to(port) as channel:
         return await channel.unary_unary(method, request_serializer=bytes, response_deserializer=bytes)(
-            b"x", timeout=TIMEOUT
+            b"x", metadata=METADATA, timeout=TIMEOUT
         )
 
 
 async def call_unary(port: int, payload: bytes) -> list[bytes]:
     async with channel_to(port) as channel:
         method = channel.unary_unary("/test.Echo/Say", request_serializer=bytes, response_deserializer=bytes)
-        return [await method(payload, timeout=TIMEOUT)]
+        return [await method(payload, metadata=METADATA, timeout=TIMEOUT)]
 
 
 async def call_unary_stream(port: int, payload: bytes) -> list[bytes]:
@@ -209,7 +238,7 @@ async def call_unary_stream(port: int, payload: bytes) -> list[bytes]:
         method = channel.unary_stream(
             "/test.Stream/Repeat", request_serializer=bytes, response_deserializer=bytes
         )
-        return [item async for item in method(payload, timeout=TIMEOUT)]
+        return [item async for item in method(payload, metadata=METADATA, timeout=TIMEOUT)]
 
 
 async def call_unary_stream_written(port: int, payload: bytes) -> list[bytes]:
@@ -217,7 +246,7 @@ async def call_unary_stream_written(port: int, payload: bytes) -> list[bytes]:
         method = channel.unary_stream(
             "/test.Stream/WriteTwice", request_serializer=bytes, response_deserializer=bytes
         )
-        return [item async for item in method(payload, timeout=TIMEOUT)]
+        return [item async for item in method(payload, metadata=METADATA, timeout=TIMEOUT)]
 
 
 async def call_stream_unary(port: int, payload: bytes) -> list[bytes]:
@@ -225,7 +254,7 @@ async def call_stream_unary(port: int, payload: bytes) -> list[bytes]:
         method = channel.stream_unary(
             "/test.Collect/Join", request_serializer=bytes, response_deserializer=bytes
         )
-        return [await method(iter([payload]), timeout=TIMEOUT)]
+        return [await method(iter([payload]), metadata=METADATA, timeout=TIMEOUT)]
 
 
 async def call_stream_stream(port: int, payload: bytes) -> list[bytes]:
@@ -233,7 +262,7 @@ async def call_stream_stream(port: int, payload: bytes) -> list[bytes]:
         method = channel.stream_stream(
             "/test.Relay/Pass", request_serializer=bytes, response_deserializer=bytes
         )
-        return [item async for item in method(iter([payload]), timeout=TIMEOUT)]
+        return [item async for item in method(iter([payload]), metadata=METADATA, timeout=TIMEOUT)]
 
 
 CALLS: Final[Mapping[str, Call]] = {
@@ -248,7 +277,7 @@ EVERY_CALL = pytest.mark.parametrize("call", CALLS.values(), ids=CALLS.keys())
 
 @pytest.fixture
 async def port(registry: CollectorRegistry) -> AsyncGenerator[int]:
-    async with serve_grpc(port=0, register=register, registry=registry) as bound:
+    async with serve_grpc(port=0, register=register, registry=registry, callers=CALLERS) as bound:
         yield bound
 
 
@@ -368,19 +397,26 @@ async def test_the_error_of_a_stream_arrives_after_the_items_before_it(port: int
         method = channel.unary_stream(
             "/test.Stream/Repeat", request_serializer=bytes, response_deserializer=bytes
         )
-        stream = method(THING, timeout=TIMEOUT)
+        stream = method(THING, metadata=METADATA, timeout=TIMEOUT)
         assert await stream.read() == THING
         with pytest.raises(grpc.aio.AioRpcError) as caught:
             await stream.read()
     assert (caught.value.code(), caught.value.details()) == (grpc.StatusCode.NOT_FOUND, "no such thing")
 
 
-async def test_a_synchronous_method_is_served_as_grpc_serves_it(port: int) -> None:
-    async with channel_to(port) as channel:
-        method = channel.unary_unary(
-            "/test.Echo/SayWithoutWaiting", request_serializer=bytes, response_deserializer=bytes
-        )
-        assert await method(b"hello", timeout=TIMEOUT) == b"hello"
+async def test_a_synchronous_method_is_never_served(port: int, registry: CollectorRegistry) -> None:
+    """``grpc.aio`` would run it on a thread, outside the caller guard: it fails as a defect of ours."""
+    with capture_logs() as logs, pytest.raises(grpc.aio.AioRpcError) as caught:
+        await call_named(port, "/test.Echo/SayWithoutWaiting")
+    assert (caught.value.code(), caught.value.details(), trailers(caught.value)[ERROR_CODE_KEY]) == (
+        grpc.StatusCode.INTERNAL,
+        GENERIC_DETAILS,
+        "internal",
+    )
+    assert [(entry["event"], entry["code"]) for entry in logs] == [
+        ("grpc.unhandled_error", "grpc_method_synchronous")
+    ]
+    assert duration_count(registry, "/test.Echo/SayWithoutWaiting", "INTERNAL") == 1
 
 
 @dataclass(slots=True)
@@ -413,7 +449,7 @@ async def test_unknown_methods_are_unimplemented(port: int) -> None:
             "/test.Echo/Nothing", request_serializer=bytes, response_deserializer=bytes
         )
         with pytest.raises(grpc.aio.AioRpcError) as caught:
-            await missing(b"", timeout=TIMEOUT)
+            await missing(b"", metadata=METADATA, timeout=TIMEOUT)
     assert caught.value.code() == grpc.StatusCode.UNIMPLEMENTED
 
 
@@ -447,13 +483,17 @@ def register_waiting(
 async def call_waiting(port: int) -> bytes:
     async with channel_to(port) as channel:
         method = channel.unary_unary("/test.Wait/For", request_serializer=bytes, response_deserializer=bytes)
-        return await method(b"done", timeout=TIMEOUT)
+        return await method(b"done", metadata=METADATA, timeout=TIMEOUT)
 
 
 async def test_a_call_in_flight_finishes_within_the_grace(registry: CollectorRegistry) -> None:
     started, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
     async with serve_grpc(
-        port=0, register=register_waiting(started, release, cancelled), registry=registry, grace=TIMEOUT
+        port=0,
+        register=register_waiting(started, release, cancelled),
+        registry=registry,
+        callers=CALLERS,
+        options=ServerOptions(grace=TIMEOUT),
     ) as bound:
         call = asyncio.create_task(call_waiting(bound))
         async with asyncio.timeout(TIMEOUT):
@@ -467,7 +507,11 @@ async def test_a_call_that_outlives_the_grace_is_cancelled_and_is_no_bug(registr
     started, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
     with capture_logs() as logs:
         async with serve_grpc(
-            port=0, register=register_waiting(started, release, cancelled), registry=registry, grace=0.1
+            port=0,
+            register=register_waiting(started, release, cancelled),
+            registry=registry,
+            callers=CALLERS,
+            options=ServerOptions(grace=0.1),
         ) as bound:
             call = asyncio.create_task(call_waiting(bound))
             async with asyncio.timeout(TIMEOUT):
@@ -484,7 +528,7 @@ async def test_a_call_that_outlives_the_grace_is_cancelled_and_is_no_bug(registr
 @example(number=65536)
 def test_a_port_outside_the_range_is_refused_at_once(number: int) -> None:
     with pytest.raises(InvalidOptionError, match=r"^gRPC option port must be between 0 and 65535, not "):
-        serve_grpc(port=number, register=register, registry=CollectorRegistry())
+        serve_grpc(port=number, register=register, registry=CollectorRegistry(), callers=CALLERS)
 
 
 @given(seconds=st.floats().filter(lambda value: not (value > 0 and isfinite(value))))
@@ -493,7 +537,7 @@ def test_a_port_outside_the_range_is_refused_at_once(number: int) -> None:
 @example(seconds=nan)
 def test_a_grace_that_is_not_a_positive_finite_time_is_refused_at_once(seconds: float) -> None:
     with pytest.raises(InvalidOptionError, match=r"^gRPC option grace must be a positive, finite number "):
-        serve_grpc(port=0, register=register, registry=CollectorRegistry(), grace=seconds)
+        ServerOptions(grace=seconds)
 
 
 @given(
@@ -504,7 +548,13 @@ def test_a_grace_that_is_not_a_positive_finite_time_is_refused_at_once(seconds: 
 @example(number=65535, seconds=1e300)
 def test_every_port_and_every_positive_finite_grace_is_accepted(number: int, seconds: float) -> None:
     """Accepted as options: nothing is bound until the server is entered."""
-    serve_grpc(port=number, register=register, registry=CollectorRegistry(), grace=seconds)
+    serve_grpc(
+        port=number,
+        register=register,
+        registry=CollectorRegistry(),
+        callers=CALLERS,
+        options=ServerOptions(grace=seconds),
+    )
 
 
 class StartFailedError(Exception):
@@ -520,8 +570,15 @@ async def test_a_server_that_cannot_start_is_stopped(
     stopped: list[float | None] = []
     make = grpc.aio.server
 
-    def failing_server(*, interceptors: Sequence[grpc.aio.ServerInterceptor]) -> grpc.aio.Server:
-        server = make(interceptors=interceptors)
+    def failing_server(
+        *,
+        interceptors: Sequence[grpc.aio.ServerInterceptor],
+        maximum_concurrent_rpcs: int,
+        options: Sequence[tuple[str, int]],
+    ) -> grpc.aio.Server:
+        server = make(
+            interceptors=interceptors, maximum_concurrent_rpcs=maximum_concurrent_rpcs, options=options
+        )
         real_stop = server.stop
 
         async def start() -> None:
@@ -538,7 +595,9 @@ async def test_a_server_that_cannot_start_is_stopped(
 
     monkeypatch.setattr(grpc.aio, "server", failing_server)
     with pytest.raises(StartFailedError):
-        async with serve_grpc(port=0, register=register, registry=registry, grace=0.5):
+        async with serve_grpc(
+            port=0, register=register, registry=registry, callers=CALLERS, options=ServerOptions(grace=0.5)
+        ):
             pass
     assert len(servers) == 1
     assert stopped == [0.5]
@@ -548,7 +607,9 @@ async def test_a_port_that_is_taken_is_a_startup_error() -> None:
     with occupy_a_port() as taken:
         number = port_of(taken)
         with pytest.raises(GrpcBindError, match=rf"^the gRPC server could not bind port {number}$") as caught:
-            async with serve_grpc(port=number, register=register, registry=CollectorRegistry()):
+            async with serve_grpc(
+                port=number, register=register, registry=CollectorRegistry(), callers=CALLERS
+            ):
                 pass
     assert isinstance(caught.value.__cause__, RuntimeError)
     assert caught.value.code == "grpc_bind_failed"
@@ -592,17 +653,15 @@ async def test_a_status_the_method_set_itself_is_the_one_measured(
     assert duration_count(registry, "/test.Echo/Say", "RESOURCE_EXHAUSTED") == 1
 
 
-async def test_calls_that_reach_no_asynchronous_method_are_not_timed(
+async def test_calls_of_a_method_nobody_registered_are_not_timed(
     port: int, registry: CollectorRegistry
 ) -> None:
-    """An unknown method is the client's to name (each name would be a series); a synchronous one runs on a
-    thread, outside the guard."""
+    """An unknown method is the client's to name: each name would be a series."""
     async with channel_to(port) as channel:
         with contextlib.suppress(grpc.aio.AioRpcError):
             await channel.unary_unary(
                 "/test.Echo/Nothing", request_serializer=bytes, response_deserializer=bytes
-            )(b"", timeout=TIMEOUT)
-    await call_named(port, "/test.Echo/SayWithoutWaiting")
+            )(b"", metadata=METADATA, timeout=TIMEOUT)
     measured = [
         sample.labels
         for metric in registry.collect()
@@ -617,7 +676,11 @@ async def test_a_call_cancelled_at_the_end_of_the_grace_is_timed_as_cancelled(
 ) -> None:
     started, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
     async with serve_grpc(
-        port=0, register=register_waiting(started, release, cancelled), registry=registry, grace=0.1
+        port=0,
+        register=register_waiting(started, release, cancelled),
+        registry=registry,
+        callers=CALLERS,
+        options=ServerOptions(grace=0.1),
     ) as bound:
         call = asyncio.create_task(call_waiting(bound))
         async with asyncio.timeout(TIMEOUT):
@@ -625,3 +688,105 @@ async def test_a_call_cancelled_at_the_end_of_the_grace_is_timed_as_cancelled(
     with pytest.raises(grpc.aio.AioRpcError):
         await call
     assert duration_count(registry, "/test.Wait/For", "CANCELLED") == 1
+
+
+@pytest.mark.parametrize("limit", [0, -1, MAX_MESSAGE_BYTES + 1], ids=["zero", "negative", "over-the-most"])
+def test_a_message_limit_outside_its_range_is_refused_at_once(limit: int) -> None:
+    with pytest.raises(
+        InvalidOptionError,
+        match=rf"^gRPC option max_message_bytes must be 1 to {MAX_MESSAGE_BYTES} bytes, not ",
+    ):
+        ServerOptions(max_message_bytes=limit)
+
+
+@pytest.mark.parametrize("limit", [1, MAX_MESSAGE_BYTES], ids=["least", "most"])
+def test_a_message_limit_within_its_range_is_accepted(limit: int) -> None:
+    assert ServerOptions(max_message_bytes=limit).max_message_bytes == limit
+
+
+def refuse_to_read(raw: bytes) -> bytes:
+    """A deserializer that cannot read what it is given, and says so quoting it."""
+    raise ValueError(raw.decode())
+
+
+@pytest.fixture
+async def unguarded_port(registry: CollectorRegistry) -> AsyncGenerator[int]:
+    """A server with ``GuardInterceptor`` alone, whose methods cannot read their requests."""
+    server = grpc.aio.server(interceptors=(GuardInterceptor(registry),))
+    serve_methods(
+        server,
+        "test.Echo",
+        Say=grpc.unary_unary_rpc_method_handler(
+            say, request_deserializer=refuse_to_read, response_serializer=bytes
+        ),
+    )
+    serve_methods(
+        server,
+        "test.Collect",
+        Join=grpc.stream_unary_rpc_method_handler(
+            join, request_deserializer=refuse_to_read, response_serializer=bytes
+        ),
+    )
+    bound = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    try:
+        yield bound
+    finally:
+        await server.stop(None)
+
+
+@pytest.mark.parametrize("call", [call_unary, call_stream_unary], ids=["unary-unary", "stream-unary"])
+async def test_a_body_that_cannot_be_read_is_invalid_even_without_the_caller_guard(
+    call: Call, unguarded_port: int, registry: CollectorRegistry
+) -> None:
+    """``GuardInterceptor`` reads the request itself: grpc would answer ``UNKNOWN`` with the exception."""
+    with capture_logs() as logs:
+        error = await failure_of(call, unguarded_port, SECRET.encode())
+    assert (error.code(), error.details(), trailers(error)[ERROR_CODE_KEY]) == (
+        grpc.StatusCode.INVALID_ARGUMENT,
+        "the request could not be read",
+        "grpc_request_malformed",
+    )
+    assert SECRET not in str(error)
+    assert logs == []
+    measured = [
+        sample.labels["code"]
+        for metric in registry.collect()
+        for sample in metric.samples
+        if sample.name == "ledger_grpc_request_duration_seconds_count"
+    ]
+    assert measured == ["INVALID_ARGUMENT"]
+
+
+@pytest.mark.parametrize("limit", [0, -1, MAX_CONCURRENT_RPCS + 1], ids=["zero", "negative", "over-the-most"])
+def test_a_concurrency_limit_outside_its_range_is_refused_at_once(limit: int) -> None:
+    with pytest.raises(
+        InvalidOptionError,
+        match=rf"^gRPC option max_concurrent_rpcs must be 1 to {MAX_CONCURRENT_RPCS} calls, not ",
+    ):
+        ServerOptions(max_concurrent_rpcs=limit)
+
+
+def test_a_server_takes_a_bounded_number_of_calls_at_once_by_default() -> None:
+    assert 1 <= ServerOptions().max_concurrent_rpcs == DEFAULT_MAX_CONCURRENT_RPCS <= MAX_CONCURRENT_RPCS
+
+
+async def test_a_call_past_the_concurrency_limit_is_refused_resource_exhausted(
+    registry: CollectorRegistry,
+) -> None:
+    started, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    async with serve_grpc(
+        port=0,
+        register=register_waiting(started, release, cancelled),
+        registry=registry,
+        callers=CALLERS,
+        options=ServerOptions(grace=0.1, max_concurrent_rpcs=1),
+    ) as bound:
+        first = asyncio.create_task(call_waiting(bound))
+        async with asyncio.timeout(TIMEOUT):
+            await started.wait()
+        with pytest.raises(grpc.aio.AioRpcError) as caught:
+            await call_waiting(bound)
+        release.set()
+        assert await first == b"done"
+    assert caught.value.code() == grpc.StatusCode.RESOURCE_EXHAUSTED

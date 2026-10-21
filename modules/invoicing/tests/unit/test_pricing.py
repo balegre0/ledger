@@ -13,6 +13,7 @@ from ledger_invoicing.domain.errors import (
     ExchangeRateUnusedError,
     FieldInvalidError,
     FieldRequiredError,
+    FieldUndeclaredInvalidError,
     FieldUnknownError,
     InvalidExchangeRateError,
     InvalidIssueDateError,
@@ -31,6 +32,7 @@ from ledger_invoicing.domain.pricing import (
     Terms,
     local_date,
     price,
+    refuse_undeclared,
 )
 from ledger_kernel.errors import ErrorKind, InvalidValueError
 from ledger_kernel.money import Currency, Money
@@ -410,7 +412,7 @@ def with_fields(fields: dict[str, dict[str, FieldValue]]) -> Terms:
 
 def test_a_regime_that_declares_no_field_refuses_every_one(regime: RegimeDef) -> None:
     with pytest.raises(FieldUnknownError) as caught:
-        priced(regime, with_fields({"do": {"ecf_type": "31"}}))
+        refuse_undeclared(priced(regime, with_fields({"do": {"ecf_type": "31"}})), regime)
     assert str(caught.value) == "fiscal.do holds a field the regime does not declare"
     assert (caught.value.kind, caught.value.code) == (ErrorKind.INVALID, "field_unknown")
     with pytest.raises(FieldUnknownError, match=r"^fiscal holds a namespace other than the regime's, do$"):
@@ -474,3 +476,64 @@ def test_a_field_of_another_kind_is_refused_by_its_name(
         priced(regime_with_fields, with_fields({"do": {"ecf_type": "31", name: value}}))
     assert str(caught.value) == f"fiscal.do.{name} must be {requirement}"
     assert (caught.value.kind, caught.value.code) == (ErrorKind.INVALID, "field_invalid")
+
+
+def test_fields_the_regime_does_not_declare_are_kept_for_the_issue_policy_chain_to_judge(
+    regime_with_fields: RegimeDef,
+) -> None:
+    """Decision 24: the regime's channels' fields are kept; the chain judges them, or without one none may."""
+    fields: dict[str, FieldValue] = {
+        "ecf_type": "31",
+        "modification_code": "3",
+        "withholdings": {"0": {"itbis": "18.00", "isr": "10.00"}},
+    }
+    kept = priced(regime_with_fields, with_fields({"do": fields}))
+    assert kept.fiscal == fields
+    with pytest.raises(FieldUnknownError, match=r"^fiscal\.do holds a field the regime does not declare$"):
+        refuse_undeclared(kept, regime_with_fields)
+    refuse_undeclared(priced(regime_with_fields, with_fields({"do": {"ecf_type": "31"}})), regime_with_fields)
+    with pytest.raises(FieldInvalidError, match=r"^fiscal\.do\.ecf_type must be"):
+        priced(regime_with_fields, with_fields({"do": {**fields, "ecf_type": {"x": "1"}}}))
+
+
+UNDECLARED: Final = (
+    "fiscal.do holds a field the regime does not declare whose name or value is not text of 1 to 500 "
+    "characters, none of them invisible, or an object of at most 1000 such fields (each text, or an object "
+    "of at most 20 text fields)"
+)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "a\x00b",
+        "a\N{ZERO WIDTH SPACE}b",
+        "",
+        "x" * 501,
+        {"0": {"itbis": "1\x07"}},
+        {"0": {"itbis": {"deeper": "1"}}},
+        {"0": {f"f{index}": "1" for index in range(21)}},
+        {str(index): "1" for index in range(1001)},
+        {"a\N{ZERO WIDTH SPACE}": "1"},
+    ],
+)
+def test_an_undeclared_field_holds_plain_text_whatever_judges_it(
+    regime: RegimeDef, value: FieldValue
+) -> None:
+    """Chain or not, draft or not: what a document keeps is text a person can read (review I2)."""
+    with pytest.raises(FieldUndeclaredInvalidError) as caught:
+        priced(regime, with_fields({"do": {"withholdings": value}}))
+    assert str(caught.value) == UNDECLARED
+    assert (caught.value.kind, caught.value.code) == (ErrorKind.INVALID, "field_undeclared_invalid")
+    with pytest.raises(FieldUndeclaredInvalidError):
+        priced(regime, with_fields({"do": {"a\x00": "1"}}))
+
+
+def test_an_undeclared_object_holds_a_field_per_line_of_the_largest_document(regime: RegimeDef) -> None:
+    """DO's ``withholdings`` keys a line's amounts by its index: as many as a document has lines."""
+    withholdings: dict[str, FieldValue] = {
+        str(index): {"itbis": "18.00", "isr": "10.00"} for index in range(MAX_LINES)
+    }
+    assert priced(regime, with_fields({"do": {"withholdings": withholdings}})).fiscal == {
+        "withholdings": withholdings
+    }

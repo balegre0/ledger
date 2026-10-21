@@ -7,9 +7,11 @@ from typing import ClassVar, Final, final
 lazy from collections.abc import Awaitable, Callable
 
 import structlog
+lazy from prometheus_client import CollectorRegistry
 
 from ledger_kernel.errors import LedgerError
 from ledger_platform.config.options import require_seconds
+from ledger_platform.observability.metrics import gauge
 lazy from ledger_kernel.clock import MonotonicClock
 
 _COMPONENT: Final = "health"
@@ -85,6 +87,10 @@ class Health:
     The liveness probe also asks the parts registered with ``add_liveness``, which are not readiness checks:
     a part that is gone for good (a background worker stopped by a configuration mistake) makes ``dead``
     name it, and nothing but a restart of the process brings it back.
+
+    Each check's last verdict is the gauge ``ledger_readiness_check{check}`` of ``registry`` (1 ready, 0 not),
+    set by every ``run``: a check failing for minutes is an alert of its own, whatever the probes did with it.
+    A check no probe has run yet has no series.
     """
 
     __slots__ = (
@@ -93,6 +99,7 @@ class Health:
         "_failing",
         "_flights",
         "_liveness",
+        "_ready",
         "_stuck",
         "_timeout",
         "_wedge_after",
@@ -104,6 +111,7 @@ class Health:
         timeout: float = 2.0,
         wedge_after: float | None = None,
         clock: MonotonicClock = monotonic,
+        registry: CollectorRegistry | None = None,
     ) -> None:
         require_seconds(_COMPONENT, "timeout", timeout)
         wedge_after = _WEDGE_TIMEOUTS * timeout if wedge_after is None else wedge_after
@@ -116,6 +124,12 @@ class Health:
         self._stuck: dict[str, _Stuck] = {}
         self._liveness: dict[str, Alive] = {}
         self._failing: set[str] = set()
+        self._ready = gauge(
+            registry,
+            "ledger_readiness_check",
+            "1 when the readiness check passed its last probe, else 0.",
+            ["check"],
+        )
 
     def add(self, name: str, check: Check) -> None:
         """Register ``check`` under ``name``."""
@@ -149,7 +163,10 @@ class Health:
             tasks = {
                 name: group.create_task(self._verdict(name, check)) for name, check in self._checks.items()
             }
-        return {name: task.result() for name, task in tasks.items()}
+        verdicts = {name: task.result() for name, task in tasks.items()}
+        for name, ready in verdicts.items():
+            self._ready.labels(check=name).set(1 if ready else 0)
+        return verdicts
 
     async def _verdict(self, name: str, check: Check) -> bool:
         """The result of ``name`` from the run under way, or from a run begun now.

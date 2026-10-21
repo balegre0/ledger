@@ -1,0 +1,163 @@
+syntax = "proto3";
+
+package ledger.signer.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// The signer (spec §3.7, ADR 0010): signing certificates in custody, and signatures made with them.
+// Every call carries its caller's token (`authorization: Bearer <token>`) and its call id (`ledger-call-id`);
+// a caller reaches only its methods: api ImportCertificate, DescribeCertificates, RetireCertificate; worker
+// and receiver SignXml, SignSeed, DescribeCertificates. A failed call ends with its error kind's status and the error's stable code
+// in the trailing metadata `ledger-error-code`. Ids are internal UUIDs, never public ids.
+service SignerService {
+  // Installs a certificate: a header, then (local backend) the PKCS#12 bundle in chunks of at most 64 KiB and
+  // 2 MiB in all; a remote certificate is the header alone. Idempotent by the header's key. The active
+  // certificate of the company that served the new one's modes loses them, and is retired once it serves none.
+  rpc ImportCertificate(stream ImportCertificateRequest) returns (ImportCertificateResponse);
+  // The company's certificates serving a mode, active first.
+  rpc DescribeCertificates(DescribeCertificatesRequest) returns (DescribeCertificatesResponse);
+  // Retires a certificate for every mode; retiring a retired one answers it unchanged. A request in test mode
+  // never retires a certificate that serves live (FAILED_PRECONDITION certificate_serves_live).
+  rpc RetireCertificate(RetireCertificateRequest) returns (RetireCertificateResponse);
+  // Signs a document (enveloped signature, the root's last child) with the active certificate of the company
+  // and mode, once the signature is audited.
+  rpc SignXml(SignXmlRequest) returns (SignXmlResponse);
+  // Signs an authority's authentication seed the same way; audited as a seed, with no reference.
+  rpc SignSeed(SignSeedRequest) returns (SignSeedResponse);
+}
+
+enum Mode {
+  MODE_UNSPECIFIED = 0;
+  MODE_TEST = 1;
+  MODE_LIVE = 2;
+}
+
+enum Backend {
+  BACKEND_UNSPECIFIED = 0;
+  BACKEND_LOCAL = 1;   // the key in custody, sealed under a data key the KMS wraps
+  BACKEND_REMOTE = 2;  // the key at an INDOTEL-authorized certification entity; we hold a credential
+}
+
+enum CertificateStatus {
+  CERTIFICATE_STATUS_UNSPECIFIED = 0;
+  CERTIFICATE_STATUS_ACTIVE = 1;
+  CERTIFICATE_STATUS_RETIRED = 2;
+}
+
+enum SignatureProfile {
+  SIGNATURE_PROFILE_UNSPECIFIED = 0;
+  SIGNATURE_PROFILE_XMLDSIG_ENVELOPED_RSA_SHA256 = 1;  // C14N 1.0, RSA-SHA256, SHA-256, URI=""
+}
+
+// Who acts, for the audit: the request id or system call id, and "human:<subject>", "machine:<subject>" or
+// "system:<reason>".
+message CallContext {
+  string call_id = 1;
+  string actor = 2;
+}
+
+message Company {
+  string organization_id = 1;
+  string company_id = 2;
+}
+
+message ImportCertificateRequest {
+  oneof part {
+    ImportHeader header = 1;
+    bytes chunk = 2;
+  }
+}
+
+message ImportHeader {
+  CallContext call = 1;
+  Company company = 2;
+  Mode mode = 3;             // the request's mode: the idempotency key's scope
+  repeated Mode modes = 4;   // the modes the certificate serves: one or both, distinct
+  string idempotency_key = 5;
+  oneof source {
+    LocalSource local = 6;
+    RemoteSource remote = 7;
+  }
+}
+
+message LocalSource {
+  string password = 1;  // opens the bundle; never stored, logged or echoed
+}
+
+message RemoteSource {
+  string credential = 1;  // the entity's credential reference; sealed at rest like a key
+}
+
+message ImportCertificateResponse {
+  Certificate certificate = 1;
+  bool replayed = 2;  // the answer of an earlier import under the same key
+}
+
+message Certificate {
+  string certificate_id = 1;
+  Company company = 2;
+  repeated Mode modes = 3;
+  Backend backend = 4;
+  CertificateStatus status = 5;
+  bytes fingerprint_sha256 = 6;
+  string serial_number = 7;  // hexadecimal
+  string subject = 8;        // RFC 4514
+  string issuer = 9;         // RFC 4514
+  google.protobuf.Timestamp not_before = 10;
+  google.protobuf.Timestamp not_after = 11;
+  google.protobuf.Timestamp installed_at = 12;
+  google.protobuf.Timestamp retired_at = 13;  // unset while active
+  string retired_reason = 14;                 // replaced, retired, company_deactivated; empty while active
+  int64 version = 15;
+}
+
+message DescribeCertificatesRequest {
+  CallContext call = 1;
+  Company company = 2;
+  Mode mode = 3;
+  bool include_retired = 4;
+}
+
+message DescribeCertificatesResponse {
+  repeated Certificate certificates = 1;
+}
+
+message RetireCertificateRequest {
+  CallContext call = 1;
+  Company company = 2;
+  string certificate_id = 3;
+  Mode mode = 4;  // the request's mode: a test-mode one retires no certificate that serves live
+}
+
+message RetireCertificateResponse {
+  Certificate certificate = 1;
+}
+
+message SignXmlRequest {
+  CallContext call = 1;
+  Company company = 2;
+  Mode mode = 3;
+  SignatureProfile profile = 4;
+  bytes document = 5;                          // at most 4 MiB, UTF-8, unsigned
+  google.protobuf.Timestamp signed_at = 6;     // the moment the document states
+  string reference = 7;                        // what the audit names (an e-NCF)
+}
+
+message SignXmlResponse {
+  bytes signed_document = 1;
+  string certificate_id = 2;
+}
+
+message SignSeedRequest {
+  CallContext call = 1;
+  Company company = 2;
+  Mode mode = 3;
+  SignatureProfile profile = 4;
+  bytes seed = 5;  // at most 16 KiB
+  string audience = 6;  // the host the seed came from, with its port if any: audited
+}
+
+message SignSeedResponse {
+  bytes signed_seed = 1;
+  string certificate_id = 2;
+}

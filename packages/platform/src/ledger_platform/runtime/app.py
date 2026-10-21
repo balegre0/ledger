@@ -3,23 +3,32 @@
 Assemble (at construction, no I/O): load the platform's and the modules' manifests, the regimes and the
 channels (entry points); make the pool object and one ``BoundDatabase`` per schema; assemble the modules in
 dependency order, each reading only the APIs, extensions and ports of its declared dependencies; then the
-channels, with the ports modules provide; then merge what they handed back and check it against the manifests
-(every declared consumer and job is provided, nothing undeclared is: ``runtime.assembly``). Start
-(``asgi()``'s lifespan, or ``migrate()``): open what the role needs, nothing more.
+channels, with the ports modules provide and the archive the settings configure (``runtime.archiving``,
+bound as ``ArchivePort``), the app's request authentication and an ``OutboundHttp`` each; then merge what
+they handed back and check it against the manifests (every declared consumer and job is provided, nothing
+undeclared is: ``runtime.assembly``). Start
+(``asgi()``'s lifespan, or ``migrate()``): open what the role needs, nothing more. A lifespan opens the
+archive first when the role assembles a channel (a store that holds connections is checked then: an app that
+cannot archive does not start; the signer never opens one), then the packages' resources.
 
 - ``api``: the routers of every module mounted in ``api`` (and the channels' public routes); the identity
   provider's keys as a resource. It refuses to start without the token settings.
 - ``worker``: the fan-out, an inbox runner per consumer, a job runner per schema with jobs, the scheduler and
   the LISTEN connection, each supervised; ``/livez``, ``/readyz`` and ``/metrics`` on the worker's HTTP port.
+  The fan-out covers the schemas of modules isolated in another role too; nothing else of the worker does.
+- ``signer``: the modules isolated in it alone (``runtime.assembly``), their resources (a gRPC server), inbox
+  runners, job runners and schedules, the scheduler and the LISTEN connection as the worker runs them, but no
+  fan-out (the worker's moves its outbox); ``/livez``, ``/readyz`` and ``/metrics`` on its HTTP port.
 - ``migrate``: every schema's revisions in order (platform first), the relay's grants, then the subscriptions
   of every schema and the routing version in one transaction.
-- ``signer``, ``receiver``: refused until their modules exist (v2-M2, v2-M4).
+- ``receiver``: refused until its modules exist (v2-M4).
 
 Connections. Units go through ``LEDGER_DATABASE_URL``, which may be a transaction pooler's (§6.7): with
 ``LEDGER_DATABASE_POOLED`` psycopg prepares no statement on it. The after-commit NOTIFYs have a pool of their
 own (one connection, short waits), so a busy pool never delays them and they never take a unit's connection.
-The worker's LISTEN connection and ``ledger-migrate`` connect directly (``LEDGER_DATABASE_DIRECT_URL``, which
-the worker requires when it is made); the URLs are secrets and never logged. ``migrate`` exports no spans.
+The LISTEN connections of the worker and the signer, and ``ledger-migrate``, connect directly
+(``LEDGER_DATABASE_DIRECT_URL``, which the worker and the signer require when they are made); the URLs are
+secrets and never logged. ``migrate`` exports no spans.
 
 An app starts once (``AppAlreadyStartedError`` for a second lifespan). It stops within ``STOP_BUDGET``
 seconds, step by step, each step held to its share (``STOP``): the worker's runners are asked to stop (claim
@@ -70,6 +79,7 @@ from ledger_platform.jobs.schedules import Scheduler
 from ledger_platform.observability.health import Health
 from ledger_platform.observability.logs import configure_logging
 from ledger_platform.observability.tracing import DEFAULT_SHUTDOWN_TIMEOUT, Tracing
+from ledger_platform.runtime.archiving import archive_of
 from ledger_platform.runtime.assembly import Shared, assemble
 from ledger_platform.runtime.registries import installed
 from ledger_platform.runtime.supervision import Supervisor
@@ -93,6 +103,8 @@ POOL_HEADROOM: Final = 2
 """Connections beyond what a role runs: readiness checks, a request or a renewal at a busy moment."""
 WORKER_LOOPS: Final = 2
 """The worker's fan-out and scheduler, each holding a connection while it runs a pass."""
+SIGNER_LOOPS: Final = 1
+"""The signer's scheduler: the worker fans its outbox out."""
 STOP_BUDGET: Final = 25.0
 """Seconds an app takes to stop at most: inside an orchestrator's usual 30-second grace."""
 
@@ -122,7 +134,9 @@ STOP: Final = StopTimes()
 _ABANDONED: Final[set[asyncio.Future[object]]] = set()
 """Stop steps left behind: kept until they end, so that they are not collected while they run."""
 _logger = structlog.stdlib.get_logger(__name__)
-_NOT_BUILT: Final = frozenset({"signer", "receiver"})
+_NOT_BUILT: Final = frozenset({"receiver"})
+_LOOPS: Final[Mapping[AppRole, int]] = {"worker": WORKER_LOOPS, "signer": SIGNER_LOOPS}
+"""The roles that run consumers, jobs and schedules (they listen for wake-ups), and their loops besides."""
 _PERMANENT: Final = (InvalidOptionError,)
 """Failures of a worker that no restart can fix."""
 _SET_LOCK_TIMEOUT: Final = text("SELECT set_config('lock_timeout', :wait, true)")
@@ -153,8 +167,9 @@ class PoolTooSmallError(LedgerError):
 
     def __init__(self, role: str, size: int, need: PoolNeed) -> None:
         pool = f"the {role}'s pool of {size} connections (LEDGER_DATABASE_POOL_SIZE)"
-        jobs = f"{need.jobs} for jobs (their concurrency), {need.renewals} for their lease renewals"
-        parts = f"{jobs}, {need.runners} for its runners, {need.headroom}"
+        jobs = f"{need.jobs} for jobs (their concurrency)"
+        renewals = f"{need.renewals} for lease renewals (running jobs, outside consumers)"
+        parts = f"{jobs}, {renewals}, {need.runners} for its runners, {need.headroom}"
         super().__init__(f"{pool} is smaller than the {need.total} it may hold at once: {parts} of headroom")
 
 
@@ -166,7 +181,8 @@ class PoolNeed:
     jobs: int = 0
     """Every job kind's ``concurrency``: a running job holds its unit's connection."""
     renewals: int = 0
-    """One per running job too: its lease is renewed in a unit of its own while its handler holds one."""
+    """One per running job and per outside consumer too: its lease is renewed in a unit of its own while its
+    handler holds one (an outside handler, through the facades it calls)."""
     runners: int = 0
     """One per inbox runner and per job runner (claims, outcomes), the fan-out's and the scheduler's."""
     headroom: int = POOL_HEADROOM
@@ -178,19 +194,25 @@ class PoolNeed:
 
 
 def pool_need(role: AppRole, members: Sequence[Member]) -> PoolNeed:
-    """What ``role`` holds at once: the worker runs every member's jobs and runners; the others, requests."""
-    if role != "worker":
+    """What ``role`` holds at once.
+
+    The worker and the signer run their members' jobs and runners (a member relayed only has none); the
+    others, requests.
+    """
+    loops = _LOOPS.get(role)
+    if loops is None:
         return PoolNeed()
     jobs = sum(decl.concurrency for member in members for decl, _ in member.kinds.values())
+    outside = sum(consumer.outside for member in members for consumer in member.consumers)
     return PoolNeed(
         jobs=jobs,
-        renewals=jobs,
-        runners=sum(len(member.consumers) + bool(member.kinds) for member in members) + WORKER_LOOPS,
+        renewals=jobs + outside,
+        runners=sum(len(member.consumers) + bool(member.kinds) for member in members) + loops,
     )
 
 
 class DirectUrlMissingError(LedgerError):
-    """A worker or ``ledger-migrate`` without ``LEDGER_DATABASE_DIRECT_URL`` (LISTEN, session locks)."""
+    """The worker, the signer or ``ledger-migrate`` without ``LEDGER_DATABASE_DIRECT_URL`` (LISTEN, locks)."""
 
     code: ClassVar[str] = "direct_url_missing"
 
@@ -217,16 +239,16 @@ class SchemaUnknownError(LedgerError):
 
 
 class NotListeningError(LedgerError):
-    """The worker's LISTEN connection is down (readiness)."""
+    """The LISTEN connection of the worker or the signer is down (readiness)."""
 
     code: ClassVar[str] = "listen_down"
 
     def __init__(self) -> None:
-        super().__init__("the worker does not listen for wake-ups")
+        super().__init__("the app does not listen for wake-ups")
 
 
 class WorkersDownError(LedgerError):
-    """The worker's workers are not running, or some ended for good (readiness)."""
+    """The workers of the worker or the signer are not running, or some ended for good (readiness)."""
 
     code: ClassVar[str] = "workers_down"
 
@@ -328,7 +350,7 @@ class App:
     ) -> None:
         if role in _NOT_BUILT:
             raise RoleNotBuiltError(role)
-        if role == "worker" and settings.database_direct_url is None:
+        if role in _LOOPS and settings.database_direct_url is None:
             raise DirectUrlMissingError(role)
         self._role = role
         self._settings = settings
@@ -362,12 +384,14 @@ class App:
         self._signals = Notifier(self._notifications)
         shared = Shared(
             role=role,
+            environment=settings.environment,
             clock=clock,
             database=self._database,
             signals=self._signals,
             tracing=self._tracing,
             registry=self._registry,
             authentication=self._authentication,
+            archive=archive_of(settings, clock=clock),
         )
         self._assembled = assemble(shared, discover)
         if (
@@ -390,6 +414,11 @@ class App:
         return self._assembled.modules
 
     @property
+    def members(self) -> tuple[Member, ...]:
+        """What the role assembled: the platform, then the modules in assembly order, then the channels."""
+        return self._assembled.members
+
+    @property
     def migrations(self) -> tuple[SchemaMigrations, ...]:
         """Every schema's revisions, in migration order: the platform's, then each module's and channel's."""
         return tuple(member.migrations for member in self._assembled.members)
@@ -406,8 +435,8 @@ class App:
         await self._close_pools()
 
     def asgi(self) -> FastAPI:
-        """The app to serve (roles ``api`` and ``worker``): its lifespan starts and stops everything else."""
-        if self._role not in {"api", "worker"}:
+        """The app to serve (``api``, ``worker``, ``signer``): its lifespan starts and stops the rest."""
+        if self._role not in {"api", "worker", "signer"}:
             raise RoleMismatchError(self._role, "serve HTTP")
         if self._served is None:
             members = self._assembled.members
@@ -441,13 +470,14 @@ class App:
         )
 
     def _health(self) -> Health:
-        health = Health()
+        health = Health(registry=self._registry)
         health.add("database", self._database.ping)
         for member in self._assembled.members:
-            health.add(f"schema:{member.schema}", partial(member.migrations.readiness, self._database))
+            if not member.relay_only:  # a schema its login cannot enter
+                health.add(f"schema:{member.schema}", partial(member.migrations.readiness, self._database))
             for name, check in member.checks.items():
                 health.add(f"{member.name}:{name}", check)
-        if self._role == "worker":
+        if self._role in _LOOPS:
             health.add("listen", self._listening)
             health.add("workers", self._working)
             health.add_liveness("workers", self._alive)
@@ -474,11 +504,13 @@ class App:
         self._tracing.register_globally()
         opened: list[AbstractAsyncContextManager[object]] = []
         try:
+            opened_archive = self._assembled.archive
+            archive = () if opened_archive is None else (opened_archive,)  # before the channels that use it
             resources = [resource for member in self._assembled.members for resource in member.resources]
-            for resource in (*resources, *self._authentication.resources()):
+            for resource in (*archive, *resources, *self._authentication.resources()):
                 await resource.__aenter__()
                 opened.append(resource)
-            if self._role == "worker":
+            if self._role in _LOOPS:
                 self._start_workers()
             yield
         finally:
@@ -517,13 +549,15 @@ class App:
         self._running = True  # from the first worker on: a start that fails halfway is stopped all the same
         wakeups = self._wakeups = Wakeups(settings.listen_url.get_secret_value())
         _ = supervisor.start("wakeups", wakeups.run)
-        dispatcher = Dispatcher(
-            self._database,
-            schemas=tuple(member.schema for member in members),
-            signals=self._signals,
-            registry=self._registry,
-        )
-        _ = supervisor.start("dispatcher", partial(dispatcher.run, wakeups))
+        # The worker fans out every schema, relayed ones too: the signer's outbox is moved by the worker's.
+        if self._role == "worker":
+            dispatcher = Dispatcher(
+                self._database,
+                schemas=tuple(member.schema for member in members),
+                signals=self._signals,
+                registry=self._registry,
+            )
+            _ = supervisor.start("dispatcher", partial(dispatcher.run, wakeups))
         for member in members:
             database = self._assembled.bound[member.schema]
             for consumer in member.consumers:

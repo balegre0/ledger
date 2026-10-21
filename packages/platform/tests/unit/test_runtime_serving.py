@@ -1,6 +1,7 @@
 import logging
 import logging.config
 from importlib.metadata import version
+lazy from pathlib import Path
 
 import pytest
 from granian.constants import Interfaces
@@ -39,8 +40,11 @@ def test_a_server_record_is_a_line_of_the_app_s_format(capsys: pytest.CaptureFix
 
 
 @pytest.fixture
-def environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """What both served roles need: the api's token settings, the worker's direct URL, a host port."""
+def environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """What both served roles need: the api's token settings, the worker's direct URL, a host port, and the
+    archive the workspace's channel reads (nothing is archived: no app starts)."""
+    monkeypatch.setenv("LEDGER_ARCHIVE_BACKEND", "file")
+    monkeypatch.setenv("LEDGER_ARCHIVE_PATH", str(tmp_path / "archive"))
     monkeypatch.setenv("LEDGER_ENVIRONMENT", "test")
     monkeypatch.setenv("LEDGER_DATABASE_URL", URL)
     monkeypatch.setenv("LEDGER_DATABASE_DIRECT_URL", URL)
@@ -63,7 +67,13 @@ def test_the_api_factory_builds_the_api_app_without_connecting() -> None:
 
 
 @pytest.mark.usefixtures("environment")
-def test_the_worker_factory_builds_the_worker_app_without_connecting() -> None:
+def test_the_worker_factory_builds_the_worker_app_without_connecting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The workspace's DO channel needs, in the worker, the roots counterparties chain to: the deployment's
+    (read when the worker starts, never while it is built); and a pool for its jobs, as compose sizes it."""
+    monkeypatch.setenv("LEDGER_DO_ECF_TRUSTED_ROOTS", str(tmp_path / "roots.pem"))
+    monkeypatch.setenv("LEDGER_DATABASE_POOL_SIZE", "50")
     app = serving.worker()
     assert (app.title, app.version) == ("ledger-worker", version("ledger-app-worker"))
     assert {"/livez", "/readyz", "/metrics"} <= paths(app)
@@ -71,10 +81,33 @@ def test_the_worker_factory_builds_the_worker_app_without_connecting() -> None:
 
 
 @pytest.mark.usefixtures("environment")
-def test_a_worker_without_a_direct_url_does_not_start(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_signer_factory_builds_the_signer_app_without_connecting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The workspace's signer module is isolated in the signer's role: its app serves probes, no route.
+
+    The signer module refuses to start without its callers' tokens and its KMS's key file: the deployment's.
+    """
+    for caller in ("api", "worker", "receiver"):
+        monkeypatch.setenv(f"LEDGER_SIGNER_TOKEN_{caller.upper()}", f"{caller}-token-".ljust(40, "x"))
+    key_file = tmp_path / "kms.key"
+    key_file.write_bytes(bytes(range(32)))
+    monkeypatch.setenv("LEDGER_SIGNER_KMS_KEY_FILE", str(key_file))
+    app = serving.signer()
+    assert (app.title, app.version) == ("ledger-signer", version("ledger-app-signer"))
+    assert {"/livez", "/readyz", "/metrics"} <= paths(app)
+    assert not any(path.startswith("/v1/") for path in paths(app))
+
+
+@pytest.mark.usefixtures("environment")
+@pytest.mark.parametrize("role", ["worker", "signer"])
+def test_an_app_that_listens_without_a_direct_url_does_not_start(
+    monkeypatch: pytest.MonkeyPatch, role: serving.ServedRole
+) -> None:
     monkeypatch.delenv("LEDGER_DATABASE_DIRECT_URL")
-    with pytest.raises(DirectUrlMissingError):
-        serving.worker()
+    factory = {"worker": serving.worker, "signer": serving.signer}[role]
+    with pytest.raises(DirectUrlMissingError, match=role):
+        factory()
 
 
 def served(monkeypatch: pytest.MonkeyPatch, role: serving.ServedRole) -> dict[str, object]:
@@ -95,7 +128,7 @@ def served(monkeypatch: pytest.MonkeyPatch, role: serving.ServedRole) -> dict[st
 
 
 @pytest.mark.usefixtures("environment")
-@pytest.mark.parametrize("role", ["api", "worker"])
+@pytest.mark.parametrize("role", ["api", "worker", "signer"])
 def test_serve_hands_granian_the_role_s_factory_on_the_configured_address(
     monkeypatch: pytest.MonkeyPatch, role: serving.ServedRole
 ) -> None:

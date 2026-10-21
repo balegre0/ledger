@@ -2,7 +2,7 @@ lazy from collections.abc import Callable
 
 import pytest
 
-from ledger_country_do_testing.pki import Authority, organization
+from ledger_country_do_testing.pki import organization
 from ledger_country_do_testing.signatures import (
     SHAPES,
     SignxmlShapeError,
@@ -11,6 +11,7 @@ from ledger_country_do_testing.signatures import (
     sign_with_signxml,
     verify_with_signxml,
 )
+from ledger_testing.pki import Authority
 
 
 def test_signxml_signs_and_verifies_and_trusts_only_whom_it_is_told() -> None:

@@ -7,10 +7,13 @@ from contextlib import asynccontextmanager
 from datetime import date
 from decimal import Decimal
 from functools import partial
-from typing import ClassVar, Final, Protocol, TypeIs, final, runtime_checkable
+from typing import Annotated, ClassVar, Final, Protocol, TypeIs, final, runtime_checkable
 lazy from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+lazy from pathlib import Path
 
+import httpx
 import pytest
+from fastapi import APIRouter, Depends
 from pydantic import SecretStr
 from pydantic_settings import SettingsConfigDict
 from structlog.testing import capture_logs
@@ -20,13 +23,18 @@ from ledger_kernel.jurisdiction import CountryCode, Jurisdiction
 from ledger_kernel.money import Currency, RoundingMode
 from ledger_kernel.regimes import Locale, RegimeDef, RegimeKey, RoundingPoint, RoundingRule, Source
 from ledger_platform.auth.tokens import TokenSettingsMissingError
+from ledger_platform.blobs.archive import ARCHIVE_PORT_NAME
+from ledger_platform.blobs.store import BlobStoreUnavailableError
 from ledger_platform.config.manifest import ChannelEntry, load_manifest
 from ledger_platform.config.settings import PackageSettings, Settings, section_prefix
 from ledger_platform.data.database import Database
 from ledger_platform.data.migrations import SchemaMigrations
-from ledger_platform.events.consumers import ConsumerSpec
+from ledger_platform.events.consumers import ConsumerMismatchError, ConsumerSpec
+from ledger_platform.http.outbound import OutboundHttp, OutboundTimeouts
+from ledger_platform.jobs.maintenance import maintenance_jobs
 from ledger_platform.jobs.outcomes import Done, JobSpec
 from ledger_platform.runtime import app as runtime_app
+from ledger_platform.runtime import assembly as runtime_assembly
 from ledger_platform.runtime.app import (
     STOP,
     STOP_BUDGET,
@@ -39,6 +47,7 @@ from ledger_platform.runtime.app import (
     SchemaUnknownError,
     StopTimes,
 )
+from ledger_platform.runtime.archiving import StoreArchive
 from ledger_platform.runtime.assembly import (
     ConsumerNotProvidedError,
     ConsumerUndeclaredError,
@@ -46,11 +55,14 @@ from ledger_platform.runtime.assembly import (
     DuplicateSchemaError,
     ForeignSchemaError,
     HandlerDuplicateError,
+    IsolatedModuleMissingError,
+    IsolatedPartsError,
     JobNotProvidedError,
     JobUndeclaredError,
     MigrationsMissingError,
     ModuleCycleError,
     ModuleMissingError,
+    PortReservedError,
     SchemaMissingError,
 )
 from ledger_platform.runtime.contexts import (
@@ -62,7 +74,12 @@ from ledger_platform.runtime.contexts import (
     SectionMissingError,
 )
 from ledger_platform.runtime.facade import UnguardedFacadeError, facade
-from ledger_platform.runtime.keys import BindingMissingError, Key, UndeclaredDependencyError
+from ledger_platform.runtime.keys import (
+    Binding,
+    BindingMissingError,
+    Key,
+    UndeclaredDependencyError,
+)
 from ledger_platform.runtime.registries import CHANNELS, MODULES, REGIMES, Discovered
 from ledger_platform.runtime.sections import (
     InvalidSettingsError,
@@ -71,9 +88,15 @@ from ledger_platform.runtime.sections import (
     SettingsUndeclaredError,
 )
 from ledger_testing.waiting import Watched
+lazy from ledger_kernel.access import Principal
+lazy from ledger_platform.config.manifest import AppRole
+lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.unit_of_work import UnitOfWork
 lazy from ledger_platform.events.consumers import RawEvent
+lazy from ledger_platform.http.authentication import Authentication
 lazy from ledger_platform.jobs.outcomes import Job, JobOutcome
+lazy from ledger_platform.runtime import Environment
+lazy from ledger_platform.runtime.assembly import Member
 lazy from ledger_platform.runtime.contexts import AssembledChannels, ChannelContext, ModuleContext
 lazy from ledger_platform.runtime.registries import Discover
 
@@ -157,14 +180,20 @@ async def export(job: Job) -> JobOutcome:
 
 
 def manifest_text(
-    name: str, body: str = "", *, schema: str | None = None, depends: Sequence[str] = ()
+    name: str,
+    body: str = "",
+    *,
+    schema: str | None = None,
+    depends: Sequence[str] = (),
+    isolated: bool = False,
 ) -> str:
     schema_name = name if schema is None else schema
     modules = ", ".join(f'"{module}"' for module in depends)
+    isolation = 'isolated_in = "signer"\n' if isolated else ""
     return (
         f'[package]\nname = "{name}"\nkind = "module"\nsummary = "A probe."\nowners = ["@o"]\n\n'
         f'[dependencies]\npackages = ["kernel", "platform"]\nmodules = [{modules}]\n\n'
-        f'[data]\nschema = "{schema_name}"\n\n{body}'
+        f'[data]\nschema = "{schema_name}"\n{isolation}\n{body}'
     )
 
 
@@ -520,10 +549,9 @@ def test_every_module_owns_a_schema_of_its_own_with_its_migrations() -> None:
         App("worker", settings=SETTINGS, discover=discovering(module("alpha", foreign)))
 
 
-def test_signer_and_receiver_are_not_built_yet() -> None:
-    for role in ("signer", "receiver"):
-        with pytest.raises(RoleNotBuiltError, match=role):
-            App(role, settings=SETTINGS, discover=discovering())
+def test_the_receiver_is_not_built_yet() -> None:
+    with pytest.raises(RoleNotBuiltError, match="receiver"):
+        App("receiver", settings=SETTINGS, discover=discovering())
 
 
 def test_the_api_needs_token_settings() -> None:
@@ -799,10 +827,49 @@ def test_a_worker_s_pool_holds_every_job_its_renewals_its_runners_and_headroom()
         App("worker", settings=sized(no_overflow, 15), discover=discover)  # the need without the renewals
     assert str(caught.value) == (
         "the worker's pool of 15 connections (LEDGER_DATABASE_POOL_SIZE) is smaller than the 23 it may hold "
-        "at once: 8 for jobs (their concurrency), 8 for their lease renewals, 5 for its runners, "
+        "at once: 8 for jobs (their concurrency), 8 for lease renewals (running jobs, outside consumers), "
+        "5 for its runners, "
         "2 of headroom"
     )
     assert caught.value.code == "pool_too_small"
+
+
+async def notice(event: RawEvent) -> None:
+    del event
+
+
+OUTSIDE: Final = CONSUMES + 'style = "outside"\n'
+
+
+def noticing(context: ModuleContext) -> ModuleParts:
+    return ModuleParts(
+        consumers=(ConsumerSpec(name="probe.echo", outside=notice),),
+        migrations=migrations(context.database.schema),
+    )
+
+
+def test_an_outside_consumer_holds_a_second_connection_for_its_lease_renewals() -> None:
+    """Its handler's units and its row's lease renewals at once (§3.5): jobs 1 + 1 (the platform's purges),
+    renewals 2 + 1; runners 1 inbox + 1 job runner + fan-out + scheduler; headroom 2: 11."""
+    discover = discovering(module("probe", noticing, OUTSIDE))
+    no_overflow = SETTINGS.model_copy(update={"database_pool_overflow": 0})
+    (consumer,) = members(App("worker", settings=sized(no_overflow, 11), discover=discover))[
+        "probe"
+    ].consumers
+    assert consumer.outside
+    with pytest.raises(PoolTooSmallError) as caught:
+        App("worker", settings=sized(no_overflow, 10), discover=discover)
+    assert str(caught.value) == (
+        "the worker's pool of 10 connections (LEDGER_DATABASE_POOL_SIZE) is smaller than the 11 it may hold "
+        "at once: 2 for jobs (their concurrency), 3 for lease renewals (running jobs, outside consumers), "
+        "4 for its runners, "
+        "2 of headroom"
+    )
+
+
+def test_an_outside_consumer_of_an_inside_declaration_is_a_defect() -> None:
+    with pytest.raises(ConsumerMismatchError, match=r"probe\.echo \(outside\)"):
+        App("worker", settings=SETTINGS, discover=discovering(module("probe", noticing, CONSUMES)))
 
 
 def test_the_api_and_migrate_need_the_headroom_only() -> None:
@@ -841,3 +908,440 @@ def test_a_suspended_module_s_section_is_validated_too(monkeypatch: pytest.Monke
     monkeypatch.setenv("LEDGER_BOOKS_LIMIT", "many")
     with pytest.raises(InvalidSettingsError, match="books: limit"):
         App("worker", settings=SETTINGS, discover=discovering(module_of))
+
+
+# ── Isolated modules (Decisions 2, 11): their own role runs them; every other role assembles and relays ────
+
+VAULT: Final = (
+    '[[events.consumes]]\nconsumer = "vault.renamed"\ntypes = ["probe.thing.renamed"]\n\n'
+    '[[jobs]]\nkind = "vault.export"\nconcurrency = 3\n\n'
+    '[[schedules]]\nname = "vault.nightly"\nevery = "24h"\nenqueues = "vault.export"\n'
+)
+
+
+async def ready() -> None:
+    """A readiness check that passes."""
+
+
+@final
+class Vault:
+    """The module ``vault``, isolated in the signer's role and depending on ``beta``; what its assemblies saw.
+
+    ``outside``: what it hands over in any role but its own as well (a defect); ``reads``: it reads beta's API
+    while it assembles, and ``read`` records what that gave.
+    """
+
+    __slots__ = ("contexts", "outside", "read", "reads")
+
+    def __init__(self, *, outside: Sequence[str] = (), reads: bool = False) -> None:
+        self.contexts: list[ModuleContext] = []
+        self.outside = frozenset(outside)
+        self.reads = reads
+        self.read: list[str] = []
+
+    def module(self) -> Module:
+        manifest = manifest_text("vault", VAULT, depends=["beta"], isolated=True)
+        return Module(manifest=load_manifest(manifest), assemble=self._assemble)
+
+    def _assemble(self, context: ModuleContext) -> ModuleParts:
+        self.contexts.append(context)
+        if self.reads:
+            try:
+                self.read.append(type(context.apis.get(BETA_API)).__name__)
+            except UndeclaredDependencyError as error:
+                self.read.append(error.code)
+        own = context.role == "signer"
+        consumers = own or "consumers" in self.outside
+        jobs = own or "jobs" in self.outside
+        return ModuleParts(
+            consumers=(ConsumerSpec(name="vault.renamed", handler=record),) if consumers else (),
+            jobs=(JobSpec(kind="vault.export", handler=export),) if jobs else (),
+            checks={"ready": ready},
+            migrations=migrations(context.database.schema),
+        )
+
+
+def members(app: App) -> dict[str, Member]:
+    return {member.name: member for member in app.members}
+
+
+def test_the_signer_role_assembles_only_isolated_modules() -> None:
+    vault = Vault()
+    app = App(
+        "signer",
+        settings=SETTINGS,
+        discover=discovering(vault.module(), module("beta", beta), module("probe")),
+    )
+    assert [manifest.package.name for manifest in app.modules] == ["vault"]
+    assert list(members(app)) == ["platform", "vault"]
+    own = members(app)["vault"]
+    assert not own.relay_only
+    assert [consumer.name for consumer in own.consumers] == ["vault.renamed"]
+    assert list(own.kinds) == ["vault.export"]
+    assert [decl.name for decl in own.schedules] == ["vault.nightly"]
+    assert [context.role for context in vault.contexts] == ["signer"]
+    with pytest.raises(SchemaUnknownError, match="'probe'"):
+        app.bound("probe")
+    # the module it depends on need not be installed: its role assembles none
+    alone = App("signer", settings=SETTINGS, discover=discovering(Vault().module()))
+    assert [manifest.package.name for manifest in alone.modules] == ["vault"]
+
+
+def test_the_signer_role_assembles_no_channel_and_reads_no_other_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither another module's variables nor a channel's are the signer's: a wrong one never stops it."""
+    monkeypatch.setenv("LEDGER_BOOKS_LIMIT", "many")
+    monkeypatch.setenv("LEDGER_US_PROBE_TIMEOUT_SECONDS", "soon")
+    assembled: list[str] = []
+
+    def channel(context: ChannelContext) -> ChannelParts:
+        assembled.append(context.definition.key)
+        return ChannelParts(channel="probe", migrations=migrations(context.database.schema))
+
+    pack = ChannelPack(
+        entry=channel_entry(settings=True), regime="us", assemble=channel, settings=ProbeChannelSettings
+    )
+    vault = Vault()
+    app = App(
+        "signer",
+        settings=SETTINGS,
+        discover=discovering(vault.module(), sectioned(BooksSettings), regimes=(us_regime(),), packs=(pack,)),
+    )
+    assert assembled == []
+    with pytest.raises(SchemaUnknownError, match="'us_probe'"):
+        app.bound("us_probe")
+    [context] = vault.contexts
+    assert context.channel_entries == ()
+    assert context.channels.keys() == ()
+
+
+def recording(purged: list[tuple[str, ...]]) -> Callable[[Sequence[BoundDatabase]], tuple[JobSpec, JobSpec]]:
+    """``maintenance_jobs`` as assembly calls it, the schemas of each call written down in ``purged``."""
+
+    def jobs(databases: Sequence[BoundDatabase]) -> tuple[JobSpec, JobSpec]:
+        purged.append(tuple(database.schema for database in databases))
+        return maintenance_jobs(databases)
+
+    return jobs
+
+
+def test_the_signer_role_runs_no_platform_job_or_schedule(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The worker purges the schemas it reaches; the signer hands its own purges over (Decision 11)."""
+    purged: list[tuple[str, ...]] = []
+    monkeypatch.setattr(runtime_assembly, "maintenance_jobs", recording(purged))
+    app = App("signer", settings=SETTINGS, discover=discovering(Vault().module()))
+    platform = members(app)["platform"]
+    assert (platform.consumers, dict(platform.kinds), platform.schedules) == ((), {}, ())
+    assert purged == []
+    assert app.bound("platform").schema == "platform"  # its schedule leases
+
+
+@pytest.mark.parametrize("role", ["api", "worker", "migrate"])
+def test_outside_its_role_an_isolated_module_is_relay_only(
+    role: AppRole, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    purged: list[tuple[str, ...]] = []
+    monkeypatch.setattr(runtime_assembly, "maintenance_jobs", recording(purged))
+    vault = Vault()
+    app = App(role, settings=TOKENS, discover=discovering(vault.module(), module("beta", beta)))
+    assert [manifest.package.name for manifest in app.modules] == ["beta", "vault"]
+    assert [context.role for context in vault.contexts] == [role]
+    relayed = members(app)["vault"]
+    assert relayed.relay_only
+    assert (relayed.consumers, dict(relayed.kinds), relayed.schedules) == ((), {}, ())
+    assert list(relayed.checks) == ["ready"]
+    assert [decl.consumer for decl in relayed.events.consumes] == ["vault.renamed"]  # migrate subscribes it
+    assert not members(app)["beta"].relay_only
+    assert purged == [("platform", "beta")]  # never a schema its login cannot enter
+
+
+@pytest.mark.parametrize("part", ["consumers", "jobs"])
+def test_an_isolated_module_handing_consumers_outside_its_role_is_a_defect(part: str) -> None:
+    discover = discovering(Vault(outside=[part]).module(), module("beta", beta))
+    with pytest.raises(IsolatedPartsError) as caught:
+        App("worker", settings=SETTINGS, discover=discover)
+    assert caught.value.code == "isolated_parts_outside_role"
+    assert str(caught.value) == (
+        "'vault' is isolated in the signer's role and hands over consumers or jobs in the worker app: "
+        "only its own role runs them"
+    )
+    App("signer", settings=SETTINGS, discover=discover)
+
+
+def test_an_isolated_module_s_outside_consumer_runs_in_its_role_alone() -> None:
+    """Isolation holds whatever the style: relayed in another role, handing a consumer there is a defect."""
+    body = 'isolated_in = "signer"\n\n' + OUTSIDE
+
+    def sealed(context: ModuleContext) -> ModuleParts:
+        own = context.role == "signer"
+        return ModuleParts(
+            consumers=(ConsumerSpec(name="probe.echo", outside=notice),) if own else (),
+            migrations=migrations(context.database.schema),
+        )
+
+    signer = App("signer", settings=SETTINGS, discover=discovering(module("probe", sealed, body)))
+    assert [consumer.outside for consumer in members(signer)["probe"].consumers] == [True]
+    worker = App("worker", settings=SETTINGS, discover=discovering(module("probe", sealed, body)))
+    assert members(worker)["probe"].relay_only
+    assert members(worker)["probe"].consumers == ()
+    with pytest.raises(IsolatedPartsError):
+        App("worker", settings=SETTINGS, discover=discovering(module("probe", noticing, body)))
+
+
+def test_an_isolated_module_reads_no_api_in_its_role() -> None:
+    vault = Vault(reads=True)
+    discover = discovering(vault.module(), module("beta", beta))
+    App("signer", settings=SETTINGS, discover=discover)
+    App("worker", settings=SETTINGS, discover=discover)
+    assert vault.read == ["dependency_undeclared", "Beta"]
+
+
+async def scraped(app: App) -> str:
+    """The app's ``/metrics`` page."""
+    transport = httpx.ASGITransport(app=app.asgi())
+    async with httpx.AsyncClient(transport=transport, base_url="http://ledger.test") as client:
+        text = (await client.get("/metrics")).text
+    await app.aclose()
+    return text
+
+
+@pytest.mark.parametrize(("role", "served"), [("api", 0), ("worker", 0), ("signer", 1)])
+async def test_every_app_says_whether_it_serves_each_isolated_module_it_installs(
+    role: AppRole, served: int
+) -> None:
+    """Installed, served by no live app: the alert of ``docs/runbooks/signer/signer-unavailable.md``."""
+    settings = TOKENS if role == "api" else SETTINGS
+    app = App(role, settings=settings, discover=discovering(Vault().module(), module("beta", beta)))
+    text = await scraped(app)
+    assert f'ledger_isolated_module_served{{isolated_in="signer",module="vault"}} {served}.0\n' in text
+    assert 'module="beta"' not in text
+
+
+async def test_every_readiness_check_s_last_verdict_is_on_the_metrics_page() -> None:
+    """A check failing for minutes is an alert of its own (``docs/runbooks/signer/signer-unavailable.md``)."""
+    app = App("signer", settings=SETTINGS, discover=discovering(Vault().module()))
+    transport = httpx.ASGITransport(app=app.asgi())
+    async with httpx.AsyncClient(transport=transport, base_url="http://ledger.test") as client:
+        ready = await client.get("/readyz")
+        text = (await client.get("/metrics")).text
+    await app.aclose()
+    assert ready.status_code == httpx.codes.SERVICE_UNAVAILABLE  # nothing listens on the database's port
+    assert 'ledger_readiness_check{check="database"} 0.0\n' in text
+    assert 'ledger_readiness_check{check="vault:ready"} 1.0\n' in text
+
+
+async def test_an_app_without_an_isolated_module_reports_none() -> None:
+    text = await scraped(App("worker", settings=SETTINGS, discover=discovering(module("beta", beta))))
+    assert "ledger_isolated_module_served{" not in text
+
+
+def test_the_signer_role_needs_the_direct_url() -> None:
+    """It listens for wake-ups, as the worker does (§6.7)."""
+    with pytest.raises(DirectUrlMissingError, match="signer"):
+        App("signer", settings=BARE, discover=discovering())
+    with pytest.raises(RoleMismatchError, match="signer app does not migrate"):
+        App("signer", settings=SETTINGS, discover=discovering(Vault().module())).migrate()
+
+
+def test_a_signer_without_an_isolated_module_does_not_start() -> None:
+    """Every other role warns (``app.no_modules``); the signer's whole purpose is its isolated modules."""
+    suspended = manifest_text("vault", VAULT, isolated=True).replace(
+        'owners = ["@o"]\n', 'owners = ["@o"]\nstatus = "suspended"\n'
+    )
+    for discover in (
+        discovering(),
+        discovering(module("beta", beta)),
+        discovering(Module(manifest=load_manifest(suspended), assemble=beta)),
+    ):
+        with pytest.raises(IsolatedModuleMissingError) as caught:
+            App("signer", settings=SETTINGS, discover=discover)
+        assert caught.value.code == "isolated_module_missing"
+        assert str(caught.value) == (
+            "the signer app runs the modules isolated in its role, and none is installed and active"
+        )
+
+
+def test_the_signer_pool_need_counts_its_runners() -> None:
+    """Jobs 3 (vault's), each with its renewal; runners 1 inbox + 1 job runner + the scheduler (no fan-out);
+    headroom 2: 11. A worker counts nothing of what it only relays: the purges' 2 + 2, a job runner, the
+    fan-out and the scheduler, 2: 9."""
+    discover = discovering(Vault().module(), module("beta", beta))
+    no_overflow = SETTINGS.model_copy(update={"database_pool_overflow": 0})
+    App("signer", settings=sized(no_overflow, 11), discover=discover)
+    with pytest.raises(PoolTooSmallError) as caught:
+        App("signer", settings=sized(no_overflow, 10), discover=discover)
+    assert str(caught.value) == (
+        "the signer's pool of 10 connections (LEDGER_DATABASE_POOL_SIZE) is smaller than the 11 it may hold "
+        "at once: 3 for jobs (their concurrency), 3 for lease renewals (running jobs, outside consumers), "
+        "3 for its runners, "
+        "2 of headroom"
+    )
+    App("worker", settings=sized(no_overflow, 9), discover=discover)
+    with pytest.raises(PoolTooSmallError, match="the 9 it may hold"):
+        App("worker", settings=sized(no_overflow, 8), discover=discover)
+
+
+@pytest.mark.parametrize("environment", ["local", "production"])
+def test_contexts_carry_the_environment(environment: Environment) -> None:
+    """A module may refuse a local-only adapter outside ``local`` and ``test`` (Decision 14)."""
+    seen: list[ModuleContext] = []
+    settings = SETTINGS.model_copy(update={"environment": environment})
+    App("worker", settings=settings, discover=discovering(sectioned(None, seen, declared=False)))
+    [context] = seen
+    assert context.environment == environment
+
+
+def is_store_archive(value: object) -> TypeIs[StoreArchive]:
+    return isinstance(value, StoreArchive)
+
+
+ARCHIVE: Final = Key[StoreArchive](ARCHIVE_PORT_NAME, is_store_archive)
+"""fiscal-kit's ``ARCHIVE_PORT`` as the platform's tests can name it (the platform imports no kit)."""
+
+
+def archived(settings: Settings, provider: Module | None = None) -> list[StoreArchive]:
+    """The archive a channel reads while it assembles, in an app with ``settings``."""
+    seen: list[StoreArchive] = []
+
+    def channel(context: ChannelContext) -> ChannelParts:
+        seen.append(context.ports.get(ARCHIVE))
+        return ChannelParts(channel="archiving", migrations=migrations(context.database.schema))
+
+    modules = () if provider is None else (provider,)
+    App(
+        "worker",
+        settings=settings,
+        discover=discovering(
+            *modules,
+            regimes=(us_regime(),),
+            packs=(ChannelPack(entry=channel_entry(), regime="us", assemble=channel),),
+        ),
+    )
+    return seen
+
+
+async def test_a_channel_reads_the_archive_the_app_binds(tmp_path: Path) -> None:
+    filed = SETTINGS.model_copy(update={"archive_backend": "file", "archive_path": tmp_path})
+    [archive] = archived(filed)
+    stored = await archive.put_once(
+        "probe/a.xml", b"<a/>", retain_until=date(2040, 1, 1), media_type="text/xml"
+    )
+    assert (tmp_path / "probe" / "a.xml").read_bytes() == b"<a/>"
+    assert await archive.get("probe/a.xml", sha256=stored.sha256) == b"<a/>"
+
+
+def test_without_an_archive_configured_a_channel_that_reads_one_does_not_start() -> None:
+    with pytest.raises(BindingMissingError, match="'ArchivePort'"):
+        archived(SETTINGS)
+
+
+def test_no_module_provides_the_archive_the_app_binds(tmp_path: Path) -> None:
+    def providing(context: ModuleContext) -> ModuleParts:
+        return ModuleParts(
+            provides=(Binding(ARCHIVE_PORT_NAME, Signer()),), migrations=migrations(context.database.schema)
+        )
+
+    filed = SETTINGS.model_copy(update={"archive_backend": "file", "archive_path": tmp_path})
+    provider = module("alpha", providing, '[extension_points]\nprovides = ["ArchivePort"]\n')
+    for settings in (filed, SETTINGS):  # configured or not, the archive is the app's alone
+        with pytest.raises(
+            PortReservedError, match="'alpha' provides port 'ArchivePort', which the app binds"
+        ):
+            archived(settings, provider)
+
+
+async def test_a_channel_is_given_the_app_s_authentication_and_its_outbound_http() -> None:
+    """``ChannelContext.auth`` and ``.http`` (Decision 4): the modules' caller, clients to call out with."""
+    module_auth: list[Authentication] = []
+    channels: list[ChannelContext] = []
+
+    def alpha(context: ModuleContext) -> ModuleParts:
+        module_auth.append(context.auth)
+        return ModuleParts(migrations=migrations(context.database.schema))
+
+    def channel(context: ChannelContext) -> ChannelParts:
+        channels.append(context)
+        return ChannelParts(channel="calling out", migrations=migrations(context.database.schema))
+
+    App(
+        "worker",
+        settings=SETTINGS,
+        discover=discovering(
+            module("alpha", alpha),
+            regimes=(us_regime(),),
+            packs=(ChannelPack(entry=channel_entry(), regime="us", assemble=channel),),
+        ),
+    )
+    [context] = channels
+    assert context.auth is module_auth[0]
+    assert context.environment == SETTINGS.environment  # a channel refuses test-only settings in production
+    assert isinstance(context.http, OutboundHttp)
+    assert not context.http.replaced("party")  # an app's clients call the network
+    async with context.http.client(
+        "party", timeouts=OutboundTimeouts(connect=1.0, each=2.0, deadline=2.0)
+    ) as client:
+        assert not client.follow_redirects
+
+
+async def test_a_channel_s_public_routes_declare_the_app_s_caller() -> None:
+    def channel(context: ChannelContext) -> ChannelParts:
+        router = APIRouter(prefix="/v1/us")
+
+        @router.get("/ranges")
+        async def ranges(principal: Annotated[Principal, Depends(context.auth.caller)]) -> str:
+            return principal.subject
+
+        return ChannelParts(
+            channel="routed", routers=(router,), migrations=migrations(context.database.schema)
+        )
+
+    app = App(
+        "api",
+        settings=TOKENS,
+        discover=discovering(
+            regimes=(us_regime(),), packs=(ChannelPack(entry=channel_entry(), regime="us", assemble=channel),)
+        ),
+    )
+    transport = httpx.ASGITransport(app=app.asgi())
+    async with httpx.AsyncClient(transport=transport, base_url="http://ledger.test") as client:
+        refused = await client.get("/v1/us/ranges")
+    assert refused.status_code == httpx.codes.UNAUTHORIZED
+    await app.aclose()
+
+
+UNREACHABLE_ARCHIVE: Final = TOKENS.model_copy(
+    update={
+        "archive_backend": "s3",
+        "archive_bucket": "ledger-archive",
+        "archive_region": "us-east-1",
+        "archive_endpoint_url": "http://127.0.0.1:9",  # the discard port: nothing answers there
+    }
+)
+"""An S3 archive nobody serves: its check fails the start of an app that opens it."""
+
+
+async def test_an_app_opens_its_archive_only_for_the_channels_it_assembles(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The archive is the channels': an app that assembles none never checks it, nor holds its threads."""
+    for name in ("AWS_PROFILE", "AWS_SESSION_TOKEN", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")  # asked with credentials, answered by nobody
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
+    bare = App("api", settings=UNREACHABLE_ARCHIVE, discover=discovering(regimes=(us_regime(),))).asgi()
+    async with bare.router.lifespan_context(bare):
+        pass
+
+    def channel(context: ChannelContext) -> ChannelParts:
+        return ChannelParts(channel="archiving", migrations=migrations(context.database.schema))
+
+    pack = ChannelPack(entry=channel_entry(), regime="us", assemble=channel)
+    archiving = App(
+        "api", settings=UNREACHABLE_ARCHIVE, discover=discovering(regimes=(us_regime(),), packs=(pack,))
+    ).asgi()
+    with pytest.raises(BlobStoreUnavailableError):
+        async with archiving.router.lifespan_context(archiving):
+            pytest.fail("an app whose channels' archive cannot be reached never serves")

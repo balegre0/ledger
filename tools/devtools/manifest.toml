@@ -7,4 +7,12 @@ scripts = { "ledger-devtools" = "ledger_devtools.cli:main" }
 
 [dependencies]
 packages = ["kernel", "platform"]
-python = ["pathspec>=1.1.1", "pydantic>=2.14.1", "pydantic-settings>=2.15.0"]
+# grpcio-tools and mypy-protobuf generate each module's gRPC code from its contract (ledger_devtools.protos).
+python = [
+    "grpcio-tools>=1.84.0",
+    "mypy-protobuf>=5.1.0",
+    "pathspec>=1.1.1",
+    "protobuf>=7.36.2",
+    "pydantic>=2.14.1",
+    "pydantic-settings>=2.15.0",
+]

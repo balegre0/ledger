@@ -3,12 +3,16 @@
 [project]
 name = "ledger-testing"
 version = "0.1.0"
-description = "The shared test harness: a pytest plugin, PostgreSQL, a local OpenID provider, clocks. Dev-only."
+description = "The shared test harness: a pytest plugin, PostgreSQL, a local OpenID provider, clocks, a test PKI. Dev-only."
 requires-python = ">=3.15"
 dependencies = [
     "ledger-kernel",
     "ledger-platform",
+    "ledger-fiscal-kit",
     "alembic>=1.20.0",
+    "boto3>=1.43.100",
+    "botocore>=1.43.100",
+    "cryptography>=50.0.2",
     "httpx>=0.28.1",
     "joserfc>=1.7.5",
     "psycopg[binary]>=3.3.6",
@@ -17,6 +21,7 @@ dependencies = [
     "sqlalchemy>=2.1.4",
     "structlog>=26.1.0",
     "testcontainers>=4.15.0",
+    "types-boto3-s3>=1.43.100",
 ]
 
 [project.entry-points.pytest11]
@@ -25,6 +30,7 @@ ledger = "ledger_testing.plugin"
 [tool.uv.sources]
 ledger-kernel = { workspace = true }
 ledger-platform = { workspace = true }
+ledger-fiscal-kit = { workspace = true }
 
 [build-system]
 requires = ["uv_build>=0.13.0,<0.14.0"]
@@ -46,4 +52,9 @@ partial_branches = []  # no "pragma: no branch": every branch counts
 "pytest" = [
     "py",
     "pytest",
+]
+
+[tool.deptry.per_rule_ignores]
+DEP002 = [
+    "boto3",
 ]

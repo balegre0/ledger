@@ -55,7 +55,7 @@ UNREACHABLE_PROXY: Final = "http://127.0.0.1:1"
 
 @pytest.fixture
 def policy(local_issuer: LocalIssuer) -> TokenPolicy:
-    return TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=local_issuer.keys_url, fetch_timeout=1.0)
+    return TokenPolicy(issuer=ISSUER, audience=AUDIENCE, keys_url=local_issuer.keys_url)  # never a race
 
 
 @pytest.fixture

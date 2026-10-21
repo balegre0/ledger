@@ -11,6 +11,7 @@ from sqlalchemy import CheckConstraint
 
 from ledger_invoicing.adapters.postgres.schema import MIGRATIONS
 from ledger_invoicing.adapters.postgres.tables import SCHEMA, InvoicingTable
+from ledger_invoicing.domain.fiscal import FiscalStatusName
 from ledger_invoicing.domain.invoice import InvoiceStatus
 from ledger_kernel.regimes import Direction, DocumentKind, TaxCategoryKind
 from ledger_kernel.tenancy import Mode
@@ -27,7 +28,9 @@ from ledger_testing.migrations import (
 )
 lazy from ledger_testing.postgres import WorkerDatabase
 
-DOCUMENT_TABLES: Final = frozenset({"invoices", "invoice_lines", "invoice_line_taxes", "invoice_taxes"})
+DOCUMENT_TABLES: Final = frozenset(
+    {"invoices", "invoice_lines", "invoice_line_taxes", "invoice_taxes", "fiscal_statuses"}
+)
 CHASSIS_TABLES: Final = frozenset(
     {"outbox", "inbox", "jobs", "subscriptions", "idempotency_keys", "audit_events"}
 )
@@ -46,7 +49,7 @@ def superuser(worker: WorkerDatabase) -> str:
 def test_the_schema_holds_the_chassis_s_tables_and_a_document_s_at_one_revision(
     migrated: WorkerDatabase,
 ) -> None:
-    assert MIGRATIONS.head == "0001"  # the chassis's two versions and the tables, squashed: nothing released
+    assert MIGRATIONS.head == "0002"  # 0001: the chassis and a document; 0002: the fiscal mirror
     assert tables_of(superuser(migrated), schema=SCHEMA) == {
         *DOCUMENT_TABLES,
         *CHASSIS_TABLES,
@@ -76,6 +79,8 @@ def test_the_check_constraints_are_the_models_and_allow_exactly_the_domains_word
         "ck_invoices_direction": Direction,
         "ck_invoices_status": InvoiceStatus,
         "ck_invoice_line_taxes_kind": TaxCategoryKind,
+        "ck_fiscal_statuses_mode": Mode,
+        "ck_fiscal_statuses_status": FiscalStatusName,
     }.items():
         assert set(QUOTED.findall(checks[name])) == {str(word) for word in words}, name
 
@@ -129,5 +134,14 @@ def test_a_business_key_is_unique_per_tenant_and_type_and_every_index_leads_with
         "ix_invoices_corrects": (
             "CREATE INDEX ix_invoices_corrects ON invoicing.invoices "
             "USING btree (organization_id, company_id, mode, corrects) WHERE (corrects IS NOT NULL)"
+        ),
+    }
+
+
+def test_the_mirror_is_keyed_by_its_tenant_document_and_channel(migrated: WorkerDatabase) -> None:
+    assert indexes_of(superuser(migrated), "fiscal_statuses", schema=SCHEMA) == {
+        "fiscal_statuses_pkey": (
+            "CREATE UNIQUE INDEX fiscal_statuses_pkey ON invoicing.fiscal_statuses "
+            "USING btree (organization_id, company_id, mode, invoice_id, channel)"
         ),
     }

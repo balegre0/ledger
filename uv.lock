@@ -2,18 +2,33 @@ version = 1
 revision = 5
 requires-python = ">=3.15"
 
+[options]
+
+[options.exclude-newer-package]
+boto3 = { timestamp = "0001-01-01T00:00:00Z", span = "P7D" }
+botocore = { timestamp = "0001-01-01T00:00:00Z", span = "P7D" }
+botocore-stubs = { timestamp = "0001-01-01T00:00:00Z", span = "P7D" }
+s3transfer = { timestamp = "0001-01-01T00:00:00Z", span = "P7D" }
+types-boto3 = { timestamp = "0001-01-01T00:00:00Z", span = "P7D" }
+types-boto3-s3 = { timestamp = "0001-01-01T00:00:00Z", span = "P7D" }
+types-s3transfer = { timestamp = "0001-01-01T00:00:00Z", span = "P7D" }
+
 [manifest]
 members = [
     "ledger-app-api",
     "ledger-app-migrate",
+    "ledger-app-signer",
     "ledger-app-worker",
     "ledger-country-do",
     "ledger-country-do-testing",
     "ledger-devtools",
+    "ledger-fiscal",
+    "ledger-fiscal-kit",
     "ledger-identity",
     "ledger-invoicing",
     "ledger-kernel",
     "ledger-platform",
+    "ledger-signer",
     "ledger-testing",
     "ledger-workspace",
 ]
@@ -131,6 +146,43 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/43/65/318323f98dbee45d42dff61d8f047181bc6f2268a9068cfad035a46be5af/beautifulsoup4-4.15.0.tar.gz", hash = "sha256:288e3ca7d54b06f2ac191970bc275c1939cb46d450b255bf6718b04aa37ab4f7", size = 632571, upload-time = "2026-06-07T16:44:20.453Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/88/c6/92fcd42f1ba33e1184263f25bfabf3d27c383410470f169e4b8163bf9c17/beautifulsoup4-4.15.0-py3-none-any.whl", hash = "sha256:d6f88de62e1d4e38ecb1077eb9724cd0eff29d2a08ca16a401e9b9e93f117cf9", size = 109924, upload-time = "2026-06-07T16:44:21.566Z" },
+]
+
+[[package]]
+name = "boto3"
+version = "1.43.112"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "botocore" },
+    { name = "jmespath" },
+    { name = "s3transfer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c8/83/bf66a8c094d11db78a6cc19d835460af7b470640df0d0a3a108e1f3cefcd/boto3-1.43.112.tar.gz", hash = "sha256:599548a8c8e93cf0223bcb35b615c82f29d30295e992b94863cfbb2405ee33e5", size = 112667, upload-time = "2026-10-12T19:26:59.963Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c1/33/88d5fa546f2b1ec726cfa1b3f9316a28a3c416f44572abc734a0d5f3c2bc/boto3-1.43.112-py3-none-any.whl", hash = "sha256:add1216791e16c4f737676a0f5d6d2fa6240eef61619c6c44df9eeeaf88f24ff", size = 140041, upload-time = "2026-10-12T19:26:58.514Z" },
+]
+
+[[package]]
+name = "botocore"
+version = "1.43.112"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jmespath" },
+    { name = "python-dateutil" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0e/49/58187bfb510831e4cdafd7ced8e2a748097da81e8b9799d93f8d6ebf9f61/botocore-1.43.112.tar.gz", hash = "sha256:9ce0d70e09fabbb3a2e1126d3ec79ed67d14c88bb3f064e62ab2881d5eaf3c7b", size = 16351533, upload-time = "2026-10-12T19:26:55.249Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4a/a7/dd4c7cf9cde38db5cd5a295434e25415d814536704fe084ec7ee73e5658b/botocore-1.43.112-py3-none-any.whl", hash = "sha256:1e67a3dcf4a308c695d880b65463a492a971d5b28761b49add92f71e4322130f", size = 16052210, upload-time = "2026-10-12T19:26:50.658Z" },
+]
+
+[[package]]
+name = "botocore-stubs"
+version = "1.43.112"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f7/b4/11461e9eefc1a58acd87788f57fef2703fdadee4abdf39bdf890af029b99/botocore_stubs-1.43.112.tar.gz", hash = "sha256:eda6315f1976939aff1b9bb8bedd88ecc8bae9a1551a62b23050e876a4237dd1", size = 42914, upload-time = "2026-10-13T01:58:00.541Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9c/20/35b81efaa2a4818f67c585201bc912436d9cecb8a23385b66a2044aac188/botocore_stubs-1.43.112-py3-none-any.whl", hash = "sha256:a86d150dc924e072ede90d42415a6da81edc232330ea7ac4972e53fb3174f762", size = 67249, upload-time = "2026-10-13T01:57:57.419Z" },
 ]
 
 [[package]]
@@ -539,6 +591,29 @@ wheels = [
 ]
 
 [[package]]
+name = "grpcio-tools"
+version = "1.84.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "grpcio" },
+    { name = "protobuf" },
+    { name = "setuptools" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cd/db/a5dba38d7ff7711d1ad05f2b43751bd0e9f234fae7c89df1846a9de034f9/grpcio_tools-1.84.0.tar.gz", hash = "sha256:210ac5ac9803569490ec33574b7e995bc087815b00d9b777e0134cab5ed9a379", size = 6401750, upload-time = "2026-09-14T07:03:45.725Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d0/d0/6cb3f84a4994a60929c2da21f5129cb04b675e814b3b03e4bbfc45512a2e/grpcio_tools-1.84.0-cp315-cp315-linux_armv7l.whl", hash = "sha256:ed27e0c12e687a4b15f6352e98eb794a296bdcc75fc26fbd5e2d1d6844c0bb5a", size = 2652855, upload-time = "2026-09-14T07:03:17.043Z" },
+    { url = "https://files.pythonhosted.org/packages/79/bf/0525cdfd7eb41feed328c3e839da12d56be9a23d87c74e15e1b16c3b2b5a/grpcio_tools-1.84.0-cp315-cp315-macosx_10_15_universal2.whl", hash = "sha256:a30b3259bbcd7aa1377e8cf5e39b30962f88ead94bd1a25c30ab8819c1163a0d", size = 5971465, upload-time = "2026-09-14T07:03:20.057Z" },
+    { url = "https://files.pythonhosted.org/packages/55/e3/ef3de0d88b69a022198ce1d8ff27df970f9bbf5f0f3d65576879054718e0/grpcio_tools-1.84.0-cp315-cp315-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:b268a8cc6a0ffde0388371fee57942585060e89a3904eec1a2c00765707a26b3", size = 2707417, upload-time = "2026-09-14T07:03:22.826Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/c4/f9c204a32145191bbcb39d487e2abcb9ed96c95e7d9e56267a1b5d378a61/grpcio_tools-1.84.0-cp315-cp315-manylinux2014_i686.manylinux_2_17_i686.whl", hash = "sha256:feab5e59a8cbba38190196a29b878bedf3ea8e1baf94fe26fb21ca9a5b06e17c", size = 2904340, upload-time = "2026-09-14T07:03:25.8Z" },
+    { url = "https://files.pythonhosted.org/packages/b7/54/a6d0aa5fc695e98c40442d9da819e2c178e3ee170182ff34922da512294b/grpcio_tools-1.84.0-cp315-cp315-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:be960444736ff4363aad257847e0b6de8798a818b7760253b043f1c2141b522b", size = 2756591, upload-time = "2026-09-14T07:03:28.57Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/40/343a5fb15e9b702df619f34302829ae3f02306c6e22ce98a2634e5ee51d7/grpcio_tools-1.84.0-cp315-cp315-musllinux_1_2_aarch64.whl", hash = "sha256:5c772fff61c94a526869fbbdc1cf5d40047170c0d591609685170130de031e63", size = 3231636, upload-time = "2026-09-14T07:03:31.285Z" },
+    { url = "https://files.pythonhosted.org/packages/e1/1f/32445fe2f52f3e3fa1c83131f1c051d025baa1218e38fa51d7d3dab70248/grpcio_tools-1.84.0-cp315-cp315-musllinux_1_2_i686.whl", hash = "sha256:769ae9073f09b2dd322b4de5e5fffa7c2f38340cf779a21486c45946ab2b2991", size = 3684445, upload-time = "2026-09-14T07:03:34.124Z" },
+    { url = "https://files.pythonhosted.org/packages/1f/49/10314e948033f1f2c5a4d68edcade8795c5fab7cb4a132ae78d3cc98e300/grpcio_tools-1.84.0-cp315-cp315-musllinux_1_2_x86_64.whl", hash = "sha256:cee293333fc9efaa1e75d8baf0150d79007874c7bb364cffebf35346836038e8", size = 3435303, upload-time = "2026-09-14T07:03:37.42Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/69/69e92ff54e590236eff01ca72e9722ff31baac828c4bffcfac1f9a5e850d/grpcio_tools-1.84.0-cp315-cp315-win32.whl", hash = "sha256:65a2ae3836ffb7b035e341a6dcc81e3d8b090b0df173851715f44cdd89723b1e", size = 1045039, upload-time = "2026-09-14T07:03:39.731Z" },
+    { url = "https://files.pythonhosted.org/packages/b4/8e/12b84ac60171f8401d31bf64e9cdf3e041653e3e5c79ce50cac7b2b8fa5d/grpcio_tools-1.84.0-cp315-cp315-win_amd64.whl", hash = "sha256:f28ffc8f0d2831a81239cee6b038ee3254bd7ac884fe69cc99b4ee83ff1fc1a5", size = 1224255, upload-time = "2026-09-14T07:03:42.561Z" },
+]
+
+[[package]]
 name = "h11"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -656,6 +731,15 @@ wheels = [
 ]
 
 [[package]]
+name = "jmespath"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d3/59/322338183ecda247fb5d1763a6cbe46eff7222eaeebafd9fa65d4bf5cb11/jmespath-1.1.0.tar.gz", hash = "sha256:472c87d80f36026ae83c6ddd0f1d05d4e510134ed462851fd5f754c8c3cbb88d", size = 27377, upload-time = "2026-01-22T16:35:26.279Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl", hash = "sha256:a5663118de4908c91729bea0acadca56526eb2698e83de10cd116ae0f4e97c64", size = 20419, upload-time = "2026-01-22T16:35:24.919Z" },
+]
+
+[[package]]
 name = "joserfc"
 version = "1.7.5"
 source = { registry = "https://pypi.org/simple" }
@@ -690,6 +774,17 @@ dependencies = [
 requires-dist = [{ name = "ledger-platform", editable = "packages/platform" }]
 
 [[package]]
+name = "ledger-app-signer"
+version = "0.1.0"
+source = { editable = "apps/signer" }
+dependencies = [
+    { name = "ledger-platform" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "ledger-platform", editable = "packages/platform" }]
+
+[[package]]
 name = "ledger-app-worker"
 version = "0.1.0"
 source = { editable = "apps/worker" }
@@ -705,20 +800,34 @@ name = "ledger-country-do"
 version = "0.1.0"
 source = { editable = "countries/do" }
 dependencies = [
+    { name = "alembic" },
     { name = "cryptography" },
+    { name = "fastapi" },
     { name = "httpx" },
+    { name = "ledger-fiscal-kit" },
     { name = "ledger-kernel" },
+    { name = "ledger-platform" },
     { name = "lxml" },
+    { name = "psycopg" },
     { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "sqlalchemy" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "alembic", specifier = ">=1.20.0" },
     { name = "cryptography", specifier = ">=50.0.2" },
+    { name = "fastapi", specifier = ">=0.143.0" },
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "ledger-fiscal-kit", editable = "packages/fiscal-kit" },
     { name = "ledger-kernel", editable = "packages/kernel" },
+    { name = "ledger-platform", editable = "packages/platform" },
     { name = "lxml", specifier = ">=6.1.3" },
+    { name = "psycopg", specifier = ">=3.3.6" },
     { name = "pydantic", specifier = ">=2.14.1" },
+    { name = "pydantic-settings", specifier = ">=2.15.0" },
+    { name = "sqlalchemy", specifier = ">=2.1.4" },
 ]
 
 [[package]]
@@ -730,7 +839,10 @@ dependencies = [
     { name = "granian" },
     { name = "httpx" },
     { name = "ledger-country-do" },
+    { name = "ledger-fiscal-kit" },
     { name = "ledger-kernel" },
+    { name = "ledger-platform" },
+    { name = "ledger-testing" },
     { name = "lxml" },
     { name = "pydantic" },
     { name = "python-multipart" },
@@ -746,7 +858,10 @@ requires-dist = [
     { name = "granian", specifier = ">=2.8.4" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "ledger-country-do" },
+    { name = "ledger-fiscal-kit" },
     { name = "ledger-kernel" },
+    { name = "ledger-platform" },
+    { name = "ledger-testing" },
     { name = "lxml", specifier = ">=6.1.3" },
     { name = "pydantic", specifier = ">=2.14.1" },
     { name = "python-multipart", specifier = ">=0.0.32" },
@@ -761,20 +876,74 @@ name = "ledger-devtools"
 version = "0.1.0"
 source = { editable = "tools/devtools" }
 dependencies = [
+    { name = "grpcio-tools" },
     { name = "ledger-kernel" },
     { name = "ledger-platform" },
+    { name = "mypy-protobuf" },
     { name = "pathspec" },
+    { name = "protobuf" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "grpcio-tools", specifier = ">=1.84.0" },
     { name = "ledger-kernel", editable = "packages/kernel" },
     { name = "ledger-platform", editable = "packages/platform" },
+    { name = "mypy-protobuf", specifier = ">=5.1.0" },
     { name = "pathspec", specifier = ">=1.1.1" },
+    { name = "protobuf", specifier = ">=7.36.2" },
     { name = "pydantic", specifier = ">=2.14.1" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
+]
+
+[[package]]
+name = "ledger-fiscal"
+version = "0.1.0"
+source = { editable = "modules/fiscal" }
+dependencies = [
+    { name = "alembic" },
+    { name = "fastapi" },
+    { name = "ledger-fiscal-kit" },
+    { name = "ledger-identity" },
+    { name = "ledger-kernel" },
+    { name = "ledger-platform" },
+    { name = "pydantic" },
+    { name = "sqlalchemy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alembic", specifier = ">=1.20.0" },
+    { name = "fastapi", specifier = ">=0.143.0" },
+    { name = "ledger-fiscal-kit", editable = "packages/fiscal-kit" },
+    { name = "ledger-identity", editable = "modules/identity" },
+    { name = "ledger-kernel", editable = "packages/kernel" },
+    { name = "ledger-platform", editable = "packages/platform" },
+    { name = "pydantic", specifier = ">=2.14.1" },
+    { name = "sqlalchemy", specifier = ">=2.1.4" },
+]
+
+[[package]]
+name = "ledger-fiscal-kit"
+version = "0.1.0"
+source = { editable = "packages/fiscal-kit" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "ledger-kernel" },
+    { name = "ledger-platform" },
+    { name = "lxml" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "cryptography", specifier = ">=50.0.2" },
+    { name = "ledger-kernel", editable = "packages/kernel" },
+    { name = "ledger-platform", editable = "packages/platform" },
+    { name = "lxml", specifier = ">=6.1.3" },
+    { name = "pydantic", specifier = ">=2.14.1" },
 ]
 
 [[package]]
@@ -810,6 +979,7 @@ dependencies = [
     { name = "ledger-identity" },
     { name = "ledger-kernel" },
     { name = "ledger-platform" },
+    { name = "prometheus-client" },
     { name = "pydantic" },
     { name = "sqlalchemy" },
 ]
@@ -821,6 +991,7 @@ requires-dist = [
     { name = "ledger-identity", editable = "modules/identity" },
     { name = "ledger-kernel", editable = "packages/kernel" },
     { name = "ledger-platform", editable = "packages/platform" },
+    { name = "prometheus-client", specifier = ">=0.26.0" },
     { name = "pydantic", specifier = ">=2.14.1" },
     { name = "sqlalchemy", specifier = ">=2.1.4" },
 ]
@@ -836,6 +1007,8 @@ version = "0.1.0"
 source = { editable = "packages/platform" }
 dependencies = [
     { name = "alembic" },
+    { name = "boto3" },
+    { name = "botocore" },
     { name = "fastapi" },
     { name = "granian", extra = ["uvloop"] },
     { name = "grpcio" },
@@ -852,12 +1025,15 @@ dependencies = [
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "starlette" },
     { name = "structlog" },
+    { name = "types-boto3-s3" },
     { name = "tzdata" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.20.0" },
+    { name = "boto3", specifier = ">=1.43.100" },
+    { name = "botocore", specifier = ">=1.43.100" },
     { name = "fastapi", specifier = ">=0.143.0" },
     { name = "granian", extras = ["uvloop"], specifier = ">=2.8.4" },
     { name = "grpcio", specifier = ">=1.84.0" },
@@ -874,7 +1050,49 @@ requires-dist = [
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.1.4" },
     { name = "starlette", specifier = ">=1.7.0" },
     { name = "structlog", specifier = ">=26.1.0" },
+    { name = "types-boto3-s3", specifier = ">=1.43.100" },
     { name = "tzdata", specifier = ">=2025.2" },
+]
+
+[[package]]
+name = "ledger-signer"
+version = "0.1.0"
+source = { editable = "modules/signer" }
+dependencies = [
+    { name = "alembic" },
+    { name = "cryptography" },
+    { name = "fastapi" },
+    { name = "grpcio" },
+    { name = "ledger-fiscal-kit" },
+    { name = "ledger-identity" },
+    { name = "ledger-kernel" },
+    { name = "ledger-platform" },
+    { name = "prometheus-client" },
+    { name = "protobuf" },
+    { name = "psycopg" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "sqlalchemy" },
+    { name = "starlette" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alembic", specifier = ">=1.20.0" },
+    { name = "cryptography", specifier = ">=50.0.2" },
+    { name = "fastapi", specifier = ">=0.143.0" },
+    { name = "grpcio", specifier = ">=1.84.0" },
+    { name = "ledger-fiscal-kit", editable = "packages/fiscal-kit" },
+    { name = "ledger-identity", editable = "modules/identity" },
+    { name = "ledger-kernel", editable = "packages/kernel" },
+    { name = "ledger-platform", editable = "packages/platform" },
+    { name = "prometheus-client", specifier = ">=0.26.0" },
+    { name = "protobuf", specifier = ">=7.36.2" },
+    { name = "psycopg", specifier = ">=3.3.6" },
+    { name = "pydantic", specifier = ">=2.14.1" },
+    { name = "pydantic-settings", specifier = ">=2.15.0" },
+    { name = "sqlalchemy", specifier = ">=2.1.4" },
+    { name = "starlette", specifier = ">=1.7.0" },
 ]
 
 [[package]]
@@ -883,8 +1101,12 @@ version = "0.1.0"
 source = { editable = "packages/testing" }
 dependencies = [
     { name = "alembic" },
+    { name = "boto3" },
+    { name = "botocore" },
+    { name = "cryptography" },
     { name = "httpx" },
     { name = "joserfc" },
+    { name = "ledger-fiscal-kit" },
     { name = "ledger-kernel" },
     { name = "ledger-platform" },
     { name = "psycopg", extra = ["binary"] },
@@ -893,13 +1115,18 @@ dependencies = [
     { name = "sqlalchemy" },
     { name = "structlog" },
     { name = "testcontainers" },
+    { name = "types-boto3-s3" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.20.0" },
+    { name = "boto3", specifier = ">=1.43.100" },
+    { name = "botocore", specifier = ">=1.43.100" },
+    { name = "cryptography", specifier = ">=50.0.2" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "joserfc", specifier = ">=1.7.5" },
+    { name = "ledger-fiscal-kit", editable = "packages/fiscal-kit" },
     { name = "ledger-kernel", editable = "packages/kernel" },
     { name = "ledger-platform", editable = "packages/platform" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.6" },
@@ -908,6 +1135,7 @@ requires-dist = [
     { name = "sqlalchemy", specifier = ">=2.1.4" },
     { name = "structlog", specifier = ">=26.1.0" },
     { name = "testcontainers", specifier = ">=4.15.0" },
+    { name = "types-boto3-s3", specifier = ">=1.43.100" },
 ]
 
 [[package]]
@@ -936,8 +1164,10 @@ dev = [
     { name = "ruff" },
     { name = "signxml" },
     { name = "testcontainers" },
+    { name = "types-boto3" },
     { name = "types-grpcio" },
     { name = "types-lxml" },
+    { name = "types-protobuf" },
     { name = "typos" },
     { name = "vulture" },
     { name = "xmlschema" },
@@ -947,7 +1177,9 @@ workspace = [
     { name = "ledger-devtools" },
     { name = "ledger-testing" },
     { name = "signxml" },
+    { name = "types-boto3" },
     { name = "types-lxml" },
+    { name = "types-protobuf" },
     { name = "xmlschema" },
 ]
 
@@ -974,8 +1206,10 @@ dev = [
     { name = "ruff", specifier = ">=0.17.0" },
     { name = "signxml", specifier = ">=5.1.0" },
     { name = "testcontainers", specifier = ">=4.15.0" },
+    { name = "types-boto3", specifier = ">=1.43.100" },
     { name = "types-grpcio", specifier = ">=1.84.0.20260928" },
     { name = "types-lxml", specifier = ">=2026.2.16" },
+    { name = "types-protobuf", specifier = ">=7.35.1.20260906" },
     { name = "typos", specifier = ">=1.51.1" },
     { name = "vulture", specifier = ">=2.14" },
     { name = "xmlschema", specifier = ">=4.3.2" },
@@ -985,7 +1219,9 @@ workspace = [
     { name = "ledger-devtools", editable = "tools/devtools" },
     { name = "ledger-testing", editable = "packages/testing" },
     { name = "signxml", specifier = ">=5.1.0" },
+    { name = "types-boto3", specifier = ">=1.43.100" },
     { name = "types-lxml", specifier = ">=2026.2.16" },
+    { name = "types-protobuf", specifier = ">=7.35.1.20260906" },
     { name = "xmlschema", specifier = ">=4.3.2" },
 ]
 
@@ -1178,6 +1414,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a2/6e/371856a3fb9d31ca8dac321cda606860fa4548858c0cc45d9d1d4ca2628b/mypy_extensions-1.1.0.tar.gz", hash = "sha256:52e68efc3284861e772bbcd66823fde5ae21fd2fdb51c62a211403730b916558", size = 6343, upload-time = "2025-04-22T14:54:24.164Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/79/7b/2c79738432f5c924bef5071f933bcc9efd0473bac3b4aa584a6f7c1c8df8/mypy_extensions-1.1.0-py3-none-any.whl", hash = "sha256:1be4cccdb0f2482337c4743e60421de3a356cd97508abadd57d47403e94f5505", size = 4963, upload-time = "2025-04-22T14:54:22.983Z" },
+]
+
+[[package]]
+name = "mypy-protobuf"
+version = "5.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "protobuf" },
+    { name = "types-protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/87/07/7ffb897eee5c01e816e037f51a6720bf1a0a8c17cca1a2382ae554f43044/mypy_protobuf-5.1.0.tar.gz", hash = "sha256:8493758852a9cdc075a11dbe96c6e37ea2feba5fd5f33ef7442b9a275322a94c", size = 37529, upload-time = "2026-04-28T15:56:40.356Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e8/ec/5ffcf8f5f53757e01afdece10c664e694ac60d2f17c2036811b85b842a5b/mypy_protobuf-5.1.0-py3-none-any.whl", hash = "sha256:d7031f563f806b8bcd448a3e86768bf0994c0af5b0017b344a4fbbba4191f43c", size = 26313, upload-time = "2026-04-28T15:56:39.096Z" },
 ]
 
 [[package]]
@@ -1566,6 +1815,18 @@ wheels = [
 ]
 
 [[package]]
+name = "python-dateutil"
+version = "2.9.0.post0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/66/c0/0c8b6ad9f17a802ee498c46e004a0eb49bc148f2fd230864601a86dcf6db/python-dateutil-2.9.0.post0.tar.gz", hash = "sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3", size = 342432, upload-time = "2024-03-01T18:36:20.211Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl", hash = "sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427", size = 229892, upload-time = "2024-03-01T18:36:18.57Z" },
+]
+
+[[package]]
 name = "python-dotenv"
 version = "1.2.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1665,6 +1926,27 @@ wheels = [
 ]
 
 [[package]]
+name = "s3transfer"
+version = "0.19.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "botocore" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/76/43/35e4d8aa320bffe8287fe8f65f578fa2d2db0a64212f0e710dce58267854/s3transfer-0.19.2.tar.gz", hash = "sha256:ba0309fd86be3c27dbf78cdd813c13c5e1df16e5874b99d2535ebbdfb9892993", size = 165592, upload-time = "2026-07-22T19:30:44.432Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bc/e7/5c595c75e9f41a44f30e526eda465ea0b4eec93470e074e4a111b253f13a/s3transfer-0.19.2-py3-none-any.whl", hash = "sha256:d8168eccca828cbb2cd573675333f3bddd254313a9c42494b84c76b539e8ba25", size = 90216, upload-time = "2026-07-22T19:30:43.251Z" },
+]
+
+[[package]]
+name = "setuptools"
+version = "84.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/6d/44/f5da03a8ef95d369145c5bb53050e7877c9f3d312e128605fd9504829143/setuptools-84.0.0.tar.gz", hash = "sha256:f4695c21257f0d9b537ec2692c941d02ee143b7cc1276941349a546573b2ef73", size = 1168449, upload-time = "2026-08-08T18:27:58.365Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/95/9c/c510029fc6ef33a6275cd2c5d3cecd6613dfd6aa401d57c54f1c18852ccf/setuptools-84.0.0-py3-none-any.whl", hash = "sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670", size = 818216, upload-time = "2026-08-08T18:27:56.719Z" },
+]
+
+[[package]]
 name = "signxml"
 version = "5.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1676,6 +1958,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/41/48/82fb75feed6fd29af5cc26ff6b8d05845c7e4620a13c18e4c9c0f7940d09/signxml-5.1.0.tar.gz", hash = "sha256:9b5fb208b59e843a87f36fd9fc3c8ccbb46e11b1ffab037d4b177ece33b5fd18", size = 1623299, upload-time = "2026-07-05T02:03:03.41Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/50/20/16b2e170786aa6140344d3aac887fbd266717421ab4a79c0020df0e19726/signxml-5.1.0-py3-none-any.whl", hash = "sha256:f9d815164e35c8451295fc532d5292d2b10202a85a845c17c802fb15da8783c6", size = 62628, upload-time = "2026-07-05T02:03:01.556Z" },
+]
+
+[[package]]
+name = "six"
+version = "1.17.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
 ]
 
 [[package]]
@@ -1771,6 +2062,28 @@ wheels = [
 ]
 
 [[package]]
+name = "types-boto3"
+version = "1.43.112"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "botocore-stubs" },
+    { name = "types-s3transfer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/27/1f/0ac47fb6a4cde0f00fbc24a2a3f3faf718640292448ecf4029c066518d0f/types_boto3-1.43.112.tar.gz", hash = "sha256:84d474549cdceddc8b02c32eebc1d10e52f23c60c8ff251e4cac0248acd09fc8", size = 106102, upload-time = "2026-10-12T20:04:46.764Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e9/fc/ee966440036747e02c0970d1334187253f9f0279e724759e1fc873b1d671/types_boto3-1.43.112-py3-none-any.whl", hash = "sha256:416bfb93106f74cb4670e9c347e163ba2f03706e0e51dd8b7337155a251e7342", size = 72084, upload-time = "2026-10-12T20:04:42.967Z" },
+]
+
+[[package]]
+name = "types-boto3-s3"
+version = "1.43.106"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/43/98/3c6997d7c7b0ee15c90595bb5165913c944f831bd7529458e1248807d75b/types_boto3_s3-1.43.106.tar.gz", hash = "sha256:aaf25465555efcb54586b141834cd108b2bd0a6f3229e46e72e20675fcd79f35", size = 79270, upload-time = "2026-09-30T22:44:27.614Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ba/ba/176046d5287c59cf50e4d1bcc4ddb592a8e4b2e6ef33fa3910f97807e88f/types_boto3_s3-1.43.106-py3-none-any.whl", hash = "sha256:a08d18cacdbe77ae8a8e6ed79bbec0b3deaae9eda35d55def30ce72f41440950", size = 86607, upload-time = "2026-09-30T22:44:25.295Z" },
+]
+
+[[package]]
 name = "types-grpcio"
 version = "1.84.0.20260928"
 source = { registry = "https://pypi.org/simple" }
@@ -1804,6 +2117,24 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/dd/ad/c70ac8cbdc28eb58a17301c69b4925af54b614e47f9b2ebc9de5cc10f786/types_lxml-2026.2.16.tar.gz", hash = "sha256:b3a1340cc06db98d541c785732f6f68bea438daff4e2b7809ef748d545d01406", size = 161204, upload-time = "2026-02-17T02:34:50.855Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5f/5c/03ec9befbf4bb5309bfd576c6a5ac1c75633f78f6b64cf1f594e97cd3d23/types_lxml-2026.2.16-py3-none-any.whl", hash = "sha256:5dd81ffa54830e5f361988737c5f1d6a0ae48b2742790637ec560df790ea0401", size = 97040, upload-time = "2026-02-17T02:34:49.286Z" },
+]
+
+[[package]]
+name = "types-protobuf"
+version = "7.35.1.20260906"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e1/6c/e3e5b3e10bc328126a39637c138f9ebfd734bf14342b9f3540039b4ab995/types_protobuf-7.35.1.20260906.tar.gz", hash = "sha256:efd1a3862d4c967dad5512ef8d56b1530ac84f182c41735b94004756518c4998", size = 69895, upload-time = "2026-09-06T06:35:28.308Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/44/4e/f63e826c68f77ef875506d72f225918800346545ee99847bc28f3394f18d/types_protobuf-7.35.1.20260906-py3-none-any.whl", hash = "sha256:5155e48569e0dabff303fdf578db96cd31ea9a4a63b18018a4ceac6b0ae17462", size = 86419, upload-time = "2026-09-06T06:35:27.247Z" },
+]
+
+[[package]]
+name = "types-s3transfer"
+version = "0.19.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/61/29/4df7e8eccfdaac9308e06ae94271eb0e5d2324cbe6df241363c44b70e08c/types_s3transfer-0.19.2.tar.gz", hash = "sha256:2a78a806c09b11fc6d59756402ade26b49b93a85ac6f209a39e2498211c6a41b", size = 13766, upload-time = "2026-10-13T01:42:25.222Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/93/02/3fa02c57a65f8721030247866d28c1a6601d7826297e83059c50b7d6ce7e/types_s3transfer-0.19.2-py3-none-any.whl", hash = "sha256:f1167b9a082a49fc55f12700dcbd3a8b540b9e6fec4e1d782ff44f3eef0bdbff", size = 19473, upload-time = "2026-10-13T01:42:23.813Z" },
 ]
 
 [[package]]

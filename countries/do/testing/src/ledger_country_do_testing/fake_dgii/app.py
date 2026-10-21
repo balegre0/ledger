@@ -20,10 +20,11 @@ lazy from starlette.requests import Request
 from ledger_country_do_testing.fake_dgii.emitter import EmitterServices, UploadTooLargeError
 from ledger_country_do_testing.fake_dgii.receiver import ReceiverServices
 from ledger_country_do_testing.fake_dgii.state import FakeState, dgii_check
-from ledger_country_do_testing.pki import Authority, organization
+from ledger_country_do_testing.pki import organization
+from ledger_testing.pki import Authority
 lazy from ledger_country_do_testing.fake_dgii.emitter import Handler
 lazy from ledger_country_do_testing.fake_dgii.state import Received, Script, SignatureCheck
-lazy from ledger_country_do_testing.pki import Issued
+lazy from ledger_testing.pki import Issued
 
 ENVIRONMENTS: Final = frozenset({"testecf", "certecf", "ecf"})
 DEFAULT_PUBLIC_URL: Final = "http://127.0.0.1:8471"

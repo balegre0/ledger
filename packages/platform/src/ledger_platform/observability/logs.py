@@ -17,6 +17,9 @@ pydantic and FastAPI say of an input (``input_value=...``). The log shows instea
   above shows of it, and the statement (never its parameters).
 * pydantic's ``ValidationError`` and FastAPI's request and response validation errors: how many problems
   there are, and where and of which type the first twenty are.
+* botocore's ``ClientError`` (what S3 answered): the operation, the error code and the HTTP status, never
+  the message, which names roles, accounts, buckets and keys; any other botocore error (a lost connection, a
+  missing credential): its type alone, never the endpoint or the request it names.
 
 Any other exception keeps its message: it is ours, or a library's that carries no data.
 
@@ -36,6 +39,7 @@ lazy from typing import TextIO
 
 import psycopg
 import structlog
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi.exceptions import ValidationException
 from opentelemetry import trace
 from opentelemetry.trace import format_span_id, format_trace_id
@@ -49,9 +53,14 @@ from ledger_platform.config.settings import LogFormat
 WITHHELD: Final = "(message withheld: it can quote values)"
 """What a log says in place of the message of an error of the database."""
 MAX_ISSUES: Final = 20
+QUIETED: Final = ("httpx", "httpcore")
+"""Loggers held to WARNING: httpx logs every request's full URL (paths and queries carry tax ids) at INFO,
+httpcore every step of it at DEBUG."""
 """How many problems of a validation error a log or a problem names; the rest are counted."""
 _LOCATION_PART: Final = 40
 """A location names fields, but a key a client chose is a field name too: it is cut at this length."""
+_AWS_CODE: Final = re.compile(r"[A-Za-z0-9._]{1,64}", re.ASCII)
+"""An AWS error code as a log may show it: a code's characters, never a message's."""
 _STATEMENT_LIMIT: Final = 300
 """How much of a SQL statement a log keeps: enough to find the code that ran it."""
 
@@ -121,9 +130,21 @@ def _of_a_statement(error: StatementError) -> str:
     return f"{driver} [SQL: {truncate(error.statement or '', _STATEMENT_LIMIT)}]"
 
 
+def _of_botocore(error: ClientError | BotoCoreError) -> str:
+    """What a log shows of botocore's errors: S3's answers by operation, code and status; others by type."""
+    if isinstance(error, BotoCoreError):
+        return f"botocore: {type(error).__name__}"
+    code = error.response.get("Error", {}).get("Code", "")
+    status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
+    shown = code if _AWS_CODE.fullmatch(code) else "?"
+    return f"S3 {error.operation_name}: {shown} ({status})"
+
+
 def _withheld(error: BaseException) -> str | None:
     """What a log shows in place of the text of ``error``; ``None`` when its text may be shown."""
     match error:
+        case ClientError() | BotoCoreError():
+            return _of_botocore(error)
         case psycopg.Error():
             return _of_the_database(error)
         case StatementError():
@@ -328,3 +349,5 @@ def configure_logging(settings: LogSettings, *, service: str) -> None:
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(settings.log_level)
+    for name in QUIETED:
+        logging.getLogger(name).setLevel(logging.WARNING)

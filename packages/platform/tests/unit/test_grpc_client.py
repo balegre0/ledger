@@ -1,16 +1,18 @@
 import asyncio
 import math
 from typing import ClassVar, Final
-lazy from collections.abc import AsyncGenerator
+lazy from collections.abc import AsyncGenerator, AsyncIterator, Iterable
 
 import grpc
 import pytest
 from prometheus_client import CollectorRegistry
+from pydantic import SecretStr
 
 from ledger_kernel.errors import ErrorKind, NotFoundError, truncate
 from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.grpc.client import (
     ERROR_CODE_KEY,
+    INTERNAL_CODE,
     MAX_DEADLINE,
     REMOTE_CODE_LIMIT,
     RemoteConflictError,
@@ -19,11 +21,20 @@ from ledger_platform.grpc.client import (
     RemoteForbiddenError,
     RemoteNotFoundError,
     RemoteUnavailableError,
+    call_stream_unary,
     call_unary,
 )
+from ledger_platform.grpc.guard import CallerPolicy, CallerTokens
+from ledger_platform.grpc.metadata import call_metadata
 from ledger_platform.grpc.server import serve_grpc
 
 RPC: Final = "/test.Remote/Call"
+UPLOAD: Final = "/test.Remote/Upload"
+TOKEN: Final = "remote-token-0123456789abcdefghijklmnop"
+CALLERS: Final = CallerTokens(
+    [CallerPolicy(name="probe", tokens=(SecretStr(TOKEN),), methods=frozenset({RPC, UPLOAD}))]
+)
+METADATA: Final = call_metadata(SecretStr(TOKEN), call_id="test")
 LONG_CODE: Final = "x" * 1_000
 """A code no chassis server writes, but another side could (within gRPC's 8 KiB of metadata)."""
 ODD_CODE: Final = "Bad Code! <b>"
@@ -60,11 +71,21 @@ async def behave(request: bytes, context: Context) -> bytes:
     return request
 
 
+async def upload(requests: AsyncIterator[bytes], context: Context) -> bytes:
+    """Behave as the parts sent, joined, say."""
+    return await behave(b"".join([request async for request in requests]), context)
+
+
 def register(server: grpc.aio.Server) -> None:
     handler = grpc.unary_unary_rpc_method_handler(
         behave, request_deserializer=bytes, response_serializer=bytes
     )
-    server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler("test.Remote", {"Call": handler}),))
+    uploads = grpc.stream_unary_rpc_method_handler(
+        upload, request_deserializer=bytes, response_serializer=bytes
+    )
+    server.add_generic_rpc_handlers(
+        (grpc.method_handlers_generic_handler("test.Remote", {"Call": handler, "Upload": uploads}),)
+    )
 
 
 def caller(channel: grpc.aio.Channel) -> grpc.aio.UnaryUnaryMultiCallable[bytes, bytes]:
@@ -75,7 +96,7 @@ def caller(channel: grpc.aio.Channel) -> grpc.aio.UnaryUnaryMultiCallable[bytes,
 @pytest.fixture
 async def call() -> AsyncGenerator[grpc.aio.UnaryUnaryMultiCallable[bytes, bytes]]:
     async with (
-        serve_grpc(port=0, register=register, registry=CollectorRegistry()) as port,
+        serve_grpc(port=0, register=register, registry=CollectorRegistry(), callers=CALLERS) as port,
         grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel,
     ):
         yield caller(channel)
@@ -85,14 +106,14 @@ async def failure(
     call: grpc.aio.UnaryUnaryMultiCallable[bytes, bytes], request: bytes, deadline: float = 2.0
 ) -> RemoteError:
     with pytest.raises(RemoteError) as caught:
-        await call_unary(call, request, rpc=RPC, deadline=deadline)
+        await call_unary(call, request, rpc=RPC, deadline=deadline, metadata=METADATA)
     return caught.value
 
 
 async def test_an_answer_comes_back_as_it_was_sent(
     call: grpc.aio.UnaryUnaryMultiCallable[bytes, bytes],
 ) -> None:
-    assert await call_unary(call, b"hello", rpc=RPC) == b"hello"
+    assert await call_unary(call, b"hello", rpc=RPC, metadata=METADATA) == b"hello"
 
 
 async def test_a_ledger_error_of_the_other_side_comes_back_with_its_kind_and_code(
@@ -195,6 +216,17 @@ async def test_a_call_past_its_deadline_is_unavailable(
     )
 
 
+async def test_a_call_its_guard_refuses_is_forbidden_with_the_guard_s_code(
+    call: grpc.aio.UnaryUnaryMultiCallable[bytes, bytes],
+) -> None:
+    with pytest.raises(RemoteForbiddenError) as caught:
+        await call_unary(call, b"hello", rpc=RPC)
+    assert (caught.value.status, caught.value.remote_code) == (
+        grpc.StatusCode.UNAUTHENTICATED,
+        "grpc_caller_unknown",
+    )
+
+
 async def test_a_service_that_is_not_there_is_unavailable() -> None:
     async with grpc.aio.insecure_channel("127.0.0.1:1") as channel:
         error = await failure(caller(channel), b"hello", deadline=1.0)
@@ -206,7 +238,7 @@ async def test_every_call_has_a_bounded_deadline(
     call: grpc.aio.UnaryUnaryMultiCallable[bytes, bytes], deadline: float
 ) -> None:
     with pytest.raises(InvalidOptionError, match="gRPC client option deadline must be"):
-        await call_unary(call, b"hello", rpc=RPC, deadline=deadline)
+        await call_unary(call, b"hello", rpc=RPC, deadline=deadline, metadata=METADATA)
 
 
 def test_the_kinds_of_remote_errors() -> None:
@@ -218,3 +250,108 @@ def test_the_kinds_of_remote_errors() -> None:
         RemoteDefectError: ErrorKind.INTERNAL,
     }
     assert {error: error.kind for error in kinds} == kinds
+
+
+def uploader(channel: grpc.aio.Channel) -> grpc.aio.StreamUnaryMultiCallable[bytes, bytes]:
+    """The test's streaming method on ``channel``, its messages sent as they are."""
+    return channel.stream_unary(UPLOAD, request_serializer=bytes, response_deserializer=bytes)
+
+
+async def parts(*sent: bytes) -> AsyncGenerator[bytes]:
+    for part in sent:
+        yield part
+
+
+@pytest.fixture
+async def upload_call() -> AsyncGenerator[grpc.aio.StreamUnaryMultiCallable[bytes, bytes]]:
+    async with (
+        serve_grpc(port=0, register=register, registry=CollectorRegistry(), callers=CALLERS) as port,
+        grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel,
+    ):
+        yield uploader(channel)
+
+
+async def test_a_streamed_request_is_answered_as_a_unary_one(
+    upload_call: grpc.aio.StreamUnaryMultiCallable[bytes, bytes],
+) -> None:
+    answer = await call_stream_unary(upload_call, parts(b"echo", b"ed"), rpc=UPLOAD, metadata=METADATA)
+    assert answer == b"echoed"
+
+
+@pytest.mark.parametrize(
+    ("sent", "expected", "status"),
+    [
+        ((b"miss", b"ing"), RemoteNotFoundError, grpc.StatusCode.NOT_FOUND),
+        ((b"sl", b"ow"), RemoteUnavailableError, grpc.StatusCode.DEADLINE_EXCEEDED),
+    ],
+)
+async def test_a_streamed_request_fails_as_a_unary_one(
+    upload_call: grpc.aio.StreamUnaryMultiCallable[bytes, bytes],
+    sent: Iterable[bytes],
+    expected: type[RemoteError],
+    status: grpc.StatusCode,
+) -> None:
+    with pytest.raises(expected) as caught:
+        await call_stream_unary(upload_call, parts(*sent), rpc=UPLOAD, deadline=0.5, metadata=METADATA)
+    assert (caught.value.rpc, caught.value.status) == (UPLOAD, status)
+
+
+async def test_a_streamed_request_s_guard_refusal_is_forbidden(
+    upload_call: grpc.aio.StreamUnaryMultiCallable[bytes, bytes],
+) -> None:
+    with pytest.raises(RemoteForbiddenError) as caught:
+        await call_stream_unary(upload_call, parts(b"hello"), rpc=UPLOAD)
+    assert caught.value.remote_code == "grpc_caller_unknown"
+
+
+@pytest.mark.parametrize("deadline", [0.0, MAX_DEADLINE + 1])
+async def test_a_streamed_request_has_a_bounded_deadline(
+    upload_call: grpc.aio.StreamUnaryMultiCallable[bytes, bytes], deadline: float
+) -> None:
+    with pytest.raises(InvalidOptionError, match="gRPC client option deadline must be"):
+        await call_stream_unary(
+            upload_call, parts(b"hello"), rpc=UPLOAD, deadline=deadline, metadata=METADATA
+        )
+
+
+class SourceFailedError(Exception):
+    """What a request stream's own source raises: never grpc's to swallow."""
+
+
+async def failing(*sent: bytes) -> AsyncGenerator[bytes]:
+    for part in sent:
+        yield part
+    raise SourceFailedError
+
+
+async def test_a_request_stream_whose_source_fails_raises_the_source_s_error(
+    upload_call: grpc.aio.StreamUnaryMultiCallable[bytes, bytes],
+) -> None:
+    """grpc would cancel the call and drop the error (a ``CancelledError`` here); the caller gets its own."""
+    with pytest.raises(SourceFailedError) as caught:
+        await call_stream_unary(upload_call, failing(b"he", b"llo"), rpc=UPLOAD, metadata=METADATA)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+
+
+async def test_a_request_stream_whose_source_fails_at_once_raises_the_source_s_error(
+    upload_call: grpc.aio.StreamUnaryMultiCallable[bytes, bytes],
+) -> None:
+    with pytest.raises(SourceFailedError):
+        await call_stream_unary(upload_call, failing(), rpc=UPLOAD, metadata=METADATA)
+
+
+async def test_a_streamed_call_whose_caller_is_cancelled_is_cancelled(
+    upload_call: grpc.aio.StreamUnaryMultiCallable[bytes, bytes],
+) -> None:
+    sending = asyncio.create_task(
+        call_stream_unary(upload_call, parts(b"sl", b"ow"), rpc=UPLOAD, deadline=5.0, metadata=METADATA)
+    )
+    await asyncio.sleep(0.2)
+    _ = sending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await sending
+
+
+def test_the_code_of_a_defect_is_shared_by_servers_and_clients() -> None:
+    assert INTERNAL_CODE == "internal"

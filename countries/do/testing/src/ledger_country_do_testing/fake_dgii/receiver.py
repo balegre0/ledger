@@ -26,6 +26,7 @@ from starlette.responses import JSONResponse, Response
 lazy from starlette.requests import Request
 
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
+from ledger_country_do.channels.ecf_v1.domain.exchanges import NotReceivedReason
 from ledger_country_do.channels.ecf_v1.domain.notation import dgii_moment
 from ledger_country_do_testing.fake_dgii.emitter import (
     ECF_FORMATS,
@@ -47,10 +48,6 @@ EMISOR_RECEPTOR: Final = "emisorreceptor"
 SIMULATOR_NAME: Final = "EMISOR RECEPTOR DGII"
 WITHOUT_DIRECTORY: Final = "certecf"
 """DT-DGII publishes ``consultadirectorio`` (as ``consultatrackids``) for TesteCF and eCF only."""
-SPECIFICATION_ERROR: Final = 1
-SIGNATURE_ERROR: Final = 2
-DUPLICATE: Final = 3
-NOT_THIS_BUYER: Final = 4
 _ARECF_RNC: Final = re.compile(r"[0-9]{9}|[0-9]{11}")
 _ARECF_ENCF: Final = re.compile(r"[a-zA-Z0-9]{13}|[a-zA-Z0-9]{11}|[a-zA-Z0-9]{9}")
 """The ARECF's ``RNCType`` and ``eNCFType`` (*Formato Acuse de Recibo v1.0*): what an ARECF can name."""
@@ -149,18 +146,20 @@ class ReceiverServices:
         del environment
         return await validate_seed(request, self._state.check, self._state.receiver_credentials)
 
-    def _reason(self, document: bytes, environment: str, named: tuple[str, str, str, str]) -> int | None:
+    def _reason(
+        self, document: bytes, environment: str, named: tuple[str, str, str, str]
+    ) -> NotReceivedReason | None:
         ecf_type, issuer, buyer, encf = named
         format_ = ECF_FORMATS.get(ecf_type)
         if format_ is None or schema_problems(format_, document):
-            return SPECIFICATION_ERROR
+            return NotReceivedReason.SPECIFICATION
         if not self._state.check.verify(document):
-            return SIGNATURE_ERROR
+            return NotReceivedReason.SIGNATURE
         if (environment, issuer, encf) in self._seen:
-            return DUPLICATE
+            return NotReceivedReason.DUPLICATE
         accepted = self._state.receiver_rncs
         if accepted is not None and buyer not in accepted:
-            return NOT_THIS_BUYER
+            return NotReceivedReason.NOT_THIS_RECEIVER
         return None
 
     async def _reception(self, request: Request, environment: str) -> Response:

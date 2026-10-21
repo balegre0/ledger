@@ -13,28 +13,40 @@ timed: its name is the client's choice, and each would be a series of its own.
 
 All four kinds of method are guarded (unary or streaming request, unary or streaming response), when the
 method is asynchronous: a coroutine function or an async generator function, the two shapes ``grpc.aio``
-runs on the event loop. A synchronous method is left as it is: ``grpc.aio`` runs it on a thread, with
-another kind of context, only so that code can migrate, and aborting from a synchronous generator after its
-first item leaves the stream hanging until its deadline (grpc 1.84).
+runs on the event loop. ``GuardInterceptor`` leaves a synchronous method as it is (``grpc.aio`` runs it on a
+thread, with another kind of context, and aborting from a synchronous generator after its first item leaves
+the stream hanging until its deadline, grpc 1.84); ``serve_grpc`` serves none, its caller guard
+(``grpc.guard``) refuses them.
+
+``serve_grpc`` places the caller guard inside ``GuardInterceptor``: a call its caller may not make is answered
+and timed like any other failed call, before its method runs and before its request is read. A request is
+read inside the guard (``_handlers``), so one that cannot be read is ``INVALID_ARGUMENT``
+(``grpc_request_malformed``), answered and timed like any error, never grpc's ``UNKNOWN`` with the text.
 """
 
 import asyncio
-import inspect
 from contextlib import aclosing, asynccontextmanager
+from dataclasses import dataclass
 from time import perf_counter
-from typing import ClassVar, Final, NamedTuple, TypeGuard, final, override
+from typing import ClassVar, Final, NamedTuple, final, override
 lazy from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 lazy from contextlib import AbstractAsyncContextManager
 lazy from types import TracebackType
 
 import grpc
 import structlog
+from opentelemetry import trace
 from prometheus_client import Histogram
+lazy from opentelemetry.trace import Tracer
 lazy from prometheus_client import CollectorRegistry
 
 from ledger_kernel.errors import ErrorKind, LedgerError
 from ledger_platform.config.options import InvalidOptionError, require_seconds
-from ledger_platform.grpc.client import ERROR_CODE_KEY
+from ledger_platform.grpc._handlers import rewrapped
+from ledger_platform.grpc.client import ERROR_CODE_KEY, INTERNAL_CODE
+from ledger_platform.grpc.guard import CallerGuard
+lazy from ledger_platform.grpc._handlers import Context, CoroutineMethod, GeneratorMethod
+lazy from ledger_platform.grpc.guard import CallerTokens
 
 _COMPONENT: Final = "gRPC"
 """What this module's option errors name (``InvalidOptionError.component``)."""
@@ -48,8 +60,15 @@ _STATUS: Final[Mapping[ErrorKind, grpc.StatusCode]] = {
     ErrorKind.UNAVAILABLE: grpc.StatusCode.UNAVAILABLE,
     ErrorKind.INTERNAL: grpc.StatusCode.INTERNAL,
 }
-_INTERNAL_CODE: Final = "internal"
 _MAX_PORT: Final = 65535
+DEFAULT_MAX_MESSAGE_BYTES: Final = 5 * 1024 * 1024
+"""The largest message a server takes or sends by default: a certificate's chunk, a signed document."""
+MAX_MESSAGE_BYTES: Final = 64 * 1024 * 1024
+"""The largest limit a server may be given."""
+DEFAULT_MAX_CONCURRENT_RPCS: Final = 64
+"""The most calls a server takes at once by default: past it a call ends ``RESOURCE_EXHAUSTED`` at once."""
+MAX_CONCURRENT_RPCS: Final = 10_000
+"""The largest number of calls at once a server may be given."""
 _logger = structlog.stdlib.get_logger(__name__)
 
 
@@ -62,19 +81,6 @@ class GrpcBindError(LedgerError):
         super().__init__(f"the gRPC server could not bind port {port}")
 
 
-type _Context = grpc.aio.ServicerContext[object, object]
-"""The context ``grpc.aio`` hands a method. The guard only ends calls with it, whatever the messages are."""
-
-type _CoroutineMethod[Input] = Callable[[Input, _Context], Awaitable[object]]
-"""A method that answers with a coroutine, or one that streams by writing to its context.
-
-``Input`` is a request, or for a method that streams its requests the iterator to read them from: an async
-iterator at runtime, although ``types-grpcio`` types it as an ``Iterator``.
-"""
-type _GeneratorMethod[Input] = Callable[[Input, _Context], AsyncGenerator[object]]
-"""A method that streams its responses by yielding them. ``Input`` is a request, or the requests to read."""
-
-
 class _Answer(NamedTuple):
     """How a call that failed ends: the status, the details a client reads and the code beside them."""
 
@@ -83,13 +89,13 @@ class _Answer(NamedTuple):
     code: str
 
 
-_DEFECT: Final = _Answer(_STATUS[ErrorKind.INTERNAL], "internal error", _INTERNAL_CODE)
+_DEFECT: Final = _Answer(_STATUS[ErrorKind.INTERNAL], "internal error", INTERNAL_CODE)
 """What a client is told about a defect: no more than that there was one."""
 
 
 def _report_defect(error: Exception, rpc: str) -> None:
     """Log where a defect happened and what it was, never the request: it may carry credentials."""
-    code = error.code if isinstance(error, LedgerError) else _INTERNAL_CODE
+    code = error.code if isinstance(error, LedgerError) else INTERNAL_CODE
     _logger.error("grpc.unhandled_error", rpc=rpc, code=code, exc_info=error)
 
 
@@ -118,7 +124,7 @@ def _set(code: object) -> grpc.StatusCode | None:
     return code if isinstance(code, grpc.StatusCode) else None
 
 
-def _ended_with(context: _Context, error: BaseException | None) -> grpc.StatusCode:
+def _ended_with(context: Context, error: BaseException | None) -> grpc.StatusCode:
     """The status of a call that was not ours to answer."""
     if (chosen := _set(context.code())) is not None:
         return chosen
@@ -137,7 +143,7 @@ class _Call:
 
     __slots__ = ("_context", "_duration", "_rpc", "_started")
 
-    def __init__(self, context: _Context, rpc: str, duration: Histogram) -> None:
+    def __init__(self, context: Context, rpc: str, duration: Histogram) -> None:
         self._context = context
         self._rpc = rpc
         self._duration = duration
@@ -158,82 +164,49 @@ class _Call:
             )
 
 
-def _is_coroutine_method[Input](
-    behavior: Callable[[Input, grpc.ServicerContext], object],
-) -> TypeGuard[_CoroutineMethod[Input]]:
-    """Whether ``behavior`` is a coroutine function, as grpc decides it before it awaits one.
+@final
+class _Guarded:
+    """Wraps the asynchronous methods of a call to ``rpc`` in a ``_Call``; leaves a synchronous one alone.
 
-    ``types-grpcio`` types every behaviour as the synchronous kind (a plain return, the blocking context), so
-    what grpc awaits with an asynchronous context has to be told apart here.
+    The request is read inside the ``_Call``: one that cannot be read is answered and timed like any error.
     """
-    return inspect.iscoroutinefunction(behavior)
 
+    __slots__ = ("_duration", "_rpc")
 
-def _is_generator_method[Input](
-    behavior: Callable[[Input, grpc.ServicerContext], object],
-) -> TypeGuard[_GeneratorMethod[Input]]:
-    """Whether ``behavior`` is an async generator function, as grpc decides it before it iterates one."""
-    return inspect.isasyncgenfunction(behavior)
+    def __init__(self, rpc: str, duration: Histogram) -> None:
+        self._rpc = rpc
+        self._duration = duration
 
+    def coroutine[Raw, Input](
+        self, behavior: CoroutineMethod[Input], parse: Callable[[Raw], Input]
+    ) -> CoroutineMethod[Raw]:
+        rpc, duration = self._rpc, self._duration
 
-def _guard_coroutine[Input](
-    behavior: _CoroutineMethod[Input], rpc: str, duration: Histogram
-) -> _CoroutineMethod[Input]:
-    async def guarded(request: Input, context: _Context) -> object:
-        async with _Call(context, rpc, duration):
-            return await behavior(request, context)
+        async def guarded(request: Raw, context: Context) -> object:
+            async with _Call(context, rpc, duration):
+                return await behavior(parse(request), context)
 
-    return guarded
+        return guarded
 
+    def generator[Raw, Input](
+        self, behavior: GeneratorMethod[Input], parse: Callable[[Raw], Input]
+    ) -> GeneratorMethod[Raw]:
+        rpc, duration = self._rpc, self._duration
 
-def _guard_generator[Input](
-    behavior: _GeneratorMethod[Input], rpc: str, duration: Histogram
-) -> _GeneratorMethod[Input]:
-    async def guarded(request: Input, context: _Context) -> AsyncGenerator[object]:
-        # When the call ends or fails, the method's generator is closed with this one, not left to the
-        # garbage collector. A call abandoned by a client that left is finalized by asyncio.
-        async with _Call(context, rpc, duration), aclosing(behavior(request, context)) as responses:
-            async for response in responses:
-                yield response
+        async def guarded(request: Raw, context: Context) -> AsyncGenerator[object]:
+            # When the call ends or fails, the method's generator is closed with this one, not left to the
+            # garbage collector. A call abandoned by a client that left is finalized by asyncio.
+            async with (
+                _Call(context, rpc, duration),
+                aclosing(behavior(parse(request), context)) as responses,
+            ):
+                async for response in responses:
+                    yield response
 
-    return guarded
+        return guarded
 
-
-def _guard[Input](
-    behavior: Callable[[Input, grpc.ServicerContext], object] | None, rpc: str, duration: Histogram
-) -> _CoroutineMethod[Input] | _GeneratorMethod[Input] | None:
-    """``behavior`` guarded; ``None`` when there is no behaviour or it is synchronous."""
-    if behavior is None:
+    def synchronous(self) -> CoroutineMethod[object] | None:
         return None
-    if _is_generator_method(behavior):
-        return _guard_generator(behavior, rpc, duration)
-    if _is_coroutine_method(behavior):
-        return _guard_coroutine(behavior, rpc, duration)
-    return None
-
-
-def _guarded[Request, Response](
-    handler: grpc.RpcMethodHandler[Request, Response], rpc: str, duration: Histogram
-) -> grpc.RpcMethodHandler[Request, Response]:
-    """``handler`` with its behaviour guarded, or ``handler`` itself when it cannot be."""
-    deserializer, serializer = handler.request_deserializer, handler.response_serializer
-    if (guarded := _guard(handler.unary_unary, rpc, duration)) is not None:
-        return grpc.unary_unary_rpc_method_handler(
-            guarded, request_deserializer=deserializer, response_serializer=serializer
-        )
-    if (guarded := _guard(handler.unary_stream, rpc, duration)) is not None:
-        return grpc.unary_stream_rpc_method_handler(
-            guarded, request_deserializer=deserializer, response_serializer=serializer
-        )
-    if (guarded_reader := _guard(handler.stream_unary, rpc, duration)) is not None:
-        return grpc.stream_unary_rpc_method_handler(
-            guarded_reader, request_deserializer=deserializer, response_serializer=serializer
-        )
-    if (guarded_reader := _guard(handler.stream_stream, rpc, duration)) is not None:
-        return grpc.stream_stream_rpc_method_handler(
-            guarded_reader, request_deserializer=deserializer, response_serializer=serializer
-        )
-    return handler
 
 
 @final
@@ -267,7 +240,7 @@ class GuardInterceptor(grpc.aio.ServerInterceptor):
         handler = await continuation(handler_call_details)
         if handler is None:
             return None  # no such method: grpc answers UNIMPLEMENTED
-        return _guarded(handler, handler_call_details.method, self._duration)
+        return rewrapped(handler, _Guarded(handler_call_details.method, self._duration))
 
 
 def _require_port(port: int) -> None:
@@ -285,18 +258,69 @@ def _bind(server: grpc.aio.Server, port: int) -> int:
         raise GrpcBindError(port) from error
 
 
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ServerOptions:
+    """How a server runs, besides what it serves and who may call it. Checked when made.
+
+    Raises ``InvalidOptionError`` for a ``grace`` that is not a positive, finite number of seconds, a
+    ``max_message_bytes`` outside 1..``MAX_MESSAGE_BYTES``, or a ``max_concurrent_rpcs`` outside
+    1..``MAX_CONCURRENT_RPCS``.
+    """
+
+    grace: float = 10.0
+    """Seconds the calls in flight have to finish when the server stops, before they are cancelled."""
+    max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES
+    """The largest message the server takes or sends: a larger one ends its call ``RESOURCE_EXHAUSTED``."""
+    max_concurrent_rpcs: int = DEFAULT_MAX_CONCURRENT_RPCS
+    """The most calls the server runs at once: one more ends ``RESOURCE_EXHAUSTED`` before it is admitted,
+    so a flood of calls cannot hold the process's memory and threads."""
+    tracer: Tracer | None = None
+    """What traces each call (the app's, ``Telemetry.tracer``); the process-wide provider's when ``None``."""
+
+    def __post_init__(self) -> None:
+        require_seconds(_COMPONENT, "grace", self.grace)
+        if not 0 < self.max_message_bytes <= MAX_MESSAGE_BYTES:
+            raise InvalidOptionError(
+                component=_COMPONENT,
+                option="max_message_bytes",
+                requirement=f"1 to {MAX_MESSAGE_BYTES} bytes",
+                value=self.max_message_bytes,
+            )
+        if not 0 < self.max_concurrent_rpcs <= MAX_CONCURRENT_RPCS:
+            raise InvalidOptionError(
+                component=_COMPONENT,
+                option="max_concurrent_rpcs",
+                requirement=f"1 to {MAX_CONCURRENT_RPCS} calls",
+                value=self.max_concurrent_rpcs,
+            )
+
+
+DEFAULT_SERVER_OPTIONS: Final = ServerOptions()
+
+
 @asynccontextmanager
 async def _serving(
-    port: int, register: Callable[[grpc.aio.Server], None], registry: CollectorRegistry, grace: float
+    port: int,
+    register: Callable[[grpc.aio.Server], None],
+    interceptors: tuple[grpc.aio.ServerInterceptor, ...],
+    options: ServerOptions,
 ) -> AsyncGenerator[int]:
-    server = grpc.aio.server(interceptors=(GuardInterceptor(registry),))
+    server = grpc.aio.server(
+        interceptors=interceptors,
+        maximum_concurrent_rpcs=options.max_concurrent_rpcs,
+        options=(
+            ("grpc.max_receive_message_length", options.max_message_bytes),
+            ("grpc.max_send_message_length", options.max_message_bytes),
+        ),
+    )
     register(server)
     bound = _bind(server, port)
     try:
         await server.start()
         yield bound
     finally:
-        await server.stop(grace)
+        await server.stop(options.grace)
 
 
 def serve_grpc(
@@ -304,22 +328,24 @@ def serve_grpc(
     port: int,
     register: Callable[[grpc.aio.Server], None],
     registry: CollectorRegistry,
-    grace: float = 10.0,
+    callers: CallerTokens,
+    options: ServerOptions = DEFAULT_SERVER_OPTIONS,
 ) -> AbstractAsyncContextManager[int]:
-    """Serve the services ``register`` adds on ``port`` (0: any free port); yields the bound port.
+    """Serve the services ``register`` adds on ``port`` (0: any free port), guarded; yields the bound port.
 
-    The calls of its asynchronous methods are timed into ``registry`` (see the module).
+    Every call of a registered method is admitted by ``callers`` before the method runs (``grpc.guard``: its
+    caller's token and allowlist), traced as a server span that continues the caller's trace, and timed into
+    ``registry`` (see the module). There is no way to serve without a guard.
 
     The port is plaintext and open to whatever reaches it: until a service mesh adds mTLS (after go-live, spec
     §16.4), what protects a service is the network policy and the per-caller token and method allowlist its
-    guard checks (ADR 0010), so a service that signs or holds secrets must not be served without both. On
-    exit the server stops taking calls and gives those in flight ``grace`` seconds to finish before it cancels
-    them.
+    guard checks (ADR 0010). On exit the server stops taking calls and gives those in flight
+    ``options.grace`` seconds to finish before it cancels them.
 
-    Raises ``InvalidOptionError``, at once, for a ``port`` outside 0..65535 or a ``grace`` that is not a
-    positive, finite number of seconds; and ``GrpcBindError`` on entering when the port cannot be bound, with
-    nothing left running.
+    Raises ``InvalidOptionError``, at once, for a ``port`` outside 0..65535; and ``GrpcBindError`` on entering
+    when the port cannot be bound, with nothing left running.
     """
     _require_port(port)
-    require_seconds(_COMPONENT, "grace", grace)
-    return _serving(port, register, registry, grace)
+    tracer = trace.get_tracer(__name__) if options.tracer is None else options.tracer
+    interceptors = (GuardInterceptor(registry), CallerGuard(callers, tracer))
+    return _serving(port, register, interceptors, options)

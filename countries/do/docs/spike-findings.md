@@ -37,7 +37,12 @@ e-CF v1.0*), **FMT** (*Formato e-CF V1.0*).
 - **Revocation.** A buyer's certificate is never checked against CRL or OCSP; production delivery is blocked
   until it is (v2-M4).
 - **Buyer authentication** (signing a buyer's seed) is a per-company switch, off unless a buyer requires it
-  (v2-M4), because of F14.
+  (v2-M4), because of F14. Since the channel signs through `SignerPort` (v2-M2b), each seed's audience (the
+  host it came from) is audited by the signer, but it is not bound into the signature: DGII's `SemillaModel`
+  has no audience field, so a hostile receiver can still relay a real DGII seed for us to sign.
+- **An exception escaping `Emitter.send`** that is not a pack error is a defect with an **unknown outcome**:
+  the document may be at DGII; it is never sent again, only resumed as a parked document (binding on v2-M3's
+  callers).
 - **Duplicate receipts.** An ARECF "not received, duplicate" (reason 3) means "already received" only when the
   same e-CF had an earlier delivery whose outcome is unknown; otherwise it is a conflict (v2-M4).
 
@@ -46,8 +51,9 @@ Carried from the reviews of Tasks 8-13 (recorded in the spike's progress ledger,
 - **Recovering a parked document** is by hand in the spike: `consultatrackids` for an e-CF, `consultarfce`
   for an RFCE (whose `codigo` 0 means pending, not final). v2-M3 automates it, and must not reuse a released
   e-NCF within `RECEIPT_TOLERANCE` of its last reception (or must exclude earlier attempts' track ids).
-- **The buyer-seed audit log** (`ledger_country_do.audit.buyer_seeds`) names a buyer's RNC or cédula, personal
-  data: v2-M4 sends it to a dedicated audit sink.
-- **A refused receipt is not kept**: when an ARECF fails its checks (signature, schema, trust), the CLI reports
-  the refusal but the receipt's bytes are not written. Settling F15 from a refusal relies on the error's
-  reason; v2-M4's delivery archives refused receipts.
+- **The buyer-seed audit** (v2-M3b Task 15): the log line is gone; the buyer client returns each seed signed
+  (`SeedSigned`: buyer, endpoint host, time) and the delivery job audits it in `do_ecf.audit_events` with the
+  buyer masked (Decision 20). Buyer authentication is a per-company switch, off by default (Decision 19).
+- **A refused receipt is kept apart**: an ARECF that fails its checks (signature, schema, trust) comes back as
+  `ReceiptRefused` with its bytes; the CLI writes it as `<RNC><e-NCF>.arecf-refused.xml`, the delivery job
+  archives it (`arecf-refused`) and never retries.

@@ -1,5 +1,4 @@
 import base64
-import hashlib
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Final
@@ -15,33 +14,14 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from lxml import etree
 
-from ledger_country_do.channels.ecf_v1.adapters.signing.certificates import (
-    CERTIFICATION_AUTHORITY,
-    NOT_FOR_SIGNING,
-)
-from ledger_country_do.channels.ecf_v1.adapters.signing.profile import (
-    C14N,
-    ENVELOPED,
-    PROFILES,
-    RSA_SHA256,
-    SHA256,
-)
-from ledger_country_do.channels.ecf_v1.adapters.signing.signer import (
-    DocumentSignedError,
-    NotAnRsaKeyError,
-    SeedMalformedError,
-    SignerCertificateError,
-    UnsignableDocumentError,
-    sign_enveloped,
-)
+from ledger_country_do.channels.ecf_v1.adapters.signing.seeds import SeedMalformedError, require_seed
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import (
     INBOUND,
     STRICT,
     SignatureInvalidError,
     verify_enveloped,
 )
-from ledger_country_do.channels.ecf_v1.adapters.xml.parsing import DSIG, UnreadableDocumentError, texts
-from ledger_country_do_testing.pki import SIGNING, Authority, ec_key, organization, rsa_key
+from ledger_country_do_testing.pki import organization
 from ledger_country_do_testing.signatures import (
     OUTSIDE_ROOT,
     SHAPES,
@@ -50,34 +30,20 @@ from ledger_country_do_testing.signatures import (
     sign_with_signxml,
     verify_with_signxml,
 )
+from ledger_fiscal_kit.ports import MAX_SEED_BYTES
+from ledger_fiscal_kit.xml.dsig import (
+    C14N,
+    CERTIFICATION_AUTHORITY,
+    ENVELOPED,
+    NOT_FOR_SIGNING,
+    SigningPairError,
+    sign_enveloped,
+)
+from ledger_fiscal_kit.xml.hardened import XmlDocumentError, texts
+from ledger_testing.pki import SIGNING, Authority, ec_key, rsa_key
 lazy from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import VerificationProfile
-lazy from ledger_country_do_testing.pki import Issued
+lazy from ledger_testing.pki import Issued
 
-GOLDEN_C14N_INPUT: Final = (
-    b'<?xml version="1.0" encoding="utf-8"?>\n<?pi before?>\n<ECF  b="2" a="1&#9;&#10;x"'
-    b' xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
-    b"<Empty/><!-- gone --><T>Pe&#241;a &lt;12&quot;&gt; \r\n&amp;</T>"
-    b'<x:P xmlns:x="urn:x" xmlns="urn:d"><Q/></x:P></ECF>'
-)
-GOLDEN_C14N: Final = (
-    b'<?pi before?>\n<ECF xmlns:xsd="http://www.w3.org/2001/XMLSchema"'
-    b' xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" a="1&#x9;&#xA;x" b="2"><Empty></Empty>'
-    b'<T>Pe\xc3\xb1a &lt;12"&gt; \n&amp;</T><x:P xmlns="urn:d" xmlns:x="urn:x"><Q></Q></x:P></ECF>'
-)
-"""Inclusive C14N 1.0 without comments of the input above: attributes sorted, their whitespace as references,
-CR LF read as LF, empty elements written out, comments dropped, the PI before the root kept with its line
-break, namespace declarations first and sorted."""
-GOLDEN_SIGNATURE: Final = (
-    '<Signature xmlns="http://www.w3.org/2000/09/xmldsig#"><SignedInfo>'
-    '<CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315"/>'
-    '<SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>'
-    '<Reference URI=""><Transforms><Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/>'
-    '</Transforms><DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>'
-    "<DigestValue>{digest}</DigestValue></Reference></SignedInfo><SignatureValue>{value}</SignatureValue>"
-    "<KeyInfo><X509Data><X509Certificate>{certificate}</X509Certificate></X509Data></KeyInfo></Signature>"
-)
-"""DGII's shape (*Firmado de e-CF*), exactly, with its three values taken out."""
-VALUES: Final = re.compile(r"<(DigestValue|SignatureValue|X509Certificate)>([^<]*)<")
 ECF: Final = SHAPES["ecf"]
 RNC: Final = b"101850043"
 PROFILES_VERIFIED: Final = [STRICT, INBOUND]
@@ -94,8 +60,8 @@ ENCIPHERMENT_ONLY: Final = x509.KeyUsage(
 )
 
 
-def sign(issued: Issued, document: bytes, *, seed: bool = False) -> bytes:
-    return sign_enveloped(document, issued.key, issued.certificate, seed=seed)
+def sign(issued: Issued, document: bytes) -> bytes:
+    return sign_enveloped(document, issued.key, issued.certificate)
 
 
 def canonical(document: bytes) -> bytes:
@@ -129,38 +95,12 @@ def certificate(
     return builder.sign(key, hashes.SHA256())
 
 
-def test_the_profile_is_dgii_s_and_its_c14n_variant() -> None:
-    head = (("CanonicalizationMethod", C14N), ("SignatureMethod", RSA_SHA256), ("Transform", ENVELOPED))
-    assert {
-        (*head, ("DigestMethod", SHA256)),
-        (*head, ("Transform", C14N), ("DigestMethod", SHA256)),
-    } == PROFILES
-
-
-def test_the_signature_has_exactly_dgii_s_shape(issued: Issued) -> None:
-    signed = sign(issued, ECF)
-    found = re.search(rb"<Signature .*</Signature>", signed)
-    assert found is not None
-    element = found.group().decode()
-    values = dict(
-        zip(("digest", "value", "certificate"), [m.group(2) for m in VALUES.finditer(element)], strict=True)
-    )
-    assert element == GOLDEN_SIGNATURE.format(**values)
-    assert base64.b64decode(values["digest"]) == hashlib.sha256(canonical(ECF)).digest()
-    assert base64.b64decode(values["certificate"]) == issued.certificate.public_bytes(Encoding.DER)
-    assert signed.endswith(GOLDEN_SIGNATURE.format(**values).encode() + b"</ECF>")
-
-
-def test_the_canonical_form_is_c14n_1_0_inclusive_without_comments() -> None:
-    assert canonical(GOLDEN_C14N_INPUT) == GOLDEN_C14N
-
-
 @pytest.mark.parametrize("profile", PROFILES_VERIFIED)
 @pytest.mark.parametrize("shape", list(SHAPES))
 def test_our_verifier_accepts_our_signatures(
     issued: Issued, shape: str, profile: VerificationProfile
 ) -> None:
-    signed = sign(issued, SHAPES[shape], seed=shape == "seed")
+    signed = sign(issued, SHAPES[shape])
     verified = verify_enveloped(signed, profile)
     assert verified.certificate == issued.certificate
     assert verified.intermediates == ()
@@ -170,9 +110,7 @@ def test_our_verifier_accepts_our_signatures(
 
 @pytest.mark.parametrize("shape", [shape for shape in SHAPES if shape not in XMLSEC1_ONLY])
 def test_signxml_verifies_our_signatures(issued: Issued, shape: str) -> None:
-    assert verify_with_signxml(
-        sign(issued, SHAPES[shape], seed=shape == "seed"), trusted=[issued.certificate]
-    )
+    assert verify_with_signxml(sign(issued, SHAPES[shape]), trusted=[issued.certificate])
 
 
 @pytest.mark.parametrize("profile", PROFILES_VERIFIED)
@@ -383,9 +321,9 @@ def test_a_certificate_that_may_not_sign_signs_nothing(
     made = certificate(key, ca=ca, usage=usage)
     with pytest.raises(SignatureInvalidError, match=reason):
         verify_enveloped(forge(ECF, key, made), profile)
-    with pytest.raises(SignerCertificateError, match=reason) as caught:
+    with pytest.raises(SigningPairError, match=reason) as caught:
         sign_enveloped(ECF, key, made)
-    assert caught.value.code == "do_ecf_signer_certificate"
+    assert caught.value.code == "xml_signing_pair_refused"
 
 
 @pytest.mark.parametrize("profile", PROFILES_VERIFIED)
@@ -409,34 +347,6 @@ def test_a_subject_key_identifier_named_for_a_certificate_without_one_is_refused
         verify_enveloped(signed, INBOUND)
 
 
-def test_the_signer_signs_only_with_its_own_certificate_and_a_long_key(issued: Issued) -> None:
-    with pytest.raises(SignerCertificateError, match="not the signing key's"):
-        sign_enveloped(ECF, rsa_key(), issued.certificate)
-    with pytest.raises(SignerCertificateError, match="not the signing key's"):
-        sign_enveloped(ECF, rsa_key(), Authority.root().issue(organization(), key=ec_key()).certificate)
-    short = rsa_key(1024)
-    with pytest.raises(SignerCertificateError, match="shorter than 2048 bits"):
-        sign_enveloped(ECF, short, certificate(short))
-
-
-@pytest.mark.parametrize(
-    ("document", "reason"),
-    [
-        (ECF.replace(b"<Encabezado>", b"<!-- c --><Encabezado>"), "comment"),
-        (ECF.replace(b"<Encabezado>", b"<?pi in?><Encabezado>"), "comment"),
-        (b"<!-- before --><a/>", "comment"),
-        (b'<a xml:lang="es"/>', "xml: attribute"),
-    ],
-    ids=["comment", "pi-inside", "comment-outside", "xml-attribute"],
-)
-def test_what_the_strict_profile_would_refuse_is_not_signed(
-    issued: Issued, document: bytes, reason: str
-) -> None:
-    with pytest.raises(UnsignableDocumentError, match=reason) as caught:
-        sign(issued, document)
-    assert caught.value.code == "do_ecf_document_unsignable"
-
-
 def test_an_xml_attribute_on_the_root_is_strictly_refused(issued: Issued) -> None:
     assert isinstance(issued.key, RSAPrivateKey)
     signed = forge(b'<r xml:lang="es-DO"><a xml:space="preserve"> t </a></r>', issued.key, issued.certificate)
@@ -445,28 +355,27 @@ def test_an_xml_attribute_on_the_root_is_strictly_refused(issued: Issued) -> Non
     assert verify_enveloped(signed, INBOUND).certificate == issued.certificate
 
 
+def test_a_seed_is_dgii_s_semilla_model() -> None:
+    require_seed(SHAPES["seed"])
+
+
 @pytest.mark.parametrize(
-    ("document", "seed", "error"),
+    ("seed", "unreadable"),
     [
-        (b"<a>", False, UnreadableDocumentError),
-        (b'<!DOCTYPE a [<!ENTITY b "c">]><a>&b;</a>', False, UnreadableDocumentError),
-        (
-            b'<!DOCTYPE a SYSTEM "http://169.254.169.254/latest/meta-data/"><a/>',
-            False,
-            UnreadableDocumentError,
-        ),
-        (b'<?xml version="1.0" encoding="latin-1"?><a/>', False, UnreadableDocumentError),
-        (b"<SemillaModel><fecha/><valor/></SemillaModel>", True, SeedMalformedError),
-        (b"<Semilla><valor/><fecha/></Semilla>", True, SeedMalformedError),
-        (ECF, True, SeedMalformedError),
+        (b"<a>", True),
+        (b'<!DOCTYPE a [<!ENTITY b "c">]><SemillaModel>&b;</SemillaModel>', True),
+        (b'<?xml version="1.0" encoding="latin-1"?><SemillaModel/>', True),
+        (b"<SemillaModel><fecha/><valor/></SemillaModel>", False),
+        (b"<Semilla><valor/><fecha/></Semilla>", False),
+        (ECF, False),
+        (b"<SemillaModel><valor>" + b"v" * MAX_SEED_BYTES + b"</valor><fecha>f</fecha></SemillaModel>", True),
     ],
-    ids=["unclosed", "entity", "external-dtd", "latin-1", "seed-order", "seed-root", "ecf-as-seed"],
+    ids=["unclosed", "entity", "latin-1", "seed-order", "seed-root", "ecf-as-seed", "over-the-port-s-limit"],
 )
-def test_what_cannot_be_signed_is_refused_unread(
-    issued: Issued, document: bytes, *, seed: bool, error: type[Exception]
-) -> None:
-    with pytest.raises(error):
-        sign(issued, document, seed=seed)
+def test_what_is_not_a_seed_is_refused_before_it_is_signed(seed: bytes, *, unreadable: bool) -> None:
+    with pytest.raises(SeedMalformedError) as caught:
+        require_seed(seed)
+    assert isinstance(caught.value.__cause__, XmlDocumentError) is unreadable
 
 
 @pytest.mark.parametrize(
@@ -475,20 +384,8 @@ def test_what_cannot_be_signed_is_refused_unread(
     ids=["unclosed", "entity", "latin-1"],
 )
 def test_what_cannot_be_read_is_not_verified(document: bytes) -> None:
-    with pytest.raises(UnreadableDocumentError):
+    with pytest.raises(XmlDocumentError):
         verify_enveloped(document)
-
-
-def test_a_signed_document_is_not_signed_again(issued: Issued) -> None:
-    with pytest.raises(DocumentSignedError):
-        sign(issued, sign(issued, ECF))
-    with pytest.raises(DocumentSignedError):
-        sign(issued, f'<Signature xmlns="{DSIG}"/>'.encode())
-
-
-def test_only_an_rsa_key_signs(issued: Issued) -> None:
-    with pytest.raises(NotAnRsaKeyError):
-        sign_enveloped(ECF, ec_key(), issued.certificate)
 
 
 _NAMES: Final = st.sampled_from(["a", "b", "Item", "eNCF", "x-y", "z.1"])

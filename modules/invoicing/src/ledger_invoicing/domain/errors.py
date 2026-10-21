@@ -6,13 +6,15 @@ client's data. ``InvalidValueError`` (``ledger_kernel.errors``) is for a value o
 """
 
 from enum import StrEnum
-from typing import ClassVar
-lazy from collections.abc import Mapping
+from typing import ClassVar, Final
+lazy from collections.abc import Mapping, Sequence
 lazy from uuid import UUID
 
 from ledger_invoicing.domain.ids import INVOICE_PREFIX
 from ledger_kernel.errors import ConflictError, InvalidInputError, LedgerError, NotFoundError
 from ledger_kernel.ids import format_id
+lazy from ledger_invoicing.domain.fiscal import Detail
+lazy from ledger_invoicing.domain.objections import Objection
 
 
 def _public(invoice: UUID) -> str:
@@ -150,6 +152,18 @@ class FieldUnknownError(InvalidInputError):
         )
 
 
+class FieldUndeclaredInvalidError(InvalidInputError):
+    """A country field the regime does not declare (a channel's) that is not plain text, or objects of it.
+
+    Its name is the client's, so the message names the regime's namespace only.
+    """
+
+    code: ClassVar[str] = "field_undeclared_invalid"
+
+    def __init__(self, regime: str, requirement: str) -> None:
+        super().__init__(f"fiscal.{regime} holds a field the regime does not declare whose {requirement}")
+
+
 class FieldRequiredError(InvalidInputError):
     """A country field the company's regime requires is missing."""
 
@@ -250,17 +264,17 @@ class InvoiceNotIssuableError(ConflictError):
 
 
 class InvoiceNotVoidableError(ConflictError):
-    """Only an issued document that no channel accepted and no standing note corrects is voided.
+    """Only an issued document that no channel holds and no standing note corrects is voided.
 
-    An accepted one is corrected by a note; one a draft or issued note corrects keeps standing for it.
+    One a channel holds (numbered, submitted, accepted) is corrected by a credit note; one a draft or issued
+    note corrects keeps standing for it.
     """
 
     code: ClassVar[str] = "invoice_not_voidable"
 
     def __init__(self, invoice: UUID) -> None:
-        super().__init__(
-            f"invoice {_public(invoice)} is not issued, a channel accepted it, or a note corrects it"
-        )
+        held = "a fiscal channel holds it (correct it with a credit note)"
+        super().__init__(f"invoice {_public(invoice)} is not issued, {held}, or a note corrects it")
 
 
 class InvoiceVersionStaleError(ConflictError):
@@ -301,3 +315,41 @@ class RegimeMissingError(LedgerError):
 
     def __init__(self) -> None:
         super().__init__("no installed regime governs the company's jurisdiction")
+
+
+MAX_LISTED_OBJECTIONS: Final = 20
+"""The objections a problem lists (``errors[]``, §9.6); the rest are counted (``omitted_errors``)."""
+
+
+class DocumentInvalidError(InvalidInputError):
+    """What the document is issued through would refuse it: the ``IssuePolicy`` chain's objections (§8.5).
+
+    The problem lists them (``errors[]``: code, field, message, in chain order; at most
+    ``MAX_LISTED_OBJECTIONS``, the rest counted in ``omitted_errors``). Messages name rules, never values.
+    """
+
+    code: ClassVar[str] = "invalid_document"
+    objections: tuple[Objection, ...]
+
+    def __init__(self, objections: Sequence[Objection]) -> None:
+        count = len(objections)
+        rules = "rule" if count == 1 else "rules"
+        super().__init__(f"the document breaks {count} {rules} of the fiscal channels it is issued through")
+        self.objections = tuple(objections)
+
+    def problem_members(self) -> Mapping[str, Detail]:
+        """``errors``, each objection as ``{code, field, message}``, and how many were left out."""
+        listed: list[Detail] = [
+            {"code": objection.code, "field": objection.field, "message": objection.message}
+            for objection in self.objections[:MAX_LISTED_OBJECTIONS]
+        ]
+        return {"errors": listed, "omitted_errors": max(len(self.objections) - MAX_LISTED_OBJECTIONS, 0)}
+
+
+class RepresentationUnavailableError(NotFoundError):
+    """No ``Renderer`` renders the document for the channel asked (none is installed, or none answers)."""
+
+    code: ClassVar[str] = "representation_unavailable"
+
+    def __init__(self) -> None:
+        super().__init__("no fiscal channel renders this document")

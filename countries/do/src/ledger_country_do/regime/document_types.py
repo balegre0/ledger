@@ -1,8 +1,9 @@
-"""The ten e-CF types (FMT; spec §8.6.2): kind, direction, and whether the buyer's tax id is required.
+"""The ten e-CF types (FMT; spec §8.6.2): kind, direction, the buyer's tax id rule, corrections.
 
 ``requires_buyer_tax_id`` is what the e-CF schemas demand (``RNCComprador`` required in types 31, 41 and 45);
 for a purchase (41, 43, 47) the "buyer" block names the seller the company self-bills. ``test_xsd_pins``
-checks the table against DGII's vendored schemas. Corrections (which types a note may modify) are v2-M3's.
+checks the table against DGII's vendored schemas. A debit note (33) or a credit note (34) corrects a sales
+invoice: a 31, 32, 44, 45 or 46 (FMT, InformacionReferencia); never a purchase or another note.
 """
 
 from typing import Final
@@ -12,6 +13,8 @@ from ledger_kernel.regimes import Direction, DocumentKind, DocumentTypeDef, Loca
 
 TYPES_SOURCE: Final = FORMAT_ECF
 """Where the table comes from (the kernel's ``DocumentTypeDef`` cites none of its own)."""
+SALES_INVOICES: Final = ("31", "32", "44", "45", "46")
+"""The types a note corrects."""
 
 _I, _C, _D = DocumentKind.INVOICE, DocumentKind.CREDIT_NOTE, DocumentKind.DEBIT_NOTE
 _S, _P = Direction.SALES, Direction.PURCHASE
@@ -24,6 +27,7 @@ def _type(code: str, label: str, kind: DocumentKind, direction: Direction, *, bu
         kind=kind,
         direction=direction,
         requires_buyer_tax_id=buyer,
+        corrects=() if kind is DocumentKind.INVOICE else SALES_INVOICES,
     )
 
 

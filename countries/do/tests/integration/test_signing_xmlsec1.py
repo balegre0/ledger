@@ -6,12 +6,12 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding
 
-from ledger_country_do.channels.ecf_v1.adapters.signing.signer import sign_enveloped
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import INBOUND, verify_enveloped
-from ledger_country_do_testing.pki import Authority, pem
 from ledger_country_do_testing.signatures import SHAPES, forge, sign_with_signxml
 from ledger_country_do_testing.xmlsec import Xmlsec
-lazy from ledger_country_do_testing.pki import Issued
+from ledger_fiscal_kit.xml.dsig import sign_enveloped
+from ledger_testing.pki import Authority, pem
+lazy from ledger_testing.pki import Issued
 
 
 @pytest.fixture(scope="module")
@@ -24,7 +24,7 @@ def xmlsec() -> Iterator[Xmlsec]:
 def test_every_shape_we_sign_verifies_in_xmlsec1_with_its_chain(
     xmlsec: Xmlsec, authority: Authority, intermediate: Authority, issued: Issued, shape: str
 ) -> None:
-    signed = sign_enveloped(SHAPES[shape], issued.key, issued.certificate, seed=shape == "seed")
+    signed = sign_enveloped(SHAPES[shape], issued.key, issued.certificate)
     verdict = xmlsec.verify(
         signed,
         trusted=pem(authority.certificate),

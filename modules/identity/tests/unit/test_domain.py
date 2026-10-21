@@ -101,7 +101,18 @@ INVOICES_READ: Final = parse_permission("invoicing.invoices.read")
 INVOICES_CREATE: Final = parse_permission("invoicing.invoices.create")
 INVOICES_ISSUE: Final = parse_permission("invoicing.invoices.issue")
 INVOICES_VOID: Final = parse_permission("invoicing.invoices.void")
-"""invoicing's codes, as its manifest declares them: the generated table holds them for identity."""
+CERTIFICATES_READ: Final = parse_permission("signer.certificates.read")
+CERTIFICATES_MANAGE: Final = parse_permission("signer.certificates.manage")
+ENROLLMENTS_READ: Final = parse_permission("fiscal.enrollments.read")
+ENROLLMENTS_MANAGE: Final = parse_permission("fiscal.enrollments.manage")
+RANGES_READ: Final = parse_permission("do_ecf.ranges.read")
+RANGES_MANAGE: Final = parse_permission("do_ecf.ranges.manage")
+RANGES_VOID: Final = parse_permission("do_ecf.ranges.void")
+RECEIVED_READ: Final = parse_permission("do_ecf.received_documents.read")
+RECEIVED_MANAGE: Final = parse_permission("do_ecf.received_documents.manage")
+DELIVERIES_MANAGE: Final = parse_permission("do_ecf.deliveries.manage")
+"""invoicing's, signer's and fiscal's codes, and channel do-ecf-v1's, as their manifests declare them: the
+generated table holds them for identity."""
 
 NOW: Final = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
 LATER: Final = NOW + timedelta(hours=1)
@@ -215,17 +226,44 @@ def test_what_each_role_may_do() -> None:
         "invoicing.invoices.create",
         "invoicing.invoices.issue",
         "invoicing.invoices.void",
+        "signer.certificates.read",
+        "signer.certificates.manage",
+        "fiscal.enrollments.read",
+        "fiscal.enrollments.manage",
+        "do_ecf.ranges.read",
+        "do_ecf.ranges.manage",
+        "do_ecf.ranges.void",
+        "do_ecf.received_documents.read",
+        "do_ecf.received_documents.manage",
+        "do_ecf.deliveries.manage",
     } == EVERYTHING
-    issuing = frozenset({COMPANIES_READ, INVOICES_READ, INVOICES_CREATE, INVOICES_ISSUE})
+    issuing = frozenset(
+        {
+            COMPANIES_READ,
+            INVOICES_READ,
+            INVOICES_CREATE,
+            INVOICES_ISSUE,
+            CERTIFICATES_READ,
+            ENROLLMENTS_READ,
+            RANGES_READ,
+        }
+    )
     expected = {
         Role.OWNER: EVERYTHING,
         Role.ADMIN: EVERYTHING - {OWNERSHIP_MANAGE},
-        Role.ACCOUNTANT: issuing | {MEMBERSHIPS_READ, INVOICES_VOID},
+        Role.ACCOUNTANT: issuing
+        | {MEMBERSHIPS_READ, INVOICES_VOID, RECEIVED_READ, RECEIVED_MANAGE, DELIVERIES_MANAGE},
         Role.ISSUER: issuing,
-        Role.VIEWER: frozenset({COMPANIES_READ, INVOICES_READ}),
+        Role.VIEWER: frozenset(
+            {COMPANIES_READ, INVOICES_READ, CERTIFICATES_READ, ENROLLMENTS_READ, RANGES_READ, RECEIVED_READ}
+        ),
     }
     assert expected == PERMISSIONS
     assert {COMPANIES_MANAGE, MEMBERSHIPS_MANAGE} <= PERMISSIONS[Role.ADMIN]
+    assert [role for role in Role if CERTIFICATES_MANAGE in permissions_of(role)] == [Role.OWNER, Role.ADMIN]
+    assert [role for role in Role if ENROLLMENTS_MANAGE in permissions_of(role)] == [Role.OWNER, Role.ADMIN]
+    for managed in (RANGES_MANAGE, RANGES_VOID):
+        assert [role for role in Role if managed in permissions_of(role)] == [Role.OWNER, Role.ADMIN]
 
 
 def test_the_roles_grant_exactly_what_the_manifest_declares() -> None:
@@ -719,7 +757,7 @@ def test_other_services_may_let_a_member_of_a_deactivated_company_read_only() ->
     issuer = member(company, "3001", Role.ISSUER)
     assert permissions_in(company, issuer) == permissions_of(Role.ISSUER)
     assert permissions_in(company.deactivate(now=LATER)[0], issuer) == frozenset(
-        {COMPANIES_READ, INVOICES_READ}
+        {COMPANIES_READ, INVOICES_READ, CERTIFICATES_READ, ENROLLMENTS_READ, RANGES_READ}
     )
     owner, _ = found(company, FOUNDER, now=NOW)
     assert permissions_in(company.deactivate(now=LATER)[0], owner) == only_reads(EVERYTHING)

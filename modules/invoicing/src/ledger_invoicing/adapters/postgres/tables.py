@@ -9,7 +9,8 @@ invoicing's role reaches no other.
 A document is one row of ``invoices`` (its terms, dates, parties and totals), a row of ``invoice_lines`` per
 line (as written and as priced), a row of ``invoice_line_taxes`` per tax a line is charged (the rate resolved
 at the tax point, kept for ever) and a row of ``invoice_taxes`` per category of its totals (with the
-functional amounts of a document in another currency). Rows keep their place in the document
+functional amounts of a document in another currency). What each fiscal channel last reported of a document
+is a row of ``fiscal_statuses`` (the fiscal mirror). Rows keep their place in the document
 (``position``, ``place``): the order is the document's, never a collation's. Amounts are ``numeric`` with
 their own scale (§6.6) and dates are the document's legal dates, never instants.
 """
@@ -38,6 +39,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.schema import SchemaItem
 
+from ledger_invoicing.domain.fiscal import MAX_AUTHORITY_NUMBER, MAX_ENVIRONMENT, FiscalStatusName
 from ledger_invoicing.domain.invoice import InvoiceStatus
 from ledger_invoicing.domain.text import (
     MAX_ADDRESS,
@@ -66,6 +68,10 @@ TIME_ZONE_LENGTH: Final = 64
 """An IANA zone name, as identity keeps it."""
 TAX_SCHEME_LENGTH: Final = 34
 """The longest scheme key ``ledger_kernel.tax_ids`` reads: a country code, a dot and 31 characters."""
+CHANNEL_LENGTH: Final = 64
+"""A channel's key (``do-ecf-v1``), as manifests name it."""
+STATUS_LENGTH: Final = 32
+"""A fiscal status's word (``accepted_with_observations``)."""
 TENANT: Final = ("organization_id", "company_id", "mode")
 """What every row is scoped by, and what every key between rows carries."""
 
@@ -260,3 +266,33 @@ class InvoiceTaxRecord(InvoicingTable):
     tax: Mapped[Decimal] = mapped_column(Numeric())
     functional_base: Mapped[Decimal | None] = mapped_column(Numeric())
     functional_tax: Mapped[Decimal | None] = mapped_column(Numeric())
+
+
+class FiscalStatusRecord(InvoicingTable):
+    """The fiscal mirror: what a channel last reported of a document, one row per document and channel.
+
+    ``version`` is the channel's (a newer one replaces the row); ``details`` are the channel's words under the
+    regime (``regime``), shown on the wire and never read here.
+    """
+
+    __tablename__: str = "fiscal_statuses"
+    __table_args__: tuple[SchemaItem, ...] = (
+        _of_invoice("fiscal_statuses"),
+        _one_of("mode", Mode, name="ck_fiscal_statuses_mode"),
+        _one_of("status", FiscalStatusName, name="ck_fiscal_statuses_status"),
+        CheckConstraint("version > 0", name="ck_fiscal_statuses_version"),
+    )
+
+    organization_id: Mapped[UUID] = mapped_column(primary_key=True)
+    company_id: Mapped[UUID] = mapped_column(primary_key=True)
+    mode: Mapped[str] = mapped_column(String(WORD_LENGTH), primary_key=True)
+    invoice_id: Mapped[UUID] = mapped_column(primary_key=True)
+    channel: Mapped[str] = mapped_column(String(CHANNEL_LENGTH), primary_key=True)
+    environment: Mapped[str] = mapped_column(String(MAX_ENVIRONMENT))
+    status: Mapped[str] = mapped_column(String(STATUS_LENGTH))
+    version: Mapped[int] = mapped_column(BigInteger)
+    authority_number: Mapped[str | None] = mapped_column(String(MAX_AUTHORITY_NUMBER))
+    messages: Mapped[list[object]] = mapped_column(JSONB)
+    regime: Mapped[str] = mapped_column(String(REGIME_LENGTH))
+    details: Mapped[dict[str, object]] = mapped_column(JSONB)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

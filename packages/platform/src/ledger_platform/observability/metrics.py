@@ -9,13 +9,16 @@ import weakref
 from typing import Final
 lazy from collections.abc import Sequence
 
-from prometheus_client import Counter, Gauge
+from prometheus_client import Counter, Gauge, Histogram
 lazy from prometheus_client import CollectorRegistry
 
 _COUNTERS: Final[weakref.WeakKeyDictionary[CollectorRegistry, dict[str, Counter]]] = (
     weakref.WeakKeyDictionary()
 )
 _GAUGES: Final[weakref.WeakKeyDictionary[CollectorRegistry, dict[str, Gauge]]] = weakref.WeakKeyDictionary()
+_HISTOGRAMS: Final[weakref.WeakKeyDictionary[CollectorRegistry, dict[str, Histogram]]] = (
+    weakref.WeakKeyDictionary()
+)
 
 
 def counter(
@@ -39,4 +42,20 @@ def gauge(registry: CollectorRegistry | None, name: str, documentation: str, lab
     found = made.get(name)
     if found is None:
         found = made[name] = Gauge(name, documentation, labels, registry=registry)
+    return found
+
+
+def histogram(
+    registry: CollectorRegistry,
+    name: str,
+    documentation: str,
+    labels: Sequence[str],
+    *,
+    buckets: Sequence[float],
+) -> Histogram:
+    """The histogram ``name`` of ``registry`` with ``buckets`` (upper bounds), made on first use."""
+    made = _HISTOGRAMS.setdefault(registry, {})
+    found = made.get(name)
+    if found is None:
+        found = made[name] = Histogram(name, documentation, labels, registry=registry, buckets=buckets)
     return found

@@ -1,13 +1,17 @@
 """Where DGII answers each service, per environment (DT-DGII, 02-01-2026).
 
 A URL is a host, the environment's segment, the service and its resource:
-``https://ecf.dgii.gov.do/testecf/recepcion/api/facturaselectronicas``. The RFCE has a host of its own,
-``fc.dgii.gov.do``. CerteCF publishes neither ``consultatrackids`` nor ``consultadirectorio``. The live
+``https://ecf.dgii.gov.do/testecf/recepcion/api/facturaselectronicas``. The RFCE and its query
+(``consultarfce``) have a host of their own, ``fc.dgii.gov.do``. CerteCF publishes neither
+``consultatrackids``, ``anularrango`` nor ``consultadirectorio``: asked there, the client refuses before it
+sends anything (``ServiceNotInEnvironmentError``). The live
 environment is reached on DGII's own hosts only (``LiveHostRefusedError``), compared exactly: a fake can stand
 in for TesteCF and CerteCF, never for production. Every host is an origin and nothing more
 (``HostRefusedError``): no path, user, query or fragment, and ``https``, except a fake on this machine
 (``LOOPBACK``: 127.0.0.1, ::1, localhost), which may be plain ``http`` and, not being DGII's, never serves the
-live environment. DGII's paths ignore case; DT-DGII's lower-case spelling is used.
+live environment. The ``ecf`` host is also the audience of DGII's seeds (``DgiiHosts.audience``), so it must
+be one the signer can audit (fiscal-kit's ``is_audience``). DGII's paths ignore case; DT-DGII's lower-case
+spelling is used.
 """
 
 from dataclasses import dataclass
@@ -24,6 +28,7 @@ from ledger_country_do.channels.ecf_v1.domain.environments import (
 )
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfConflictError, EcfError
 from ledger_country_do.channels.ecf_v1.domain.printed import QrHosts
+from ledger_fiscal_kit.ports import is_audience
 
 
 class Service(StrEnum):
@@ -35,6 +40,9 @@ class Service(StrEnum):
     RESULT = "result"
     TRACK_IDS = "track_ids"
     RFCE = "rfce"
+    RFCE_QUERY = "rfce_query"
+    VOID_RANGES = "void_ranges"
+    APPROVAL = "approval"
     DIRECTORY = "directory"
 
 
@@ -46,10 +54,15 @@ PATHS: Final[Mapping[Service, str]] = MappingProxyType(
         Service.RESULT: "consultaresultado/api/consultas/estado",
         Service.TRACK_IDS: "consultatrackids/api/trackids/consulta",
         Service.RFCE: "recepcionfc/api/recepcion/ecf",
+        Service.RFCE_QUERY: "consultarfce/api/consultas/consulta",
+        Service.VOID_RANGES: "anulacionrangos/api/operaciones/anularrango",
+        Service.APPROVAL: "aprobacioncomercial/api/aprobacioncomercial",
         Service.DIRECTORY: "consultadirectorio/api/consultas/obtenerdirectorioporrnc",
     }
 )
-NOT_IN_CERTECF: Final = frozenset({Service.TRACK_IDS, Service.DIRECTORY})
+NOT_IN_CERTECF: Final = frozenset({Service.TRACK_IDS, Service.VOID_RANGES, Service.DIRECTORY})
+ON_FC: Final = frozenset({Service.RFCE, Service.RFCE_QUERY})
+"""The services DGII answers on its ``fc`` host."""
 
 
 class ServiceNotInEnvironmentError(EcfConflictError):
@@ -115,8 +128,13 @@ class DgiiHosts:
     fc: str = OFFICIAL_FC_HOST
 
     def __post_init__(self) -> None:
-        if not (_origin(self.ecf) and _origin(self.fc)):
+        if not (_origin(self.ecf) and _origin(self.fc) and is_audience(self.audience)):
             raise HostRefusedError
+
+    @property
+    def audience(self) -> str:
+        """DGII's seeds' audience: the ``ecf`` host, with its port if it names one (checked when built)."""
+        return urlsplit(self.ecf).netloc
 
     @property
     def official(self) -> bool:
@@ -134,7 +152,7 @@ class DgiiHosts:
             raise LiveHostRefusedError
         if not offered(service, environment):
             raise ServiceNotInEnvironmentError(service, environment)
-        host = self.fc if service is Service.RFCE else self.ecf
+        host = self.fc if service in ON_FC else self.ecf
         return f"{host}/{environment.value}/{PATHS[service]}"
 
 

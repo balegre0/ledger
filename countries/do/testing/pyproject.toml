@@ -3,11 +3,14 @@
 [project]
 name = "ledger-country-do-testing"
 version = "0.1.0"
-description = "Dev-only tools of the DO pack: a fake DGII from DGII's documentation, a test PKI, samples, the spike CLI."
+description = "Dev-only tools of the DO pack: a fake DGII from DGII's documentation, DO test subjects, samples, the spike CLI."
 requires-python = ">=3.15"
 dependencies = [
     "ledger-kernel",
+    "ledger-platform",
     "ledger-country-do",
+    "ledger-fiscal-kit",
+    "ledger-testing",
     "cryptography>=50.0.2",
     "granian>=2.8.4",
     "httpx>=0.28.1",
