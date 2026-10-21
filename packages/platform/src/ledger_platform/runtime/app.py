@@ -7,7 +7,9 @@ channels, with the ports modules provide and the archive the settings configure 
 bound as ``ArchivePort``), the app's request authentication and an ``OutboundHttp`` each; then merge what
 they handed back and check it against the manifests (every declared consumer and job is provided, nothing
 undeclared is: ``runtime.assembly``). Start
-(``asgi()``'s lifespan, or ``migrate()``): open what the role needs, nothing more.
+(``asgi()``'s lifespan, or ``migrate()``): open what the role needs, nothing more. A lifespan opens the
+archive first when the role assembles a channel (a store that holds connections is checked then: an app that
+cannot archive does not start; the signer never opens one), then the packages' resources.
 
 - ``api``: the routers of every module mounted in ``api`` (and the channels' public routes); the identity
   provider's keys as a resource. It refuses to start without the token settings.
@@ -502,8 +504,10 @@ class App:
         self._tracing.register_globally()
         opened: list[AbstractAsyncContextManager[object]] = []
         try:
+            opened_archive = self._assembled.archive
+            archive = () if opened_archive is None else (opened_archive,)  # before the channels that use it
             resources = [resource for member in self._assembled.members for resource in member.resources]
-            for resource in (*resources, *self._authentication.resources()):
+            for resource in (*archive, *resources, *self._authentication.resources()):
                 await resource.__aenter__()
                 opened.append(resource)
             if self._role in _LOOPS:

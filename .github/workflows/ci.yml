@@ -50,9 +50,11 @@ jobs:
           LEDGER_TEST_JOBS: "2"
         run: uv run poe check
       - name: Local infrastructure configuration
-        # The signer's callers' tokens first: compose refuses the stack without the files the script writes.
+        # The signer's callers' tokens and do-ecf-v1's development roots first: compose refuses the stack without
+        # the files the scripts write.
         run: |
           sh deploy/local/signer/tokens.sh
+          sh deploy/local/do/roots.sh
           docker compose -f deploy/local/compose.yaml config --quiet
           docker compose -f deploy/local/compose.yaml --profile zitadel config --quiet
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1

@@ -1,4 +1,7 @@
-"""``ledger-migrate`` on fresh databases: every installed schema, named by the manifests, ends at its head."""
+"""``ledger-migrate`` on fresh databases: every installed schema, named by the manifests, ends at its head.
+
+Modules' and channels' alike: a country's channel owns a schema of its own (do-ecf-v1, ``do_ecf``).
+"""
 
 import psycopg
 import pytest
@@ -9,7 +12,8 @@ from ledger_app_migrate import main
 from ledger_platform._manifest import MANIFEST as PLATFORM
 from ledger_platform.config.settings import Settings
 from ledger_platform.runtime.app import App, DirectUrlMissingError
-from ledger_platform.runtime.packs import load_modules
+from ledger_platform.runtime.packs import Channels, load_modules
+from ledger_platform.runtime.registries import Regimes
 lazy from ledger_testing.postgres import PostgresServer
 
 _VERSION = TypeAdapter(tuple[str])
@@ -33,7 +37,12 @@ def heads() -> dict[str, str]:
 @pytest.mark.usefixtures("environment")
 def test_migrate_brings_every_installed_schema_to_head(fresh: str, postgres: PostgresServer) -> None:
     expected = heads()
-    named = {PLATFORM.schema_name, *(module.manifest.schema_name for module in load_modules())}
+    channels = Channels.load(Regimes.load()).packs
+    named = {
+        PLATFORM.schema_name,
+        *(module.manifest.schema_name for module in load_modules()),
+        *(pack.entry.schema_name for pack in channels),
+    }
     assert set(expected) == named  # every schema a manifest names, none more
     assert main.main() == 0
     assert {schema: version(postgres, fresh, schema) for schema in expected} == expected

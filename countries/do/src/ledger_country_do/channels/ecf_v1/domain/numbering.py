@@ -10,6 +10,11 @@ that day: it expires with its range.
 The repository applies the choice under the series' row lock, in the unit that records the document: it
 deletes the released number taken, or moves its range's ``next`` on.
 
+**Registration** (``authorized``): a range is DGII's authorization as the company enters it, numbered from its
+first number on. DGII dates every type's ranges but may leave the consumer invoice's and the credit note's
+(32, 34) undated (``UNDATED_TYPES``; TesteCF dates them all); no number may be shared with a range of its
+series, whatever its state (a voided range's numbers stay voided).
+
 **Accounting** (``accounting_holds``): every number of ``[first, next)`` has exactly one fate: used by a
 document neither rejected nor voided, burned by a rejection, released, or voided by an accepted ANECF; and no
 number of the range from ``next`` on has any.
@@ -17,17 +22,16 @@ number of the range from ``next`` on has any.
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import ClassVar, final
+from typing import ClassVar, Final, final
 lazy from collections.abc import Sequence
 lazy from collections.abc import Set as AbstractSet
 lazy from datetime import date, datetime
 lazy from uuid import UUID
 
-from ledger_country_do.channels.ecf_v1.domain.encf import MAX_SEQUENCE, Encf
+from ledger_country_do.channels.ecf_v1.domain.encf import MAX_SEQUENCE, EcfType, Encf
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfConflictError, EcfInvalidError
 from ledger_country_do.channels.ecf_v1.domain.notation import local_date, require_aware
 from ledger_country_do.channels.ecf_v1.domain.polling import RECEIPT_TOLERANCE
-lazy from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
 
 
 class RangeStatus(StrEnum):
@@ -56,6 +60,30 @@ class NoNumberAvailableError(EcfConflictError):
 
     def __init__(self, ecf_type: EcfType) -> None:
         super().__init__(f"no e-NCF of type {ecf_type} is available: register a DGII-authorized range")
+
+
+UNDATED_TYPES: Final = frozenset({EcfType.CONSUMER_INVOICE, EcfType.CREDIT_NOTE})
+"""The types DGII may authorize without an expiry (32, 34): every other range states its last day."""
+
+
+class RangeExpiryRequiredError(EcfInvalidError):
+    """A range of a dated type registered without its last day."""
+
+    code: ClassVar[str] = "do_ecf_range_expiry_required"
+
+    def __init__(self, ecf_type: EcfType) -> None:
+        super().__init__(f"a range of type {ecf_type.value} needs the day it expires, as DGII authorized it")
+
+
+class RangeOverlapsError(EcfConflictError):
+    """A range that shares a number with one its series holds: DGII authorizes a number once."""
+
+    code: ClassVar[str] = "do_ecf_range_overlaps"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "the range shares numbers with a range already registered for its type and environment"
+        )
 
 
 @final
@@ -153,6 +181,41 @@ def choose(
                 released=False,
             )
     raise NoNumberAvailableError(ecf_type)
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Authorization:
+    """A range as DGII authorized it: for one e-CF type, from ``first`` to ``last``, until ``expires_on``."""
+
+    ecf_type: EcfType
+    first: int
+    last: int
+    expires_on: date | None
+    """Its last day, in Santo Domingo; ``None`` only for an undated type (``UNDATED_TYPES``)."""
+
+
+def authorized(authorization: Authorization, *, range_id: UUID, series: Sequence[RangeState]) -> RangeState:
+    """``authorization`` registered as ``range_id`` in a series holding ``series``: active, from its first on.
+
+    ``RangeExpiryRequiredError`` without a day for a dated type; ``RangeInvalidError`` for numbers out of
+    order or bounds; ``RangeOverlapsError`` when a number is one of a range of the same type in ``series``.
+    """
+    ecf_type, first, last = authorization.ecf_type, authorization.first, authorization.last
+    if authorization.expires_on is None and ecf_type not in UNDATED_TYPES:
+        raise RangeExpiryRequiredError(ecf_type)
+    registered = RangeState(
+        id=range_id,
+        ecf_type=ecf_type,
+        first=first,
+        last=last,
+        next=first,
+        expires_on=authorization.expires_on,
+        status=RangeStatus.ACTIVE,
+    )
+    if overlaps((first, last), [each for each in series if each.ecf_type is ecf_type]):
+        raise RangeOverlapsError
+    return registered
 
 
 def overlaps(new: tuple[int, int], existing: Sequence[RangeState]) -> bool:

@@ -7,6 +7,7 @@ needs it: the tests use a local OpenID provider of their own (`ledger_testing.is
 
 ```sh
 sh deploy/local/signer/tokens.sh                                                      # once: the signer's tokens
+sh deploy/local/do/roots.sh                                                           # once: the worker's roots
 docker compose -f deploy/local/compose.yaml --profile zitadel up -d --wait --build   # the first start takes a minute
 sh deploy/local/zitadel/bootstrap.sh                                                  # again whenever you like
 docker compose -f deploy/local/compose.yaml up -d api                                 # the api takes the new audience

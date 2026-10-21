@@ -40,8 +40,11 @@ def test_a_server_record_is_a_line_of_the_app_s_format(capsys: pytest.CaptureFix
 
 
 @pytest.fixture
-def environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """What both served roles need: the api's token settings, the worker's direct URL, a host port."""
+def environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """What both served roles need: the api's token settings, the worker's direct URL, a host port, and the
+    archive the workspace's channel reads (nothing is archived: no app starts)."""
+    monkeypatch.setenv("LEDGER_ARCHIVE_BACKEND", "file")
+    monkeypatch.setenv("LEDGER_ARCHIVE_PATH", str(tmp_path / "archive"))
     monkeypatch.setenv("LEDGER_ENVIRONMENT", "test")
     monkeypatch.setenv("LEDGER_DATABASE_URL", URL)
     monkeypatch.setenv("LEDGER_DATABASE_DIRECT_URL", URL)
@@ -64,7 +67,12 @@ def test_the_api_factory_builds_the_api_app_without_connecting() -> None:
 
 
 @pytest.mark.usefixtures("environment")
-def test_the_worker_factory_builds_the_worker_app_without_connecting() -> None:
+def test_the_worker_factory_builds_the_worker_app_without_connecting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The workspace's DO channel needs, in the worker, the roots counterparties chain to: the deployment's
+    (read when the worker starts, never while it is built)."""
+    monkeypatch.setenv("LEDGER_DO_ECF_TRUSTED_ROOTS", str(tmp_path / "roots.pem"))
     app = serving.worker()
     assert (app.title, app.version) == ("ledger-worker", version("ledger-app-worker"))
     assert {"/livez", "/readyz", "/metrics"} <= paths(app)

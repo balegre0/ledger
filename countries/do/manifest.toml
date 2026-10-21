@@ -10,7 +10,8 @@ owners = ["@balegre0"]
 # is the platform's) until a channel (v2-M3) brings one.
 [dependencies]
 packages = ["kernel", "platform", "fiscal-kit"]
-python = ["cryptography>=50.0.2", "httpx>=0.28.1", "lxml>=6.1.3", "pydantic>=2.14.1"]
+python = ["alembic>=1.20.0", "cryptography>=50.0.2", "fastapi>=0.143.0", "httpx>=0.28.1", "lxml>=6.1.3",
+          "pydantic>=2.14.1", "pydantic-settings>=2.15.0", "sqlalchemy>=2.1.4"]
 test = ["signxml>=5.1.0", "types-lxml>=2026.2.16", "xmlschema>=4.3.2"]
 
 [country]
@@ -20,7 +21,76 @@ currencies = ["DOP"]
 time_zone = "America/Santo_Domingo"
 authority = { name = "Dirección General de Impuestos Internos", short = "DGII", url = "https://dgii.gov.do" }
 
-# The channel do-ecf-v1 is a library until it has an assembly and a schema (v2-M3): no [[channels]] entry yet.
 [[regimes]]
 key = "do"
 entry_point = "ledger_country_do.regime:REGIME"
+
+# Channel do-ecf-v1 (spec §4.3, §8.6): DGII's e-CF. Its jobs, schedules and consumers are declared by the tasks
+# that hand their handlers (an assembly must provide each one its entry declares).
+[[channels]]
+key = "do-ecf-v1"
+entry_point = "ledger_country_do.channels.ecf_v1.assembly:CHANNEL"
+schema = "do_ecf"
+valid_from = "2019-01-01"
+environments = ["testecf", "certecf", "ecf"]
+live_environments = ["ecf"]
+document_kinds = ["invoice", "credit_note", "debit_note"]
+directions = ["sales", "purchase"]
+http_prefixes = ["/v1/do"]
+tier = "bronze"
+settings = true                      # LEDGER_DO_ECF_*
+
+[[channels.ids]]
+prefix = "rng"
+resource = "numbering_range"
+
+[[channels.ids]]
+prefix = "anl"
+resource = "range_void"
+
+[[channels.ids]]
+prefix = "rdoc"
+resource = "received_document"
+
+[[channels.permissions]]
+code = "do_ecf.ranges.read"
+summary = "See the company's DGII-authorized e-NCF ranges."
+roles = ["owner", "admin", "accountant", "issuer", "viewer"]
+
+[[channels.permissions]]
+code = "do_ecf.ranges.manage"
+summary = "Register DGII-authorized e-NCF ranges."
+roles = ["owner", "admin"]
+
+[[channels.permissions]]
+code = "do_ecf.ranges.void"
+summary = "Void unused e-NCF before DGII."
+roles = ["owner", "admin"]
+
+[[channels.permissions]]
+code = "do_ecf.received_documents.read"
+summary = "See the e-CF other emitters sent the company."
+roles = ["owner", "admin", "accountant", "viewer"]
+
+[[channels.permissions]]
+code = "do_ecf.received_documents.manage"
+summary = "Approve or reject received e-CF commercially."
+roles = ["owner", "admin", "accountant"]
+
+[[channels.permissions]]
+code = "do_ecf.deliveries.manage"
+summary = "Retry a delivery to a buyer; choose whether to authenticate with buyers."
+roles = ["owner", "admin", "accountant"]
+
+[[channels.events.publishes]]
+type = "fiscal_channel.document.updated"
+version = 1
+
+[[channels.events.publishes]]
+type = "fiscal_channel.received_document.recorded"
+version = 1
+public = "received_document.created"
+
+[[channels.events.publishes]]
+type = "fiscal_channel.requirements.changed"
+version = 1

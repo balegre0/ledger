@@ -55,6 +55,7 @@ the local stack from it.
 
 ```bash
 sh deploy/local/signer/tokens.sh                                    # once: the signer's callers' tokens (git ignores them)
+sh deploy/local/do/roots.sh                                         # once: do-ecf-v1's development root (the worker's)
 docker compose -f deploy/local/compose.yaml up -d --build --wait   # postgres, migrate, api, worker, signer
 docker compose -f deploy/local/compose.yaml down -v                 # stop and delete the data (and the signer's KMS key)
 ```

@@ -23,7 +23,7 @@ from ledger_devtools.workspace import CUSTODY, HTTP_ADAPTER, KEY_LIBRARY, MANIFE
 from ledger_platform.config.manifest import PackageKind
 from ledger_platform.config.names import PLATFORM
 from ledger_platform.config.settings import SETTINGS_GROUP
-lazy from ledger_devtools.openapi import api_document, openapi_text, require_installed
+lazy from ledger_devtools.openapi import api_document, api_prefixes, openapi_text, require_installed
 lazy from ledger_devtools.workspace import Package, Workspace
 
 GENERATED_HEADER: Final = (
@@ -72,10 +72,13 @@ _INNER: Final = ("domain", "application", "adapters")
 """A module's layers an app never imports (contract 14)."""
 _PURE: Final = ("domain", "events")
 """A module's layers that import nothing but the kernel and the standard library (contract 11)."""
-_CHANNEL_LAYERS: Final = ("adapters", "application", "domain")
-"""A channel's layers, top to bottom (§4.6 contract 10)."""
+_CHANNEL_LAYERS: Final = ("assembly", "settings", "adapters", "application", "domain")
+"""A channel's layers, top to bottom (§4.6 contract 10): its assembly (the ``ChannelPack``) and its settings
+section above the three layers every package has, as a module's assembly is above its own."""
 _CHANNEL_PURE: Final = ("application", "domain")
 """A channel's layers that know no third party (§4.6 contract 11)."""
+_CHANNEL_MIGRATIONS: Final = ("adapters", "postgres", "migrations")
+"""Where a channel's revisions are, under its package (``channels/<channel>/``)."""
 _KIT: Final = "ledger_fiscal_kit"
 _KIT_VALUES: Final = ("drafts", "objections", "status")
 """fiscal-kit's value types a channel's pure layers import: the kernel and the standard library only."""
@@ -106,12 +109,23 @@ def has_manifest_module(package: Package) -> bool:
     return package.kind is PackageKind.MODULE or manifest.schema_name is not None or bool(manifest.channels)
 
 
-def _migrations_directory(package: Package) -> str | None:
+def _migrations_directories(package: Package, workspace: Workspace) -> list[str]:
+    """Where ``package``'s revisions are: its schema's, or each of its channels' on disk (a country's).
+
+    Alembic loads a revision by its path, not as a module of the package: coverage measures them by path.
+    """
+    if package.kind is PackageKind.COUNTRY:
+        channels = package.source / "channels"
+        return sorted(
+            path.as_posix()
+            for path in workspace.seen.directories
+            if path.parts[-3:] == _CHANNEL_MIGRATIONS and path.parent.parent.parent.parent == channels
+        )
     if package.manifest.schema_name is None:
-        return None
+        return []
     if package.kind is PackageKind.PACKAGE:
-        return (package.source / "data" / "revisions").as_posix()
-    return (package.source / "adapters" / "postgres" / "migrations").as_posix()
+        return [(package.source / "data" / "revisions").as_posix()]
+    return [(package.source / "adapters" / "postgres" / "migrations").as_posix()]
 
 
 def _entry_points(group: str, entries: Sequence[tuple[str, str]]) -> str | None:
@@ -211,9 +225,9 @@ def _coverage(package: Package, workspace: Workspace) -> str:
         '[tool.coverage.run]\nbranch = true\ncore = "sysmon"\n'
         f"source_pkgs = [{_string(package.import_name)}]\n"
     )
-    migrations = _migrations_directory(package)
-    if migrations is not None:
-        text += f"source = [{_string(migrations)}]\n"
+    migrations = _migrations_directories(package, workspace)
+    if migrations:
+        text += f"source = [{', '.join(_string(directory) for directory in migrations)}]\n"
     served = package.kind is PackageKind.MODULE and any(
         contract.module == package.name for contract in contracts(workspace.seen.files)
     )
@@ -476,7 +490,11 @@ def _channel_contracts(facts: _Facts, country: Package) -> Iterator[str | None]:
     allowed = {country.import_name, "ledger_kernel", _KIT}
     for channel in _channels(facts, country):
         container = f"{country.import_name}.channels.{channel}"
-        present = [layer for layer in _CHANNEL_LAYERS if (root / channel / layer).is_dir()]
+        present = [
+            layer
+            for layer in _CHANNEL_LAYERS
+            if (root / channel / layer).is_dir() or (root / channel / f"{layer}.py").is_file()
+        ]
         yield _contract(
             f"{country.name}-channel-{channel}-layers",
             f"Channel {channel} of {country.name} is layered",
@@ -704,11 +722,12 @@ def importlinter_text(workspace: Workspace) -> str:
 
 
 def mounted(workspace: Workspace) -> list[Package]:
-    """The modules whose routes the ``api`` app mounts: each has an OpenAPI snapshot."""
+    """The packages whose routes the ``api`` app mounts, each with an OpenAPI snapshot.
+
+    The modules mounted there, and the countries whose channels have public routes (``api`` mounts those).
+    """
     return [
-        module
-        for module in workspace.modules
-        if module.manifest.http is not None and "api" in module.manifest.http.mounted_in
+        package for package in (*workspace.modules, *workspace.countries) if api_prefixes(package.manifest)
     ]
 
 
@@ -737,12 +756,12 @@ def static_targets(workspace: Workspace) -> dict[Path, str]:
 
 
 def openapi_targets(workspace: Workspace, document: Callable[[], Mapping[str, object]]) -> dict[Path, str]:
-    """Each mounted module's ``openapi.json``, from ``document`` (the ``api`` app's), called if one is."""
-    modules = mounted(workspace)
-    if not modules:
+    """Each mounted package's ``openapi.json``, from ``document`` (the ``api`` app's), called if one is."""
+    packages = mounted(workspace)
+    if not packages:
         return {}
     whole = document()
-    return {module.directory / "openapi.json": openapi_text(module, whole) for module in modules}
+    return {package.directory / "openapi.json": openapi_text(package, whole) for package in packages}
 
 
 def targets(

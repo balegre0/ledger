@@ -92,6 +92,7 @@ from ledger_platform.blobs.store import (
     BlobNotFoundError,
     BlobRecordCorruptError,
     BlobStoreUnavailableError,
+    ConnectedStore,
     ImmutableStore,
     ObjectConflictError,
     StoredObject,
@@ -326,7 +327,7 @@ def _require_stored(found: HeadObjectOutputTypeDef, checksum: str) -> None:
 
 
 @final
-class S3ImmutableStore(ImmutableStore):
+class S3ImmutableStore(ImmutableStore, ConnectedStore):
     """Objects in ``bucket`` under compliance lock, written once (see the module).
 
     ``client_factory`` makes the client on first use (``s3_client`` with the settings' region and endpoint;
@@ -380,6 +381,7 @@ class S3ImmutableStore(ImmutableStore):
         """The bucket the objects are in."""
         return self._bucket
 
+    @override
     async def check(self) -> None:
         """Make the client and prove the bucket has object lock enabled, once: what a start may await.
 
@@ -388,6 +390,7 @@ class S3ImmutableStore(ImmutableStore):
         """
         await self._connected()
 
+    @override
     async def aclose(self) -> None:
         """Stop the store's threads (once the requests in flight end) and close its client; idempotent.
 

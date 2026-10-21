@@ -16,8 +16,14 @@ channel `do-ecf-v1` (DGII's e-CF: XML, schemas, signature, DGII's web services, 
 - **Binding rule for every caller of `Emitter.send`** (v2-M3b's advance job included): `send` parks on every
   pack error; any other exception escaping it is a defect whose outcome is **unknown**: the document may be at
   DGII, so it is never sent again, only resumed as a parked one (track ids or `consultarfce` first).
+- The channel is assembled (`channels/ecf_v1/assembly.py`, entry point `ledger.countries.channels: do-ecf-v1`):
+  schema `do_ecf` (numbering series, ranges and released numbers; documents come with issuing), settings
+  `LEDGER_DO_ECF_*` (`settings.py`: DGII's hosts and waits, trusted roots, test stand-ins, the receiver's URL),
+  the public routes under `/v1/do` (`numbering_ranges`; snapshot in `openapi.json`) and what an enrollment
+  requires (`certificate`, `numbering_range`, `receiver_url`). Until issuing is built, every other `Channel`
+  method is `do_ecf_not_ready`.
 - [`docs/runbooks/do/testecf-spike.md`](../../docs/runbooks/do/testecf-spike.md): running the spike against
   DGII's TesteCF; [`docs/spike-findings.md`](docs/spike-findings.md): what it settled.
 
-Built by the DGII spike (`docs/superpowers/plans/2026-10-13-v2-dgii-spike.md`); the runtime loads its regime,
-no app assembles its channel yet (v2-M3).
+Built by the DGII spike (`docs/superpowers/plans/2026-10-13-v2-dgii-spike.md`), assembled by v2-M3b
+(`docs/superpowers/plans/2026-10-19-v2-m3b-fiscal.md`).

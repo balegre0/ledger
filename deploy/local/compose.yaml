@@ -1,5 +1,6 @@
 # The local stack: PostgreSQL, the migrate job, the api, the worker and the signer, and Zitadel behind a profile.
-# Before the first `up`: `sh deploy/local/signer/tokens.sh` (without the signer's file compose refuses the stack).
+# Before the first `up`: `sh deploy/local/signer/tokens.sh` (without the signer's file compose refuses the stack)
+# and `sh deploy/local/do/roots.sh` (the worker's trusted roots for do-ecf-v1, mounted read-only).
 #
 # What an app running on the host is configured with (the LEDGER_* variables of Settings), beside ledger.env's:
 #   LEDGER_DATABASE_URL=postgresql+psycopg://ledger_app:ledger_app@127.0.0.1:5432/ledger (or LEDGER_POSTGRES_PORT)
@@ -119,6 +120,11 @@ services:
     environment:
       LEDGER_DATABASE_DIRECT_URL: postgresql+psycopg://ledger_app:ledger_app@postgres:5432/ledger
       LEDGER_SIGNER_ADDRESS: signer:50051
+      LEDGER_DO_ECF_TRUSTED_ROOTS: /run/ledger/do-ecf/roots.pem
+    volumes:
+      # do-ecf-v1's trusted roots, which the worker requires: do/roots.sh writes a development root (local only;
+      # a deployment's roots are the owner's, Owner item 7). Missing, compose refuses the stack.
+      - {type: bind, source: ./do/.local/roots.pem, target: /run/ledger/do-ecf/roots.pem, read_only: true, bind: {create_host_path: false}}
     ports: ["127.0.0.1:${LEDGER_WORKER_PORT:-8101}:8000"]
     networks: [default, signer]
     stop_grace_period: 40s

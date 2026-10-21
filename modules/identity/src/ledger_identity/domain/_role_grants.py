@@ -12,6 +12,12 @@ ROLE_GRANTS: Final = MappingProxyType(
     {
         Role.OWNER: frozenset(
             {
+                Permission("do_ecf.deliveries.manage"),
+                Permission("do_ecf.ranges.manage"),
+                Permission("do_ecf.ranges.read"),
+                Permission("do_ecf.ranges.void"),
+                Permission("do_ecf.received_documents.manage"),
+                Permission("do_ecf.received_documents.read"),
                 Permission("fiscal.enrollments.manage"),
                 Permission("fiscal.enrollments.read"),
                 Permission("identity.companies.manage"),
@@ -29,6 +35,12 @@ ROLE_GRANTS: Final = MappingProxyType(
         ),
         Role.ADMIN: frozenset(
             {
+                Permission("do_ecf.deliveries.manage"),
+                Permission("do_ecf.ranges.manage"),
+                Permission("do_ecf.ranges.read"),
+                Permission("do_ecf.ranges.void"),
+                Permission("do_ecf.received_documents.manage"),
+                Permission("do_ecf.received_documents.read"),
                 Permission("fiscal.enrollments.manage"),
                 Permission("fiscal.enrollments.read"),
                 Permission("identity.companies.manage"),
@@ -45,6 +57,10 @@ ROLE_GRANTS: Final = MappingProxyType(
         ),
         Role.ACCOUNTANT: frozenset(
             {
+                Permission("do_ecf.deliveries.manage"),
+                Permission("do_ecf.ranges.read"),
+                Permission("do_ecf.received_documents.manage"),
+                Permission("do_ecf.received_documents.read"),
                 Permission("fiscal.enrollments.read"),
                 Permission("identity.companies.read"),
                 Permission("identity.memberships.read"),
@@ -57,6 +73,7 @@ ROLE_GRANTS: Final = MappingProxyType(
         ),
         Role.ISSUER: frozenset(
             {
+                Permission("do_ecf.ranges.read"),
                 Permission("fiscal.enrollments.read"),
                 Permission("identity.companies.read"),
                 Permission("invoicing.invoices.create"),
@@ -67,6 +84,8 @@ ROLE_GRANTS: Final = MappingProxyType(
         ),
         Role.VIEWER: frozenset(
             {
+                Permission("do_ecf.ranges.read"),
+                Permission("do_ecf.received_documents.read"),
                 Permission("fiscal.enrollments.read"),
                 Permission("identity.companies.read"),
                 Permission("invoicing.invoices.read"),

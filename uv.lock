@@ -800,24 +800,32 @@ name = "ledger-country-do"
 version = "0.1.0"
 source = { editable = "countries/do" }
 dependencies = [
+    { name = "alembic" },
     { name = "cryptography" },
+    { name = "fastapi" },
     { name = "httpx" },
     { name = "ledger-fiscal-kit" },
     { name = "ledger-kernel" },
     { name = "ledger-platform" },
     { name = "lxml" },
     { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "sqlalchemy" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "alembic", specifier = ">=1.20.0" },
     { name = "cryptography", specifier = ">=50.0.2" },
+    { name = "fastapi", specifier = ">=0.143.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "ledger-fiscal-kit", editable = "packages/fiscal-kit" },
     { name = "ledger-kernel", editable = "packages/kernel" },
     { name = "ledger-platform", editable = "packages/platform" },
     { name = "lxml", specifier = ">=6.1.3" },
     { name = "pydantic", specifier = ">=2.14.1" },
+    { name = "pydantic-settings", specifier = ">=2.15.0" },
+    { name = "sqlalchemy", specifier = ">=2.1.4" },
 ]
 
 [[package]]

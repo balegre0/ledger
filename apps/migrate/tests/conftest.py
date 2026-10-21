@@ -13,8 +13,8 @@ from ledger_testing.modules import installed_schemas
 lazy from ledger_testing.postgres import PostgresServer, Template, WorkerDatabase
 
 INSTALLED: Final = installed_schemas()
-"""The schemas of every package installed here, from their manifests: the platform's, then each module's; a
-module isolated in the signer's role has its schema ``ledger_signer``'s, as in production."""
+"""The schemas of every package installed here, from their manifests: the platform's, each module's, then each
+channel's; a module isolated in the signer's role has its schema ``ledger_signer``'s, as in production."""
 
 
 def pytest_ledger_template(template: Template) -> None:

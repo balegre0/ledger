@@ -28,6 +28,9 @@ from ledger_kernel.errors import (
 )
 
 PACKAGES: Final = ("ledger_country_do", "ledger_country_do_testing")
+SETTINGS: Final = "ledger_country_do.channels.ecf_v1.settings"
+ALEMBIC_ENVIRONMENT: Final = ".migrations.env"
+"""A schema's migration environment: importing it runs the migrations."""
 
 
 def declared() -> set[type[BaseException]]:
@@ -35,7 +38,8 @@ def declared() -> set[type[BaseException]]:
     for package in PACKAGES:
         root = importlib.import_module(package)
         for found in pkgutil.walk_packages(root.__path__, prefix=f"{package}."):
-            importlib.import_module(found.name)
+            if not found.name.endswith(ALEMBIC_ENVIRONMENT):  # Alembic's to run, never to import
+                importlib.import_module(found.name)
     pending: list[type[BaseException]] = [BaseException]
     seen: set[type[BaseException]] = set()
     while pending:
@@ -46,6 +50,12 @@ def declared() -> set[type[BaseException]]:
     return {error for error in seen if error.__module__.partition(".")[0] in PACKAGES}
 
 
+def is_settings_refusal(error: type[BaseException]) -> bool:
+    """A refusal of the channel's settings section: a ``ValueError`` pydantic turns into the section's
+    ``ValidationError`` (naming the setting, never its value), as the platform's settings refuse theirs."""
+    return error.__module__ == SETTINGS and issubclass(error, ValueError)
+
+
 def test_every_error_of_the_pack_is_a_ledger_error() -> None:
     errors = declared()
     assert len(errors) > 50
@@ -53,10 +63,11 @@ def test_every_error_of_the_pack_is_a_ledger_error() -> None:
         sorted(
             f"{error.__module__}.{error.__qualname__}"
             for error in errors
-            if not issubclass(error, LedgerError)
+            if not issubclass(error, LedgerError) and not is_settings_refusal(error)
         )
         == []
     )
+    assert sum(is_settings_refusal(error) for error in errors) == 3
 
 
 @pytest.mark.parametrize(

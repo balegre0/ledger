@@ -9,6 +9,7 @@ client production makes (``s3_client``), its credentials found by AWS's chain in
 import base64
 import hashlib
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from functools import partial
 from typing import Final, final, override
 lazy from collections.abc import AsyncGenerator, Callable
@@ -18,6 +19,9 @@ import pytest
 from botocore.exceptions import ClientError
 from pydantic import SecretStr
 
+from ledger_kernel.jurisdiction import CountryCode, Jurisdiction
+from ledger_kernel.money import Currency, RoundingMode
+from ledger_kernel.regimes import Locale, RegimeDef, RegimeKey, RoundingPoint, RoundingRule, Source
 from ledger_platform.blobs.s3 import (
     RETENTION_METADATA,
     BlobStoreRefusedError,
@@ -26,10 +30,16 @@ from ledger_platform.blobs.s3 import (
     s3_client,
 )
 from ledger_platform.blobs.store import BlobRecordCorruptError, ObjectConflictError
+from ledger_platform.config.manifest import ChannelEntry
 from ledger_platform.config.settings import Settings
+from ledger_platform.data.migrations import SchemaMigrations
+from ledger_platform.runtime.app import App
 from ledger_platform.runtime.archiving import archive_of
+from ledger_platform.runtime.contexts import ChannelPack, ChannelParts
+from ledger_platform.runtime.registries import CHANNELS, REGIMES, Discovered
 from ledger_testing.blobs import ImmutableStoreContract
 lazy from ledger_platform.blobs.store import ImmutableStore
+lazy from ledger_platform.runtime.contexts import ChannelContext
 lazy from ledger_testing.localstack import LocalStack
 
 KEY: Final = "do-ecf-v1/test/org/company/ecf/0a1b.xml"
@@ -242,3 +252,88 @@ async def test_the_archive_the_settings_configure_writes_to_the_bucket(aws: Loca
     assert await archive.get(KEY, sha256=DIGEST) == CONTENT
     retained = await production_store(aws, bucket).retained_until(KEY)
     assert retained == date(2036, 10, 20)  # the app's ten years, never the channel's shorter date
+
+
+PROBE_SOURCE: Final = Source(
+    title="Probe law", url="https://law.invalid", version="1", retrieved_on=date(2026, 10, 20)
+)
+PROBE_REGIME: Final = RegimeDef(
+    key=RegimeKey("us"),
+    jurisdiction=Jurisdiction(CountryCode("US"), None),
+    currency=Currency.of("USD"),
+    time_zone="America/New_York",
+    labels={Locale("en"): "Probe"},
+    tax_id_schemes=(),
+    tax_categories=(),
+    document_types=(),
+    rounding=RoundingRule(
+        mode=RoundingMode.HALF_UP,
+        points=frozenset({RoundingPoint.LINE}),
+        places=2,
+        line_tolerance=Decimal("0.01"),
+    ),
+    fields=(),
+    parameters={},
+    sources=(PROBE_SOURCE,),
+)
+"""A regime of the probe channel's: a channel serves one."""
+
+
+def _archiving(context: ChannelContext) -> ChannelParts:
+    """A channel: the app binds it the archive, which the app then opens with it."""
+    return ChannelParts(
+        channel="archiving", migrations=SchemaMigrations(schema=context.database.schema, scripts="unused:x")
+    )
+
+
+PROBE_PACK: Final = ChannelPack(
+    entry=ChannelEntry.model_validate(
+        {
+            "key": "us-probe-v1",
+            "entry_point": "ledger_country_us.channels.probe:PACK",
+            "schema": "us_probe",
+            "valid_from": date(2026, 1, 1),
+            "environments": ["test"],
+            "document_kinds": ["invoice"],
+            "directions": ["sales"],
+            "tier": "bronze",
+        }
+    ),
+    regime="us",
+    assemble=_archiving,
+)
+
+
+def _one_channel(group: str) -> tuple[Discovered, ...]:
+    """A regime and a channel of it, no module: the app holds its archive for the channel."""
+    found: dict[str, tuple[Discovered, ...]] = {
+        REGIMES: (Discovered("us", partial(_same, PROBE_REGIME)),),
+        CHANNELS: (Discovered("us-probe-v1", partial(_same, PROBE_PACK)),),
+    }
+    return found.get(group, ())
+
+
+def _same[T](value: T) -> T:
+    return value
+
+
+async def test_an_app_whose_archive_bucket_has_no_object_lock_does_not_start(aws: LocalStack) -> None:
+    """The archive is checked when the app starts, not at the first document it archives.
+
+    Nothing else of the app is reached: its database and its identity provider are never asked.
+    """
+    settings = Settings(
+        environment="test",
+        database_url=SecretStr(URL),
+        token_issuer="https://issuer.invalid",
+        token_audience="ledger",
+        token_jwks_url="https://issuer.invalid/keys",
+        archive_backend="s3",
+        archive_bucket=aws.bucket(object_lock=False),
+        archive_region=aws.region,
+        archive_endpoint_url=aws.endpoint_url,
+    )
+    served = App("api", settings=settings, discover=_one_channel).asgi()
+    with pytest.raises(BlobStoreRefusedError, match=r"\(ObjectLockConfigurationNotFoundError\)"):
+        async with served.router.lifespan_context(served):
+            pytest.fail("an app whose archive cannot hold the legal archive never serves")

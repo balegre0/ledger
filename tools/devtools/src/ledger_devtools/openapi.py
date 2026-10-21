@@ -7,7 +7,9 @@ is trusted, nothing below an error is logged: a module's warning at assembly is 
 
 import functools
 import json
+import tempfile
 from importlib import metadata
+from pathlib import Path
 from typing import ClassVar, Final, TypeIs, override
 lazy from collections.abc import Iterable, Iterator, Mapping
 
@@ -17,6 +19,7 @@ lazy from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 from ledger_kernel.errors import LedgerError
 from ledger_platform.runtime import App, Settings
 lazy from ledger_devtools.workspace import Package
+lazy from ledger_platform.config.manifest import PackageManifest
 
 _SCHEMA_REF: Final = "#/components/schemas/"
 _DOCUMENT: Final = TypeAdapter(dict[str, object])
@@ -68,7 +71,9 @@ def require_installed(modules: Iterable[Package]) -> None:
 def api_document() -> dict[str, object]:
     """The ``api`` app's whole document, built once per process.
 
-    The document depends neither on whom the app trusts nor on where its database is: placeholders.
+    The document depends neither on whom the app trusts, nor on where its database is, nor on where it
+    archives (a channel does not start without an archive, and nothing is archived: the app never starts):
+    placeholders.
     """
     settings = _Placeholders(
         environment="test",
@@ -77,6 +82,8 @@ def api_document() -> dict[str, object]:
         token_audience=_AUDIENCE,
         token_jwks_url=f"{_ISSUER}/oauth/v2/keys",
         log_level="ERROR",
+        archive_backend="file",
+        archive_path=Path(tempfile.gettempdir()) / "ledger-openapi-archive",
     )
     return _DOCUMENT.validate_python(App("api", settings=settings).asgi().openapi())
 
@@ -115,9 +122,19 @@ def _owns(prefixes: tuple[str, ...], path: str) -> bool:
     return any(path == prefix or path.startswith(f"{prefix}/") for prefix in prefixes)
 
 
+def api_prefixes(manifest: PackageManifest) -> tuple[str, ...]:
+    """The path prefixes of ``manifest``'s routes in the ``api`` app.
+
+    A module's when it is mounted there; a country's, its channels' public ones.
+    """
+    http = manifest.http
+    own = http.prefixes if http is not None and "api" in http.mounted_in else ()
+    return (*own, *(prefix for channel in manifest.channels for prefix in channel.http_prefixes))
+
+
 def openapi_text(package: Package, document: Mapping[str, object]) -> str:
     """``package``'s paths of ``document`` (by its manifest's prefixes), with the schemas they reach: JSON."""
-    prefixes = () if package.manifest.http is None else package.manifest.http.prefixes
+    prefixes = api_prefixes(package.manifest)
     paths = _DOCUMENT.validate_python(document.get("paths", {}))
     owned = {path: item for path, item in paths.items() if _owns(prefixes, path)}
     components = _DOCUMENT.validate_python(document.get("components", {}))

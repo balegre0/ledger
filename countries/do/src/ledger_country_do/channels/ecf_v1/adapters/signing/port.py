@@ -42,6 +42,7 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
     SignerUnavailableError,
     SigningAs,
 )
+from ledger_country_do.channels.ecf_v1.application.requirements import Certificates
 from ledger_fiscal_kit.ports import (
     SeedToSign,
     SignatureProfile,
@@ -78,8 +79,11 @@ def signing_as(call: SystemCall) -> SigningAs:
 
 
 @final
-class DocumentSigner(Signatures):
-    """``Signatures`` over ``SignerPort`` (see the module), for any issuing company the call names."""
+class DocumentSigner(Signatures, Certificates):
+    """``Signatures`` over ``SignerPort`` (see the module), for any issuing company the call names.
+
+    It is ``Certificates`` too: whether a company's certificate covers a moment (what enrollments require).
+    """
 
     __slots__ = ("_port",)
 
@@ -111,6 +115,11 @@ class DocumentSigner(Signatures):
             return await self._port.certificate_validity(_call(who), who.tenant)
         except (PortUnavailableError, RemoteUnavailableError, TimeoutError) as error:
             raise SignerUnavailableError from error
+
+    @override
+    async def valid_at(self, who: SigningAs, moment: datetime) -> bool:
+        validity = await self.validity(who)
+        return validity is not None and validity.covers(moment)
 
 
 def _call(who: SigningAs) -> SystemCall:

@@ -15,6 +15,11 @@ module's login (``database``: ``ledger_signer`` for a module isolated in the sig
 (``module_database``), a superuser session (``admin``), the apps' settings (``settings``), the ``api`` app
 and a client of it (``api``, ``client``), and a fresh, empty database with the schemas
 (``fresh_database_name``, ``fresh``, ``fresh_admin_url``). No module copies another's conftest.
+
+A country's suite tests one of its channels the same way: the migrations of the channel's schema, and the
+modules that serve its ports (``serving``: a country depends on no module, so its manifest cannot name them);
+its app assembles those modules and the country's own channels. No other suite assembles a channel: one needs
+ports and a schema that a module's suite does not give it.
 """
 
 import graphlib
@@ -29,10 +34,10 @@ from ledger_platform.config.manifest import PackageKind
 from ledger_platform.config.names import PLATFORM
 from ledger_platform.config.settings import Settings
 from ledger_platform.data.migrations import platform_migrations
-from ledger_platform.runtime.packs import installed_modules, load_modules
-from ledger_platform.runtime.registries import MODULES, installed
+from ledger_platform.runtime.packs import Channels, installed_modules, load_modules
+from ledger_platform.runtime.registries import CHANNELS, MODULES, Regimes, installed
 from ledger_testing.database import bootstrap, migrate
-lazy from ledger_platform.config.manifest import PackageManifest
+lazy from ledger_platform.config.manifest import ChannelEntry, PackageManifest
 lazy from ledger_platform.data.migrations import SchemaMigrations
 lazy from ledger_platform.data.notifier import Channel
 lazy from ledger_platform.runtime.contexts import Module
@@ -51,12 +56,15 @@ class NeedUnmetError(LedgerError):
 
 
 class SchemaLessModuleError(LedgerError):
-    """A package under test that owns no schema: there is nothing to migrate, bind or empty."""
+    """A package under test that owns no schema, or not the one its migrations are of: nothing to test."""
 
     code: ClassVar[str] = "testing_module_schema_missing"
 
-    def __init__(self, package: str) -> None:
-        super().__init__(f"{package!r} owns no schema: its manifest has no [data] schema to test")
+    def __init__(self, package: str, schema: str | None = None) -> None:
+        if schema is None:
+            super().__init__(f"{package!r} owns no schema: its manifest has no [data] schema to test")
+        else:
+            super().__init__(f"{package!r} owns no schema {schema!r}: neither its [data] nor a channel of it")
 
 
 @final
@@ -68,10 +76,26 @@ class ModuleUnderTest:
     migrations: SchemaMigrations
     discover: Discover = installed
     """Where the modules it depends on are found: the installed entry points, unless a test says otherwise."""
+    serving: tuple[str, ...] = ()
+    """Modules the app that serves it assembles beside those its manifest depends on: a channel's ports'
+    (fiscal's ``CompanyDirectory``, the signer's ``SignerPort``), which a country cannot depend on."""
 
     def __post_init__(self) -> None:
-        if self.manifest.schema_name is None:
-            raise SchemaLessModuleError(self.manifest.package.name)
+        if self.manifest.schema_name is None and self._channel() is None:  # a country: one of its channels'
+            schema = self.migrations.schema if self.manifest.channels else None
+            raise SchemaLessModuleError(self.manifest.package.name, schema)
+
+    def _channel(self) -> ChannelEntry | None:
+        """The channel of the manifest whose schema the migrations are of, if they are a channel's."""
+        return next(
+            (entry for entry in self.manifest.channels if entry.schema_name == self.migrations.schema), None
+        )
+
+    @property
+    def source(self) -> str:
+        """Who the schema's units act for: the package, or the channel that owns the schema (its key)."""
+        channel = self._channel()
+        return self.manifest.package.name if channel is None else channel.key
 
     @property
     def schema(self) -> str:
@@ -104,12 +128,12 @@ class ModuleUnderTest:
         return _is_isolated(self.manifest)
 
     def _needed(self) -> tuple[Module, ...]:
-        """The modules it depends on, transitively, each after those it depends on itself."""
-        if self.manifest.package.kind is not PackageKind.MODULE:
+        """The modules it depends on and those that serve it, transitively, each after those it depends on."""
+        pending = [*self.manifest.dependencies.modules, *self.serving]
+        if not pending:
             return ()
         modules = {module.manifest.package.name: module for module in installed_modules(self.discover)}
         graph: dict[str, tuple[str, ...]] = {}
-        pending = list(self.manifest.dependencies.modules)
         while pending:
             name = pending.pop()
             if name in graph:
@@ -133,35 +157,51 @@ class ModuleUnderTest:
 
     @property
     def publishes(self) -> frozenset[str]:
-        """The event types the package's units may publish."""
-        return frozenset(event.type for event in self.manifest.events.publishes)
+        """The event types the schema's units may publish: the package's, or its channel's."""
+        channel = self._channel()
+        events = self.manifest.events if channel is None else channel.events
+        return frozenset(event.type for event in events.publishes)
 
     def discovering(self) -> Discover:
-        """Its ``discover`` as the app that serves its tests finds it: this module and what it needs.
+        """Its ``discover`` as the app that serves its tests finds it: this package and what it needs.
 
         Every module installed in the workspace is an entry point, so an app that found them all would need
         every schema in every module's test database. A module under test is served with the modules it
-        depends on (transitively, by their manifests) and nothing else; entry points that are not modules
-        (regimes, channels) are as installed. A package that is not a module is served with every module.
+        depends on and those that serve it (transitively, by their manifests) and nothing else; a package
+        that is not a module, with every module unless modules serve it. Its channels are its own alone (a
+        country's: none for a module or the platform); regimes are as installed.
         """
         discover = self.discover
-        if self.manifest.package.kind is not PackageKind.MODULE:
-            return discover
-        manifests = {module.manifest.package.name: module.manifest for module in installed_modules(discover)}
+        channels = frozenset(entry.key for entry in self.manifest.channels)
+        wanted = self._wanted()
+
+        def only(group: str) -> Sequence[Discovered]:
+            found = discover(group)
+            if group == CHANNELS:
+                return tuple(entry for entry in found if entry.name in channels)
+            if group == MODULES and wanted is not None:
+                return tuple(entry for entry in found if entry.name in wanted)
+            return found
+
+        return only
+
+    def _wanted(self) -> frozenset[str] | None:
+        """The modules its app assembles, by name; ``None``: every installed one (see ``discovering``)."""
+        is_module = self.manifest.package.kind is PackageKind.MODULE
+        if not is_module and not self.serving:
+            return None
+        manifests = {
+            module.manifest.package.name: module.manifest for module in installed_modules(self.discover)
+        }
         wanted: set[str] = set()
-        pending = [self.manifest.package.name]
+        pending = [*((self.manifest.package.name,) if is_module else ()), *self.serving]
         while pending:
             name = pending.pop()
             if name not in wanted:
                 wanted.add(name)
                 needed = manifests[name].dependencies.modules if name in manifests else ()
                 pending.extend(needed)
-
-        def only(group: str) -> Sequence[Discovered]:
-            found = discover(group)
-            return tuple(entry for entry in found if entry.name in wanted) if group == MODULES else found
-
-        return only
+        return frozenset(wanted)
 
     def prepare(self, template: Template) -> None:
         """The roles and the schemas, each at head as ``ledger_migrator`` with the relay granted."""
@@ -185,12 +225,14 @@ class InstalledSchemas:
 
 
 def installed_schemas(discover: Discover = installed) -> InstalledSchemas:
-    """The schemas of the platform and of every module ``ledger-migrate`` migrates, from their manifests."""
+    """The schemas of the platform, of every module and of every channel ``ledger-migrate`` migrates."""
     manifests = tuple(module.manifest for module in load_modules(discover))
+    packs = Channels.load(Regimes.load(discover), discover).packs
     return InstalledSchemas(
         schemas=(
             PLATFORM,
             *(manifest.schema_name for manifest in manifests if manifest.schema_name is not None),
+            *(pack.entry.schema_name for pack in packs),
         ),
         isolated=tuple(
             manifest.schema_name

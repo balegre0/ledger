@@ -114,8 +114,10 @@ def test_two_migrations_started_at_once_both_succeed(fresh: Settings, fresh_admi
     script = (
         "from ledger_platform.config.settings import Settings\n"
         "from ledger_platform.runtime.app import App\n"
-        "from ledger_platform.runtime.registries import MODULES, installed\n"
+        "from ledger_platform.runtime.registries import CHANNELS, MODULES, installed\n"
         "def only_identity(group):\n"
+        "    if group == CHANNELS:\n"  # a channel reads ports no module here provides
+        "        return []\n"
         "    return [e for e in installed(group) if group != MODULES or e.name == 'identity']\n"
         "App('migrate', settings=Settings(), discover=only_identity).migrate()\n"
     )
