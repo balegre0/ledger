@@ -8,8 +8,8 @@ bound as ``ArchivePort``), the app's request authentication and an ``OutboundHtt
 they handed back and check it against the manifests (every declared consumer and job is provided, nothing
 undeclared is: ``runtime.assembly``). Start
 (``asgi()``'s lifespan, or ``migrate()``): open what the role needs, nothing more. A lifespan opens the
-archive first (a store that holds connections is checked then: an app that cannot archive does not start),
-then the packages' resources.
+archive first when the role assembles a channel (a store that holds connections is checked then: an app that
+cannot archive does not start; the signer never opens one), then the packages' resources.
 
 - ``api``: the routers of every module mounted in ``api`` (and the channels' public routes); the identity
   provider's keys as a resource. It refuses to start without the token settings.
@@ -321,7 +321,6 @@ class App:
     """The app of one role (see the module). It is built once per process; ``asgi()`` is its served app."""
 
     __slots__ = (
-        "_archive",
         "_assembled",
         "_authentication",
         "_database",
@@ -383,7 +382,6 @@ class App:
             pooling=Pooling(through_pooler=pooled),
         )
         self._signals = Notifier(self._notifications)
-        self._archive = archive_of(settings, clock=clock)
         shared = Shared(
             role=role,
             environment=settings.environment,
@@ -393,7 +391,7 @@ class App:
             tracing=self._tracing,
             registry=self._registry,
             authentication=self._authentication,
-            archive=self._archive,
+            archive=archive_of(settings, clock=clock),
         )
         self._assembled = assemble(shared, discover)
         if (
@@ -506,7 +504,8 @@ class App:
         self._tracing.register_globally()
         opened: list[AbstractAsyncContextManager[object]] = []
         try:
-            archive = () if self._archive is None else (self._archive,)  # before the channels that use it
+            opened_archive = self._assembled.archive
+            archive = () if opened_archive is None else (opened_archive,)  # before the channels that use it
             resources = [resource for member in self._assembled.members for resource in member.resources]
             for resource in (*archive, *resources, *self._authentication.resources()):
                 await resource.__aenter__()

@@ -4,8 +4,9 @@ Every app builds the channel fiscal routes to (``DoEcfChannel``) over the channe
 port (``DocumentSigner``), and checks its settings: DGII's hosts (``DgiiHosts``), an attempt no longer than
 the settle delay (``SettleTooShortError``), no test stand-in in production. It reads the ports it needs from
 the app (fiscal-kit's keys): the signer, fiscal's company directory (who may do what, and who is enrolled),
-the archive (none: the channel does not start, since every document it signs is archived first). The ``api``
-app mounts its routes (``/v1/do``); the worker opens its DGII and buyer clients at start (their trusted roots,
+the archive in the roles that archive (none: the channel does not start there, since every document it signs
+is archived first; ``migrate`` reads none and gets the channel's revisions alone). The ``api`` app mounts its
+routes (``/v1/do``); the worker opens its DGII and buyer clients at start (their trusted roots,
 which it requires, read then). ``migrate`` runs its revisions; every app checks its schema is current.
 """
 
@@ -36,8 +37,11 @@ from ledger_fiscal_kit.channels import ChannelDef
 from ledger_fiscal_kit.ports import ARCHIVE_PORT, COMPANY_DIRECTORY, SIGNER_PORT
 from ledger_kernel.regimes import Locale
 from ledger_platform.runtime.contexts import ChannelPack, ChannelParts
+lazy from ledger_platform.config.manifest import AppRole
 lazy from ledger_platform.runtime.contexts import ChannelContext
 
+ARCHIVING_ROLES: Final[frozenset[AppRole]] = frozenset({"api", "worker", "receiver"})
+"""The roles that sign or receive documents, and archive them: they need the archive; ``migrate`` does not."""
 LABELS: Final = {
     Locale("es"): "Comprobante Fiscal Electrónico (e-CF) de la DGII",
     Locale("en"): "DGII electronic fiscal voucher (e-CF)",
@@ -83,7 +87,6 @@ def assemble(context: ChannelContext) -> ChannelParts:
     hosts = DgiiHosts(ecf=settings.ecf_host, fc=settings.fc_host)
     signer = DocumentSigner(context.ports.get(SIGNER_PORT))
     directory = context.ports.get(COMPANY_DIRECTORY)
-    _ = context.ports.get(ARCHIVE_PORT)  # required now: a document is archived once it is signed (Task 18)
     units = PgUnits(context.database)
     requiring = Requiring(
         units, signer, receiver=settings.receiver_public_url is not None, clock=context.clock
@@ -97,11 +100,11 @@ def assemble(context: ChannelContext) -> ChannelParts:
         authentication=context.auth,
         permissions=directory,
     )
-    parts = ChannelParts(
-        channel=DoEcfChannel(definition, requiring),
-        routers=(ranges.router(api),),
-        migrations=migrations(),
-    )
+    channel = DoEcfChannel(definition, requiring)
+    if context.role not in ARCHIVING_ROLES:  # migrate: its revisions, nothing to serve or open
+        return ChannelParts(channel=channel, migrations=migrations())
+    _ = context.ports.get(ARCHIVE_PORT)  # required now: a document is archived once it is signed (Task 18)
+    parts = ChannelParts(channel=channel, routers=(ranges.router(api),), migrations=migrations())
     if context.role != "worker":
         return parts
     roots = settings.trusted_roots

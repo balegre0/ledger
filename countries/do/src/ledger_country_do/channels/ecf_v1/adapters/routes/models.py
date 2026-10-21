@@ -53,9 +53,8 @@ class NewRange(_Shape):
 
     environment: Environment = Field(
         description=(
-            "Where the range numbers documents: testecf or certecf in test mode, ecf in live mode. The "
-            "company "
-            "must be enrolled on do-ecf-v1 there."
+            "Where the range numbers documents: testecf or certecf in test mode, ecf in live mode. "
+            "The company must be enrolled on do-ecf-v1 there."
         )
     )
     ecf_type: EcfType = Field(description="The e-CF type DGII authorized the range for (31 to 47).")

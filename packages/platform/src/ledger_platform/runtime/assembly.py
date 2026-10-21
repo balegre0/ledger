@@ -293,6 +293,9 @@ class Assembled:
     """The platform first, then the modules in assembly order, then the channels."""
     bound: Mapping[str, BoundDatabase]
     schedules: tuple[Schedule, ...]
+    archive: StoreArchive | None = None
+    """The archive the app opens: the settings', once bound to a channel this role assembles; else none (a
+    role without channels never opens one: the signer's, ``migrate``)."""
 
 
 def _served(registry: CollectorRegistry) -> Gauge:
@@ -697,4 +700,5 @@ def assemble(shared: Shared, discover: Discover) -> Assembled:
         members=members,
         bound=bound,
         schedules=_schedules(members, bound),
+        archive=shared.archive if packs else None,
     )

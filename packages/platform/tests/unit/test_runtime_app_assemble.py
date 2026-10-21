@@ -24,6 +24,7 @@ from ledger_kernel.money import Currency, RoundingMode
 from ledger_kernel.regimes import Locale, RegimeDef, RegimeKey, RoundingPoint, RoundingRule, Source
 from ledger_platform.auth.tokens import TokenSettingsMissingError
 from ledger_platform.blobs.archive import ARCHIVE_PORT_NAME
+from ledger_platform.blobs.store import BlobStoreUnavailableError
 from ledger_platform.config.manifest import ChannelEntry, load_manifest
 from ledger_platform.config.settings import PackageSettings, Settings, section_prefix
 from ledger_platform.data.database import Database
@@ -1307,3 +1308,40 @@ async def test_a_channel_s_public_routes_declare_the_app_s_caller() -> None:
         refused = await client.get("/v1/us/ranges")
     assert refused.status_code == httpx.codes.UNAUTHORIZED
     await app.aclose()
+
+
+UNREACHABLE_ARCHIVE: Final = TOKENS.model_copy(
+    update={
+        "archive_backend": "s3",
+        "archive_bucket": "ledger-archive",
+        "archive_region": "us-east-1",
+        "archive_endpoint_url": "http://127.0.0.1:9",  # the discard port: nothing answers there
+    }
+)
+"""An S3 archive nobody serves: its check fails the start of an app that opens it."""
+
+
+async def test_an_app_opens_its_archive_only_for_the_channels_it_assembles(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The archive is the channels': an app that assembles none never checks it, nor holds its threads."""
+    for name in ("AWS_PROFILE", "AWS_SESSION_TOKEN", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")  # asked with credentials, answered by nobody
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
+    bare = App("api", settings=UNREACHABLE_ARCHIVE, discover=discovering(regimes=(us_regime(),))).asgi()
+    async with bare.router.lifespan_context(bare):
+        pass
+
+    def channel(context: ChannelContext) -> ChannelParts:
+        return ChannelParts(channel="archiving", migrations=migrations(context.database.schema))
+
+    pack = ChannelPack(entry=channel_entry(), regime="us", assemble=channel)
+    archiving = App(
+        "api", settings=UNREACHABLE_ARCHIVE, discover=discovering(regimes=(us_regime(),), packs=(pack,))
+    ).asgi()
+    with pytest.raises(BlobStoreUnavailableError):
+        async with archiving.router.lifespan_context(archiving):
+            pytest.fail("an app whose channels' archive cannot be reached never serves")

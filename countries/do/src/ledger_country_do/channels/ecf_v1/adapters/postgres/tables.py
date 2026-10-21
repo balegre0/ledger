@@ -49,11 +49,15 @@ def _one_of(column: str, words: type[StrEnum], *, name: str) -> CheckConstraint:
 
 
 def _series_words(table: str) -> tuple[CheckConstraint, ...]:
-    """A table's mode, environment and e-CF type are the domain's words."""
+    """A table's mode, environment and e-CF type are the domain's words.
+
+    The live environment's rows are the live mode's, and only they are (``ChannelDef.mode_of``).
+    """
     return (
         _one_of("mode", Mode, name=f"ck_{table}_mode"),
         _one_of("environment", Environment, name=f"ck_{table}_environment"),
         _one_of("ecf_type", EcfType, name=f"ck_{table}_ecf_type"),
+        CheckConstraint("(environment = 'ecf') = (mode = 'live')", name=f"ck_{table}_live"),
     )
 
 
@@ -87,7 +91,11 @@ class NumberingSeriesRecord(DoEcfTable):
 
 
 class NumberingRangeRecord(DoEcfTable):
-    """A DGII-authorized range of a series, and the number it gives next."""
+    """A DGII-authorized range of a series, and the number it gives next.
+
+    A trigger of the revision guards it: its authorization never changes, ``next`` never goes back, and no
+    two ranges of a series share a number.
+    """
 
     __tablename__: str = "numbering_ranges"
     __table_args__: tuple[SchemaItem, ...] = (

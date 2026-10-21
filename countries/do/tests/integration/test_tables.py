@@ -11,8 +11,8 @@ from uuid import UUID
 lazy from collections.abc import Callable
 
 import pytest
-from psycopg.errors import CheckViolation, ForeignKeyViolation, InsufficientPrivilege
-from sqlalchemy import func, insert, select
+from psycopg.errors import CheckViolation, ExclusionViolation, ForeignKeyViolation, InsufficientPrivilege
+from sqlalchemy import func, insert, select, update
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 from ledger_country_do.channels.ecf_v1.adapters.postgres.tables import (
@@ -90,6 +90,15 @@ async def kept(module_database: BoundDatabase, tenant: Tenant) -> None:
             await unit.connection.execute(insert(ROWS[name][0]).values(row(tenant)))
 
 
+async def inserted(
+    module_database: BoundDatabase, tenant: Tenant, rows: list[tuple[type[DoEcfTable], dict[str, object]]]
+) -> None:
+    """``rows`` inserted in one unit of ``tenant``, in order."""
+    async with module_database.unit(tenant) as unit:
+        for table, row in rows:
+            await unit.connection.execute(insert(table).values(row))
+
+
 async def count(module_database: BoundDatabase, scope: Scope | None, name: str) -> int:
     async with module_database.unit(scope) as unit:
         found = await unit.connection.execute(select(func.count()).select_from(ROWS[name][0]))
@@ -150,6 +159,68 @@ async def test_a_range_s_numbers_and_words_are_checked(
         async with module_database.unit(tenant) as unit:
             await unit.connection.execute(insert(NumberingRangeRecord).values(a_range(tenant, **change)))
     assert isinstance(caught.value.orig, CheckViolation)
+
+
+@pytest.mark.parametrize("name", sorted(ROWS))
+@pytest.mark.parametrize(
+    ("mode", "environment"), [(Mode.TEST, "ecf"), (Mode.LIVE, "testecf"), (Mode.LIVE, "certecf")]
+)
+async def test_a_live_row_is_of_the_live_environment_and_a_test_row_of_a_test_one(
+    module_database: BoundDatabase, name: str, mode: Mode, environment: str
+) -> None:
+    """``ecf`` serves live documents only, ``testecf`` and ``certecf`` test ones (``ChannelDef.mode_of``)."""
+    organization, company = OrganizationId(new_id()), CompanyId(new_id())
+    tenant = Tenant(organization, company, mode)
+    placed = {"mode": mode.value, "environment": environment}
+    rows = [(ROWS[name][0], ROWS[name][1](tenant) | placed)]
+    if name != "numbering_series":  # its series first, as placed
+        rows.insert(0, (NumberingSeriesRecord, series(tenant) | placed))
+    with pytest.raises(IntegrityError) as caught:
+        await inserted(module_database, tenant, rows)
+    assert isinstance(caught.value.orig, CheckViolation)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"next": 4}, {"first": 2}, {"last": 99}, {"ecf_type": "32"}, {"environment": "certecf"}],
+)
+async def test_a_range_never_gives_a_number_back_nor_changes_what_dgii_authorized(
+    module_database: BoundDatabase, change: dict[str, object]
+) -> None:
+    """Whatever the repositories do: ``next`` only moves on, the authorization is kept as registered."""
+    tenant = a_tenant()
+    async with module_database.unit(tenant) as unit:
+        await unit.connection.execute(insert(NumberingSeriesRecord).values(series(tenant)))
+        await unit.connection.execute(insert(NumberingRangeRecord).values(a_range(tenant, next=5)))
+    with pytest.raises(IntegrityError, match="numbering_range_frozen") as caught:
+        async with module_database.unit(tenant) as unit:
+            await unit.connection.execute(update(NumberingRangeRecord).values(**change))
+    assert isinstance(caught.value.orig, CheckViolation)
+    async with module_database.unit(tenant) as unit:  # moving on, or voiding, is what a range does
+        await unit.connection.execute(update(NumberingRangeRecord).values(next=6, status="voided", version=2))
+
+
+async def test_no_two_ranges_of_a_series_share_a_number_whatever_the_repositories_do(
+    module_database: BoundDatabase,
+) -> None:
+    """The series' lock keeps registrations apart; the table refuses an overlap all the same (a trigger:
+    ``btree_gist``, which an exclusion constraint would need, is no extension the migrator may create)."""
+    tenant = a_tenant()
+    async with module_database.unit(tenant) as unit:
+        await unit.connection.execute(insert(NumberingSeriesRecord).values(series(tenant)))
+        await unit.connection.execute(insert(NumberingRangeRecord).values(a_range(tenant)))
+        other_type = series(tenant) | {"ecf_type": "32"}
+        await unit.connection.execute(insert(NumberingSeriesRecord).values(other_type))
+        await unit.connection.execute(
+            insert(NumberingRangeRecord).values(a_range(tenant, id=new_id(), ecf_type="32"))
+        )
+    shared = a_range(tenant, id=new_id(), first=100, last=200, next=100)
+    with pytest.raises(IntegrityError, match="numbering_range_overlaps") as caught:
+        await inserted(module_database, tenant, [(NumberingRangeRecord, shared)])
+    assert isinstance(caught.value.orig, ExclusionViolation)
+    async with module_database.unit(tenant) as unit:
+        after = a_range(tenant, id=new_id(), first=101, last=200, next=101)
+        await unit.connection.execute(insert(NumberingRangeRecord).values(after))
 
 
 async def test_a_range_belongs_to_a_series(module_database: BoundDatabase) -> None:

@@ -2,7 +2,6 @@
 
 from typing import Final
 lazy from collections.abc import Iterator
-lazy from pathlib import Path
 
 import psycopg
 import pytest
@@ -34,17 +33,9 @@ def fresh(worker_database: WorkerDatabase, postgres: PostgresServer) -> Iterator
 
 
 @pytest.fixture
-def environment(
-    fresh: str, postgres: PostgresServer, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """``LEDGER_*`` as a rollout gives ``ledger-migrate``: units as ``ledger_app``, the migrations direct.
-
-    The one environment every app reads (Decision 14) names the archive too: a channel that archives does not
-    assemble without one, in ``migrate`` as anywhere (nothing is archived here).
-    """
+def environment(fresh: str, postgres: PostgresServer, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``LEDGER_*`` as a rollout gives ``ledger-migrate``: units as ``ledger_app``, the migrations direct."""
     monkeypatch.setenv("LEDGER_ENVIRONMENT", "test")
-    monkeypatch.setenv("LEDGER_ARCHIVE_BACKEND", "file")
-    monkeypatch.setenv("LEDGER_ARCHIVE_PATH", str(tmp_path / "archive"))
     monkeypatch.setenv("LEDGER_DATABASE_URL", postgres.sqlalchemy(fresh, role=APP, password=TEST_LOGINS.app))
     monkeypatch.setenv(
         "LEDGER_DATABASE_DIRECT_URL", postgres.sqlalchemy(fresh, role=MIGRATOR, password=TEST_LOGINS.migrator)

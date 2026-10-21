@@ -339,7 +339,17 @@ async def test_the_worker_relays_an_ordinary_module_s_event_into_the_isolated_in
 async def test_the_signer_app_runs_its_consumer_and_its_schedule(
     fresh: Fresh, modules: Modules, eventually: Eventually
 ) -> None:
-    app = App("signer", settings=fresh.settings(SIGNER), discover=modules.discover())
+    """With the deployment's archive configured, as every app's environment names it (Decision 14): the
+    signer assembles no channel, so it never opens the archive (nothing answers at its endpoint here)."""
+    archived = fresh.settings(SIGNER).model_copy(
+        update={
+            "archive_backend": "s3",
+            "archive_bucket": "ledger-archive",
+            "archive_region": "us-east-1",
+            "archive_endpoint_url": "http://127.0.0.1:9",
+        }
+    )
+    app = App("signer", settings=archived, discover=modules.discover())
     served = app.asgi()
     before = asyncio.all_tasks()
     with psycopg.connect(

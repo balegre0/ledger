@@ -6,6 +6,7 @@ a range may be is DGII's: an expiry for every type but 32 and 34, numbers within
 number shared with a range of its series. identity answers who may do what (fiscal's directory).
 """
 
+import asyncio
 from typing import Final
 
 import pytest
@@ -15,7 +16,7 @@ lazy import psycopg
 
 from ledger_country_do.channels.ecf_v1.adapters.routes.models import RANGE_PREFIX, NumberingRangeView
 from ledger_kernel.ids import parse_id
-from ledger_testing.api import TestPrincipal, document, page
+from ledger_testing.api import TestPrincipal, created, document, page
 lazy from ledger_testing.issuer import LocalIssuer
 
 PATH: Final = "/v1/do/numbering_ranges"
@@ -23,6 +24,13 @@ ENROLLMENTS: Final = "/v1/fiscal/enrollments"
 A31: Final = {"environment": "testecf", "ecf_type": "31", "first": 1, "last": 100, "expires_on": "2028-12-31"}
 OUTBOX: Final = TypeAdapter(list[tuple[str, object]])
 ACTIONS: Final = TypeAdapter(list[str])
+SIBLING: Final = {
+    "jurisdiction": {"country": "DO"},
+    "functional_currency": "DOP",
+    "tax_ids": [{"scheme": "do.rnc", "value": "131880738"}],
+    "legal_name": "Ferreteria Duarte Este SRL",
+}
+"""Another company of the owner's organization."""
 
 
 def posting(principal: TestPrincipal, company: str, key: str, mode: str = "test") -> dict[str, str]:
@@ -189,3 +197,42 @@ async def test_a_viewer_reads_ranges_and_registers_none(
     assert (await client.get(PATH, headers=reading(viewer, company))).status_code == 200
     stranger = TestPrincipal(local_issuer, subject="3002")
     assert (await client.get(PATH, headers=reading(stranger, company))).status_code == 404
+
+
+@pytest.mark.usefixtures("enrollment")
+async def test_two_overlapping_registrations_at_once_register_one(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
+) -> None:
+    """The series' row lock serializes them: the second sees the first's range, whichever it is."""
+    shared = A31 | {"first": 50, "last": 150}
+    answers = await asyncio.gather(
+        client.post(PATH, json=A31, headers=posting(owner, company, "at-once-1")),
+        client.post(PATH, json=shared, headers=posting(owner, company, "at-once-2")),
+    )
+    assert sorted(answer.status_code for answer in answers) == [201, 409]
+    (refused,) = (answer for answer in answers if answer.status_code == 409)
+    assert code_of(refused) == (409, "do_ecf_range_overlaps")
+    assert len(page(await client.get(PATH, headers=reading(owner, company)))["items"]) == 1
+
+
+@pytest.mark.usefixtures("enrollment")
+async def test_a_test_mode_range_of_the_live_environment_is_refused(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
+) -> None:
+    live_environment = A31 | {"environment": "ecf"}
+    response = await client.post(PATH, json=live_environment, headers=posting(owner, company, "ecf-in-test"))
+    assert code_of(response) == (422, "do_ecf_environment_not_allowed")
+
+
+@pytest.mark.usefixtures("enrollment")
+async def test_a_range_is_read_by_its_own_company_in_its_own_mode_only(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
+) -> None:
+    made = await client.post(PATH, json=A31, headers=posting(owner, company, "mine"))
+    assert made.status_code == 201
+    path = f"{PATH}/{document(made)['id']}"
+    sibling = await created(client, "/v1/companies", SIBLING, owner.posting("company-2"))
+    assert code_of(await client.get(path, headers=reading(owner, sibling))) == (404, "do_ecf_range_not_found")
+    live = await client.get(path, headers=reading(owner, company, "live"))
+    assert code_of(live) == (404, "do_ecf_range_not_found")
+    assert (await client.get(path, headers=reading(owner, company))).status_code == 200

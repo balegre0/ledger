@@ -92,6 +92,19 @@ def test_the_channel_does_not_start_without_its_signer_or_its_archive(
         assemble(contexts(settings=RECEIVED, bound=bound))
 
 
+def test_migrate_reads_no_archive_and_gets_the_channel_s_migrations_alone(
+    contexts: Contexts, ports: dict[str, object]
+) -> None:
+    """``ledger-migrate`` archives nothing: it needs no archive configured, and mounts or opens nothing."""
+    bound = {name: value for name, value in ports.items() if name != ARCHIVE_PORT.name}
+    parts = assemble(contexts(settings=RECEIVED, bound=bound, role="migrate"))
+    assert (parts.routers, parts.resources) == ((), ())
+    assert parts.migrations is not None
+    assert parts.migrations.schema == "do_ecf"
+    with pytest.raises(BindingMissingError, match="'ArchivePort'"):
+        assemble(contexts(settings=RECEIVED, bound=bound, role="api"))
+
+
 def test_an_attempt_longer_than_the_settle_delay_is_refused(contexts: Contexts) -> None:
     """A request still in flight when track ids are asked for could land after the answer, and be missed."""
     slow = RECEIVED.model_copy(update={"dgii_attempt_seconds": 31.0})

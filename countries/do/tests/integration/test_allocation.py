@@ -11,7 +11,9 @@ from typing import Final
 from uuid import UUID
 
 import pytest
-from sqlalchemy import insert, select
+from psycopg.errors import LockNotAvailable
+from sqlalchemy import insert, select, text
+from sqlalchemy.exc import OperationalError
 
 from ledger_country_do.channels.ecf_v1.adapters.postgres.tables import (
     NumberingRangeRecord,
@@ -120,3 +122,56 @@ async def test_a_series_without_a_usable_range_numbers_nothing(module_database: 
         await allocated(module_database, tenant)
     with pytest.raises(NoNumberAvailableError):  # another company's ranges are not this one's
         await allocated(module_database, a_tenant())
+
+
+class AbandonedError(Exception):
+    """What a test raises to roll its unit back."""
+
+
+async def allocated_then_abandoned(module_database: BoundDatabase, tenant: Tenant) -> None:
+    """A unit that allocates the series' first number, then fails."""
+    async with module_database.unit(tenant) as unit:
+        assert (await bind(unit).ranges.allocate(TESTECF, T31, now=NOW)).encf == Encf(T31, 1)
+        raise AbandonedError
+
+
+async def test_a_unit_that_allocated_holds_the_series_until_it_ends(module_database: BoundDatabase) -> None:
+    """The series' row is locked by the first allocation of a unit: another waits, and here gives up."""
+    tenant = a_tenant()
+    await with_range(module_database, tenant)
+    holding, waiting = asyncio.Event(), asyncio.Event()
+
+    async def first() -> Allocation:
+        async with module_database.unit(tenant) as unit:
+            taken = await bind(unit).ranges.allocate(TESTECF, T31, now=NOW)
+            holding.set()
+            await waiting.wait()
+            return taken
+
+    async def second() -> None:
+        await holding.wait()
+        try:
+            async with module_database.unit(tenant) as unit:
+                await unit.connection.execute(text("SET LOCAL lock_timeout = '100ms'"))
+                await bind(unit).ranges.allocate(TESTECF, T31, now=NOW)
+        finally:
+            waiting.set()
+
+    held, refused = await asyncio.gather(first(), second(), return_exceptions=True)
+    assert isinstance(held, Allocation)
+    assert held.encf == Encf(T31, 1)
+    assert isinstance(refused, OperationalError)
+    assert isinstance(refused.orig, LockNotAvailable)
+    assert (await allocated(module_database, tenant)).encf == Encf(T31, 2)
+
+
+async def test_a_number_allocated_in_a_unit_that_rolls_back_is_given_again(
+    module_database: BoundDatabase,
+) -> None:
+    """Allocation commits with the unit that numbers: a unit that fails numbers nothing (Task 18 commits the
+    numbered document before it signs or archives anything)."""
+    tenant = a_tenant()
+    await with_range(module_database, tenant)
+    with pytest.raises(AbandonedError):
+        await allocated_then_abandoned(module_database, tenant)
+    assert (await allocated(module_database, tenant)).encf == Encf(T31, 1)

@@ -7,7 +7,6 @@ the migrate app runs the channel's revisions on a fresh database and the worker'
 
 import re
 from typing import Final
-lazy from pathlib import Path
 
 import pytest
 from pydantic import TypeAdapter
@@ -33,7 +32,6 @@ from ledger_testing.migrations import (
     row_security,
     tables_of,
 )
-from ledger_testing.signer import TestSigner, with_test_signer
 lazy from ledger_platform.config.settings import Settings
 lazy from ledger_testing.modules import ModuleUnderTest
 lazy from ledger_testing.postgres import WorkerDatabase
@@ -68,15 +66,15 @@ def version_of(url: str) -> str:
 
 @pytest.mark.usefixtures("channel_environment")
 def test_the_migrate_app_brings_the_channel_s_schema_to_head_from_nothing_and_again_changes_nothing(
-    fresh: Settings, fresh_admin_url: str, module_under_test: ModuleUnderTest, tmp_path: Path
+    fresh: Settings, fresh_admin_url: str, module_under_test: ModuleUnderTest
 ) -> None:
-    archived = fresh.model_copy(update={"archive_backend": "file", "archive_path": tmp_path})
-    discover = with_test_signer(module_under_test.discovering(), TestSigner())
+    """As a rollout runs it: no archive is configured, and ``ledger-migrate`` needs none."""
+    assert fresh.archive_backend is None
     assert tables_of(fresh_admin_url, schema=S) == set()
-    App("migrate", settings=archived, discover=discover).migrate()
+    App("migrate", settings=fresh, discover=module_under_test.discovering()).migrate()
     assert tables_of(fresh_admin_url, schema=S) == {*TENANT_TABLES, *CHASSIS_TABLES, "alembic_version"}
     assert version_of(fresh_admin_url) == MIGRATIONS.head == "0001"
-    App("migrate", settings=archived, discover=discover).migrate()
+    App("migrate", settings=fresh, discover=module_under_test.discovering()).migrate()
     assert pending_changes(fresh_admin_url, MODELS, schema=S) is None
 
 

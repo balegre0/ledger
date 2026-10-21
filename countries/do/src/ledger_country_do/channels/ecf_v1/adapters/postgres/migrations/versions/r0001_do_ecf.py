@@ -3,7 +3,8 @@
 Series, ranges and released numbers, each a company's in one mode (scope ``tenant``). Every type, word and
 constraint is spelled out (a revision records what was done and must not move with the models); the tests
 keep the models equal to it. Nothing is deleted but a released number once taken: a range accounts for its
-numbers for ever (§8.6.3).
+numbers for ever (§8.6.3), and its trigger (``GUARD``) keeps it so. Every row of the live environment is a
+live one, and every live row is of it.
 """
 
 from typing import Final
@@ -28,6 +29,34 @@ ENVIRONMENTS: Final = "'testecf', 'certecf', 'ecf'"
 TYPES: Final = "'31', '32', '33', '34', '41', '43', '44', '45', '46', '47'"
 
 
+GUARD: Final = """
+CREATE FUNCTION do_ecf.numbering_range_guard() RETURNS trigger LANGUAGE plpgsql AS $guard$
+BEGIN
+    IF TG_OP = 'UPDATE' AND (
+        NEW.first <> OLD.first OR NEW.last <> OLD.last OR NEW.ecf_type <> OLD.ecf_type
+        OR NEW.environment <> OLD.environment OR NEW.next < OLD.next
+    ) THEN
+        RAISE EXCEPTION 'numbering_range_frozen: a range keeps its authorization, never gives a number back'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    IF TG_OP = 'INSERT' AND EXISTS (
+        SELECT 1 FROM do_ecf.numbering_ranges AS other
+        WHERE other.organization_id = NEW.organization_id AND other.company_id = NEW.company_id
+            AND other.mode = NEW.mode AND other.environment = NEW.environment
+            AND other.ecf_type = NEW.ecf_type AND other.first <= NEW.last AND NEW.first <= other.last
+    ) THEN
+        RAISE EXCEPTION 'numbering_range_overlaps: a number belongs to one range of its series'
+            USING ERRCODE = 'exclusion_violation';
+    END IF;
+    RETURN NEW;
+END
+$guard$
+"""
+"""The ranges' backstop, whatever a repository does: what DGII authorized is never changed, ``next`` never
+goes back, no two ranges of a series share a number. A trigger, not an exclusion constraint: the constraint
+needs ``btree_gist``, an extension the migrator may not create (it has no CREATE on the database)."""
+
+
 def _tenant() -> tuple[sa.Column[UUID], sa.Column[UUID], sa.Column[str]]:
     return (
         sa.Column("organization_id", sa.Uuid(), nullable=False),
@@ -41,6 +70,7 @@ def _series_words(table: str) -> list[sa.CheckConstraint]:
         sa.CheckConstraint(f"mode IN ({MODES})", name=f"ck_{table}_mode"),
         sa.CheckConstraint(f"environment IN ({ENVIRONMENTS})", name=f"ck_{table}_environment"),
         sa.CheckConstraint(f"ecf_type IN ({TYPES})", name=f"ck_{table}_ecf_type"),
+        sa.CheckConstraint("(environment = 'ecf') = (mode = 'live')", name=f"ck_{table}_live"),
     ]
 
 
@@ -109,6 +139,9 @@ def upgrade() -> None:
     for table in ("numbering_series", "numbering_ranges", "released_numbers"):
         for statement in policy(f"{S}.{table}", RlsScope.TENANT):
             op.execute(statement)
+    op.execute(GUARD)
+    on = f"BEFORE INSERT OR UPDATE ON {S}.numbering_ranges FOR EACH ROW"
+    op.execute(f"CREATE TRIGGER numbering_ranges_guard {on} EXECUTE FUNCTION {S}.numbering_range_guard()")
     for table in ("numbering_series", "numbering_ranges"):
         op.execute(f'REVOKE DELETE ON "{S}".{table} FROM "{S}_rw"')
     op.execute(f'REVOKE UPDATE ON "{S}".released_numbers FROM "{S}_rw"')
