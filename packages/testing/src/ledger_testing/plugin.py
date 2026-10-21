@@ -252,7 +252,7 @@ def module_database(
     return BoundDatabase(
         database,
         schema=module_under_test.schema,
-        source=module_under_test.manifest.package.name,
+        source=module_under_test.source,
         signals=signals,
         publishes=module_under_test.publishes,
     )

@@ -578,6 +578,7 @@ class _Assembly:
             definition=entry,
             regime=self._regimes.get(pack.regime),
             role=shared.role,
+            environment=shared.environment,
             settings=self._sections.get(pack.key),
             database=self._bound[entry.schema_name],
             clock=shared.clock,

@@ -1274,6 +1274,7 @@ async def test_a_channel_is_given_the_app_s_authentication_and_its_outbound_http
     )
     [context] = channels
     assert context.auth is module_auth[0]
+    assert context.environment == SETTINGS.environment  # a channel refuses test-only settings in production
     assert isinstance(context.http, OutboundHttp)
     assert not context.http.replaced("party")  # an app's clients call the network
     async with context.http.client(

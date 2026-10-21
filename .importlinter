@@ -461,6 +461,7 @@ forbidden_modules =
     ledger_app_migrate
     ledger_app_signer
     ledger_app_worker
+    ledger_country_do._manifest
     ledger_country_do.channels
     ledger_country_do_testing
     ledger_devtools
@@ -499,6 +500,8 @@ containers =
     ledger_country_do.channels.ecf_v1
 exhaustive = True
 layers =
+    assembly
+    settings
     adapters
     application
     domain

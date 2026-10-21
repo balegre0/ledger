@@ -15,10 +15,15 @@ errors are ``blobs.archive``'s, which the kit exports as its own). It keeps the 
 
 Its coroutines are facades: an archive is written and read outside any unit of work (Decision 11: archive,
 then record), never while a transaction holds locks.
+
+It is also the app's resource: entering it proves a store that holds connections can keep the archive
+(``ConnectedStore.check``: S3's bucket must have object lock), so an app that cannot archive does not start;
+leaving it releases them. A store that holds none (files) is neither asked nor closed.
 """
 
-from typing import Final, final
+from typing import Final, Self, final
 lazy from datetime import date
+lazy from types import TracebackType
 
 from ledger_kernel.errors import InvalidValueError
 from ledger_platform.blobs.archive import (
@@ -33,6 +38,7 @@ from ledger_platform.blobs.store import (
     BlobDigestMismatchError,
     BlobNotFoundError,
     BlobStoreUnavailableError,
+    ConnectedStore,
     ObjectConflictError,
 )
 from ledger_platform.runtime.facade import facade
@@ -61,6 +67,23 @@ class StoreArchive:
         self._store = store
         self._years = retention_years
         self._clock = clock
+
+    async def __aenter__(self) -> Self:
+        """The archive, its store checked if it holds connections (see the module)."""
+        if isinstance(self._store, ConnectedStore):
+            await self._store.check()
+        return self
+
+    async def __aexit__(
+        self,
+        kind: type[BaseException] | None,
+        error: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        """Release what the store holds, if it holds anything."""
+        del kind, error, traceback
+        if isinstance(self._store, ConnectedStore):
+            await self._store.aclose()
 
     @facade
     async def put_once(

@@ -12,13 +12,18 @@ from hypothesis import strategies as st
 from ledger_country_do.channels.ecf_v1.domain.encf import MAX_SEQUENCE, EcfType, Encf
 from ledger_country_do.channels.ecf_v1.domain.notation import NaiveMomentError, local_date
 from ledger_country_do.channels.ecf_v1.domain.numbering import (
+    UNDATED_TYPES,
     Allocation,
+    Authorization,
     NoNumberAvailableError,
+    RangeExpiryRequiredError,
     RangeInvalidError,
+    RangeOverlapsError,
     RangeState,
     RangeStatus,
     Released,
     accounting_holds,
+    authorized,
     choose,
     overlaps,
     release_at,
@@ -302,3 +307,70 @@ def test_numbering_never_gives_a_number_twice_nor_loses_one(actions: list[tuple[
     for action, value in actions:
         series.act(action, value)
         series.check()
+
+
+# ── A range registered: DGII's authorization as the company enters it ─────────
+
+
+def test_a_registered_range_numbers_from_its_first_number_on() -> None:
+    registered = authorized(
+        Authorization(ecf_type=T31, first=101, last=200, expires_on=date(2028, 12, 31)),
+        range_id=LOW,
+        series=[a_range(1, 100)],
+    )
+    assert registered == RangeState(
+        id=LOW,
+        ecf_type=T31,
+        first=101,
+        last=200,
+        next=101,
+        expires_on=date(2028, 12, 31),
+        status=RangeStatus.ACTIVE,
+    )
+
+
+def test_only_the_consumer_invoice_and_the_credit_note_may_go_undated() -> None:
+    """TesteCF dates every type; DGII may authorize 32 and 34 without a date, never another."""
+    assert frozenset({EcfType.CONSUMER_INVOICE, EcfType.CREDIT_NOTE}) == UNDATED_TYPES
+    for ecf_type in UNDATED_TYPES:
+        assert (
+            authorized(
+                Authorization(ecf_type=ecf_type, first=1, last=9, expires_on=None), range_id=LOW, series=()
+            ).expires_on
+            is None
+        )
+    for ecf_type in frozenset(EcfType) - UNDATED_TYPES:
+        with pytest.raises(RangeExpiryRequiredError, match=f"type {ecf_type.value} needs the day"):
+            authorized(
+                Authorization(ecf_type=ecf_type, first=1, last=9, expires_on=None), range_id=LOW, series=()
+            )
+
+
+@pytest.mark.parametrize(("first", "last"), [(10, 9), (0, 9), (1, MAX_SEQUENCE + 1)])
+def test_a_range_out_of_order_or_bounds_is_refused_without_its_numbers(first: int, last: int) -> None:
+    with pytest.raises(RangeInvalidError, match="a range runs from first to last within 1 to 9999999999"):
+        authorized(
+            Authorization(ecf_type=T31, first=first, last=last, expires_on=date(2028, 12, 31)),
+            range_id=LOW,
+            series=(),
+        )
+
+
+@pytest.mark.parametrize(("first", "last"), [(1, 1), (100, 100), (50, 150), (2, 1000)])
+def test_a_range_sharing_a_number_with_one_of_its_series_is_refused(first: int, last: int) -> None:
+    with pytest.raises(RangeOverlapsError, match="shares numbers with a range already registered"):
+        authorized(
+            Authorization(ecf_type=T31, first=first, last=last, expires_on=date(2028, 12, 31)),
+            range_id=HIGH,
+            series=[a_range(1, 100)],
+        )
+
+
+def test_ranges_of_other_types_never_overlap_this_one() -> None:
+    other = replace(a_range(1, 100), ecf_type=EcfType.CONSUMER_INVOICE)
+    registered = authorized(
+        Authorization(ecf_type=T31, first=1, last=100, expires_on=date(2028, 12, 31)),
+        range_id=HIGH,
+        series=[other],
+    )
+    assert (registered.first, registered.last) == (1, 100)

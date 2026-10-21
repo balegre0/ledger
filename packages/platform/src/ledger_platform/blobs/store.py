@@ -121,6 +121,27 @@ class ImmutableStore(Protocol, metaclass=ABCMeta):
         """
 
 
+@runtime_checkable
+class ConnectedStore(Protocol, metaclass=ABCMeta):
+    """A store that holds connections (S3's client and threads): checked when its app starts, closed at stop.
+
+    A store that holds none (files, memory) is not one: there is nothing to prove before the first request
+    and nothing to release after the last.
+    """
+
+    @abstractmethod
+    async def check(self) -> None:
+        """Prove the store can keep the archive, before anything is asked of it.
+
+        ``BlobStoreRefusedError`` when it cannot (a bucket without object lock), ``BlobStoreUnavailableError``
+        when it cannot be reached.
+        """
+
+    @abstractmethod
+    async def aclose(self) -> None:
+        """Release what the store holds; idempotent. A request after it is ``BlobStoreUnavailableError``."""
+
+
 class ObjectConflictError(LedgerError):
     """Other bytes under a key that holds an object: keys embed their digest, so a defect or a tampering."""
 

@@ -37,7 +37,7 @@ from ledger_platform.config.settings import Settings
 from ledger_platform.grpc.guard import CallerPolicy, CallerTokenRefusedError, CallerTokens, current_caller
 from ledger_platform.grpc.server import ServerOptions, serve_grpc
 from ledger_platform.runtime import App, Module, SystemCall
-from ledger_platform.runtime.registries import MODULES, Discovered, installed
+from ledger_platform.runtime.registries import CHANNELS, MODULES, Discovered, installed
 from ledger_signer.adapters.custody.backends import EntityNotConfiguredError
 from ledger_signer.adapters.custody.kms_local import MASTER_KEY_BYTES
 from ledger_signer.adapters.grpc import codec
@@ -107,8 +107,11 @@ class Recorded:
         )
 
     def discover(self, group: str) -> Sequence[Discovered]:
-        """The installed packages, with identity and the recorded signer as the only modules."""
+        """The installed packages, with identity and the recorded signer as the only modules, and no channel
+        (one reads ports, fiscal's, that no module here provides)."""
         found = installed(group)
+        if group == CHANNELS:
+            return ()
         if group != MODULES:
             return found
         recorded = self.module()

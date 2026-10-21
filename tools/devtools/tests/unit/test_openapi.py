@@ -10,6 +10,37 @@ from ledger_devtools.openapi import api_document, openapi_text
 from ledger_devtools.workspace import Workspace
 
 type Editor = Callable[[str, str, str], None]
+type Writer = Callable[[str, str, tuple[str, ...]], Path]
+
+ROUTED_COUNTRY: Final = """
+[package]
+name = "do"
+kind = "country"
+summary = "Dominican Republic."
+owners = ["@o"]
+
+[dependencies]
+packages = ["kernel", "platform"]
+
+[country]
+iso = "DO"
+name = "Dominican Republic"
+currencies = ["DOP"]
+time_zone = "America/Santo_Domingo"
+authority = { name = "DGII", short = "DGII", url = "https://dgii.gov.do" }
+
+[[channels]]
+key = "do-ecf-v1"
+entry_point = "ledger_country_do.channels.ecf_v1.assembly:CHANNEL"
+schema = "do_ecf"
+valid_from = 2019-01-01
+environments = ["testecf", "certecf", "ecf"]
+document_kinds = ["invoice"]
+directions = ["sales"]
+tier = "bronze"
+http_prefixes = ["/v1/invoices"]
+"""
+"""A country whose channel's routes are under ``/v1/invoices`` (a prefix ``WHOLE`` has)."""
 
 DOCUMENT: Final = TypeAdapter(dict[str, object])
 TABLE: Final = TypeAdapter(dict[str, dict[str, object]])
@@ -65,6 +96,19 @@ def test_a_module_s_document_holds_its_paths_and_what_they_reference(tree: Path,
     assert components["securitySchemes"] == {"HTTPBearer": {"type": "http", "scheme": "bearer"}}
     assert document["info"] == {"title": "ledger", "version": "1"}
     assert text == json.dumps(json.loads(text), indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def test_a_country_s_document_holds_its_channels_paths(tree: Path, write: Writer) -> None:
+    write("countries/do", ROUTED_COUNTRY, ("regime",))
+    document = DOCUMENT.validate_json(openapi_text(Workspace.load(tree).by_name("do"), WHOLE))
+    assert sorted(TABLE.validate_python(document["paths"])) == ["/v1/invoices"]
+    assert sorted(TABLE.validate_python(document["components"])["schemas"]) == [
+        "Branch",
+        "Company",
+        "Invoice",
+        "Line",
+        "TaxId",
+    ]
 
 
 def test_a_package_without_http_has_an_empty_document(tree: Path) -> None:

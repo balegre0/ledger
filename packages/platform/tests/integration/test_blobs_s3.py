@@ -27,6 +27,7 @@ from ledger_platform.blobs.s3 import (
 )
 from ledger_platform.blobs.store import BlobRecordCorruptError, ObjectConflictError
 from ledger_platform.config.settings import Settings
+from ledger_platform.runtime.app import App
 from ledger_platform.runtime.archiving import archive_of
 from ledger_testing.blobs import ImmutableStoreContract
 lazy from ledger_platform.blobs.store import ImmutableStore
@@ -242,3 +243,31 @@ async def test_the_archive_the_settings_configure_writes_to_the_bucket(aws: Loca
     assert await archive.get(KEY, sha256=DIGEST) == CONTENT
     retained = await production_store(aws, bucket).retained_until(KEY)
     assert retained == date(2036, 10, 20)  # the app's ten years, never the channel's shorter date
+
+
+def _nothing(group: str) -> tuple[()]:
+    """No package beyond the platform: the app holds its archive and nothing else."""
+    del group
+    return ()
+
+
+async def test_an_app_whose_archive_bucket_has_no_object_lock_does_not_start(aws: LocalStack) -> None:
+    """The archive is checked when the app starts, not at the first document it archives.
+
+    Nothing else of the app is reached: its database and its identity provider are never asked.
+    """
+    settings = Settings(
+        environment="test",
+        database_url=SecretStr(URL),
+        token_issuer="https://issuer.invalid",
+        token_audience="ledger",
+        token_jwks_url="https://issuer.invalid/keys",
+        archive_backend="s3",
+        archive_bucket=aws.bucket(object_lock=False),
+        archive_region=aws.region,
+        archive_endpoint_url=aws.endpoint_url,
+    )
+    served = App("api", settings=settings, discover=_nothing).asgi()
+    with pytest.raises(BlobStoreRefusedError, match=r"\(ObjectLockConfigurationNotFoundError\)"):
+        async with served.router.lifespan_context(served):
+            pytest.fail("an app whose archive cannot hold the legal archive never serves")

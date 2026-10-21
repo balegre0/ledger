@@ -39,6 +39,12 @@ DO $$ BEGIN CREATE ROLE "signer_rw"; EXCEPTION WHEN duplicate_object THEN NULL; 
 ALTER ROLE "signer_rw" WITH NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT -1 VALID UNTIL 'infinity' PASSWORD NULL;
 DO $$ BEGIN CREATE ROLE "signer_purge"; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ALTER ROLE "signer_purge" WITH NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT -1 VALID UNTIL 'infinity' PASSWORD NULL;
+DO $$ BEGIN CREATE ROLE "do_ecf_owner"; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER ROLE "do_ecf_owner" WITH NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT -1 VALID UNTIL 'infinity' PASSWORD NULL;
+DO $$ BEGIN CREATE ROLE "do_ecf_rw"; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER ROLE "do_ecf_rw" WITH NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT -1 VALID UNTIL 'infinity' PASSWORD NULL;
+DO $$ BEGIN CREATE ROLE "do_ecf_purge"; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER ROLE "do_ecf_purge" WITH NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT -1 VALID UNTIL 'infinity' PASSWORD NULL;
 GRANT "platform_owner" TO "ledger_migrator" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
 GRANT "platform_rw" TO "ledger_app" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
 GRANT "platform_purge" TO "ledger_app" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
@@ -54,6 +60,9 @@ GRANT "invoicing_purge" TO "ledger_app" WITH ADMIN FALSE, INHERIT FALSE, SET TRU
 GRANT "signer_owner" TO "ledger_migrator" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
 GRANT "signer_rw" TO "ledger_signer" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
 GRANT "signer_purge" TO "ledger_signer" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
+GRANT "do_ecf_owner" TO "ledger_migrator" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
+GRANT "do_ecf_rw" TO "ledger_app" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
+GRANT "do_ecf_purge" TO "ledger_app" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
 GRANT "ledger_relay" TO "ledger_app" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
 GRANT "platform_rw" TO "ledger_signer" WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
 DO $$ DECLARE stray record; BEGIN
@@ -63,10 +72,10 @@ FOR stray IN
     JOIN pg_roles AS granted ON granted.oid = membership.roleid
     JOIN pg_roles AS member ON member.oid = membership.member
     JOIN pg_roles AS grantor ON grantor.oid = membership.grantor
-    WHERE NOT ((granted.rolname, member.rolname) IN (('platform_owner', 'ledger_migrator'), ('platform_rw', 'ledger_app'), ('platform_purge', 'ledger_app'), ('identity_owner', 'ledger_migrator'), ('identity_rw', 'ledger_app'), ('identity_purge', 'ledger_app'), ('fiscal_owner', 'ledger_migrator'), ('fiscal_rw', 'ledger_app'), ('fiscal_purge', 'ledger_app'), ('invoicing_owner', 'ledger_migrator'), ('invoicing_rw', 'ledger_app'), ('invoicing_purge', 'ledger_app'), ('signer_owner', 'ledger_migrator'), ('signer_rw', 'ledger_signer'), ('signer_purge', 'ledger_signer'), ('ledger_relay', 'ledger_app'), ('platform_rw', 'ledger_signer'))
+    WHERE NOT ((granted.rolname, member.rolname) IN (('platform_owner', 'ledger_migrator'), ('platform_rw', 'ledger_app'), ('platform_purge', 'ledger_app'), ('identity_owner', 'ledger_migrator'), ('identity_rw', 'ledger_app'), ('identity_purge', 'ledger_app'), ('fiscal_owner', 'ledger_migrator'), ('fiscal_rw', 'ledger_app'), ('fiscal_purge', 'ledger_app'), ('invoicing_owner', 'ledger_migrator'), ('invoicing_rw', 'ledger_app'), ('invoicing_purge', 'ledger_app'), ('signer_owner', 'ledger_migrator'), ('signer_rw', 'ledger_signer'), ('signer_purge', 'ledger_signer'), ('do_ecf_owner', 'ledger_migrator'), ('do_ecf_rw', 'ledger_app'), ('do_ecf_purge', 'ledger_app'), ('ledger_relay', 'ledger_app'), ('platform_rw', 'ledger_signer'))
                AND NOT membership.admin_option AND NOT membership.inherit_option AND membership.set_option)
       AND member.rolname <> current_user
-      AND (granted.rolname IN ('ledger_relay', 'platform_owner', 'platform_rw', 'platform_purge', 'identity_owner', 'identity_rw', 'identity_purge', 'fiscal_owner', 'fiscal_rw', 'fiscal_purge', 'invoicing_owner', 'invoicing_rw', 'invoicing_purge', 'signer_owner', 'signer_rw', 'signer_purge', 'ledger_app', 'ledger_migrator', 'ledger_signer') OR member.rolname IN ('ledger_relay', 'platform_owner', 'platform_rw', 'platform_purge', 'identity_owner', 'identity_rw', 'identity_purge', 'fiscal_owner', 'fiscal_rw', 'fiscal_purge', 'invoicing_owner', 'invoicing_rw', 'invoicing_purge', 'signer_owner', 'signer_rw', 'signer_purge') OR (member.rolname = 'ledger_app' AND granted.rolname !~ '_(rw|purge)$') OR (member.rolname = 'ledger_migrator' AND granted.rolname !~ '_owner$') OR (member.rolname = 'ledger_signer' AND granted.rolname !~ '_(rw|purge)$'))
+      AND (granted.rolname IN ('ledger_relay', 'platform_owner', 'platform_rw', 'platform_purge', 'identity_owner', 'identity_rw', 'identity_purge', 'fiscal_owner', 'fiscal_rw', 'fiscal_purge', 'invoicing_owner', 'invoicing_rw', 'invoicing_purge', 'signer_owner', 'signer_rw', 'signer_purge', 'do_ecf_owner', 'do_ecf_rw', 'do_ecf_purge', 'ledger_app', 'ledger_migrator', 'ledger_signer') OR member.rolname IN ('ledger_relay', 'platform_owner', 'platform_rw', 'platform_purge', 'identity_owner', 'identity_rw', 'identity_purge', 'fiscal_owner', 'fiscal_rw', 'fiscal_purge', 'invoicing_owner', 'invoicing_rw', 'invoicing_purge', 'signer_owner', 'signer_rw', 'signer_purge', 'do_ecf_owner', 'do_ecf_rw', 'do_ecf_purge') OR (member.rolname = 'ledger_app' AND granted.rolname !~ '_(rw|purge)$') OR (member.rolname = 'ledger_migrator' AND granted.rolname !~ '_owner$') OR (member.rolname = 'ledger_signer' AND granted.rolname !~ '_(rw|purge)$'))
 LOOP
     EXECUTE format('REVOKE %I FROM %I GRANTED BY %I CASCADE', stray.role, stray.member, stray.grantor);
 END LOOP;
@@ -103,3 +112,8 @@ GRANT USAGE ON SCHEMA "signer" TO "signer_rw", "signer_purge", "ledger_relay";
 ALTER DEFAULT PRIVILEGES FOR ROLE "signer_owner" IN SCHEMA "signer" GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "signer_rw";
 ALTER DEFAULT PRIVILEGES FOR ROLE "signer_owner" IN SCHEMA "signer" GRANT USAGE, SELECT ON SEQUENCES TO "signer_rw";
 ALTER DEFAULT PRIVILEGES FOR ROLE "signer_owner" REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+CREATE SCHEMA IF NOT EXISTS "do_ecf" AUTHORIZATION "do_ecf_owner";
+GRANT USAGE ON SCHEMA "do_ecf" TO "do_ecf_rw", "do_ecf_purge", "ledger_relay";
+ALTER DEFAULT PRIVILEGES FOR ROLE "do_ecf_owner" IN SCHEMA "do_ecf" GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "do_ecf_rw";
+ALTER DEFAULT PRIVILEGES FOR ROLE "do_ecf_owner" IN SCHEMA "do_ecf" GRANT USAGE, SELECT ON SEQUENCES TO "do_ecf_rw";
+ALTER DEFAULT PRIVILEGES FOR ROLE "do_ecf_owner" REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;

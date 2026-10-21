@@ -524,6 +524,22 @@ def test_a_country_s_channels_on_disk_are_layered_and_pure(tree: Path, write: Wr
     assert "notes" not in text
 
 
+def test_a_channel_s_assembly_and_settings_sit_above_its_adapters(tree: Path, write: Writer) -> None:
+    """A channel's own modules: its assembly (the ``ChannelPack``), then its settings, then its layers."""
+    source = write("countries/do", COUNTRY, ("regime", "channels"))
+    channel = source / "channels/ecf_v1"
+    for layer in ("adapters", "application", "domain"):
+        (channel / layer).mkdir(parents=True)
+    for module in ("assembly.py", "settings.py"):
+        (channel / module).write_text('"""A channel module."""\n', encoding="utf-8")
+    text = importlinter_text(Workspace.load(tree))
+    assert (
+        "containers =\n    ledger_country_do.channels.ecf_v1\n"
+        "exhaustive = True\n"
+        "layers =\n    assembly\n    settings\n    adapters\n    application\n    domain\n"
+    ) in text
+
+
 def test_targets_cover_init_sql_and_the_openapi_document_of_each_module_the_api_mounts(
     tree: Path, write: Writer
 ) -> None:
@@ -541,6 +557,43 @@ def test_targets_cover_init_sql_and_the_openapi_document_of_each_module_the_api_
     assert '"/v1/companies": {}' in generated[Path("modules/identity/openapi.json")]
     assert Path("modules/billing/openapi.json") not in generated
     assert calls == ["built"]
+
+
+def test_coverage_measures_a_channel_s_revisions_by_their_path(tree: Path, write: Writer) -> None:
+    """Alembic loads a revision by its path: coverage would not see it as one of the country's modules."""
+    source = write("countries/do", COUNTRY, ("regime", "channels"))
+    (source / "channels/ecf_v1/adapters/postgres/migrations").mkdir(parents=True)
+    (source / "channels/ecf_v1/adapters/xml").mkdir(parents=True)
+    (source / "channels/notes/adapters/postgres/migrations").mkdir(parents=True)
+    (source / "regime/adapters/postgres/migrations").mkdir(parents=True)  # not a channel's
+    workspace = Workspace.load(tree)
+    assert tomllib.loads(pyproject_text(workspace.by_name("do"), workspace))["tool"]["coverage"]["run"][
+        "source"
+    ] == [
+        "countries/do/src/ledger_country_do/channels/ecf_v1/adapters/postgres/migrations",
+        "countries/do/src/ledger_country_do/channels/notes/adapters/postgres/migrations",
+    ]
+    assert (
+        "source"
+        not in tomllib.loads(pyproject_text(workspace.by_name("kernel"), workspace))["tool"]["coverage"][
+            "run"
+        ]
+    )
+
+
+def test_a_country_whose_channels_route_in_the_api_gets_a_document(tree: Path, write: Writer) -> None:
+    """A channel's public routes are mounted by the ``api`` app: its country publishes their document."""
+    routed = COUNTRY.replace('tier = "bronze"', 'tier = "bronze"\nhttp_prefixes = ["/v1/do"]')
+    write("countries/do", routed, ("regime",))
+    write("countries/mx", OTHER_COUNTRY, ("regime",))
+
+    def document() -> dict[str, object]:
+        return {"openapi": "3.1.0", "paths": {"/v1/companies": {}, "/v1/do/numbering_ranges": {}}}
+
+    generated = targets(Workspace.load(tree), document=document)
+    assert '"/v1/do/numbering_ranges": {}' in generated[Path("countries/do/openapi.json")]
+    assert '"/v1/companies"' not in generated[Path("countries/do/openapi.json")]
+    assert Path("countries/mx/openapi.json") not in generated  # no channel of it routes anything
 
 
 def test_no_document_is_built_when_no_module_mounts_routes_in_the_api(tree: Path, edit: Editor) -> None:

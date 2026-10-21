@@ -2,6 +2,7 @@
 
 import hashlib
 from datetime import UTC, date, datetime
+from functools import partial
 from typing import Final, final, override
 lazy from pathlib import Path
 
@@ -18,11 +19,12 @@ from ledger_platform.blobs.archive import (
     archive_store,
 )
 from ledger_platform.blobs.files import FileImmutableStore
-from ledger_platform.blobs.s3 import S3ImmutableStore
+from ledger_platform.blobs.s3 import S3ImmutableStore, s3_client
 from ledger_platform.blobs.store import (
     BlobDigestMismatchError,
     BlobNotFoundError,
     BlobStoreUnavailableError,
+    ConnectedStore,
     ImmutableStore,
     ObjectConflictError,
 )
@@ -68,6 +70,40 @@ class Failing(ImmutableStore):
     async def retained_until(self, key: str) -> date:
         del key
         raise self.error
+
+
+@final
+class Connected(ImmutableStore):
+    """A store that holds connections: what the archive's start and stop asked of it, in order."""
+
+    def __init__(self, *, refused: LedgerError | None = None) -> None:
+        self.asked: list[str] = []
+        self.refused = refused
+
+    async def check(self) -> None:
+        self.asked.append("check")
+        if self.refused is not None:
+            raise self.refused
+
+    async def aclose(self) -> None:
+        self.asked.append("aclose")
+
+    @override
+    async def put_once(
+        self, key: str, content: bytes, *, retain_until: date, media_type: str
+    ) -> StoredObject:
+        del key, content, retain_until, media_type
+        raise BlobStoreUnavailableError
+
+    @override
+    async def get(self, key: str, *, sha256: bytes) -> bytes:
+        del key, sha256
+        raise BlobStoreUnavailableError
+
+    @override
+    async def retained_until(self, key: str) -> date:
+        del key
+        raise BlobStoreUnavailableError
 
 
 def archive(store: ImmutableStore, years: int = 10) -> StoreArchive:
@@ -152,6 +188,40 @@ async def test_get_refuses_a_digest_that_is_no_sha256_before_asking_the_store() 
     for digest in (b"", DIGEST[: SHA256_BYTES - 1], DIGEST + b"\x00"):
         with pytest.raises(InvalidValueError, match=r"archive.sha256 must be a SHA-256 digest \(32 bytes\)"):
             await untouchable.get(KEY, sha256=digest)
+
+
+async def test_an_archive_over_a_connected_store_checks_it_at_start_and_closes_it_at_stop() -> None:
+    store = Connected()
+    async with archive(store) as opened:
+        assert store.asked == ["check"]
+        assert isinstance(opened, StoreArchive)
+    assert store.asked == ["check", "aclose"]
+
+
+async def test_a_store_that_fails_its_check_stops_the_start_and_is_not_closed_by_it() -> None:
+    refused = BlobStoreUnavailableError()
+    store = Connected(refused=refused)
+    with pytest.raises(BlobStoreUnavailableError) as caught:
+        async with archive(store):
+            pytest.fail("an archive whose store failed its check is never used")
+    assert caught.value is refused
+    assert store.asked == ["check"]  # the app closes what it opened only
+
+
+async def test_an_archive_over_a_store_without_connections_opens_and_closes_without_asking_it(
+    tmp_path: Path,
+) -> None:
+    store = FileImmutableStore(tmp_path)
+    async with archive(store) as opened:
+        stored = await opened.put_once(KEY, CONTENT, retain_until=date(2040, 1, 1), media_type=MEDIA)
+        assert stored.sha256 == DIGEST
+    assert await archive(store).get(KEY, sha256=DIGEST) == CONTENT  # still readable: nothing to close
+
+
+def test_the_s3_store_holds_connections_and_the_file_store_none(tmp_path: Path) -> None:
+    s3 = S3ImmutableStore("ledger-archive", partial(s3_client, region="us-east-1", endpoint_url=None))
+    assert isinstance(s3, ConnectedStore)
+    assert not isinstance(FileImmutableStore(tmp_path), ConnectedStore)
 
 
 def test_the_archive_is_a_facade_never_called_inside_a_unit_of_work(tmp_path: Path) -> None:

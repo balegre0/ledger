@@ -9,14 +9,24 @@ dependencies = [
     "ledger-kernel",
     "ledger-platform",
     "ledger-fiscal-kit",
+    "alembic>=1.20.0",
     "cryptography>=50.0.2",
+    "fastapi>=0.143.0",
     "httpx>=0.28.1",
     "lxml>=6.1.3",
     "pydantic>=2.14.1",
+    "pydantic-settings>=2.15.0",
+    "sqlalchemy>=2.1.4",
 ]
 
 [project.entry-points."ledger.countries.regimes"]
 do = "ledger_country_do.regime:REGIME"
+
+[project.entry-points."ledger.countries.channels"]
+"do-ecf-v1" = "ledger_country_do.channels.ecf_v1.assembly:CHANNEL"
+
+[project.entry-points."ledger.settings"]
+do_ecf = "ledger_country_do.channels.ecf_v1.assembly:CHANNEL"
 
 [tool.uv.sources]
 ledger-kernel = { workspace = true }
@@ -31,6 +41,7 @@ build-backend = "uv_build"
 branch = true
 core = "sysmon"
 source_pkgs = ["ledger_country_do"]
+source = ["countries/do/src/ledger_country_do/channels/ecf_v1/adapters/postgres/migrations"]
 
 [tool.coverage.report]
 fail_under = 100

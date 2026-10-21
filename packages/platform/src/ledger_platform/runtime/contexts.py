@@ -267,6 +267,8 @@ class ChannelContext:
     regime: RegimeDef
     """The regime it serves."""
     role: AppRole
+    environment: Environment
+    """Where the app runs (``LEDGER_ENVIRONMENT``): a channel refuses its test-only settings in production."""
     settings: PackageSettings | None
     """Its own settings section (``LEDGER_<SCHEMA>_*``), validated; ``None`` if its entry declares none."""
     database: BoundDatabase

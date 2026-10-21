@@ -5,6 +5,7 @@ paths under the manifest's prefixes); this test compares it, as ``ledger-devtool
 pin what the document says: the limits of a request, and what every operation takes and answers.
 """
 
+import tempfile
 from pathlib import Path
 from typing import Final, TypedDict
 
@@ -26,8 +27,11 @@ PLACEHOLDERS: Final = Settings(
     token_issuer="https://issuer.invalid",
     token_audience="ledger",
     token_jwks_url="https://issuer.invalid/oauth/v2/keys",
+    archive_backend="file",
+    archive_path=Path(tempfile.gettempdir()) / "ledger-openapi-archive",
 )
-"""The document does not depend on whom the app trusts or where its database is: nothing connects."""
+"""The document depends on none of these: nothing connects, nothing is archived (a channel needs an archive
+to start; the app never starts)."""
 PREFIXES: Final = MANIFEST.http.prefixes if MANIFEST.http is not None else ()
 REPRESENTATION: Final = "/v1/invoices/{invoice_id}/representation"
 Parameter = TypedDict("Parameter", {"name": str, "in": str, "required": bool})
