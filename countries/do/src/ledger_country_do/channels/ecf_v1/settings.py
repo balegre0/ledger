@@ -7,8 +7,8 @@
   them); each no longer than the next. An attempt may not outlast the settle delay (``SETTLE_DELAY``, 30 s):
   the assembly refuses one that would (``SettleTooShortError``).
 - ``TRUSTED_ROOTS``: a PEM file of the certification authorities a counterparty's certificate must chain to
-  (buyers' receipts, received documents); read when the app starts, required by the worker. Its path and
-  contents are never printed.
+  (buyers' receipts, received documents); required by the worker, which reads it when it starts, and by the
+  receiver. Its path and contents are never printed.
 - ``TEST_SENDER_STANDINS``: comma-separated SHA-256 fingerprints of certificates DGII signs with as a sender
   during certification (Decision 17), honoured in ``testecf`` and ``certecf`` only; refused in production.
 - ``RECEIVER_PUBLIC_URL``: where the receiver is reachable (``https://...``, no path), for the URLs each

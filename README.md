@@ -55,7 +55,7 @@ the local stack from it.
 
 ```bash
 sh deploy/local/signer/tokens.sh                                    # once: the signer's callers' tokens (git ignores them)
-sh deploy/local/do/roots.sh                                         # once: do-ecf-v1's development root (the worker's)
+sh deploy/local/do/roots.sh                                         # once: do-ecf-v1's development root (worker, receiver)
 docker compose -f deploy/local/compose.yaml up -d --build --wait   # postgres, migrate, api, worker, receiver, signer
 docker compose -f deploy/local/compose.yaml down -v                 # stop and delete the data (and the signer's KMS key)
 ```
@@ -78,12 +78,12 @@ The signer (ADR 0010) holds the certificates and signs, in a container of its ow
 the only one that enters the schema `signer`, and a gRPC service on `signer:50051`, never published on the host
 (it has no gRPC health service: it is probed over HTTP). It shares the internal network `signer` with its callers
 and PostgreSQL alone, so nothing else in the stack reaches 50051; its own network `signer-edge` carries its probe
-port and, locally, a route out (a deployment's NetworkPolicy admits gRPC from the api and the worker only, and
-lets it reach PostgreSQL and the KMS only). The api and the worker call it with a token each;
-`deploy/local/signer/tokens.sh` writes three random ones (api, worker, receiver) into
+port and, locally, a route out (a deployment's NetworkPolicy admits gRPC from the api, the worker and the
+receiver only, and lets it reach PostgreSQL and the KMS only). The api, the worker and the receiver call it with
+a token each; `deploy/local/signer/tokens.sh` writes three random ones (api, worker, receiver) into
 `deploy/local/signer/.local/`, the signer reads all three and each caller only its own (`--new` replaces them:
-recreate the api, the worker and the signer). Without the signer's file compose refuses to start the stack; the
-api and the worker start without theirs. Neither caller's readiness depends on the signer: without it the
+recreate the api, the worker, the receiver and the signer). Without the signer's file compose refuses to start
+the stack; its callers start without theirs. No caller's readiness depends on the signer: without it the
 certificate routes answer 503 `signer_unavailable`. Its KMS is a key file in the volume
 `signer-kms`, refused outside the environments `local` and `test`, so the signer runs nowhere but here and in the
 tests yet. [docs/runbooks/signer/](docs/runbooks/signer/) has the rest.

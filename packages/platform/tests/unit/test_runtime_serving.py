@@ -101,15 +101,17 @@ def test_the_signer_factory_builds_the_signer_app_without_connecting(
 
 @pytest.mark.usefixtures("environment")
 def test_the_receiver_factory_builds_the_receiver_app_without_connecting(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """No channel is installed in the workspace yet: the receiver serves its probes, no module's route.
+    """The receiver serves its probes and no module's route; the workspace's DO channel has no receiver route
+    yet, and needs there the roots emitters' documents chain to (the deployment's) and the archive.
 
     It needs neither the token settings nor the direct URL: nothing of it proves our tokens or listens.
     """
     for name in ("LEDGER_TOKEN_ISSUER", "LEDGER_TOKEN_AUDIENCE", "LEDGER_TOKEN_JWKS_URL"):
         monkeypatch.delenv(name)
     monkeypatch.delenv("LEDGER_DATABASE_DIRECT_URL")
+    monkeypatch.setenv("LEDGER_DO_ECF_TRUSTED_ROOTS", str(tmp_path / "roots.pem"))
     app = serving.receiver()
     assert (app.title, app.version) == ("ledger-receiver", version("ledger-app-receiver"))
     assert {"/livez", "/readyz", "/metrics"} <= paths(app)

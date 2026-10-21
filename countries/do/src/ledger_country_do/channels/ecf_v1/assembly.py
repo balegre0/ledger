@@ -7,7 +7,8 @@ stand-in in production. It reads the ports it needs from the app (fiscal-kit's k
 company directory (who may do what, and who is enrolled), the archive in the roles that archive (none: the
 channel does not start there, since every document it signs is archived first; ``migrate`` reads none,
 keeps nothing, and gets the channel's revisions alone). The ``api`` app mounts its routes (``/v1/do``); the
-worker opens its DGII and buyer clients at start (their trusted roots, which it requires, read then).
+worker opens its DGII and buyer clients at start (their trusted roots, which it requires, read then); the
+receiver requires the trusted roots too (the documents emitters send it chain to them).
 ``migrate`` runs its revisions; every app checks its schema is current. Documents are signed with the QR's
 hosts of the DGII hosts configured (a test's fake's, or DGII's).
 """
@@ -63,6 +64,7 @@ class Refusal(StrEnum):
 
     STANDINS_IN_PRODUCTION = "TEST_SENDER_STANDINS is refused in production: certification runs only"
     WORKER_WITHOUT_ROOTS = "TRUSTED_ROOTS is required by the worker: it verifies counterparties"
+    RECEIVER_WITHOUT_ROOTS = "TRUSTED_ROOTS is required by the receiver: it verifies what emitters send"
 
 
 class SettingRefusedError(EcfError):
@@ -121,6 +123,8 @@ def assemble(context: ChannelContext) -> ChannelParts:
     if not archiving:  # migrate: its revisions, nothing to serve, open or keep
         return ChannelParts(channel=channel, jobs=jobs, migrations=migrations())
     parts = ChannelParts(channel=channel, routers=(ranges.router(api),), jobs=jobs, migrations=migrations())
+    if context.role == "receiver" and settings.trusted_roots is None:
+        raise SettingRefusedError(Refusal.RECEIVER_WITHOUT_ROOTS)
     if context.role != "worker":
         return parts
     roots = settings.trusted_roots

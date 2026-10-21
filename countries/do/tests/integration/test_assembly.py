@@ -137,6 +137,17 @@ def test_the_worker_needs_trusted_roots(contexts: Contexts) -> None:
         assemble(contexts(settings=RECEIVED, role="worker"))
 
 
+def test_the_receiver_needs_trusted_roots_and_opens_no_client(contexts: Contexts, tmp_path: Path) -> None:
+    """The documents emitters send the receiver chain to the roots; DGII's and the buyers' clients are the
+    worker's alone (the receiver mounts the channel's receiver routes only: none before Task 22)."""
+    with pytest.raises(SettingRefusedError, match=r"LEDGER_DO_ECF_TRUSTED_ROOTS .* the receiver"):
+        assemble(contexts(settings=RECEIVED, role="receiver"))
+    rooted = RECEIVED.model_copy(update={"trusted_roots": tmp_path / "roots.pem"})
+    parts = assemble(contexts(settings=rooted, role="receiver"))
+    assert (parts.resources, parts.receiver_routers) == ((), ())
+    assert [spec.kind for spec in parts.jobs] == ["do_ecf.advance"]
+
+
 async def test_the_worker_opens_its_dgii_and_buyer_clients_at_start_and_closes_them_at_stop(
     contexts: Contexts, tmp_path: Path, authority: Authority
 ) -> None:
