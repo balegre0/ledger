@@ -14,13 +14,15 @@ Plan: `docs/superpowers/plans/2026-10-19-v2-m3b-fiscal.md`. Each task has files,
    - released numbers when `secuenciaUtilizada=false`;
    - `AnswerMismatchError` parks the job with the state unchanged;
    - fencing for concurrent advance; one test per sentence of the never-resend rules.
-2. **Task 13** (`receiver` role, `apps/receiver`, port 8103) in `ledger-m13`: review and merge.
-   - Authentication model for inbound DGII/emitter calls.
-   - Readiness and the 2 MiB body limit.
-   - Trusted roots are required by the receiver too.
-   - The signer client binding with its own token `LEDGER_SIGNER_TOKEN_RECEIVER`.
-   - Remove the `RoleNotBuiltError` limitation in the signer client tests.
-   - Check the custody import-linter contract covers the receiver app (signer final review M6).
+2. **Task 13** (`receiver` role, `apps/receiver`, port 8103): in `main`; reviewed on 2026-10-25 (CHANGES REQUIRED,
+   no Critical) and fixed on the branch `feat/m3b-receiver-fix` (worktree `ledger-r13`): the receiver serves no
+   OpenAPI document, its probes and metrics answer 404 through a proxy, it reads its trusted roots at start,
+   IPv6 clients are limited by their /64 (the plan's Task 13 review note has the rest). Next: re-review if wanted,
+   then merge into `main`. Owner/backlog notes from that review (not fixed):
+   - `SignSeed` is probably unnecessary for the receiver (spec §3.7 lists it): a least-privilege question for the owner.
+   - The receiver uses the `ledger_app` login (read-write on every module schema, spec §6): give the
+     internet-facing app a narrower login.
+   - The receiver archives (an archiving role) but has no `/archive` volume yet: Task 26 adds it, for raw inbound copies.
 3. **Task 20** (fiscal module: `IssuePolicy`, routing, recovery and mirror consumers, `Renderer`). Binding notes, already in the plan:
    - add `invoicing` to fiscal's `dependencies.modules` and `implements = ["invoicing.IssuePolicy", "invoicing.Renderer"]`, then `uv run poe sync` (the layer order changes: check it);
    - every coroutine must be a `@facade`;
@@ -96,6 +98,10 @@ Source: `docs/reviews/2026-10-20-signer-final-review.md`. ADR 0010 is still "Pro
 5. Egress proxy (Smokescreen) with a DGII allowlist.
 6. Supply chain in CI: Renovate, pip-audit, Trivy, SBOM, cosign.
 7. OpenTofu "cell" module and deploy pipeline (GitHub Actions by image digest, ECR, staging then prod); signer and receiver console scripts; restore-and-verify drill; a PITR numbering reconciliation runbook.
+   Deployment checklist for the receiver (Task 13's review):
+   - `LEDGER_RECEIVER_FORWARDED_HOPS=1` behind an ALB, or every client is the ALB's address and shares one allowance (the receiver logs `app.receiver_without_proxies` at start in staging and production with 0).
+   - The ALB routes only `/<channel key>/` (`/do-ecf-v1/`) to the receiver.
+   - Its health checks call the target directly, with no `X-Forwarded-For`: a probe or scrape that carries the header is answered 404.
 8. Hash-chained audit anchors into the locked bucket, plus pgaudit.
 9. Per-company claim fairness, one claim loop per process (idle polling), NOTIFY on enqueue.
 10. Index `(organization_id, company_id, mode, issue_date)` for reports; 606/607 export (confirm the obligation with an accountant).

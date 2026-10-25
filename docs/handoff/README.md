@@ -20,6 +20,8 @@ Read in this order:
 - **Task 19 is merged into local `main` (not pushed) as of 2026-10-25; the next step is Task 20 once the owner gives the green light.** History of the branch `feat/m3b-advance-final` (worktree `ledger-t19`): Task 19 (`do_ecf.advance`, the DGII submission job) in **review-fixed state**: the independent review's
   rulings (CRITICAL 1, IMPORTANT 1-3, the minors) are fixed or recorded in the plan, gate: on the first fix round three runs (one failed on the known gRPC flake, two green), on the re-review's fixes two runs, both green (see HANDOFF.md). Not in `main`: it awaits the
   re-review of the fixes, then the merge. `wip/m3b-advance-snapshot` is its superseded unfinished snapshot.
+- `feat/m3b-receiver-fix` (worktree `ledger-r13`, from `main` 6f0ab2b): Task 13's review fix round (the review returned CHANGES REQUIRED, no Critical): the receiver
+  serves no OpenAPI document and no probe or metrics through a proxy, reads its trusted roots at start, limits IPv6 clients by their /64. Not merged, not pushed; gate green twice (see HANDOFF.md).
 - `feat/signer`, `feat/m3b-receiver`: older integration/feature branches whose content is already in `main`.
 
 ## Do not
