@@ -612,7 +612,10 @@ async def test_en_proceso_is_polled_on_the_schedule_publishing_once_while_it_las
     await with_range(module_database, tenant)
     worker.fake.script.default = Scripted(processing=3)
     document = await worker.issued(draft_of(tenant))
-    assert await worker.drain(document) == ["again:1", "again:2", "again:5", "again:10", "done"]
+    assert await worker.drain(document, limit=2) == ["again:1", "again:2"]
+    processing = await row_of(module_database, tenant, document)
+    assert (processing.state, processing.since) == ("in_process", None)  # in process is not unknown
+    assert await worker.drain(document) == ["again:5", "again:10", "done"]
     row = await row_of(module_database, tenant, document)
     assert (row.state, row.polls, worker.network.posts(RECEPTION)) == ("accepted", 4, 1)
     updates = await updates_of(module_database, tenant)
@@ -1106,7 +1109,10 @@ async def test_an_adopted_track_id_dgii_does_not_find_leaves_it_unknown_since_th
     await worker.run(tenant, document)  # adopted
     (received,) = worker.fake.received
     received.track_id = "e" * 32  # DGII knows the adopted one no more
-    await worker.run(tenant, document)  # polled: 0, No encontrado
+    with capture_logs() as logged:
+        polled = await worker.run(tenant, document)  # polled: 0, No encontrado, the window open
+    assert isinstance(polled, RunAgain)  # asked about again, no person yet
+    assert ("do_ecf.waiting_for_a_person", "error", "outcome_unknown") not in events_of(logged)
     row = await row_of(module_database, tenant, document)
     assert (row.state, row.since, row.code) == ("outcome_unknown", since, 0)
     await worker.run(tenant, document)  # the new one adopted

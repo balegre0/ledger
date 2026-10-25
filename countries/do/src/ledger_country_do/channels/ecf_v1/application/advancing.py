@@ -37,11 +37,15 @@ became unknown (``track_id_since``, never reset). Every step that leaves the out
 adopts nothing, ``consultarfce``'s 0, a poll's 0 for an adopted track id, DGII out of reach) waits for a
 person once the window is closed, so a track id DGII lists but never finds cannot loop for ever.
 
-**A wake** (``Channel.resume``: ``OPERATOR``, or any wake that lands while the run is under way) is the job
-made ready from its park; nothing of it is kept on the document. Since no step runs the job again once the
-window is closed, a run that finds the outcome unknown with the window closed follows a wake (or a run that
-lost a race and is run again at once): it asks DGII once, may adopt a track id, and the poll that follows
-waits for a person again on a 0. A wake buys one lookup and one poll; it never reopens the window.
+**A wake** (any ``wake_all`` of the job's kind and company: ``Channel.resume`` for an operator, a range
+registered, a certificate installed; one landing while a run is under way readies the job it parks) is the
+job made ready from its park; nothing of it is kept on the document. No step schedules another lookup once
+it finds the window closed; a run scheduled while it was open (``SETTLE_DELAY``, the poll schedule,
+``after_unavailable``), a run that lost a race and is run again at once, and a woken run may still find it
+closed. Such a run asks DGII once, may adopt a track id, and the poll that follows waits for a person again
+on a 0 (an adopted, ``submitted`` document DGII cannot be reached about keeps being asked after
+``after_unavailable``, as any submitted document is, until DGII answers). Any wake buys at most one lookup
+and one poll; none reopens the window.
 
 **Decided**: DGII's state, messages, code and ``secuenciaUtilizada``; the number used, burned, or released
 (a ``released_numbers`` row, allocatable from ``release_at`` on, by the channel's clock, which numbers are
