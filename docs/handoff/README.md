@@ -14,11 +14,11 @@ Read in this order:
 
 ## Which branch has what
 
-- `main`: v2-M1 restructure, the DGII spike, the earlier GitHub work with its fix wave, and the invoicing module (all reviewed), plus this handoff.
-- `feat/signer`: the integration branch. It contains `main` plus the signer module (Tasks 1-15) and the fiscal work (kit, builders, readers, DGII/buyer clients, S3 archive, channel entry, issue).
-  The newest plans and notes live here. Its last full gate was green at 5cd35a2; run the gate again first.
-- `feat/m3b-receiver`: Task 13 (receiver role), committed and not yet reviewed.
-- Task 19 (the `do_ecf.advance` job) was uncommitted in a local worktree when this was written and is not in the repository.
+- `main`: everything reviewed and gated so far: v2-M1 restructure, the DGII spike, the earlier GitHub work with its fix wave, the invoicing module, the signer module (Tasks 1-15),
+  the fiscal work (kit, builders, readers, DGII/buyer clients, S3 archive, channel entry, issue) and the receiver role (Task 13, merged on 2026-10-25), plus this handoff.
+  The full gate was green twice on this tree on 2026-10-25. The plans and their "As built" notes live here.
+- `wip/m3b-advance-snapshot`: the unfinished, unreviewed, ungated Task 19 (`do_ecf.advance`, the DGII submission job). Not in `main`. Resume it first (see HANDOFF.md).
+- `feat/signer`, `feat/m3b-receiver`: older integration/feature branches whose content is already in `main`.
 
 ## Do not
 
