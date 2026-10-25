@@ -17,12 +17,9 @@ Read in this order:
 - `main`: everything reviewed and gated so far: v2-M1 restructure, the DGII spike, the earlier GitHub work with its fix wave, the invoicing module, the signer module (Tasks 1-15),
   the fiscal work (kit, builders, readers, DGII/buyer clients, S3 archive, channel entry, issue) and the receiver role (Task 13, merged on 2026-10-25), plus this handoff.
   The full gate was green twice on this tree on 2026-10-25. The plans and their "As built" notes live here.
-- **Task 19 is merged into local `main` (not pushed) as of 2026-10-25; the next step is Task 20 once the owner gives the green light.** History of the branch `feat/m3b-advance-final` (worktree `ledger-t19`): Task 19 (`do_ecf.advance`, the DGII submission job) in **review-fixed state**: the independent review's
-  rulings (CRITICAL 1, IMPORTANT 1-3, the minors) are fixed or recorded in the plan, gate: on the first fix round three runs (one failed on the known gRPC flake, two green), on the re-review's fixes two runs, both green (see HANDOFF.md). Not in `main`: it awaits the
-  re-review of the fixes, then the merge. `wip/m3b-advance-snapshot` is its superseded unfinished snapshot.
-- `feat/m3b-receiver-fix` (worktree `ledger-r13`, from `main` 6f0ab2b): Task 13's review fix round (the review returned CHANGES REQUIRED, no Critical): the receiver
-  serves no OpenAPI document and no probe or metrics through a proxy, reads its trusted roots at start, limits IPv6 clients by their /64. Not merged, not pushed; gate green twice (see HANDOFF.md).
-- `feat/signer`, `feat/m3b-receiver`: older integration/feature branches whose content is already in `main`.
+- **As of 2026-10-25, local `main` also contains Task 19 (`do_ecf.advance`, the DGII submission job; reviewed twice, mutation-checked, gate green twice) and the review fixes of Task 13 (the receiver: no OpenAPI or probe through a proxy, trusted roots read at start, IPv6 limited by /64; gate green twice).**
+  Local `main` is ahead of GitHub's `main` and has NOT been pushed. The next step is Task 20 once the owner gives the green light (the owner asked to continue only what was started, then wait).
+- `feat/m3b-advance-final`, `feat/m3b-receiver-fix`, `wip/m3b-advance-snapshot`, `feat/signer`, `feat/m3b-receiver`, `feat/everything`: feature or integration branches whose content is already in `main` (the `wip/` snapshot is a superseded unfinished copy of Task 19).
 
 ## Do not
 
