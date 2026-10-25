@@ -33,8 +33,15 @@ DGII's answer while the outcome is unknown: the answer is the document's own.
 **Track ids** (Decision 9): adopted only when DGII received it from ``RECEIPT_TOLERANCE`` before the moment
 of signing on and no earlier document with the same e-NCF holds it. Asked on the poll schedule (``polls``,
 reset only when a submission gets its track id) for ``TRACK_ID_WINDOW`` from the moment the outcome first
-became unknown (``track_id_since``, never reset: adopting a track id DGII then does not find cannot loop
-for ever).
+became unknown (``track_id_since``, never reset). Every step that leaves the outcome unknown (a lookup that
+adopts nothing, ``consultarfce``'s 0, a poll's 0 for an adopted track id, DGII out of reach) waits for a
+person once the window is closed, so a track id DGII lists but never finds cannot loop for ever.
+
+**A wake** (``Channel.resume``: ``OPERATOR``, or any wake that lands while the run is under way) is the job
+made ready from its park; nothing of it is kept on the document. Since no step runs the job again once the
+window is closed, a run that finds the outcome unknown with the window closed follows a wake (or a run that
+lost a race and is run again at once): it asks DGII once, may adopt a track id, and the poll that follows
+waits for a person again on a 0. A wake buys one lookup and one poll; it never reopens the window.
 
 **Decided**: DGII's state, messages, code and ``secuenciaUtilizada``; the number used, burned, or released
 (a ``released_numbers`` row, allocatable from ``release_at`` on, by the channel's clock, which numbers are
@@ -343,9 +350,12 @@ class Advancing:
             to = answered(outcome.state)
             if to is current.state:  # still in process: nothing to publish
                 await unit.documents.changed(asked)
-            else:  # in process, or not found: unknown since the first time only (Decision 7)
+            elif to is EcfDocumentState.OUTCOME_UNKNOWN:  # not found: unknown since the first time only
                 since = current.track_id_since or unit.now
-                await self._move(unit, replace(asked, track_id_since=since), Step.POLL, to)
+                moved = await self._move(unit, replace(asked, track_id_since=since), Step.POLL, to)
+                return self._still_unknown(moved, unit.now)  # a window closed: a person (Decision 7)
+            else:  # in process
+                await self._move(unit, asked, Step.POLL, to)
             return Again(unit.now + next_poll(asked.polls))
 
     # ── outcome unknown: track ids, or consultarfce ──────────────────────────────────

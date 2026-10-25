@@ -206,6 +206,13 @@ safe to resend. In every case:
 A document still pending after the polling schedule (`DGII: still pending ...`) has a track id: ask
 `consultaresultado` later; never resend it either.
 
+**The one physical resend there is (a 401).** DGII's client (`adapters/dgii/client.py`,
+`_authenticated`) answers a 401 to a document's `POST` by renewing the token and posting the same bytes
+once more within the same call (the spike's CLI and the `do_ecf.advance` job alike). It relies on a 401
+meaning DGII did not take the document. If TesteCF ever answers a 401 to a `recepcion` or `recepcionfc`
+`POST` and then lists a track id for that e-NCF from before the second `POST`, or answers it twice, record
+it as a finding at once: that assumption is wrong and the client must stop resending on a 401.
+
 ## Open questions and how each is settled
 
 | # | How TesteCF settles it (or why it does not) | Step |

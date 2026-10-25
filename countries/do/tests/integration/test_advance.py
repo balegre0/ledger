@@ -1098,7 +1098,7 @@ async def test_in_certecf_an_unknown_outcome_waits_for_a_person_at_once(
 async def test_an_adopted_track_id_dgii_does_not_find_leaves_it_unknown_since_the_first_time(
     worker: Worker, module_database: BoundDatabase
 ) -> None:
-    """The adopt loop is bounded by the window: ``track_id_since`` is never reset."""
+    """``track_id_since`` is never reset: the window the next test closes runs from the first time."""
     tenant = a_tenant()
     await with_range(module_database, tenant)
     document = await broken_once(worker, module_database, tenant, draft_of(tenant))
@@ -1111,6 +1111,32 @@ async def test_an_adopted_track_id_dgii_does_not_find_leaves_it_unknown_since_th
     assert (row.state, row.since, row.code) == ("outcome_unknown", since, 0)
     await worker.run(tenant, document)  # the new one adopted
     assert (await row_of(module_database, tenant, document)).track_id == "e" * 32
+    assert worker.network.posts(RECEPTION) == 1
+
+
+async def test_a_track_id_dgii_lists_but_never_finds_waits_for_a_person_once_the_window_closed(
+    worker: Worker, module_database: BoundDatabase
+) -> None:
+    """The adopt → No encontrado → unknown loop ends with the window: a wake buys one lookup and one poll."""
+    tenant = a_tenant()
+    await with_range(module_database, tenant)
+    document = await broken_once(worker, module_database, tenant, draft_of(tenant))
+    row = await row_of(module_database, tenant, document)
+    assert row.since is not None
+    (received,) = worker.fake.received
+    received.status = Status.NOT_FOUND  # listed, never found
+    await set_row(module_database, tenant, document, track_id_since=row.since - timedelta(days=3))
+    with capture_logs() as logged:
+        assert await worker.drain(document) == ["again:2", "parked:outcome_unknown"]
+    assert events_of(logged) == [("do_ecf.waiting_for_a_person", "error", "outcome_unknown")]
+    call = SystemCall(reason="operator", scope=tenant)
+    await worker.channel.resume(call, tenant.company, ResumeReason.OPERATOR)
+    with capture_logs() as logged:
+        assert await worker.drain(document) == ["again:10", "parked:outcome_unknown"]
+    assert events_of(logged) == [("do_ecf.waiting_for_a_person", "error", "outcome_unknown")]
+    parked = await row_of(module_database, tenant, document)
+    assert (parked.state, parked.code, parked.polls) == ("outcome_unknown", 0, 4)
+    assert parked.since == row.since - timedelta(days=3)
     assert worker.network.posts(RECEPTION) == 1
 
 
@@ -1497,6 +1523,29 @@ async def test_a_submission_refused_by_a_429_after_another_run_found_its_mark_st
     assert await row_of(module_database, tenant, document) == unknown
     assert (unknown.state, unknown.mark is not None) == ("outcome_unknown", True)
     assert worker.receptions(unknown.encf) == []
+
+
+async def test_a_submission_refused_by_a_429_keeps_a_mark_another_run_set_meanwhile(
+    worker: Worker, module_database: BoundDatabase
+) -> None:
+    """Still ``signed``, but no longer this run's mark: the run that set it is the one to clear it."""
+    tenant = a_tenant()
+    await with_range(module_database, tenant)
+    document = await worker.issued(draft_of(tenant))
+    release = asyncio.Event()
+    worker.network.stalled[RECEPTION] = release
+    worker.network.throttled[RECEPTION] = 1
+    late = asyncio.create_task(worker.run(tenant, document))
+    await worker.network.delivered.wait()
+    ours = await row_of(module_database, tenant, document)
+    assert ours.mark is not None
+    theirs = ours.mark + timedelta(seconds=1)
+    await set_row(module_database, tenant, document, submission_started_at=theirs)
+    release.set()
+    assert isinstance(await late, RunAgain)
+    kept = await row_of(module_database, tenant, document)
+    assert (kept.state, kept.mark, kept.polls, kept.version) == ("signed", theirs, ours.polls, ours.version)
+    assert worker.receptions(kept.encf) == []
 
 
 async def test_a_submission_broken_after_another_run_found_its_mark_changes_nothing_more(
