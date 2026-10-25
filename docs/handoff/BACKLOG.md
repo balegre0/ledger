@@ -6,7 +6,7 @@ Read `HANDOFF.md` first (owner rules, process, repo map, current state, pending 
 
 Plan: `docs/superpowers/plans/2026-10-19-v2-m3b-fiscal.md`. Each task has files, interfaces, steps and the review notes added later (the notes are binding).
 
-1. **Task 19** (`do_ecf.advance` job) in `ledger-m19`: finish, independent review, fix round, merge into `feat/signer`.
+1. **Task 19** (`do_ecf.advance` job) on `feat/m3b-advance-final` (worktree `ledger-t19`): reviewed, fix round done (review-fixed state); re-review the fix commits, then merge into `main`.
    Central property: a submission whose outcome may be unknown must never be resent.
    - the submission MARK is a column (`submission_started_at`), not a state;
    - track-id lookup before any resubmit; `outcome_unknown` parking;
@@ -32,12 +32,14 @@ Plan: `docs/superpowers/plans/2026-10-19-v2-m3b-fiscal.md`. Each task has files,
    - `check` must object `field_unknown` to undeclared keys when no channel routes the document;
    - per-line withholdings are `fiscal.do.withholdings`, keyed by line index, and must be resent whenever `lines` change;
    - a void is refused while any fiscal status is non-final;
-   - outside consumers use style "outside", timeout default 60 s, idempotent by event id or version.
+   - outside consumers use style "outside", timeout default 60 s, idempotent by event id or version;
+   - **from Task 19's review:** `wake_all` does not move a job's `deadline_at`: a `do_ecf.advance` job parked for `certificate` or `outcome_unknown` and woken more than 15 days after enqueue dies at once (`deadline_passed`), leaving its document `numbered`/`signed`/`outcome_unknown`; the recovery consumer re-enqueues `do_ecf.advance` for an undecided document whose job is dead or missing (Owner item 13).
 4. **Task 21** (DO delivery job, options, retry).
    - Call `deliver(..., authenticate=company_options.buyer_authentication)`.
    - Audit every `SeedSigned`, including `.seeds` on errors, masking the buyer.
    - Archive `ReceiptRefused.arecf` and never retry it; `BuyerRequiresAuthenticationError` is alertable.
    - Raise the worker pool size (see `docs/runbooks/platform/database-connections.md`).
+   - From Task 19's review: enqueue `do_ecf.deliver` in `Advancing._decided` AND for every reception document already accepted with `delivery = not_started` when this lands.
 5. **Task 22** (DO receiver routes).
    - `read_inbound_ecf`, then verify the signature with `INBOUND`, then trust.
    - Answer with `render_arecf(Receipt(...))` signed through SignerPort.
@@ -52,6 +54,8 @@ Plan: `docs/superpowers/plans/2026-10-19-v2-m3b-fiscal.md`. Each task has files,
 9. **Task 26** (fake DGII completed with consultarfce, anularrango and aprobacioncomercial; compose; end-to-end test against the fake DGII).
    - Needs the trusted-roots file (`deploy/local/do/roots.sh`) plus the buyer simulator's root, the `/archive` volume owned by uid 65532, and Postgres `max_connections=300`.
 10. **Task 27** (retire the spike CLI and `emission.py`; runbooks; as-built notes) and **Task 34** (final verification and whole-branch review).
+    - From Task 19's review: the outcome-unknown alert and runbook also cover dead `do_ecf.advance` jobs (a signed + marked document whose job died logs no `do_ecf.waiting_for_a_person`) and `require_ready` failures counted as attempts during shutdown; keep the DO runbook's line on the one physical resend (the DGII client re-POSTs a document after a 401 with a renewed token, assuming a 401 means DGII did not take it).
+    - LIVE Task 28 (from Task 19's review): honour a 429's `Retry-After` in the advance job. LIVE Task 31 (from Task 19's review): operator commands that wake, unblock or settle a document whose advance job is dead or past its deadline enqueue a fresh `do_ecf.advance` (or re-arm the deadline); reopening the track-id window or adopting a named track id is an operator command, never the wake (Owner item 13).
 11. Decisions already taken inside those tasks:
     - promote Task 33 (code-4 replacement e-CF) from LATER to LIVE;
     - enable types 41/47 (`do_ecf_type_not_issued`) once Task 8's retention block is accepted;
