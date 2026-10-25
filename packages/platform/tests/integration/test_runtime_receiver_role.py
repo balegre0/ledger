@@ -228,15 +228,18 @@ async def test_the_receiver_is_ready_with_its_database_and_its_channels_schemas(
 async def test_a_client_over_its_rate_is_answered_429_and_the_probes_still_answer(
     fresh: Fresh, probe: Probe
 ) -> None:
-    settings = fresh.settings(APP, receiver_rate_per_second=1.0, receiver_rate_burst=2)
+    """One request in 1000 s once its burst is spent: no wall clock this test could race refills a slot."""
+    settings = fresh.settings(APP, receiver_rate_per_second=0.001, receiver_rate_burst=2)
     app = App("receiver", settings=settings, discover=probe.discover())
     async with serving(app.asgi(), FIRST, OTHER) as (client, other):
         answered = [(await client.post(RECEPTION, content=b"<ECF/>")).status_code for _ in range(3)]
-        retry = (await client.post(RECEPTION, content=b"<ECF/>")).headers["retry-after"]
+        again = await client.post(RECEPTION, content=b"<ECF/>")
         ready = await client.get("/readyz")
         another = await other.post(RECEPTION, content=b"<ECF/>")
     assert answered == [HTTPStatus.OK, HTTPStatus.OK, HTTPStatus.TOO_MANY_REQUESTS]
-    assert (retry, ready.status_code, another.status_code) == ("1", HTTPStatus.OK, HTTPStatus.OK)
+    assert again.status_code == HTTPStatus.TOO_MANY_REQUESTS
+    assert int(again.headers["retry-after"]) > 1
+    assert (ready.status_code, another.status_code) == (HTTPStatus.OK, HTTPStatus.OK)
     assert probe.received == [6, 6, 6]  # two from the first client, one from the other
 
 

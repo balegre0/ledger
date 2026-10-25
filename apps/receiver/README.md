@@ -12,8 +12,18 @@ consumer, job or schedule. `main` calls `ledger_platform.runtime.serve("receiver
 - **Limits before anything is read:** each client address is held to `LEDGER_RECEIVER_RATE_PER_SECOND`
   (default 20) with a burst of `LEDGER_RECEIVER_RATE_BURST` (40), per replica; over it, 429 with `Retry-After`.
   Behind an ingress, `LEDGER_RECEIVER_FORWARDED_HOPS` says how many proxies append to `X-Forwarded-For`
-  (default 0: the header is ignored and the peer is the client). Bodies over 1 MiB are refused 413 as they
-  are read, unless a route declares more (an inbound e-CF, 2 MiB). A channel adds its own per-taxpayer limit.
+  (default 0: the header is ignored and the peer is the client; **1 behind an ALB**, or every client is the
+  ALB's address and shares one allowance: in staging and production the app logs
+  `app.receiver_without_proxies` when it starts with 0). An IPv6 client is limited by its /64; an
+  `X-Forwarded-For` entry that is not an IP address is ignored for the peer's. Bodies over 1 MiB are refused
+  413 as they are read, unless a route declares more (an inbound e-CF, 2 MiB). A channel adds its own
+  per-taxpayer limit.
+- **Its public host is the internet's.** It serves no OpenAPI document (`/openapi.json`, `/docs`, `/redoc`
+  answer 404), and its `/livez`, `/readyz` and `/metrics` answer only callers that reach the replica directly
+  (the orchestrator's prober, the scraper): a request that carries `X-Forwarded-For` (it came through a proxy,
+  whatever `LEDGER_RECEIVER_FORWARDED_HOPS` says) is answered 404 there, and counted against its client's
+  rate. **The ingress routes only `/<channel key>/` (`/do-ecf-v1/`) to the receiver**; nothing else of it is
+  for the internet.
 - **Readiness** is the database and its packages' schemas and checks; never the signer's.
 - **Signing** (the ARECF it answers with) goes through the signer with the receiver's own caller token:
   `LEDGER_SIGNER_ADDRESS` and `LEDGER_SIGNER_TOKEN_RECEIVER`. Without them the signer's stand-ins answer

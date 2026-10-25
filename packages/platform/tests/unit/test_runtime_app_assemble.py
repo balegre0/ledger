@@ -625,16 +625,20 @@ def receiving_app(
 async def test_the_receiver_mounts_the_channels_receiver_routes_alone_in_any_case() -> None:
     """No module's router and no channel's public route; DGII's paths are case-insensitive ([06] §4)."""
     app = receiving_app("receiver")
-    transport = httpx.ASGITransport(app=app.asgi())
+    served = app.asgi()
+    transport = httpx.ASGITransport(app=served)
     async with httpx.AsyncClient(transport=transport, base_url="http://receiver.test") as client:
         received = await client.post("/US-PROBE-V1/TESTECF/131880738/FE/Recepcion/API/ECF")
         public = await client.get("/v1/us/ranges")
         module_s = await client.get("/v1/alphas/ping")
-        document = await client.get("/openapi.json")
+        documents = [(await client.get(path)).status_code for path in ("/openapi.json", "/docs", "/redoc")]
+        proxied = await client.get("/readyz", headers={"X-Forwarded-For": "192.0.2.1"})
     await app.aclose()
     assert (received.status_code, received.json()) == (200, {"environment": "testecf", "tax_id": "131880738"})
     assert (public.status_code, module_s.status_code) == (404, 404)
-    assert list(TypeAdapter(dict[str, object]).validate_python(document.json()["paths"])) == [RECEPTION]
+    assert documents == [404, 404, 404]  # nothing describes its routes to the internet
+    assert list(TypeAdapter(dict[str, object]).validate_python(served.openapi()["paths"])) == [RECEPTION]
+    assert proxied.status_code == 404  # the probes answer the prober, which calls the replica directly
 
 
 async def test_the_api_mounts_no_receiver_route() -> None:
@@ -730,6 +734,21 @@ def test_a_receiver_without_a_channel_says_so(capsys: pytest.CaptureFixture[str]
     App("receiver", settings=SETTINGS, discover=discovering(module("alpha")))
     [line] = [line for line in capsys.readouterr().out.splitlines() if "app.no_channels" in line]
     assert ("warning" in line, "role=receiver" in line) == (True, True)
+
+
+@pytest.mark.parametrize("environment", ["staging", "production"])
+def test_a_deployed_receiver_that_declares_no_proxy_says_so(
+    capsys: pytest.CaptureFixture[str], environment: Environment
+) -> None:
+    """Behind an ALB with no proxy declared, every client is the ALB's address: one allowance for them all."""
+    deployed = SETTINGS.model_copy(update={"environment": environment})
+    receiving_app("receiver", settings=deployed)
+    [line] = [line for line in capsys.readouterr().out.splitlines() if "app.receiver_without_proxies" in line]
+    assert ("warning" in line, "role=receiver" in line, f"environment={environment}" in line) == (True,) * 3
+    receiving_app("receiver", settings=deployed.model_copy(update={"receiver_forwarded_hops": 1}))
+    receiving_app("receiver", settings=SETTINGS)  # a laptop's, a test's: called directly
+    receiving_app("worker", settings=deployed)  # it limits no client address
+    assert "app.receiver_without_proxies" not in capsys.readouterr().out
 
 
 def test_the_api_needs_token_settings() -> None:

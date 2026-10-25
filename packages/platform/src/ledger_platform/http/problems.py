@@ -270,6 +270,14 @@ def refusal(error: LedgerError) -> JSONResponse:
     return _problem(status_of(error), error.code, detail=str(error) or None, headers=headers)
 
 
+def unrouted(status: HTTPStatus) -> JSONResponse:
+    """The problem the router answers ``status`` with when it refuses a request itself: 404 ``not_found``.
+
+    For a layer that answers before the router as the router would: a path there for some callers only.
+    """
+    return _problem(status, _describe(status).code)
+
+
 def current_request_id() -> str | None:
     """The id of the request being answered: the id of its trace, if it is traced.
 

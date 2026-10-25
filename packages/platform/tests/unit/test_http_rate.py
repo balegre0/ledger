@@ -18,6 +18,7 @@ from ledger_platform.auth.providers.zitadel import organization_of
 from ledger_platform.config.options import InvalidOptionError
 from ledger_platform.http.app import ApiInfo, Edge, Observability, create_app
 from ledger_platform.http.deps import Verifier
+from ledger_platform.http.probes import OPERATIONAL_PATHS
 from ledger_platform.http.problems import Problem
 from ledger_platform.http.proving import authenticated
 from ledger_platform.http.rate import ClientRate, RateLimitedError, RateLimiter, client_address
@@ -222,7 +223,8 @@ async def test_a_refusal_to_wait_names_whole_seconds_in_retry_after() -> None:
 
 
 def by_client_app(limiter: RateLimiter, *, forwarded_hops: int = 0) -> FastAPI:
-    """An app holding every client address to ``limiter`` (the receiver's), with one route of its own."""
+    """An app with the receiver's edge (every client address held to ``limiter``, no document, the operational
+    routes for direct callers alone), with one route of its own."""
     router = APIRouter()
 
     @router.get("/ping")
@@ -237,7 +239,11 @@ def by_client_app(limiter: RateLimiter, *, forwarded_hops: int = 0) -> FastAPI:
         observability=observability,
         lifespan=lifespan,
         routers=[router],
-        edge=Edge(client_rate=ClientRate(limiter=limiter, forwarded_hops=forwarded_hops)),
+        edge=Edge(
+            client_rate=ClientRate(limiter=limiter, forwarded_hops=forwarded_hops),
+            documents=False,
+            direct_operational=True,
+        ),
     )
 
 
@@ -270,6 +276,42 @@ async def test_probes_and_metrics_are_never_held_to_a_client_s_rate() -> None:
         assert (await get_from(app, "10.0.0.1", path)).status_code == 200
 
 
+@pytest.mark.parametrize("hops", [0, 1])
+async def test_through_a_proxy_the_probes_and_metrics_are_not_found(hops: int) -> None:
+    """The receiver's host is the internet's: a prober or a scraper reaches a replica directly, and sends no
+    ``X-Forwarded-For``; a request that came through a proxy (it does, whatever the proxies declared) is
+    answered as for a path that does not exist."""
+    app = by_client_app(limiter_of(Clock(), rate=1.0, burst=100), forwarded_hops=hops)
+    for path in sorted(OPERATIONAL_PATHS):
+        proxied = await get_from(app, "10.0.0.1", path, forwarded=("192.0.2.1",))
+        direct = await get_from(app, "10.0.0.1", path)
+        assert (path, proxied.status_code, direct.status_code) == (path, 404, 200)
+        problem = Problem.model_validate_json(proxied.content)
+        assert (problem.code, problem.status) == ("not_found", 404)
+
+
+async def test_a_probe_through_a_proxy_is_held_to_its_client_s_rate() -> None:
+    app = by_client_app(limiter_of(Clock(), rate=1.0, burst=1), forwarded_hops=1)
+    first = await get_from(app, "10.0.0.1", "/readyz", forwarded=("192.0.2.1",))
+    second = await get_from(app, "10.0.0.1", "/metrics", forwarded=("192.0.2.1",))
+    assert (first.status_code, second.status_code) == (404, 429)
+
+
+@pytest.mark.parametrize("path", ["/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"])
+async def test_the_receiver_s_edge_serves_no_document(path: str) -> None:
+    """Its callers are tax authorities and emitters, not our developers: nothing describes its routes."""
+    response = await get_from(by_client_app(limiter_of(Clock(), rate=1.0, burst=100)), "10.0.0.1", path)
+    assert response.status_code == 404
+
+
+async def test_ipv6_clients_are_held_to_a_rate_by_their_64_bit_prefix() -> None:
+    """A subscriber gets a /64 and may use any address in it: per address, it would have 2**64 allowances."""
+    app = by_client_app(limiter_of(Clock(), rate=1.0, burst=1))
+    assert (await get_from(app, "2001:db8::1")).status_code == 200
+    assert (await get_from(app, "2001:db8::ffff:2")).status_code == 429  # the same /64
+    assert (await get_from(app, "2001:db8:0:1::1")).status_code == 200  # the next /64
+
+
 async def test_without_proxies_a_forwarded_address_is_ignored() -> None:
     """Anyone can write ``X-Forwarded-For``: with no proxy declared, the peer is the client."""
     app = by_client_app(limiter_of(Clock(), rate=1.0, burst=1))
@@ -294,8 +336,31 @@ async def test_behind_proxies_the_client_is_the_address_the_outermost_proxy_wrot
         (2, ("192.0.2.1",), ("10.0.0.1", 1), "10.0.0.1"),  # fewer than declared: it did not pass them all
         (1, (" , ",), ("10.0.0.1", 1), "10.0.0.1"),
         (0, (), None, "unknown"),
+        (0, (), ("2001:db8::1", 1), "2001:db8::/64"),
+        (1, ("2001:DB8:0:0:abcd::9",), ("10.0.0.1", 1), "2001:db8::/64"),
+        (0, (), ("::ffff:192.0.2.1", 1), "192.0.2.1"),
+        (1, ("::ffff:192.0.2.1",), ("10.0.0.1", 1), "192.0.2.1"),
+        (1, ("not-an-address",), ("10.0.0.1", 1), "10.0.0.1"),
+        (1, ("192.0.2.1:4711",), ("10.0.0.1", 1), "10.0.0.1"),
+        (1, ("192.0.2.1",), ("testclient", 1), "192.0.2.1"),
+        (0, (), ("testclient", 1), "testclient"),
     ],
-    ids=["peer", "one proxy", "two proxies, two headers", "short chain", "empty chain", "no peer"],
+    ids=[
+        "peer",
+        "one proxy",
+        "two proxies, two headers",
+        "short chain",
+        "empty chain",
+        "no peer",
+        "ipv6 peer",
+        "ipv6 forwarded",
+        "ipv4-mapped peer",
+        "ipv4-mapped forwarded",
+        "forwarded not an address",
+        "forwarded with a port",
+        "peer not an address, forwarded",
+        "peer not an address",
+    ],
 )
 def test_the_client_address_of_a_request(
     hops: int, forwarded: tuple[str, ...], client: tuple[str, int] | None, address: str

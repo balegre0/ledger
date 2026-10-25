@@ -43,7 +43,7 @@ from ledger_platform.http.limits import MAX_BODY_BYTES, BodyLimit, route_limits
 from ledger_platform.http.lowercase import LowercasePath
 from ledger_platform.http.metrics import ROUTE_KEY, UNMATCHED, Measure, RouteLabels
 from ledger_platform.http.mode import require_mode_header
-from ledger_platform.http.probes import OPERATIONAL_PATHS, add_probes
+from ledger_platform.http.probes import OPERATIONAL_PATHS, DirectOperational, add_probes
 from ledger_platform.http.problems import (
     INTERNAL_CODE,
     REQUEST_ID_HEADER,
@@ -115,6 +115,12 @@ class Edge:
     """Paths under these are routed lower-cased (``http.lowercase``): the receiver's channel keys."""
     client_rate: ClientRate | None = None
     """Each client address held to it before anything else runs (``http.rate``): the receiver's."""
+    documents: bool = True
+    """Whether the app serves its OpenAPI document and the pages over it (``/openapi.json``, ``/docs``,
+    ``/redoc``). Not the receiver's: its callers are tax authorities and emitters, not our developers."""
+    direct_operational: bool = False
+    """Whether the operational routes answer only a request that reached the app directly
+    (``probes.DirectOperational``): the receiver's, whose public host is the internet's."""
 
 
 DEFAULT_EDGE: Final = Edge()
@@ -289,11 +295,15 @@ def create_app(
     complete before this returns: a route added afterwards, to the app or to a router already included, is
     measured as ``unregistered`` (and logged once), never under a path that may lack a prefix.
     """
+    documents = edge.documents
     app = _ChassisApp(
         title=info.title,
         version=info.version,
         lifespan=lifespan,
         telemetry=_telemetry(observability.tracer_provider),
+        openapi_url="/openapi.json" if documents else None,
+        docs_url="/docs" if documents else None,
+        redoc_url="/redoc" if documents else None,
     )
     require_at_least("http", "max_body_bytes", edge.max_body_bytes)
     app.caller_trace = observability.caller_trace
@@ -308,8 +318,11 @@ def create_app(
         registry=observability.registry,
     )
     # Starlette runs the middleware added last first: Measure, then the path lower-cased (the body limit
-    # matches its routes on it), then a client's rate, then the body limit, then the router.
+    # matches its routes on it), then a client's rate, then the operational routes refused through a proxy
+    # (counted by the rate first), then the body limit, then the router.
     app.add_middleware(BodyLimit, limit=edge.max_body_bytes, routes=route_limits(app.routes))
+    if edge.direct_operational:
+        app.add_middleware(DirectOperational)
     if edge.client_rate is not None:
         app.add_middleware(RateByClient, rate=edge.client_rate)
     if edge.lowercase_prefixes:

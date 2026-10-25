@@ -27,7 +27,10 @@ cannot archive does not start; the signer never opens one), then the packages' r
   inbound document declares its own, ``larger_body``). It proves no token of ours and needs no token
   setting: its channels prove their senders (seeds, tokens and signatures of their own). No module's router,
   no consumer, job or schedule runs in it; its readiness is the database and its packages' schemas and
-  checks, never the signer's (a client role's signer hands no check).
+  checks, never the signer's (a client role's signer hands no check). Its public host is the internet's: it
+  serves no OpenAPI document or pages, and its probes and metrics answer only callers that reach the replica
+  directly (``http.probes``). In staging and production it says so when it declares no proxy in front
+  (``LEDGER_RECEIVER_FORWARDED_HOPS``: 1 behind an ALB), since every client would then share one allowance.
 
 Connections. Units go through ``LEDGER_DATABASE_URL``, which may be a transaction pooler's (§6.7): with
 ``LEDGER_DATABASE_POOLED`` psycopg prepares no statement on it. The after-commit NOTIFYs have a pool of their
@@ -92,7 +95,7 @@ from ledger_platform.runtime.registries import installed
 from ledger_platform.runtime.supervision import Supervisor
 lazy from ledger_kernel.clock import Clock
 lazy from ledger_platform.config.manifest import AppRole, PackageManifest
-lazy from ledger_platform.config.settings import Settings
+lazy from ledger_platform.config.settings import Environment, Settings
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.data.migrations import SchemaMigrations
 lazy from ledger_platform.runtime.assembly import Member
@@ -145,6 +148,8 @@ _SERVED: Final[frozenset[AppRole]] = frozenset({"api", "worker", "signer", "rece
 """The roles an HTTP server serves; ``migrate`` runs once."""
 _LOOPS: Final[Mapping[AppRole, int]] = {"worker": WORKER_LOOPS, "signer": SIGNER_LOOPS}
 """The roles that run consumers, jobs and schedules (they listen for wake-ups), and their loops besides."""
+_DEPLOYED: Final[frozenset[Environment]] = frozenset({"staging", "production"})
+"""The environments a receiver runs behind an ingress in."""
 _PERMANENT: Final = (InvalidOptionError,)
 """Failures of a worker that no restart can fix."""
 _SET_LOCK_TIMEOUT: Final = text("SELECT set_config('lock_timeout', :wait, true)")
@@ -401,6 +406,10 @@ class App:
             _logger.warning("app.no_modules", role=role)
         if role == "receiver" and not self._assembled.channels:  # it serves its probes, and nothing else
             _logger.warning("app.no_channels", role=role)
+        if (
+            role == "receiver" and settings.environment in _DEPLOYED and settings.receiver_forwarded_hops == 0
+        ):  # behind an ALB every client would be the ALB's address, and share one allowance
+            _logger.warning("app.receiver_without_proxies", role=role, environment=settings.environment)
         need = pool_need(role, self._assembled.members)
         if settings.database_pool_size < need.total:
             raise PoolTooSmallError(role, settings.database_pool_size, need)
@@ -455,15 +464,18 @@ class App:
         return self._served
 
     def _receiver_edge(self) -> Edge:
-        """The receiver's edge: paths under its channels' keys lower-cased, a rate per client address (§10).
+        """The receiver's edge (§10): its channels' paths lower-cased, a rate per client address, no document.
 
-        Its callers hold no credential of ours to count by.
+        Its callers hold no credential of ours to count by. Its operational routes answer direct callers alone
+        (``http.probes``).
         """
         settings = self._settings
         limiter = RateLimiter(rate=settings.receiver_rate_per_second, burst=settings.receiver_rate_burst)
         return Edge(
             lowercase_prefixes=tuple(f"/{key}/" for key in self._assembled.channels),
             client_rate=ClientRate(limiter=limiter, forwarded_hops=settings.receiver_forwarded_hops),
+            documents=False,
+            direct_operational=True,
         )
 
     def migrate(self) -> None:

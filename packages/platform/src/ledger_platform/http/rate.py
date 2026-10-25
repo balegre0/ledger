@@ -17,12 +17,16 @@ that large meets. The settings are ``LEDGER_RATE_LIMIT_PER_SECOND`` and ``LEDGER
 The receiver's callers hold no credential of ours (§3.8): ``RateByClient`` holds each client *address* to a
 limiter instead (§10, the receiver's per-IP limit; ``LEDGER_RECEIVER_RATE_*``), before the app reads anything
 of the request. The address is the peer's, unless proxies are declared in front (``forwarded_hops``): then it
-is the one the outermost of them appended to ``X-Forwarded-For``, the one entry a client cannot write.
+is the one the outermost of them appended to ``X-Forwarded-For``, the one entry a client cannot write; an
+entry that is not an IP address (a proxy that appends a port, say) names no client, and the peer is taken. An
+IPv6 client is keyed by its /64: a subscriber is given a /64 and may use any address of it, which would be
+2**64 allowances. An IPv4 address mapped into IPv6 (``::ffff:192.0.2.1``) is its IPv4 address.
 """
 
 from collections import OrderedDict
 from dataclasses import dataclass
 from http import HTTPStatus
+from ipaddress import IPv6Address, IPv6Network, ip_address
 from math import ceil
 from time import monotonic
 from typing import ClassVar, Final, final
@@ -33,7 +37,7 @@ from starlette.datastructures import Headers
 from ledger_kernel.errors import UnavailableError
 from ledger_platform.config.options import InvalidOptionError, is_positive_and_finite, require_at_least
 from ledger_platform.config.settings import MAX_FORWARDED_HOPS
-from ledger_platform.http.probes import OPERATIONAL_PATHS
+from ledger_platform.http.probes import FORWARDED_FOR, OPERATIONAL_PATHS, proxied
 from ledger_platform.http.problems import refusal
 lazy from ledger_platform.http.metrics import AsgiApp, AsgiReceive, AsgiScope, AsgiSend
 
@@ -42,7 +46,8 @@ DEFAULT_KEYS: Final = 10_000
 DEFAULT_SET_ASIDE: Final = 1_000
 UNKNOWN_CLIENT: Final = "unknown"
 """The key of a request whose server named no peer (no ASGI server does over TCP): one shared allowance."""
-_FORWARDED_FOR: Final = "x-forwarded-for"
+IPV6_CLIENT_PREFIX: Final = 64
+"""The bits of an IPv6 address that name its client: a subscriber's /64."""
 
 
 class RateLimitedError(UnavailableError):
@@ -163,14 +168,30 @@ def client_address(scope: AsgiScope, *, forwarded_hops: int) -> str:
     """
     match scope.get("client"):
         case [str() as host, int()]:
-            address = host
+            address = _client_key(host) or host  # not an IP address (a test client's name): taken as it is
         case _:
             address = UNKNOWN_CLIENT
     if forwarded_hops == 0:
         return address
-    written = ",".join(Headers(scope=scope).getlist(_FORWARDED_FOR)).split(",")
+    written = ",".join(Headers(scope=scope).getlist(FORWARDED_FOR)).split(",")
     chain = [entry for entry in (each.strip() for each in written) if entry]
-    return chain[-forwarded_hops] if len(chain) >= forwarded_hops else address
+    if len(chain) < forwarded_hops:
+        return address
+    return _client_key(chain[-forwarded_hops]) or address
+
+
+def _client_key(written: str) -> str | None:
+    """The key of the client at ``written`` (see the module); ``None`` when it is not an IP address."""
+    try:
+        address = ip_address(written)
+    except ValueError:
+        return None
+    if isinstance(address, IPv6Address):
+        mapped = address.ipv4_mapped
+        if mapped is not None:
+            return str(mapped)
+        return str(IPv6Network((address, IPV6_CLIENT_PREFIX), strict=False))
+    return str(address)
 
 
 @final
@@ -178,8 +199,9 @@ class RateByClient:
     """Holds each client address to a ``ClientRate`` (see the module); an ASGI middleware.
 
     Over its rate, a request is answered 429 ``rate_limited`` with ``Retry-After``, before the app reads it.
-    The probes and the metrics (``OPERATIONAL_PATHS``) are never limited: the orchestrator's prober and the
-    scraper share an address with nobody, and a refused probe would take a healthy replica out of rotation.
+    The probes and the metrics (``OPERATIONAL_PATHS``) asked directly are never limited: the orchestrator's
+    prober and the scraper share an address with nobody, and a refused probe would take a healthy replica out
+    of rotation. Asked through a proxy (``probes.proxied``) they are a client's requests like any other.
     """
 
     __slots__ = ("_app", "_rate")
@@ -190,7 +212,7 @@ class RateByClient:
 
     async def __call__(self, scope: AsgiScope, receive: AsgiReceive, send: AsgiSend) -> None:
         """Run the request, or refuse it when its client is over the rate."""
-        if scope["type"] == "http" and scope.get("path") not in OPERATIONAL_PATHS:
+        if scope["type"] == "http" and (scope.get("path") not in OPERATIONAL_PATHS or proxied(scope)):
             rate = self._rate
             wait = rate.limiter.wait(client_address(scope, forwarded_hops=rate.forwarded_hops))
             if wait > 0:
