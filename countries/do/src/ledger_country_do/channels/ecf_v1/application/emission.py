@@ -1,8 +1,9 @@
 """Emitting an e-CF end to end for the spike CLI: sign, send, poll, map (spec §8.5, §8.6.3-§8.6.4).
 
-The channel itself signs in ``Channel.issue`` and its ``do_ecf.advance`` job (``signing``; Task 19's job
-steps submit and poll, one call per run); this module keeps the spike's own loop (``ledger-dgii-spike``,
-retired in Task 27). Emission is two steps, so a caller can keep what was signed before anything leaves:
+The channel itself signs in ``Channel.issue`` and its ``do_ecf.advance`` job, which submits and polls one
+call per run (``advancing``, whose errors this module shares); this module keeps the spike's own loop
+(``ledger-dgii-spike``), and goes with it in Task 27. Emission is two steps, so a caller can keep what was
+signed before anything leaves:
 
 * ``sign(draft) -> Signed``: ``signing.Signing.sign``, once DGII's side is ready
   (``Authority.require_ready``: hosts allowed, connections open), the range expiring when the draft says.
@@ -39,9 +40,10 @@ caller supplies each e-NCF.
 
 import asyncio
 from dataclasses import dataclass
-from typing import ClassVar, Final, Required, TypedDict, Unpack, final
+from typing import Final, Required, TypedDict, Unpack, final
 lazy from collections.abc import Awaitable
 
+from ledger_country_do.channels.ecf_v1.application.advancing import AnswerMismatchError, SettleTooShortError
 from ledger_country_do.channels.ecf_v1.application.ports import (
     AuthorityUnavailableError,
     Failure,
@@ -51,7 +53,7 @@ from ledger_country_do.channels.ecf_v1.application.ports import (
 )
 from ledger_country_do.channels.ecf_v1.application.signing import Signing
 from ledger_country_do.channels.ecf_v1.domain import polling
-from ledger_country_do.channels.ecf_v1.domain.errors import EcfError, EcfUnavailableError
+from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 from ledger_country_do.channels.ecf_v1.domain.printed import OFFICIAL_QR
 from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiCode, DgiiService, decide
 from ledger_country_do.regime import REGIME
@@ -77,27 +79,6 @@ SETTLE_DELAY: Final = polling.SETTLE_DELAY.total_seconds()
 default, ``DgiiTimeouts.total``), which ``Emitter`` checks when it is built."""
 SEND_BUDGET: Final = 300.0
 """Seconds one ``send`` may take in all: the schedule (108 s), the settle delay and the calls' own limits."""
-
-
-class SettleTooShortError(EcfError):
-    """An emitter that would ask DGII before its authority's longest attempt is over: a configuration defect.
-
-    A request still in flight when DGII is asked for track ids could land after the answer, and be missed.
-    """
-
-    code: ClassVar[str] = "do_ecf_settle_too_short"
-
-    def __init__(self) -> None:
-        super().__init__("the settle delay is shorter than the longest attempt at sending a document")
-
-
-class AnswerMismatchError(EcfUnavailableError):
-    """DGII answered about another issuer or e-NCF than the document asked about."""
-
-    code: ClassVar[str] = "do_ecf_dgii_answer_mismatch"
-
-    def __init__(self) -> None:
-        super().__init__("DGII's answer names another issuer or e-NCF than the document sent")
 
 
 SEND_BUDGET_SPENT: Final = "do_ecf_send_budget_spent"

@@ -23,6 +23,7 @@ from structlog.testing import capture_logs
 lazy import psycopg
 
 from ledger_country_do.channels.ecf_v1.adapters.channel import DoEcfChannel
+from ledger_country_do.channels.ecf_v1.adapters.outbound import OutboundClosedError
 from ledger_country_do.channels.ecf_v1.adapters.postgres.tables import DocumentRecord
 from ledger_country_do.channels.ecf_v1.adapters.postgres.unit import bind
 from ledger_country_do.channels.ecf_v1.application.issuing import SIGNING_DELAY, DocumentMissingError
@@ -48,7 +49,7 @@ from ledger_kernel.regimes import Direction, DocumentKind
 from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.data.codec import JsonValue
 from ledger_platform.data.tables import chassis_tables
-from ledger_platform.jobs.outcomes import Job, Park
+from ledger_platform.jobs.outcomes import Job, Park, RunAgain
 from ledger_platform.runtime.calls import SystemCall
 from ledger_platform.runtime.facade import facade
 from ledger_testing.signer import TestSigner
@@ -338,6 +339,7 @@ async def test_issue_twice_for_one_invoice_numbers_one_document_once(
         "signed_at": None,
         "qr_url": None,
         "emission_mode": None,
+        "track_id": None,
     }
     assert await documents_of(module_database, tenant) == [(str(draft.document), 1, "numbered", 1)]
     other = await channel.issue(call_of(tenant), draft_of(tenant), sign_within=None)
@@ -575,7 +577,8 @@ async def test_a_credit_note_needs_an_accepted_e_cf_of_its_invoice_here(
     (signed_only,) = await channel.check(call_of(tenant), credit_note(tenant, invoice.document))
     assert signed_only.code == "do_ecf_reference_unresolved"  # signed is not accepted
     async with module_database.unit(tenant) as unit:
-        await unit.connection.execute(update(DocumentRecord).values(state="accepted"))
+        accepted = {"state": "accepted", "submission_started_at": unit.now, "number_fate": "used"}
+        await unit.connection.execute(update(DocumentRecord).values(**accepted))
     note = credit_note(tenant, invoice.document)
     assert await channel.check(call_of(tenant), note) == ()
     issued = await channel.issue(call_of(tenant), note, sign_within=BUDGET)
@@ -607,7 +610,7 @@ async def advanced(
     return await spec.handler(job_of(tenant, document))
 
 
-async def test_the_job_signs_a_numbered_document_then_waits_for_submission(
+async def test_the_job_signs_a_numbered_document_then_runs_again_at_once_to_submit_it(
     contexts: Contexts,
     module_database: BoundDatabase,
     ports: dict[str, object],
@@ -617,10 +620,11 @@ async def test_the_job_signs_a_numbered_document_then_waits_for_submission(
     await with_range(module_database, tenant)
     await channel_of(contexts).issue(call_of(tenant), draft_of(tenant), sign_within=None)
     document, _ = await document_row(module_database, tenant)
-    assert await advanced(contexts, ports, tenant, document) == Park("submission")
+    assert isinstance(await advanced(contexts, ports, tenant, document), RunAgain)
     assert len(recording.kept) == 1
     assert [row[2:] for row in await documents_of(module_database, tenant)] == [("signed", 2)]
-    assert await advanced(contexts, ports, tenant, document) == Park("submission")
+    with pytest.raises(OutboundClosedError):  # the api has no DGII client: only the worker runs jobs
+        await advanced(contexts, ports, tenant, document)
     assert len(recording.kept) == 1  # signed once
     updates = await updates_of(module_database, tenant)
     assert [each["version"] for each in updates] == [1, 2]
@@ -781,7 +785,7 @@ async def test_a_crash_between_archiving_and_recording_leaves_an_orphan_and_the_
     assert [row[2:] for row in await documents_of(module_database, tenant)] == [("numbered", 1)]
     clock.advance(timedelta(seconds=5))  # the job's run: another moment of signing, other bytes
     document, _ = await document_row(module_database, tenant)
-    assert await advanced(contexts, ports, tenant, document) == Park("submission")
+    assert isinstance(await advanced(contexts, ports, tenant, document), RunAgain)
     orphan, kept = recording.kept
     async with module_database.unit(tenant) as unit:
         referenced = (await unit.connection.execute(select(DocumentRecord.ecf_key))).scalar_one()
@@ -795,7 +799,7 @@ async def test_the_job_signs_and_archives_a_consumer_invoice_summarized(
     await with_range(module_database, tenant, CONSUMER)
     await channel_of(contexts).issue(call_of(tenant), draft_of(tenant, counterparty=None), sign_within=None)
     document, _ = await document_row(module_database, tenant)
-    assert await advanced(contexts, ports, tenant, document) == Park("submission")
+    assert isinstance(await advanced(contexts, ports, tenant, document), RunAgain)
     assert [key.split("/")[4] for key in recording.kept] == ["ecf", "rfce"]
     async with module_database.unit(tenant) as unit:
         rfce = (await unit.connection.execute(select(DocumentRecord.rfce_key))).scalar_one()

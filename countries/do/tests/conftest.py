@@ -248,6 +248,7 @@ class Contexts(Protocol):
         bound: Mapping[str, object] | None = None,
         role: AppRole = "api",
         environment: Environment = "test",
+        http: OutboundHttp | None = None,
     ) -> ChannelContext: ...
 
 
@@ -257,7 +258,7 @@ def contexts(module_database: BoundDatabase, clock: ManualClock, ports: dict[str
 
     ``ports`` by default (each one declared; a test may leave one unbound), the channel's own units, the
     test's clock, an authentication that trusts no one (no route is called through it) and clients to call
-    out with.
+    out with (``http``: over the network unless a test gives its own, the fake DGII's).
     """
 
     def context(
@@ -266,6 +267,7 @@ def contexts(module_database: BoundDatabase, clock: ManualClock, ports: dict[str
         bound: Mapping[str, object] | None = None,
         role: AppRole = "api",
         environment: Environment = "test",
+        http: OutboundHttp | None = None,
     ) -> ChannelContext:
         directory = Directory("port")
         for name, value in (ports if bound is None else bound).items():
@@ -282,7 +284,7 @@ def contexts(module_database: BoundDatabase, clock: ManualClock, ports: dict[str
             ports=directory.view(frozenset({SIGNER_PORT.name, COMPANY_DIRECTORY.name, ARCHIVE_PORT.name})),
             telemetry=telemetry,
             auth=Authentication.of(UNAUTHENTICATED),
-            http=OutboundHttp(telemetry=telemetry),
+            http=OutboundHttp(telemetry=telemetry) if http is None else http,
         )
 
     return context

@@ -6,7 +6,8 @@ shape; which kinds exist is the channel's.
 
 ``PortArchive`` is the use cases' ``Archive`` over fiscal-kit's ``ArchivePort`` (the app's archive): each
 document kept once under its key, until ten years from the day kept (Código Tributario art. 50 h; the app's
-archive keeps none less than its own retention), its unavailability the channel's ``ArchiveUnavailableError``.
+archive keeps none less than its own retention), and read back checked against its SHA-256 (a mismatch or a
+missing object passes as the archive's defect); its unavailability the channel's ``ArchiveUnavailableError``.
 ``ledger-migrate`` archives nothing and binds no archive: its channel keeps nothing (``UnboundArchive``).
 """
 
@@ -67,6 +68,13 @@ class PortArchive(Archive):
     async def rfce(self, tenant: Tenant, signed: bytes) -> Archived:
         return await self._kept(tenant, ArchiveKind.RFCE, signed)
 
+    @override
+    async def read(self, archived: Archived) -> bytes:
+        try:
+            return await self._port.get(archived.key, sha256=archived.sha256)
+        except PortUnavailableError as error:
+            raise ArchiveUnavailableError from error
+
     async def _kept(self, tenant: Tenant, kind: ArchiveKind, content: bytes) -> Archived:
         key = archive_key(channel=KEY, tenant=tenant, kind=kind.value, content=content, extension="xml")
         retain_until = years_after(self._clock().date(), RETENTION_YEARS)
@@ -98,4 +106,8 @@ class UnboundArchive(Archive):
 
     @override
     async def rfce(self, tenant: Tenant, signed: bytes) -> Archived:
+        raise ArchiveNotBoundError
+
+    @override
+    async def read(self, archived: Archived) -> bytes:
         raise ArchiveNotBoundError

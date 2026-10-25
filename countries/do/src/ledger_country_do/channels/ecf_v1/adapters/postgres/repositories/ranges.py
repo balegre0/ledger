@@ -5,7 +5,8 @@ row-level security enforces it again (§2). A series' row is its lock: ``series`
 makes it and every use locks it (``ON CONFLICT DO UPDATE`` counts the use in its ``version``) until the unit
 ends; registrations and allocations of a series therefore run one after the other, and two units never take
 one number. An allocation applies ``numbering.choose`` under that lock: a released number taken is deleted, a
-range's ``next`` moves on (its ``version`` with it). A list is read in its page's direction.
+range's ``next`` moves on (its ``version`` with it). A number DGII released is kept until its
+``available_at`` (``release``; Decision 9). A list is read in its page's direction.
 """
 
 from typing import Final, final, override
@@ -34,6 +35,7 @@ from ledger_country_do.channels.ecf_v1.domain.numbering import (
 )
 from ledger_kernel.pagination import page_of
 from ledger_platform.data import paged
+lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
 lazy from ledger_country_do.channels.ecf_v1.domain.numbering import Allocation
 lazy from ledger_kernel.pagination import Page, PageRequest
 lazy from ledger_kernel.tenancy import Mode, Tenant
@@ -228,3 +230,25 @@ class PgRanges(Ranges):
                 .values(next=NumberingRangeRecord.next + 1, version=NumberingRangeRecord.version + 1)
             )
         return allocation
+
+    @override
+    async def release(
+        self,
+        environment: Environment,
+        encf: Encf,
+        *,
+        document: UUID,
+        released_at: datetime,
+        available_at: datetime,
+    ) -> None:
+        await self._connection.execute(
+            insert(ReleasedNumberRecord).values(
+                **self._owner(),
+                environment=environment.value,
+                ecf_type=encf.ecf_type.value,
+                sequence=encf.sequence,
+                released_at=released_at,
+                available_at=available_at,
+                document_id=document,
+            )
+        )

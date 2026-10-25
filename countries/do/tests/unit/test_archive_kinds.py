@@ -13,10 +13,11 @@ from ledger_country_do.channels.ecf_v1.adapters.archive import (
     PortArchive,
     UnboundArchive,
 )
-from ledger_country_do.channels.ecf_v1.application.ports import ArchiveUnavailableError
+from ledger_country_do.channels.ecf_v1.application.ports import Archived, ArchiveUnavailableError
 from ledger_fiscal_kit.ports import archive_key
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tenancy import Mode, Tenant
+from ledger_platform.blobs.archive import ArchiveDigestMismatchError
 from ledger_platform.runtime.archiving import StoreArchive
 from ledger_testing.blobs import MemoryImmutableStore
 from ledger_testing.clock import ManualClock
@@ -79,8 +80,27 @@ async def test_an_archive_out_of_reach_is_the_channel_s_unavailable() -> None:
 
 
 async def test_an_app_that_binds_no_archive_keeps_nothing() -> None:
-    """``ledger-migrate``'s channel: asked to keep a document, a defect."""
+    """``ledger-migrate``'s channel: asked to keep or read a document, a defect."""
     for keep in (UnboundArchive().ecf, UnboundArchive().rfce):
         with pytest.raises(ArchiveNotBoundError, match="binds no archive") as caught:
             await keep(TENANT, b"<ECF/>")
         assert caught.value.kind == "internal"
+    with pytest.raises(ArchiveNotBoundError):
+        await UnboundArchive().read(Archived(key="k", sha256=bytes(32)))
+
+
+async def test_a_document_is_read_back_only_as_its_digest_says() -> None:
+    """What is sent to DGII is what was kept (Decision 12): other bytes are the archive's defect."""
+    clock = ManualClock()
+    archive = PortArchive(StoreArchive(MemoryImmutableStore(), retention_years=10, clock=clock), clock=clock)
+    kept = await archive.ecf(TENANT, b"<ECF/>")
+    assert await archive.read(kept) == b"<ECF/>"
+    with pytest.raises(ArchiveDigestMismatchError):
+        await archive.read(Archived(key=kept.key, sha256=hashlib.sha256(b"<ECF>other</ECF>").digest()))
+
+
+async def test_an_archive_out_of_reach_reads_nothing_and_says_so() -> None:
+    clock = ManualClock()
+    store = StoreArchive(MemoryImmutableStore(unavailable_for=1), retention_years=10, clock=clock)
+    with pytest.raises(ArchiveUnavailableError):
+        await PortArchive(store, clock=clock).read(Archived(key="k", sha256=bytes(32)))

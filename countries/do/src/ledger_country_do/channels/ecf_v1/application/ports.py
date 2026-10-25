@@ -371,6 +371,13 @@ class Archive(Protocol, metaclass=ABCMeta):
     async def rfce(self, tenant: Tenant, signed: bytes) -> Archived:
         """``signed``, a consumer-invoice summary (RFCE) of ``tenant``'s, kept."""
 
+    @abstractmethod
+    async def read(self, archived: Archived) -> bytes:
+        """The bytes kept as ``archived``, checked against its SHA-256 before they are answered (Decision 12).
+
+        Bytes that do not match, or a key the archive does not hold, are the archive's defects: never sent.
+        """
+
 
 class EcfFormat(Protocol, metaclass=ABCMeta):
     """DGII's XML formats: documents written and checked against DGII's schemas.

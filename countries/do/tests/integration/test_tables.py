@@ -26,6 +26,7 @@ from ledger_country_do.channels.ecf_v1.adapters.postgres.tables import (
     NumberingRangeRecord,
     NumberingSeriesRecord,
     ReleasedNumberRecord,
+    SubmissionRecord,
 )
 from ledger_country_do.channels.ecf_v1.adapters.postgres.unit import bind
 from ledger_kernel.errors import InvalidValueError
@@ -37,6 +38,7 @@ lazy from ledger_platform.data.bound import BoundDatabase
 
 NOW: Final = datetime(2026, 10, 20, 12, tzinfo=UTC)
 RANGE: Final = UUID("0199e3a0-0000-7000-8000-0000000000a1")
+DOCUMENT: Final = UUID("0199e3a0-0000-7000-8000-0000000000d1")
 SERIES: Final = {"environment": "testecf", "ecf_type": "31"}
 
 
@@ -83,13 +85,29 @@ def released(tenant: Tenant, sequence: int = 1) -> dict[str, object]:
     )
 
 
+def a_submission(tenant: Tenant, **changes: object) -> dict[str, object]:
+    """A track id of ``DOCUMENT`` (``a_document``'s id), under its number."""
+    row: dict[str, object] = (
+        owned(tenant)
+        | SERIES
+        | {
+            "document_id": DOCUMENT,
+            "track_id": "0d1e2f",
+            "sequence": 1,
+            "submitted_at": NOW,
+            "received_at": None,
+        }
+    )
+    return row | changes
+
+
 def a_document(tenant: Tenant, **changes: object) -> dict[str, object]:
     """A numbered 31 of ``RANGE`` (``a_range``), unsigned."""
     row: dict[str, object] = (
         owned(tenant)
         | SERIES
         | {
-            "id": new_id(),
+            "id": DOCUMENT,
             "invoice_id": new_id(),
             "sequence": 1,
             "range_id": RANGE,
@@ -116,6 +134,8 @@ SIGNED: Final[dict[str, object]] = {
     "ecf_sha256": bytes(32),
 }
 """What a signed document records beside its number."""
+SUBMITTED: Final = SIGNED | {"state": "submitted", "submission_started_at": NOW, "track_id": "0d1e2f"}
+"""What a document DGII took records beside its signature: the mark, the track id."""
 SUMMARIZED: Final = SIGNED | {
     "route": "rfce",
     "rfce_key": "do-ecf-v1/test/o/c/rfce/d.xml",
@@ -127,6 +147,7 @@ ROWS: Final[dict[str, tuple[type[DoEcfTable], Callable[[Tenant], dict[str, objec
     "numbering_ranges": (NumberingRangeRecord, a_range),
     "released_numbers": (ReleasedNumberRecord, released),
     "documents": (DocumentRecord, a_document),
+    "submissions": (SubmissionRecord, a_submission),
 }
 
 
@@ -318,6 +339,16 @@ async def with_a_range(module_database: BoundDatabase, tenant: Tenant) -> None:
         {"delivery_state": "lost"},
         SIGNED | {"emission_mode": "contingency"},
         {"number_fate": "lost"},
+        {"submission_started_at": NOW},  # marked before signing
+        SUBMITTED | {"submission_started_at": None},  # taken by DGII unmarked
+        SUBMITTED | {"track_id": None},  # deliberated about without a track id
+        SUBMITTED | {"state": "in_process", "track_id": None},
+        SUBMITTED | {"state": "outcome_unknown"},  # unknown since no moment
+        SUBMITTED | {"state": "accepted"},  # decided, its number's fate untold
+        SUBMITTED | {"state": "accepted", "number_fate": "burned"},
+        SUBMITTED | {"state": "rejected", "number_fate": "used"},
+        SIGNED | {"number_fate": "used"},  # a fate before DGII decided
+        {"polls": -1},
         {"sequence": 0},
         {"version": 0},
     ],
@@ -333,15 +364,24 @@ async def test_a_document_s_words_and_signature_are_checked(
     assert isinstance(caught.value.orig, CheckViolation)
 
 
-@pytest.mark.parametrize("state", ["signed", "accepted", "rejected"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"state": "signed"},
+        {"state": "signed", "submission_started_at": NOW},
+        {"state": "outcome_unknown", "submission_started_at": NOW, "track_id_since": NOW},
+        {"state": "accepted", "submission_started_at": NOW, "number_fate": "used"},
+        {"state": "rejected", "submission_started_at": NOW, "number_fate": "released"},
+    ],
+)
 async def test_a_signed_document_records_its_signature_and_a_summary_its_own(
-    module_database: BoundDatabase, state: str
+    module_database: BoundDatabase, change: dict[str, object]
 ) -> None:
     tenant = a_tenant()
     await with_a_range(module_database, tenant)
-    full = a_document(tenant, **SIGNED | {"state": state})
-    summary = a_document(tenant, **SUMMARIZED | {"state": state, "sequence": 2})
-    blocked = a_document(tenant, state="blocked", sequence=3)
+    full = a_document(tenant, **SIGNED | change | {"id": new_id()})
+    summary = a_document(tenant, **SUMMARIZED | change | {"id": new_id(), "sequence": 2})
+    blocked = a_document(tenant, state="blocked", sequence=3, id=new_id())
     await inserted(module_database, tenant, [(DocumentRecord, row) for row in (full, summary, blocked)])
 
 
@@ -353,13 +393,17 @@ async def test_an_invoice_has_one_document_and_a_number_one_holder_until_release
     await with_a_range(module_database, tenant)
     first = a_document(tenant)
     await inserted(module_database, tenant, [(DocumentRecord, first)])
-    for twin in (a_document(tenant, invoice_id=first["invoice_id"], sequence=2), a_document(tenant)):
+    for twin in (
+        a_document(tenant, invoice_id=first["invoice_id"], sequence=2, id=new_id()),
+        a_document(tenant, id=new_id()),
+    ):
         with pytest.raises(IntegrityError) as caught:
             await inserted(module_database, tenant, [(DocumentRecord, twin)])
         assert isinstance(caught.value.orig, UniqueViolation)
     async with module_database.unit(tenant) as unit:
-        await unit.connection.execute(update(DocumentRecord).values(number_fate="released"))
-    await inserted(module_database, tenant, [(DocumentRecord, a_document(tenant))])
+        rejected = SUBMITTED | {"state": "rejected", "track_id": None, "number_fate": "released"}
+        await unit.connection.execute(update(DocumentRecord).values(**rejected))
+    await inserted(module_database, tenant, [(DocumentRecord, a_document(tenant, id=new_id()))])
     async with module_database.unit(tenant) as unit:
         found = await unit.connection.execute(select(DocumentRecord.number_fate))
         assert sorted(found.scalars().all(), key=str) == [None, "released"]
@@ -385,3 +429,31 @@ async def test_a_document_is_of_its_range_s_type_and_environment(
     with pytest.raises(IntegrityError) as caught:
         await inserted(module_database, tenant, [(DocumentRecord, a_document(tenant, **change))])
     assert isinstance(caught.value.orig, ForeignKeyViolation)
+
+
+@pytest.mark.parametrize("change", [{"sequence": 0}, {"track_id": ""}, {"ecf_type": "99"}])
+async def test_a_submission_s_number_and_track_id_are_checked(
+    module_database: BoundDatabase, change: dict[str, object]
+) -> None:
+    tenant = a_tenant()
+    await with_a_range(module_database, tenant)
+    await inserted(module_database, tenant, [(DocumentRecord, a_document(tenant))])
+    with pytest.raises(IntegrityError) as caught:
+        await inserted(module_database, tenant, [(SubmissionRecord, a_submission(tenant, **change))])
+    assert isinstance(caught.value.orig, CheckViolation)
+
+
+async def test_a_submission_belongs_to_a_document_of_its_company_and_is_never_changed(
+    module_database: BoundDatabase,
+) -> None:
+    tenant = a_tenant()
+    await with_a_range(module_database, tenant)
+    with pytest.raises(IntegrityError) as caught:
+        await inserted(module_database, tenant, [(SubmissionRecord, a_submission(tenant))])
+    assert isinstance(caught.value.orig, ForeignKeyViolation)
+    await inserted(module_database, tenant, [(DocumentRecord, a_document(tenant))])
+    await inserted(module_database, tenant, [(SubmissionRecord, a_submission(tenant))])
+    with pytest.raises(ProgrammingError) as refused:
+        async with module_database.unit(tenant) as unit:
+            await unit.connection.execute(update(SubmissionRecord).values(received_at=NOW))
+    assert isinstance(refused.value.orig, InsufficientPrivilege)

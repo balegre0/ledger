@@ -20,11 +20,11 @@ from ledger_country_do.channels.ecf_v1.adapters.outbound import (
     TrustedRootsUnreadableError,
 )
 from ledger_country_do.channels.ecf_v1.adapters.routes.ranges import PREFIX
-from ledger_country_do.channels.ecf_v1.application.emission import SettleTooShortError
+from ledger_country_do.channels.ecf_v1.application.advancing import SettleTooShortError
 from ledger_country_do.channels.ecf_v1.assembly import SettingRefusedError, assemble
 from ledger_country_do.channels.ecf_v1.domain.fields import CHANNEL_FIELDS
 from ledger_country_do.channels.ecf_v1.settings import DoEcfSettings
-from ledger_fiscal_kit.channels import Channel, ResumeReason
+from ledger_fiscal_kit.channels import Channel
 from ledger_fiscal_kit.drafts import DocumentRef
 from ledger_fiscal_kit.ports import ARCHIVE_PORT, SIGNER_PORT
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
@@ -181,15 +181,13 @@ async def test_roots_that_cannot_be_read_stop_the_worker_without_naming_their_fi
     assert caught.value.code == "do_ecf_trusted_roots_unreadable"
 
 
-async def test_the_channel_answers_no_status_resume_or_representation_yet(contexts: Contexts) -> None:
-    """``status``, ``resume``, ``representation``: built by the tasks to come (19, 24)."""
+async def test_the_channel_answers_no_status_or_representation_yet(contexts: Contexts) -> None:
+    """``status``, ``representation``: built by the tasks to come (20, 24); ``resume`` is Task 19's."""
     channel = assemble(contexts(settings=RECEIVED)).channel
     assert isinstance(channel, DoEcfChannel)
     document = DocumentRef(new_id())
     with pytest.raises(ChannelNotReadyError, match="do-ecf-v1 does not answer this yet"):
         await channel.status(CALL, document)
-    with pytest.raises(ChannelNotReadyError):
-        await channel.resume(CALL, CompanyId(new_id()), ResumeReason.RANGE_REGISTERED)
     with pytest.raises(ChannelNotReadyError):
         await channel.representation(CALL, document)
     assert ChannelNotReadyError.code == "do_ecf_not_ready"

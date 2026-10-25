@@ -6,10 +6,12 @@ keeps its authorization as registered). Its draft is the platform codec's JSON (
 fiscal-kit's ``read_draft``. A second document for an invoice (a request that raced the one that
 committed first) is the table's refusal (``documents_invoice_key``), raised as ``DocumentExistsError``.
 A signature's columns are all there or none: the table checks it
-(``ck_documents_signature``), so a row is signed exactly when it has them all.
+(``ck_documents_signature``), so a row is signed exactly when it has them all. Past signing, a change keeps
+the submission's mark, DGII's track id, code, ``secuenciaUtilizada`` and messages (``[{code, text}]``),
+how often DGII was asked, delivery, and the number's fate.
 """
 
-from typing import Final, final, override
+from typing import Final, TypedDict, final, override
 lazy from collections.abc import Collection, Mapping
 lazy from datetime import date, datetime
 lazy from uuid import UUID
@@ -34,12 +36,22 @@ from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 from ledger_country_do.channels.ecf_v1.domain.references import AcceptedEcf
 from ledger_country_do.channels.ecf_v1.domain.routing import Route
+from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage, NumberFate
 from ledger_fiscal_kit.draft_codec import read_draft
 from ledger_fiscal_kit.drafts import DocumentRef
 from ledger_platform.data.codec import JsonValue, encode
 lazy from ledger_kernel.tenancy import Mode, Tenant
 
+
+class _StoredMessage(TypedDict):
+    """One of DGII's messages as ``documents.messages`` keeps it."""
+
+    code: str
+    text: str
+
+
 _DRAFT: Final = TypeAdapter[JsonValue](JsonValue)
+_MESSAGES: Final = TypeAdapter(list[_StoredMessage])
 ONE_PER_INVOICE: Final = "documents_invoice_key"
 """The constraint that gives an invoice one document."""
 _SIGNATURE_COLUMNS: Final[tuple[str, ...]] = (
@@ -77,6 +89,14 @@ _DOCUMENT: Final = select(
     DocumentRecord.version,
     DocumentRecord.created_at,
     DocumentRecord.updated_at,
+    DocumentRecord.submission_started_at,
+    DocumentRecord.track_id,
+    DocumentRecord.track_id_since,
+    DocumentRecord.polls,
+    DocumentRecord.outcome_code,
+    DocumentRecord.sequence_used,
+    DocumentRecord.number_fate,
+    DocumentRecord.messages,
 ).join(
     NumberingRangeRecord,
     (NumberingRangeRecord.organization_id == DocumentRecord.organization_id)
@@ -108,6 +128,14 @@ type _Row = Row[
     int,
     datetime,
     datetime,
+    datetime | None,
+    str | None,
+    datetime | None,
+    int,
+    int | None,
+    bool | None,
+    str | None,
+    list[dict[str, str]],
 ]
 type _Query = Select[
     UUID,
@@ -133,6 +161,14 @@ type _Query = Select[
     int,
     datetime,
     datetime,
+    datetime | None,
+    str | None,
+    datetime | None,
+    int,
+    int | None,
+    bool | None,
+    str | None,
+    list[dict[str, str]],
 ]
 
 
@@ -189,6 +225,14 @@ def _document(row: _Row) -> EcfDocument:
         version,
         created_at,
         updated_at,
+        mark,
+        track_id,
+        since,
+        polls,
+        outcome_code,
+        sequence_used,
+        fate,
+        messages,
     ) = row
     return EcfDocument(
         id=identifier,
@@ -206,7 +250,33 @@ def _document(row: _Row) -> EcfDocument:
         version=version,
         created_at=created_at,
         updated_at=updated_at,
+        submission_started_at=mark,
+        track_id=track_id,
+        track_id_since=since,
+        polls=polls,
+        outcome_code=outcome_code,
+        sequence_used=sequence_used,
+        number_fate=None if fate is None else NumberFate(fate),
+        messages=tuple(
+            DgiiMessage(message["code"], message["text"]).authority()
+            for message in _MESSAGES.validate_python(messages)
+        ),
     )
+
+
+def _progress_columns(document: EcfDocument) -> Mapping[str, object]:
+    """What a document records past signing: its mark, DGII's track id and answer, its number's fate."""
+    return {
+        "delivery_state": document.delivery.value,
+        "submission_started_at": document.submission_started_at,
+        "track_id": document.track_id,
+        "track_id_since": document.track_id_since,
+        "polls": document.polls,
+        "outcome_code": document.outcome_code,
+        "sequence_used": document.sequence_used,
+        "number_fate": None if document.number_fate is None else document.number_fate.value,
+        "messages": [{"code": message.code, "text": message.message} for message in document.messages],
+    }
 
 
 def _signed_columns(signature: Signature | None) -> Mapping[str, object]:
@@ -288,8 +358,8 @@ class PgDocuments(Documents):
                 range_id=document.range_id,
                 state=document.state.value,
                 route=document.route.value,
-                delivery_state=document.delivery.value,
                 issued_on=document.issued_on,
+                **_progress_columns(document),
                 **_signed_columns(document.signature),
                 draft=encode(document.draft),
                 version=document.version,
@@ -306,6 +376,7 @@ class PgDocuments(Documents):
             .values(
                 state=document.state.value,
                 **_signed_columns(document.signature),
+                **_progress_columns(document),
                 version=document.version,
                 updated_at=document.updated_at,
             )

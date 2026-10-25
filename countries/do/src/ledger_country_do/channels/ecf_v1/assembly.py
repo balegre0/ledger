@@ -1,7 +1,8 @@
 """do-ecf-v1's assembly (§3.10): what the apps make of the channel, and the pack its entry point names.
 
 Every app builds the channel fiscal routes to (``DoEcfChannel``) over the channel's units, the signer's
-port (``DocumentSigner``) and the archive, with its ``do_ecf.advance`` job, and checks its settings: DGII's
+port (``DocumentSigner``) and the archive, with its ``do_ecf.advance`` job (which reaches DGII through the
+worker's client only: in any other role reaching it is a defect), and checks its settings: DGII's
 hosts (``DgiiHosts``), an attempt no longer than the settle delay (``SettleTooShortError``), no test
 stand-in in production. It reads the ports it needs from the app (fiscal-kit's keys): the signer, fiscal's
 company directory (who may do what, and who is enrolled), the archive in the roles that archive (none: the
@@ -24,14 +25,14 @@ from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts
 from ledger_country_do.channels.ecf_v1.adapters.enrollments import DirectoryEnrollments
 from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
 from ledger_country_do.channels.ecf_v1.adapters.jobs import advance_job
-from ledger_country_do.channels.ecf_v1.adapters.logs import SigningLog
-from ledger_country_do.channels.ecf_v1.adapters.outbound import DgiiAccess, Outbound
+from ledger_country_do.channels.ecf_v1.adapters.logs import AdvanceLog, SigningLog
+from ledger_country_do.channels.ecf_v1.adapters.outbound import DgiiAccess, Outbound, unopened
 from ledger_country_do.channels.ecf_v1.adapters.postgres.schema import migrations
 from ledger_country_do.channels.ecf_v1.adapters.postgres.unit import PgUnits
 from ledger_country_do.channels.ecf_v1.adapters.routes import ranges
 from ledger_country_do.channels.ecf_v1.adapters.signing.port import DocumentSigner
 from ledger_country_do.channels.ecf_v1.adapters.xml.documents import DgiiXml
-from ledger_country_do.channels.ecf_v1.application.emission import SettleTooShortError
+from ledger_country_do.channels.ecf_v1.application.advancing import Advancing, SettleTooShortError
 from ledger_country_do.channels.ecf_v1.application.issuing import Issuing
 from ledger_country_do.channels.ecf_v1.application.ranges import Ranging
 from ledger_country_do.channels.ecf_v1.application.requirements import Requiring
@@ -111,28 +112,41 @@ def assemble(context: ChannelContext) -> ChannelParts:
         permissions=directory,
     )
     archiving = context.role in ARCHIVING_ROLES
+    archive = (
+        PortArchive(context.ports.get(ARCHIVE_PORT), clock=context.clock) if archiving else UnboundArchive()
+    )
     issuing = Issuing(
         units,
         Signing(DgiiXml(), signer, clock=context.clock, qr_hosts=hosts.qr, regime=context.regime),
-        PortArchive(context.ports.get(ARCHIVE_PORT), clock=context.clock) if archiving else UnboundArchive(),
+        archive,
         SigningLog(context.telemetry),
         regime=context.regime,
     )
-    channel = DoEcfChannel(definition, requiring, issuing)
-    jobs = (advance_job(issuing),)
+    outbound = _outbound(settings, context, signer, DgiiAccess(hosts=hosts, timeouts=timeouts))
+    authority = unopened if outbound is None else outbound.authority
+    advancing = Advancing(units, issuing, archive, authority, AdvanceLog(context.telemetry))
+    channel = DoEcfChannel(definition, requiring, issuing, advancing)
+    jobs = (advance_job(advancing),)
     if not archiving:  # migrate: its revisions, nothing to serve, open or keep
         return ChannelParts(channel=channel, jobs=jobs, migrations=migrations())
     parts = ChannelParts(channel=channel, routers=(ranges.router(api),), jobs=jobs, migrations=migrations())
     if context.role == "receiver" and settings.trusted_roots is None:
         raise SettingRefusedError(Refusal.RECEIVER_WITHOUT_ROOTS)
-    if context.role != "worker":
+    if outbound is None:
         return parts
+    return replace(parts, resources=(outbound.opened(),))
+
+
+def _outbound(
+    settings: DoEcfSettings, context: ChannelContext, signer: DocumentSigner, access: DgiiAccess
+) -> Outbound | None:
+    """The worker's DGII and buyer clients (its trusted roots required); ``None`` in every other role."""
+    if context.role != "worker":
+        return None
     roots = settings.trusted_roots
     if roots is None:
         raise SettingRefusedError(Refusal.WORKER_WITHOUT_ROOTS)
-    access = DgiiAccess(hosts=hosts, timeouts=timeouts)
-    outbound = Outbound(signer, http=context.http, access=access, roots=roots, clock=context.clock)
-    return replace(parts, resources=(outbound.opened(),))
+    return Outbound(signer, http=context.http, access=access, roots=roots, clock=context.clock)
 
 
 def _pack() -> ChannelPack:

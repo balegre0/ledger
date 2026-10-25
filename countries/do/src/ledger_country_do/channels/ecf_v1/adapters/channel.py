@@ -6,21 +6,26 @@ reads); ``requirements`` what an enrollment still needs (``application.requireme
 words; ``check`` and ``issue`` a draft's objections and its document, numbered, and signed within the
 request's budget (``application.issuing``), answered as the kit's ``StatusUpdate`` (``statuses``). A draft
 is the call's tenant's, in an environment of its mode (``InvalidValueError`` otherwise: a defect of fiscal's
-routing). The rest arrives with the tasks that build it (``status``, ``resume``, ``representation``): until
-then each is ``ChannelNotReadyError``.
+routing). ``resume`` wakes the documents waiting for what its reason settles (``application.advancing``).
+The rest arrives with the tasks that build it (``status``, ``representation``): until then each is
+``ChannelNotReadyError``.
 """
 
+from types import MappingProxyType
 from typing import ClassVar, Final, final, override
-lazy from collections.abc import Sequence
+lazy from collections.abc import Mapping, Sequence
 lazy from datetime import timedelta
 
 from ledger_country_do.channels.ecf_v1.adapters.statuses import update_of
 from ledger_country_do.channels.ecf_v1.application.ports import SigningAs
+from ledger_country_do.channels.ecf_v1.application.steps import ParkReason
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
-from ledger_fiscal_kit.channels import Channel, Issued, Requirements
+from ledger_fiscal_kit.channels import Channel, Issued, Requirements, ResumeReason
 from ledger_kernel.errors import InvalidValueError
+from ledger_kernel.tenancy import Tenant
 from ledger_platform.runtime.facade import facade
+lazy from ledger_country_do.channels.ecf_v1.application.advancing import Advancing
 lazy from ledger_country_do.channels.ecf_v1.application.issuing import Issuing
 lazy from ledger_country_do.channels.ecf_v1.application.requirements import Requiring
 lazy from ledger_fiscal_kit.channels import (
@@ -28,7 +33,6 @@ lazy from ledger_fiscal_kit.channels import (
     EnrollmentState,
     Objection,
     Representation,
-    ResumeReason,
     StatusUpdate,
 )
 lazy from ledger_fiscal_kit.drafts import DocumentRef, FiscalDraft
@@ -36,6 +40,18 @@ lazy from ledger_kernel.ids import CompanyId
 lazy from ledger_platform.runtime.calls import SystemCall
 
 _ENVIRONMENTS: Final = {environment.value: environment for environment in Environment}
+_WOKEN: Final[Mapping[ResumeReason, tuple[ParkReason, ...]]] = MappingProxyType(
+    {
+        ResumeReason.CERTIFICATE_INSTALLED: (ParkReason.CERTIFICATE,),
+        ResumeReason.RANGE_REGISTERED: (ParkReason.RANGE_MISSING,),
+        ResumeReason.OPERATOR: (
+            ParkReason.CERTIFICATE,
+            ParkReason.OUTCOME_UNKNOWN,
+            ParkReason.ANSWER_MISMATCH,
+        ),
+    }
+)
+"""What each reason to resume wakes."""
 
 
 class ChannelNotReadyError(EcfError):
@@ -51,12 +67,15 @@ class ChannelNotReadyError(EcfError):
 class DoEcfChannel(Channel):
     """The channel fiscal routes to (see the module)."""
 
-    __slots__ = ("_definition", "_issuing", "_requiring")
+    __slots__ = ("_advancing", "_definition", "_issuing", "_requiring")
 
-    def __init__(self, definition: ChannelDef, requiring: Requiring, issuing: Issuing) -> None:
+    def __init__(
+        self, definition: ChannelDef, requiring: Requiring, issuing: Issuing, advancing: Advancing
+    ) -> None:
         self._definition = definition
         self._requiring = requiring
         self._issuing = issuing
+        self._advancing = advancing
 
     def _environment(self, call: SystemCall, draft: FiscalDraft) -> Environment:
         """``draft``'s environment, once ``draft`` is ``call``'s tenant's and the environment of its mode."""
@@ -118,7 +137,16 @@ class DoEcfChannel(Channel):
     @facade
     @override
     async def resume(self, call: SystemCall, company: CompanyId, reason: ResumeReason) -> None:
-        raise ChannelNotReadyError
+        """Take on the company's documents (in the call's mode) waiting for what ``reason`` settles.
+
+        A certificate installed: those that could not sign; a range registered: those without a number; an
+        operator: those waiting for a certificate (the signer's clock fixed), an unknown outcome or an answer
+        about another e-NCF, each asked about again (a blocked one needs unblocking first, Task 31).
+        """
+        scope = call.scope
+        if not isinstance(scope, Tenant) or scope.mode is None or scope.company != company:
+            raise InvalidValueError(field="call.scope", requirement="the company resumed, in a mode")
+        await self._advancing.wake(scope, _WOKEN[reason])
 
     @facade
     @override
