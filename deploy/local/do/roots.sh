@@ -1,8 +1,8 @@
 #!/bin/sh
 # Writes the local stack's trusted roots for channel do-ecf-v1 (LEDGER_DO_ECF_TRUSTED_ROOTS): a development
 # certification authority, self-signed, into .local/roots.pem, which git ignores and compose mounts read-only
-# into the worker. The worker refuses to start without the file: it verifies the counterparties' signatures
-# (buyers' receipts, received documents) against these roots. Its key is thrown away as soon as the
+# into the worker and the receiver. Both refuse to start without a readable file: they verify the
+# counterparties' signatures (buyers' receipts, received documents) against these roots. Its key is thrown away as soon as the
 # certificate is made, so this root vouches for nothing: no counterparty chains to it. Which authorities a
 # deployment trusts (DGII's, INDOTEL's certification entities) is the owner's to decide (Owner item 7); this file
 # is the local stack's alone, never a deployment's.

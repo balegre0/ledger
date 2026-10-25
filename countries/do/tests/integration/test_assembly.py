@@ -1,7 +1,8 @@
 """do-ecf-v1 assembled (§3.10): its ports read, its settings checked, its clients opened in the worker only.
 
-Assembly builds and reads, and opens nothing: the worker's DGII and buyer clients are a resource the app opens
-at start, the trusted roots read then. A refusal names the setting and what it must be, never its value.
+Assembly builds and reads, and opens nothing: the worker's DGII and buyer clients and the receiver's trust are
+resources the app opens at start, the trusted roots read then. A refusal names the setting and what it must
+be, never its value.
 """
 
 from typing import Final, Protocol
@@ -20,6 +21,7 @@ from ledger_country_do.channels.ecf_v1.adapters.outbound import (
     TrustedRootsUnreadableError,
 )
 from ledger_country_do.channels.ecf_v1.adapters.routes.ranges import PREFIX
+from ledger_country_do.channels.ecf_v1.adapters.signing.trust import CounterpartyTrust
 from ledger_country_do.channels.ecf_v1.application.advancing import SettleTooShortError
 from ledger_country_do.channels.ecf_v1.assembly import SettingRefusedError, assemble
 from ledger_country_do.channels.ecf_v1.domain.fields import CHANNEL_FIELDS
@@ -137,15 +139,23 @@ def test_the_worker_needs_trusted_roots(contexts: Contexts) -> None:
         assemble(contexts(settings=RECEIVED, role="worker"))
 
 
-def test_the_receiver_needs_trusted_roots_and_opens_no_client(contexts: Contexts, tmp_path: Path) -> None:
-    """The documents emitters send the receiver chain to the roots; DGII's and the buyers' clients are the
-    worker's alone (the receiver mounts the channel's receiver routes only: none before Task 22)."""
+async def test_the_receiver_reads_its_trusted_roots_at_start_and_opens_no_client(
+    contexts: Contexts, tmp_path: Path, authority: Authority
+) -> None:
+    """The documents emitters send the receiver chain to the roots, read when it starts as the worker reads
+    them; DGII's and the buyers' clients are the worker's alone (the receiver mounts the channel's receiver
+    routes only: none before Task 22)."""
     with pytest.raises(SettingRefusedError, match=r"LEDGER_DO_ECF_TRUSTED_ROOTS .* the receiver"):
         assemble(contexts(settings=RECEIVED, role="receiver"))
-    rooted = RECEIVED.model_copy(update={"trusted_roots": tmp_path / "roots.pem"})
-    parts = assemble(contexts(settings=rooted, role="receiver"))
-    assert (parts.resources, parts.receiver_routers) == ((), ())
+    roots = tmp_path / "roots.pem"
+    roots.write_bytes(pem(authority.certificate))
+    parts = assemble(contexts(settings=RECEIVED.model_copy(update={"trusted_roots": roots}), role="receiver"))
+    assert parts.receiver_routers == ()
     assert [spec.kind for spec in parts.jobs] == ["do_ecf.advance"]
+    (opening,) = parts.resources
+    async with opening as opened:
+        assert isinstance(opened, CounterpartyTrust)
+        assert list(opened.roots) == [authority.certificate]
 
 
 async def test_the_worker_opens_its_dgii_and_buyer_clients_at_start_and_closes_them_at_stop(
@@ -166,17 +176,18 @@ async def test_the_worker_opens_its_dgii_and_buyer_clients_at_start_and_closes_t
 
 
 @pytest.mark.parametrize("content", [None, b"", b"-----BEGIN CERTIFICATE-----\nnot base64\n"])
-async def test_roots_that_cannot_be_read_stop_the_worker_without_naming_their_file(
-    contexts: Contexts, tmp_path: Path, content: bytes | None
+@pytest.mark.parametrize("role", ["worker", "receiver"])
+async def test_roots_that_cannot_be_read_stop_the_worker_and_the_receiver_without_naming_their_file(
+    contexts: Contexts, tmp_path: Path, content: bytes | None, role: AppRole
 ) -> None:
     roots = tmp_path / "secret-roots.pem"
     if content is not None:
         roots.write_bytes(content)
     rooted = RECEIVED.model_copy(update={"trusted_roots": roots})
-    (opening,) = assemble(contexts(settings=rooted, role="worker")).resources
+    (opening,) = assemble(contexts(settings=rooted, role=role)).resources
     with pytest.raises(TrustedRootsUnreadableError) as caught:
         async with opening:
-            pytest.fail("a worker that cannot verify a counterparty never runs")
+            pytest.fail("an app that cannot verify a counterparty never runs")
     assert "secret-roots" not in str(caught.value)
     assert caught.value.code == "do_ecf_trusted_roots_unreadable"
 

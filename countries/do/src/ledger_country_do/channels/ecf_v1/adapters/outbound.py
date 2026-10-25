@@ -3,7 +3,8 @@
 Built inside the open block (integration checklist 5): the trusted roots are read then (a PEM file, read in a
 thread), the DGII client and the buyer client made over the channel's ``OutboundHttp`` and opened, the
 buyers' directory answered by DGII's through a cache (Decision 18). Assembly only names the file: an app
-whose roots cannot be read does not start (``TrustedRootsUnreadableError``, which never names the file).
+whose roots cannot be read does not start (``TrustedRootsUnreadableError``, which never names the file); the
+receiver reads them the same way (``read_roots``, ``inbound``).
 Outside the block the clients are not there (``OutboundClosedError``): a job that reaches them then is a
 defect.
 """
@@ -31,7 +32,7 @@ lazy from ledger_platform.http.outbound import OutboundHttp
 
 
 class TrustedRootsUnreadableError(EcfError):
-    """``LEDGER_DO_ECF_TRUSTED_ROOTS`` cannot be read, or holds no certificate in PEM: the worker stops."""
+    """``LEDGER_DO_ECF_TRUSTED_ROOTS`` cannot be read, or holds no certificate in PEM: the app stops."""
 
     code: ClassVar[str] = "do_ecf_trusted_roots_unreadable"
 
@@ -55,7 +56,7 @@ def unopened() -> Authority:
     raise OutboundClosedError
 
 
-def _read_roots(path: Path) -> tuple[x509.Certificate, ...]:
+def read_roots(path: Path) -> tuple[x509.Certificate, ...]:
     """The certificates of ``path``, in PEM (``TrustedRootsUnreadableError`` without any)."""
     try:
         roots = x509.load_pem_x509_certificates(path.read_bytes())
@@ -117,7 +118,7 @@ class Outbound:
     @asynccontextmanager
     async def opened(self) -> AsyncGenerator[Outbound]:
         """The clients, made and open for the length of the block (see the module)."""
-        trust = CounterpartyTrust(roots=await asyncio.to_thread(_read_roots, self._roots))
+        trust = CounterpartyTrust(roots=await asyncio.to_thread(read_roots, self._roots))
         access = self._access
         dgii = DgiiClient(
             self._signer, http=self._http, hosts=access.hosts, timeouts=access.timeouts, clock=self._clock

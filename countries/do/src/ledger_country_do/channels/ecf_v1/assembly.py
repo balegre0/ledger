@@ -9,7 +9,8 @@ company directory (who may do what, and who is enrolled), the archive in the rol
 channel does not start there, since every document it signs is archived first; ``migrate`` reads none,
 keeps nothing, and gets the channel's revisions alone). The ``api`` app mounts its routes (``/v1/do``); the
 worker opens its DGII and buyer clients at start (their trusted roots, which it requires, read then); the
-receiver requires the trusted roots too (the documents emitters send it chain to them).
+receiver requires the trusted roots too, and reads them at start the same way (the documents emitters send
+it chain to them: ``inbound``).
 ``migrate`` runs its revisions; every app checks its schema is current. Documents are signed with the QR's
 hosts of the DGII hosts configured (a test's fake's, or DGII's).
 """
@@ -24,6 +25,7 @@ from ledger_country_do.channels.ecf_v1.adapters.channel import DoEcfChannel
 from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts
 from ledger_country_do.channels.ecf_v1.adapters.enrollments import DirectoryEnrollments
 from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
+from ledger_country_do.channels.ecf_v1.adapters.inbound import inbound_trust
 from ledger_country_do.channels.ecf_v1.adapters.jobs import advance_job
 from ledger_country_do.channels.ecf_v1.adapters.logs import AdvanceLog, SigningLog
 from ledger_country_do.channels.ecf_v1.adapters.outbound import DgiiAccess, Outbound, unopened
@@ -130,8 +132,11 @@ def assemble(context: ChannelContext) -> ChannelParts:
     if not archiving:  # migrate: its revisions, nothing to serve, open or keep
         return ChannelParts(channel=channel, jobs=jobs, migrations=migrations())
     parts = ChannelParts(channel=channel, routers=(ranges.router(api),), jobs=jobs, migrations=migrations())
-    if context.role == "receiver" and settings.trusted_roots is None:
-        raise SettingRefusedError(Refusal.RECEIVER_WITHOUT_ROOTS)
+    if context.role == "receiver":
+        roots = settings.trusted_roots
+        if roots is None:
+            raise SettingRefusedError(Refusal.RECEIVER_WITHOUT_ROOTS)
+        return replace(parts, resources=(inbound_trust(roots),))
     if outbound is None:
         return parts
     return replace(parts, resources=(outbound.opened(),))

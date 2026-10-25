@@ -171,10 +171,8 @@ services:
   receiver:
     <<: *ledger
     command: ["/app/.venv/bin/ledger-receiver"]
-    env_file:
+    env_file:  # not Zitadel's file: its token audience is the api's, and the receiver proves no token of ours
       - ledger.env
-      - path: zitadel/.local/ledger.env
-        required: false
       - path: signer/.local/receiver.env  # LEDGER_SIGNER_TOKEN_RECEIVER: its own token, no other caller's
         required: false  # without it the receiver starts, its signatures answering signer_unavailable
     environment:
