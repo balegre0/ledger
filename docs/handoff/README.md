@@ -18,7 +18,7 @@ Read in this order:
   the fiscal work (kit, builders, readers, DGII/buyer clients, S3 archive, channel entry, issue) and the receiver role (Task 13, merged on 2026-10-25), plus this handoff.
   The full gate was green twice on this tree on 2026-10-25. The plans and their "As built" notes live here.
 - `feat/m3b-advance-final` (worktree `ledger-t19`): Task 19 (`do_ecf.advance`, the DGII submission job) in **review-fixed state**: the independent review's
-  rulings (CRITICAL 1, IMPORTANT 1-3, the minors) are fixed or recorded in the plan, the gate was run twice on it (see HANDOFF.md). Not in `main`: it awaits the
+  rulings (CRITICAL 1, IMPORTANT 1-3, the minors) are fixed or recorded in the plan, gate: on the first fix round three runs (one failed on the known gRPC flake, two green), on the re-review's fixes two runs, both green (see HANDOFF.md). Not in `main`: it awaits the
   re-review of the fixes, then the merge. `wip/m3b-advance-snapshot` is its superseded unfinished snapshot.
 - `feat/signer`, `feat/m3b-receiver`: older integration/feature branches whose content is already in `main`.
 
