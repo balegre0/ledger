@@ -347,7 +347,7 @@ async def test_after_max_attempts_the_row_is_dead_and_a_replay_runs_it_again(ben
 
 async def test_a_handler_that_lost_its_lease_commits_nothing(bench: Bench) -> None:
     (event,) = await bench.deliver(renamed())
-    await bench.make_due()  # the row's default due time is the fan-out's now(): a clock stepped back would hide it
+    await bench.make_due()  # a clock stepped back would hide a row due at the fan-out's now()
     runner_a, runner_b = bench.runner(), bench.runner()
     (claimed,) = await runner_a.claim_now()
     assert claimed.event.id == event
@@ -365,7 +365,7 @@ async def test_a_handler_that_lost_its_lease_commits_nothing(bench: Bench) -> No
 
 async def test_a_runner_whose_lease_ran_out_but_was_not_taken_keeps_its_row(bench: Bench) -> None:
     (event,) = await bench.deliver(renamed())
-    await bench.make_due()  # the row's default due time is the fan-out's now(): a clock stepped back would hide it
+    await bench.make_due()  # a clock stepped back would hide a row due at the fan-out's now()
     runner_a, runner_b = bench.runner(), bench.runner()
     (claimed,) = await runner_a.claim_now()
     await bench.superuser.execute(EXPIRE)
@@ -391,7 +391,7 @@ async def test_a_failure_is_recorded_before_the_row_is_released(
 ) -> None:
     """A worker queued for the row while the handler failed gets it only after the failure is recorded."""
     (event,) = await bench.deliver(renamed())
-    await bench.make_due()  # the row's default due time is the fan-out's now(): a clock stepped back would hide it
+    await bench.make_due()  # a clock stepped back would hide a row due at the fan-out's now()
     (claimed,) = await bench.runner().claim_now()
     waiting: list[asyncio.Task[object]] = []
 

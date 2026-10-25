@@ -159,9 +159,8 @@ def test_a_second_migrator_waits_for_the_first_then_gives_up(
     started = time.monotonic()
     with pytest.raises(MigrationLockTimeoutError, match="schema platform") as raised:
         PLATFORM_MIGRATIONS.upgrade(fresh.url(), lock_wait=timedelta(seconds=1))
-    # The server's clock, not ours, times the wait, and Docker Desktop's VM clock can run a few percent fast against
-    # the host's (a 1 s lock timeout came back after 0.96 s). Half the wait still tells "it waited" from "it gave up
-    # at once".
+    # The server's clock times the wait, and Docker Desktop's VM clock can run fast against the host's (a 1 s
+    # lock timeout came back after 0.96 s). Half the wait still tells "it waited" from "it gave up at once".
     assert time.monotonic() - started >= 0.5
     assert raised.value.code == "migration_lock_timeout"
     assert "0:00:01" in str(raised.value)
