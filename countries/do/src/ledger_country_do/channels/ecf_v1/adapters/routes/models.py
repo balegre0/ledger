@@ -1,8 +1,8 @@
 """The shapes of the channel's public API: what clients send (unknown fields refused) and what they receive.
 
-Ids are TypeIDs (``rng_…``, §9.4), days ISO 8601, times with their offset, enumerations their words (an e-CF
-type is DGII's two digits). A list answers a ``Page`` of its views (§9.7). Public ids are formatted and read
-only here.
+Ids are TypeIDs (``rng_…``; a delivery is named by its invoice's, ``inv_…``; §9.4), days ISO 8601, times
+with their offset, enumerations their words (an e-CF type is DGII's two digits). A list answers a ``Page`` of
+its views (§9.7). Public ids are formatted and read only here.
 """
 
 from datetime import date, datetime
@@ -11,11 +11,14 @@ lazy from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from ledger_country_do.channels.ecf_v1.application.delivering import DeliveryNotFoundError
 from ledger_country_do.channels.ecf_v1.application.ranges import RangeNotFoundError, RangeRequest
+from ledger_country_do.channels.ecf_v1.domain.ecf import DeliveryState
 from ledger_country_do.channels.ecf_v1.domain.encf import MAX_SEQUENCE, EcfType
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 from ledger_country_do.channels.ecf_v1.domain.numbering import Authorization, RangeStatus
 from ledger_kernel.ids import InvalidPublicIdError, format_id, parse_id
+lazy from ledger_country_do.channels.ecf_v1.application.documents import DeliveryOptions, EcfDocument
 lazy from ledger_country_do.channels.ecf_v1.application.ranges import NumberingRange
 
 RANGE_PREFIX: Final = "rng"
@@ -111,3 +114,69 @@ class NumberingRangeView(_Shape):
             version=registered.version,
             created_at=registered.created_at,
         )
+
+
+INVOICE_PREFIX: Final = "inv"
+"""The invoice's id prefix, as invoicing's manifest mints it: a delivery is named by its invoice."""
+
+
+def invoice_ref(invoice: UUID) -> str:
+    """The public id of an invoice."""
+    return format_id(INVOICE_PREFIX, invoice)
+
+
+def parse_invoice_ref(text: str) -> UUID:
+    """The invoice ``text`` names; ``DeliveryNotFoundError`` for anything but a public id of one."""
+    try:
+        return parse_id(INVOICE_PREFIX, text)
+    except InvalidPublicIdError:
+        raise DeliveryNotFoundError from None
+
+
+class DeliveryView(_Shape):
+    """Where an invoice's e-CF stands in its delivery to the buyer (spec §8.6.5)."""
+
+    object: Literal["delivery"] = "delivery"
+    invoice: str = Field(description="The invoice (inv_…) whose e-CF is delivered.")
+    livemode: bool
+    encf: str
+    delivery: DeliveryState
+    reason: str | None = Field(description="Why it failed, failed last, or does not apply: a code.")
+    version: int = Field(description="The e-CF's version, as the invoice's fiscal status carries it.")
+
+    @classmethod
+    def of(cls, document: EcfDocument) -> Self:
+        """The view of ``document``'s delivery."""
+        return cls(
+            invoice=invoice_ref(document.invoice),
+            livemode=document.environment.live,
+            encf=str(document.encf),
+            delivery=document.delivery,
+            reason=document.delivery_reason,
+            version=document.version,
+        )
+
+
+class DeliveryOptionsBody(_Shape):
+    """How the company delivers to its buyers in the request's mode."""
+
+    buyer_authentication: bool = Field(
+        description=(
+            "Whether a buyer's authentication seed is signed with the company's certificate for a token, "
+            "when the buyer publishes one (off by default: a buyer that then requires a token fails its "
+            "delivery with do_ecf_buyer_requires_authentication)."
+        )
+    )
+
+
+class DeliveryOptionsView(_Shape):
+    """The company's delivery options in a mode."""
+
+    object: Literal["delivery_options"] = "delivery_options"
+    livemode: bool
+    buyer_authentication: bool
+
+    @classmethod
+    def of(cls, options: DeliveryOptions, *, livemode: bool) -> Self:
+        """The view of ``options``."""
+        return cls(livemode=livemode, buyer_authentication=options.buyer_authentication)

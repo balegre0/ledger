@@ -102,3 +102,13 @@ timeout = "3m"                       # one outbound call per run (Decision 10)
 max_attempts = 50                    # failures; RunAgain does not count
 deadline = "15d"
 concurrency = 16
+
+# An accepted e-CF's way to its buyer (spec §8.6.5, Decision 21): its handler records `failed` at seven days
+# from the start of the delivery and never schedules a run past them, so its deadline leaves a day's room for
+# that last run (a dead job would record nothing a client could see).
+[[channels.jobs]]
+kind = "do_ecf.deliver"
+timeout = "3m"                       # one buyer exchange per run (the buyer client's own deadline is 60 s)
+max_attempts = 50                    # failures; RunAgain does not count
+deadline = "8d"
+concurrency = 8

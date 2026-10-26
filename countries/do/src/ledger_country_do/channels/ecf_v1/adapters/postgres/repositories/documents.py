@@ -8,7 +8,8 @@ committed first) is the table's refusal (``documents_invoice_key``), raised as `
 A signature's columns are all there or none: the table checks it
 (``ck_documents_signature``), so a row is signed exactly when it has them all. Past signing, a change keeps
 the submission's mark, DGII's track id, code, ``secuenciaUtilizada`` and messages (``[{code, text}]``),
-how often DGII was asked, delivery, and the number's fate.
+how often DGII was asked, delivery (since when, the attempts failed, why, the buyer's receipt's key and
+SHA-256, both or neither), and the number's fate.
 """
 
 from typing import Final, TypedDict, final, override
@@ -97,6 +98,11 @@ _DOCUMENT: Final = select(
     DocumentRecord.sequence_used,
     DocumentRecord.number_fate,
     DocumentRecord.messages,
+    DocumentRecord.delivery_since,
+    DocumentRecord.delivery_attempts,
+    DocumentRecord.delivery_reason,
+    DocumentRecord.receipt_key,
+    DocumentRecord.receipt_sha256,
 ).join(
     NumberingRangeRecord,
     (NumberingRangeRecord.organization_id == DocumentRecord.organization_id)
@@ -136,6 +142,11 @@ type _Row = Row[
     bool | None,
     str | None,
     list[dict[str, str]],
+    datetime | None,
+    int,
+    str | None,
+    str | None,
+    bytes | None,
 ]
 type _Query = Select[
     UUID,
@@ -169,6 +180,11 @@ type _Query = Select[
     bool | None,
     str | None,
     list[dict[str, str]],
+    datetime | None,
+    int,
+    str | None,
+    str | None,
+    bytes | None,
 ]
 
 
@@ -233,6 +249,11 @@ def _document(row: _Row) -> EcfDocument:
         sequence_used,
         fate,
         messages,
+        delivery_since,
+        delivery_attempts,
+        delivery_reason,
+        receipt_key,
+        receipt_sha256,
     ) = row
     return EcfDocument(
         id=identifier,
@@ -261,11 +282,17 @@ def _document(row: _Row) -> EcfDocument:
             DgiiMessage(message["code"], message["text"]).authority()
             for message in _MESSAGES.validate_python(messages)
         ),
+        delivery_since=delivery_since,
+        delivery_attempts=delivery_attempts,
+        delivery_reason=delivery_reason,
+        receipt=None
+        if receipt_key is None or receipt_sha256 is None
+        else Archived(key=receipt_key, sha256=receipt_sha256),
     )
 
 
 def _progress_columns(document: EcfDocument) -> Mapping[str, object]:
-    """What a document records past signing: its mark, DGII's track id and answer, its number's fate."""
+    """What a document records past signing: its mark, DGII's answer, its number's fate, its delivery."""
     return {
         "delivery_state": document.delivery.value,
         "submission_started_at": document.submission_started_at,
@@ -276,6 +303,11 @@ def _progress_columns(document: EcfDocument) -> Mapping[str, object]:
         "sequence_used": document.sequence_used,
         "number_fate": None if document.number_fate is None else document.number_fate.value,
         "messages": [{"code": message.code, "text": message.message} for message in document.messages],
+        "delivery_since": document.delivery_since,
+        "delivery_attempts": document.delivery_attempts,
+        "delivery_reason": document.delivery_reason,
+        "receipt_key": None if document.receipt is None else document.receipt.key,
+        "receipt_sha256": None if document.receipt is None else document.receipt.sha256,
     }
 
 

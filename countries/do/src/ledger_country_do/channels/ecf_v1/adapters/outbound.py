@@ -20,6 +20,7 @@ lazy from pathlib import Path
 from cryptography import x509
 
 from ledger_country_do.channels.ecf_v1.adapters.buyers.client import BuyerClient
+from ledger_country_do.channels.ecf_v1.adapters.buyers.delivery import BuyerDeliveries
 from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
 from ledger_country_do.channels.ecf_v1.adapters.dgii.directory import DirectoryCache
 from ledger_country_do.channels.ecf_v1.adapters.signing.trust import CounterpartyTrust
@@ -27,7 +28,7 @@ from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts
 lazy from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
 lazy from ledger_country_do.channels.ecf_v1.adapters.signing.port import DocumentSigner
-lazy from ledger_country_do.channels.ecf_v1.application.ports import Authority
+lazy from ledger_country_do.channels.ecf_v1.application.ports import Authority, Buyers
 lazy from ledger_platform.http.outbound import OutboundHttp
 
 
@@ -53,6 +54,11 @@ class OutboundClosedError(EcfError):
 
 def unopened() -> Authority:
     """DGII's client of an app that has none (every role but the worker's): reaching it is a defect."""
+    raise OutboundClosedError
+
+
+def unopened_buyers() -> Buyers:
+    """The buyers' client of an app that has none (every role but the worker's): reaching it is a defect."""
     raise OutboundClosedError
 
 
@@ -114,6 +120,10 @@ class Outbound:
         if self._buyers is None:
             raise OutboundClosedError
         return self._buyers
+
+    def deliveries(self) -> Buyers:
+        """The buyers' client, open, as the use cases see it (``Delivering``'s ``buyers``)."""
+        return BuyerDeliveries(self.buyers)
 
     @asynccontextmanager
     async def opened(self) -> AsyncGenerator[Outbound]:

@@ -35,7 +35,7 @@ from urllib.parse import urlsplit
 lazy from collections.abc import Awaitable, Callable, Sequence
 
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError
-lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.seeds import SeedSigned
+lazy from ledger_country_do.channels.ecf_v1.application.ports import SeedSigned
 
 type Address = IPv4Address | IPv6Address
 type Resolve = Callable[[str, int], Awaitable[Sequence[Address]]]

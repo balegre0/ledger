@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Final, final
 lazy from datetime import datetime
 
-lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.seeds import SeedSigned
+lazy from ledger_country_do.channels.ecf_v1.application.ports import SeedSigned
 
 APPROVAL_PATH: Final = "/fe/aprobacioncomercial/api/ecf"
 ACECF_FILE: Final = "ACECF.xml"

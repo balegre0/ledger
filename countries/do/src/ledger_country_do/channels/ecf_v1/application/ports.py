@@ -6,8 +6,10 @@ seeds signed as an issuing company, named on every call (``SigningAs``).
 every app but the signer; in tests, the fake DGII and the spike CLI a key held in that process). Whoever
 holds the key decides whether its certificate may sign at the moment a document states, never the channel.
 ``Authority`` is DGII's web services for an emitter (spec §8.6.3), each call made for an issuing company (its
-token is that company's), implemented by ``adapters.dgii.client``. ``EcfFormat`` is DGII's XML formats
-(written, checked against DGII's schemas, signatures verified), implemented by ``adapters.xml.documents``.
+token is that company's), implemented by ``adapters.dgii.client``. ``Buyers`` is the buyers' receivers
+an accepted e-CF is delivered to (spec §8.6.5), implemented over ``adapters.buyers.client``. ``EcfFormat`` is
+DGII's XML formats (written, checked against DGII's schemas, signatures verified), implemented by
+``adapters.xml.documents``.
 
 ``SigningAs`` holds no call of the platform's (the use cases import no platform): the adapter that signs
 makes each signature a ``SystemCall`` of its own, ``reason`` naming it, the tenant its scope.
@@ -26,11 +28,13 @@ from ledger_country_do.channels.ecf_v1.domain.errors import (
     EcfInvalidError,
     EcfUnavailableError,
 )
+from ledger_country_do.channels.ecf_v1.domain.exchanges import require_tax_id
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.tenancy import Tenant
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
+lazy from ledger_country_do.channels.ecf_v1.domain.exchanges import NotReceivedReason
 lazy from ledger_country_do.channels.ecf_v1.domain.polling import TrackId
 lazy from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage
 lazy from ledger_country_do.channels.ecf_v1.domain.totals import Totals
@@ -372,6 +376,14 @@ class Archive(Protocol, metaclass=ABCMeta):
         """``signed``, a consumer-invoice summary (RFCE) of ``tenant``'s, kept."""
 
     @abstractmethod
+    async def receipt(self, tenant: Tenant, arecf: bytes, *, refused: bool) -> Archived:
+        """``arecf``, a buyer's receipt of one of ``tenant``'s e-CF, kept.
+
+        ``refused``: one that failed its checks, kept as evidence apart from the trusted ones
+        (``arecf-refused``), never read as one.
+        """
+
+    @abstractmethod
     async def read(self, archived: Archived) -> bytes:
         """The bytes kept as ``archived``, checked against its SHA-256 before they are answered (Decision 12).
 
@@ -399,3 +411,105 @@ class EcfFormat(Protocol, metaclass=ABCMeta):
     @abstractmethod
     def signed(self, draft: EcfDraft, signed: bytes, *, rfce: bool) -> str:
         """``signed`` checked against its schema and its signature verified; its signature value."""
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SeedSigned:
+    """A seed signed as the issuing company for a buyer's (or an emitter's) receiver: what is audited.
+
+    ``buyer``: the counterparty's RNC or cédula, whole (the caller masks it, ``ledger_kernel.tax_ids.masked``,
+    before it reaches an audit row's detail; never shown in a ``repr``); ``endpoint_host``: the host the seed
+    came from; ``at``: when it was signed. Never the seed, its signature or a token (Decision 20).
+    """
+
+    buyer: str = field(repr=False)
+    endpoint_host: str
+    at: datetime
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DeliveryDocument:
+    """What a delivery names and its receipt is checked against: the e-CF's issuer, its buyer, its e-NCF.
+
+    Both parties are an RNC or a cédula: ``ExchangeInvalidError`` otherwise, naming the field, not the value.
+    """
+
+    issuer_rnc: str
+    buyer_rnc: str
+    encf: Encf
+
+    def __post_init__(self) -> None:
+        require_tax_id("delivery_document.issuer_rnc", self.issuer_rnc)
+        require_tax_id("delivery_document.buyer_rnc", self.buyer_rnc)
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BuyerReceipt:
+    """The buyer answered a receipt (ARECF) that holds: signed by it, about the document. Received, or not.
+
+    ``reason``: DGII's code for why it was not received (``None`` when received).
+    """
+
+    arecf: bytes = field(repr=False)
+    received: bool
+    reason: NotReceivedReason | None
+    seeds: tuple[SeedSigned, ...]
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BuyerReceiptRefused:
+    """The buyer answered a receipt failing its checks (``reason``, a code): kept, never trusted, retried."""
+
+    arecf: bytes = field(repr=False)
+    reason: str
+    seeds: tuple[SeedSigned, ...]
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class NoReceiver:
+    """DGII lists no electronic receiver for the buyer (``reason``): delivery does not apply."""
+
+    reason: str
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BuyerUnreached:
+    """The buyer's receiver could not be used now (``code``, the failure's): tried again later.
+
+    ``needs_authentication``: it answered 401 to a document sent without a token, authentication being
+    switched off for the issuing company (Decision 19): a person decides (alerted).
+    """
+
+    code: str
+    needs_authentication: bool
+    seeds: tuple[SeedSigned, ...]
+
+
+type Handed = BuyerReceipt | BuyerReceiptRefused | NoReceiver | BuyerUnreached
+"""What came of delivering a document to its buyer."""
+
+
+class Buyers(Protocol, metaclass=ABCMeta):
+    """The receivers of DGII's directory, as an issuing company delivers its accepted e-CF to them."""
+
+    @abstractmethod
+    async def deliver(
+        self,
+        who: SigningAs,
+        environment: Environment,
+        document: DeliveryDocument,
+        signed: bytes,
+        *,
+        authenticate: bool,
+    ) -> Handed:
+        """``signed``, ``document``'s accepted e-CF, delivered as ``who`` to its buyer.
+
+        Its seed signed for a token only with ``authenticate`` (and when the receiver publishes one). Every
+        seed signed is in the answer, whatever came of the exchange.
+        """

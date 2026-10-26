@@ -167,6 +167,17 @@ def issuer_rnc(draft: FiscalDraft) -> str:
     return _present(_rnc(draft.issuer.tax_id))
 
 
+def buyer_rnc(draft: FiscalDraft) -> str | None:
+    """The buyer's RNC (or cédula) a sale states: whom its accepted e-CF is delivered to (spec §8.6.5).
+
+    ``None`` for a buyer without one, and for a purchase (41, 43, 47: the company is the buyer, its
+    counterparty a supplier the document is never delivered to).
+    """
+    if draft.direction is Direction.PURCHASE or draft.counterparty is None:
+        return None
+    return _rnc(draft.counterparty.tax_id)
+
+
 def _default_type(draft: FiscalDraft) -> EcfType | None:
     note = _DEFAULT_OF_NOTE.get(draft.kind)
     if note is not None:

@@ -82,13 +82,21 @@ def test_the_published_document_is_the_one_sync_writes() -> None:
     assert PUBLISHED.read_text(encoding="utf-8") == made, "regenerate it: uv run ledger-devtools sync"
 
 
-def test_the_document_holds_the_ranges_three_operations_and_a_post_takes_a_key_in_a_mode() -> None:
+def test_the_document_holds_the_ranges_and_deliveries_operations_and_a_post_takes_a_key_in_a_mode() -> None:
     parsed = document()
     assert parsed["openapi"].startswith("3.1.")
     assert {path: sorted(operations) for path, operations in parsed["paths"].items()} == {
         "/v1/do/numbering_ranges": ["get", "post"],
         "/v1/do/numbering_ranges/{range_id}": ["get"],
+        "/v1/do/deliveries/{invoice}/retry": ["post"],
+        "/v1/do/delivery_options": ["get", "put"],
     }
+    retry = parsed["paths"]["/v1/do/deliveries/{invoice}/retry"]["post"]
+    for header in ("Idempotency-Key", "Ledger-Mode", "Ledger-Company"):
+        assert {"name": header, "in": "header", "required": True} in retry.get("parameters", [])
+    assert {"200", "404", "409"} <= set(retry.get("responses", {}))
+    put = parsed["paths"]["/v1/do/delivery_options"]["put"]
+    assert not [each for each in put.get("parameters", []) if each["name"] in {"If-Match", "Idempotency-Key"}]
     post = parsed["paths"]["/v1/do/numbering_ranges"]["post"]
     required = post.get("parameters", [])
     for header in ("Idempotency-Key", "Ledger-Mode", "Ledger-Company"):

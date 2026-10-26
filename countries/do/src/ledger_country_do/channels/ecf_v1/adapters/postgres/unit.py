@@ -2,16 +2,17 @@
 
 from contextlib import asynccontextmanager
 from typing import final, override
-lazy from collections.abc import AsyncGenerator
+lazy from collections.abc import AsyncGenerator, Mapping
 lazy from datetime import datetime
 lazy from uuid import UUID
 
-from ledger_country_do.channels.ecf_v1.adapters.jobs import ADVANCE
+from ledger_country_do.channels.ecf_v1.adapters.jobs import ADVANCE, DELIVER
 from ledger_country_do.channels.ecf_v1.adapters.postgres.repositories.documents import PgDocuments
+from ledger_country_do.channels.ecf_v1.adapters.postgres.repositories.options import PgCompanyOptions
 from ledger_country_do.channels.ecf_v1.adapters.postgres.repositories.ranges import PgRanges
 from ledger_country_do.channels.ecf_v1.adapters.postgres.repositories.submissions import PgSubmissions
 from ledger_country_do.channels.ecf_v1.adapters.statuses import update_of
-from ledger_country_do.channels.ecf_v1.application.documents import Advances
+from ledger_country_do.channels.ecf_v1.application.documents import Advances, Deliveries
 from ledger_country_do.channels.ecf_v1.application.ranges import (
     Announcements,
     Audit,
@@ -70,6 +71,23 @@ class UnitAdvances(Advances):
 
 
 @final
+class UnitDeliveries(Deliveries):
+    """The ``do_ecf.deliver`` jobs, in the unit's queue: enqueued with the change that calls for them, or not.
+
+    A delivery that failed is started again by a fresh job (a done or dead one restarted, its deadline anew).
+    """
+
+    __slots__ = ("_unit",)
+
+    def __init__(self, unit: UnitOfWork) -> None:
+        self._unit = unit
+
+    @override
+    def enqueue(self, document: UUID) -> None:
+        self._unit.jobs.enqueue(DELIVER, str(document))
+
+
+@final
 class UnitAudit(Audit):
     """The channel's audit rows, in the unit's ``audit_events``: the acting call is the actor."""
 
@@ -79,8 +97,16 @@ class UnitAudit(Audit):
         self._unit = unit
 
     @override
-    def record(self, action: AuditAction, subject: UUID, *, before: object, after: object) -> None:
-        self._unit.audit(action=action, subject=subject, before=before, after=after)
+    def record(
+        self,
+        action: AuditAction,
+        subject: UUID,
+        *,
+        before: object,
+        after: object,
+        detail: Mapping[str, str] | None = None,
+    ) -> None:
+        self._unit.audit(action=action, subject=subject, before=before, after=after, detail=detail)
 
 
 def bind(unit: UnitOfWork) -> NumberingUnit:
@@ -94,6 +120,8 @@ def bind(unit: UnitOfWork) -> NumberingUnit:
         documents=PgDocuments(unit.connection, scope, scope.mode),
         submissions=PgSubmissions(unit.connection, scope, scope.mode),
         advances=UnitAdvances(unit, scope),
+        deliveries=UnitDeliveries(unit),
+        options=PgCompanyOptions(unit.connection, scope, scope.mode, now=unit.now),
         announcements=UnitAnnouncements(unit, scope),
         audit=UnitAudit(unit),
         now=unit.now,
