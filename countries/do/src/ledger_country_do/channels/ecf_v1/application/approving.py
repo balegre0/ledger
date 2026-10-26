@@ -267,6 +267,10 @@ class ApprovalMissingError(EcfError):
 
 _UNSENT: Final = frozenset({Sending.REFUSED, Sending.OUTCOME_UNKNOWN, Sending.FAILED})
 """What leaves a party without the ACECF for good: reported."""
+type Unmarked = Literal["marked", "settled"]
+"""Why a run did not mark DGII: an earlier run marked it, or DGII is no longer pending."""
+MARKED: Final = "marked"
+SETTLED: Final = "settled"
 
 
 def _buyer(document: ReceivedDocument) -> str:
@@ -307,11 +311,14 @@ def _again(sending: PartySending, code: str | None) -> PartySending:
     return replace(sending, reason=code)
 
 
-def _given_up(sending: PartySending) -> PartySending:
-    """``sending`` ``failed`` with its last failure's code once the seven days are over, if still pending."""
+def _given_up(sending: PartySending, *, unknown: bool) -> PartySending:
+    """``sending`` once the seven days are over, if still pending: given up, its last failure's code kept.
+
+    ``failed``; or ``outcome_unknown`` when a mark is set (``unknown``: a run may have sent it, then died).
+    """
     if sending.state is not Sending.PENDING:
         return sending
-    return replace(sending, state=Sending.FAILED)
+    return replace(sending, state=Sending.OUTCOME_UNKNOWN if unknown else Sending.FAILED)
 
 
 @final
@@ -469,7 +476,9 @@ class CommercialApprovals:
             )
             return
         mark = await self._marked(tenant, document.id)
-        if mark is None:  # marked by an earlier run that recorded no answer: never sent again
+        if mark == SETTLED:  # another run settled DGII since this one read it: nothing to send
+            return
+        if mark == MARKED:  # marked by an earlier run that recorded no answer: never sent again
             await self._dgii(tenant, document.id, None, PartySending(state=Sending.OUTCOME_UNKNOWN))
             return
         answer: Acknowledged | Refused
@@ -477,7 +486,7 @@ class CommercialApprovals:
             answer = await authority.commercial_approval(who, document.environment, acecf)
         except OutcomeUnknownError as error:
             unknown = PartySending(state=Sending.OUTCOME_UNKNOWN, reason=error.reason.value)
-            await self._dgii(tenant, document.id, mark, unknown)
+            await self._dgii(tenant, document.id, mark, unknown, said=())
             return
         except _RETRIED as error:  # DGII certainly did not take it: the mark cleared, tried again
             await self._dgii(
@@ -487,18 +496,24 @@ class CommercialApprovals:
         messages = kept(tuple(message.authority() for message in answer.messages))
         if isinstance(answer, Acknowledged):
             took = PartySending(state=Sending.SENT, sent_at=self._clock())
-            await self._dgii(tenant, document.id, mark, took, messages=messages)
+            await self._dgii(tenant, document.id, mark, took, said=messages)
             return
         refused = PartySending(state=Sending.REFUSED, reason=REFUSED)
-        await self._dgii(tenant, document.id, mark, refused, messages=messages)
+        await self._dgii(tenant, document.id, mark, refused, said=messages)
 
-    async def _marked(self, tenant: Tenant, document_id: UUID) -> datetime | None:
-        """The mark this run set and committed; ``None`` when one was set already (see the module)."""
+    async def _marked(self, tenant: Tenant, document_id: UUID) -> datetime | Unmarked:
+        """The mark this run set and committed, read under the row's lock (see the module).
+
+        ``MARKED`` when an earlier run marked it; ``SETTLED`` when DGII is no longer pending (another run
+        settled it, or gave it up, since this run read it): this run marks nothing then.
+        """
         async with self._units.unit(tenant) as unit:
             current = await _found(unit, document_id, lock=True)
             approval = _approval(current)
+            if approval.dgii.state is not Sending.PENDING:
+                return SETTLED
             if approval.dgii_started_at is not None:
-                return None
+                return MARKED
             _ = await _changed(unit, current, replace(approval, dgii_started_at=unit.now))
             return unit.now
 
@@ -509,20 +524,23 @@ class CommercialApprovals:
         mark: datetime | None,
         outcome: PartySending,
         *,
-        messages: tuple[AuthorityMessage, ...] | None = None,
+        said: tuple[AuthorityMessage, ...] | None = None,
     ) -> None:
         """DGII's ``outcome`` recorded, audited, reported if unsent.
 
-        ``mark``: the one this run set and sent under (``None``: it set none). Only that run clears its mark
-        (DGII certainly did not take it), and only it may replace an unknown outcome another run inferred
-        from the mark meanwhile: its answer is DGII's own. Anything else another run recorded stays.
+        ``mark``: the one this run set and sent under (``None``: it set none); ``said``: DGII's messages when
+        ``outcome`` is DGII's own answer to that call (taken, refused, or its outcome unknown; ``None``
+        otherwise). Only the run holding the
+        row's mark clears it (DGII certainly did not take it), and only it replaces an unknown outcome another
+        run inferred from the mark meanwhile, and only with DGII's own answer: a call DGII certainly did not
+        take leaves that unknown outcome and the mark as they are. Anything else another run recorded stays.
         """
         async with self._units.unit(tenant) as unit:
             current = await _found(unit, document_id, lock=True)
             approval = _approval(current)
             holds = mark is not None and approval.dgii_started_at == mark
             inferred = holds and approval.dgii.state is Sending.OUTCOME_UNKNOWN
-            if approval.dgii.state.settled and not inferred:  # recorded by a run that raced this one
+            if approval.dgii.state.settled and not (inferred and said is not None):  # another run's
                 return
             cleared = holds and outcome.state is Sending.PENDING
             started = None if cleared else approval.dgii_started_at
@@ -530,7 +548,7 @@ class CommercialApprovals:
                 approval,
                 dgii=outcome,
                 dgii_started_at=started,
-                dgii_messages=approval.dgii_messages if messages is None else messages,
+                dgii_messages=approval.dgii_messages if said is None else said,
             )
             _ = await _changed(unit, current, recorded)
             self._recorded(unit, current.id, "dgii", outcome)
@@ -596,11 +614,13 @@ class CommercialApprovals:
                     unit, current, replace(approval, attempts=attempts, dgii=dgii, emitter=emitter)
                 )
                 return Again(next_delivery(approval.requested_at, unit.now, attempts))
-            parties: tuple[tuple[Party, PartySending], ...] = (("dgii", dgii), ("emitter", emitter))
-            _ = await _changed(
-                unit, current, replace(approval, dgii=_given_up(dgii), emitter=_given_up(emitter))
+            marked = approval.dgii_started_at is not None  # it may be at DGII: never failed, never resent
+            given_up: tuple[tuple[Party, PartySending, PartySending], ...] = (
+                ("dgii", dgii, _given_up(dgii, unknown=marked)),
+                ("emitter", emitter, _given_up(emitter, unknown=False)),
             )
-            for party, sending in parties:
+            _ = await _changed(unit, current, replace(approval, dgii=given_up[0][2], emitter=given_up[1][2]))
+            for party, sending, final in given_up:
                 if sending.state is Sending.PENDING:
-                    self._recorded(unit, current.id, party, _given_up(sending))
+                    self._recorded(unit, current.id, party, final)
             return Finished()

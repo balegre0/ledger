@@ -110,9 +110,9 @@ class Contexts(Protocol):
 
 @final
 class Network(httpx.AsyncBaseTransport):
-    """The way to the fake DGII and its simulator: ``answering`` answers a status of its own (and no body) to
-    the requests whose path ends with a key; ``unlisted`` answers DGII's directory empty; ``meanwhile`` runs
-    before a request whose path ends with a key reaches the fake (what another run does meanwhile); ``dying``
+    """The way to the fake DGII and its simulator: ``meanwhile`` runs first, for a request whose path ends
+    with a key (what another run does meanwhile); ``answering`` answers a status of its own (and no body) to
+    the requests whose path ends with a key; ``unlisted`` answers DGII's directory empty; ``dying``
     lets such a request reach the fake, then fails the run that sent it (``RunDiedError``) before its answer
     comes back: a process that died after sending.
     """
@@ -135,14 +135,14 @@ class Network(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         self.requests.append(path)
+        for part, hook in self.meanwhile.items():
+            if path.endswith(part):
+                await hook()
         for part, status in self.answering.items():
             if path.endswith(part):
                 return httpx.Response(status, stream=httpx.ByteStream(b""), request=request)
         if self.unlisted and path.endswith(DIRECTORY):
             return httpx.Response(200, stream=httpx.ByteStream(b"[]"), request=request)
-        for part, hook in self.meanwhile.items():
-            if path.endswith(part):
-                await hook()
         answered = await self._inner.handle_async_request(request)
         if any(path.endswith(part) for part in self.dying):
             raise RunDiedError
@@ -762,6 +762,12 @@ async def test_the_mark_is_committed_before_dgii_is_called_and_a_run_that_died_a
     assert [(entry["party"], entry["outcome"]) for entry in logs] == [("dgii", "outcome_unknown")]
 
 
+def not_ready(self: DgiiClient, environment: Environment) -> None:
+    """``DgiiClient.require_ready`` of a client not open."""
+    del self, environment
+    raise AuthorityUnavailableError(Failure.NOT_OPEN, "reception")
+
+
 def tampered(sign: Callable[[bytes], bytes]) -> Callable[[bytes], bytes]:
     """``sign``, its ACECF changed after it signed it (an approval turned into a rejection)."""
 
@@ -790,11 +796,6 @@ async def test_dgii_s_client_not_ready_leaves_dgii_to_try_again_and_the_emitter_
     worker: Worker, module_database: BoundDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Review I3: an error of DGII's client before anything is marked is DGII's alone."""
-
-    def not_ready(self: DgiiClient, environment: Environment) -> None:
-        del self, environment
-        raise AuthorityUnavailableError(Failure.NOT_OPEN, "reception")
-
     monkeypatch.setattr(DgiiClient, "require_ready", not_ready)
     tenant, document = await decided(module_database, APPROVED)
     assert isinstance(await worker.run(tenant, document), RunAgain)
@@ -875,3 +876,137 @@ async def test_a_document_that_names_no_buyer_any_more_is_never_retried_silently
     with pytest.raises(NotTheBuyerError):
         await worker.run(tenant, document)
     assert (await approval_of(module_database, tenant, document)).attempts == 0
+
+
+# -- The re-review's cases (2026-10-26) ---------------------------------------------------------------------
+
+
+async def test_a_run_that_set_no_mark_never_clears_another_run_s(
+    worker: Worker, module_database: BoundDatabase
+) -> None:
+    """Re-review I4: while one run's call is at DGII, a second run whose DGII client is not ready records DGII
+    pending and leaves the mark; the first dies; the next finds the mark and never sends again."""
+    tenant, document = await decided(module_database, APPROVED)
+    marks: list[datetime | None] = []
+
+    async def second_run() -> None:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(DgiiClient, "require_ready", not_ready)
+            assert isinstance(await worker.run(tenant, document), RunAgain)
+        marks.append((await approval_of(module_database, tenant, document)).dgii_started_at)
+
+    worker.network.meanwhile[DGII_APPROVAL] = second_run
+    worker.network.dying.add(DGII_APPROVAL)
+    with pytest.raises(RunDiedError):
+        await worker.run(tenant, document)
+    assert len(marks) == 1
+    assert marks[0] is not None
+    worker.network.meanwhile.clear()
+    worker.network.dying.clear()
+    assert await worker.run(tenant, document) == Done()
+    assert (await approval_of(module_database, tenant, document)).dgii == "outcome_unknown"
+    assert len(worker.fake.state.dgii_approvals) == 1
+
+
+async def test_a_run_that_set_no_mark_leaves_an_unknown_outcome_as_it_is(
+    worker: Worker, module_database: BoundDatabase
+) -> None:
+    """Re-review I4, its variant: the row is already outcome_unknown when the not-ready run records."""
+    tenant, document = await decided(module_database, APPROVED)
+
+    async def inferred_then_second_run() -> None:
+        await set_row(module_database, tenant, document, approval_dgii="outcome_unknown")
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(DgiiClient, "require_ready", not_ready)
+            _ = await worker.run(tenant, document)
+        assert (await approval_of(module_database, tenant, document)).dgii == "outcome_unknown"
+        await set_row(module_database, tenant, document, approval_dgii="pending")
+
+    worker.network.meanwhile[DGII_APPROVAL] = inferred_then_second_run
+    assert await worker.run(tenant, document) == Done()
+    assert (await approval_of(module_database, tenant, document)).dgii == "sent"
+
+
+async def test_an_answer_under_a_mark_the_row_no_longer_holds_replaces_no_unknown_outcome(
+    worker: Worker, module_database: BoundDatabase
+) -> None:
+    """Re-review I4 (Ma3): only the run holding the row's own mark replaces an unknown outcome."""
+    tenant, document = await decided(module_database, APPROVED)
+
+    async def another_mark() -> None:
+        found = await approval_of(module_database, tenant, document)
+        assert found.dgii_started_at is not None
+        moved = found.dgii_started_at + timedelta(seconds=1)
+        values = {"approval_dgii": "outcome_unknown", "approval_dgii_started_at": moved}
+        await set_row(module_database, tenant, document, **values)
+
+    worker.network.meanwhile[DGII_APPROVAL] = another_mark
+    assert await worker.run(tenant, document) == Done()
+    found = await approval_of(module_database, tenant, document)
+    assert (found.dgii, found.dgii_messages) == ("outcome_unknown", [])
+
+
+async def test_the_run_holding_the_mark_keeps_an_inferred_unknown_outcome_when_dgii_answered_nothing(
+    worker: Worker, module_database: BoundDatabase
+) -> None:
+    """Re-review I5: only DGII's own answer replaces an unknown outcome another run inferred; a throttled call
+    leaves it, and the mark, exactly as they are."""
+    tenant, document = await decided(module_database, APPROVED)
+    marks: list[datetime | None] = []
+
+    async def inferred() -> None:
+        marks.append((await approval_of(module_database, tenant, document)).dgii_started_at)
+        await set_row(module_database, tenant, document, approval_dgii="outcome_unknown")
+
+    worker.network.meanwhile[DGII_APPROVAL] = inferred
+    worker.network.answering[DGII_APPROVAL] = 429
+    assert await worker.run(tenant, document) == Done()
+    found = await approval_of(module_database, tenant, document)
+    assert (found.dgii, found.dgii_started_at) == ("outcome_unknown", marks[0])
+    assert marks[0] is not None
+    assert await worker.run(tenant, document) == Done()
+    assert (worker.network.asked(DGII_APPROVAL), len(worker.fake.state.dgii_approvals)) == (1, 0)
+
+
+async def test_a_run_whose_dgii_was_given_up_meanwhile_marks_and_sends_nothing(
+    started: Started, module_database: BoundDatabase, archive: StoreArchive
+) -> None:
+    """Re-review Minor 1: the run read DGII pending; another run gave it up before this one marked."""
+    tenant, document = await decided(module_database, APPROVED)
+    watching = Watching(archive)
+
+    async def given_up() -> None:
+        await set_row(module_database, tenant, document, approval_dgii="failed")
+
+    watching.before_acecf = given_up
+    async with started.worker(**{ARCHIVE_PORT.name: watching}) as worker:
+        assert await worker.run(tenant, document) == Done()
+    found = await approval_of(module_database, tenant, document)
+    assert (found.dgii, found.dgii_started_at, found.emitter) == ("failed", None, "sent")
+    assert (worker.network.asked(DGII_APPROVAL), len(worker.fake.state.dgii_approvals)) == (0, 0)
+
+
+async def test_seven_days_over_with_a_mark_set_is_an_unknown_outcome_not_a_failure(
+    worker: Worker, module_database: BoundDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review Minor 2: a marked approval may be at DGII, however long ago it was decided."""
+    tenant, document = await decided(module_database, APPROVED)
+    found = await approval_of(module_database, tenant, document)
+    assert found.requested_at is not None
+    values = {
+        "approval_requested_at": found.requested_at - timedelta(days=8),
+        "approval_dgii_started_at": found.requested_at - timedelta(days=8),
+    }
+    worker.network.answering[EMITTER_APPROVAL] = 503
+    monkeypatch.setattr(DgiiClient, "require_ready", not_ready)
+    assert isinstance(await worker.run(tenant, document), RunAgain)  # signed, DGII and the emitter to retry
+    await set_row(module_database, tenant, document, **values)  # as if a run marked it, then died
+    with capture_logs() as logs:
+        assert await worker.run(tenant, document) == Done()
+    after = await approval_of(module_database, tenant, document)
+    assert (after.dgii, after.emitter) == ("outcome_unknown", "failed")
+    assert [(entry["party"], entry["outcome"]) for entry in logs] == [
+        ("dgii", "outcome_unknown"),
+        ("emitter", "failed"),
+    ]
+    assert worker.network.asked(DGII_APPROVAL) == 0
