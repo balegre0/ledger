@@ -4,6 +4,7 @@ The PDF's text is read back with ``pypdf``; its QR is read back from the page's 
 module) and decoded with ``zxing-cpp``, so what is checked is what a reader of the page scans.
 """
 
+import threading
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -16,6 +17,7 @@ import zxingcpp
 from lxml import etree
 from pypdf import PdfReader
 
+from ledger_country_do.channels.ecf_v1.adapters.pdf import render
 from ledger_country_do.channels.ecf_v1.adapters.pdf.layout import CONTINGENCY_LEGEND, draw, qr_symbol
 from ledger_country_do.channels.ecf_v1.adapters.pdf.render import (
     PdfPrinting,
@@ -272,8 +274,19 @@ def test_a_name_beyond_the_page_s_font_still_renders() -> None:
     assert "FERRETERÍA" in text_of(pdf)
 
 
-async def test_printing_renders_off_the_event_loop_what_render_pdf_renders() -> None:
+async def test_printing_renders_off_the_event_loop_what_render_pdf_renders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    threads: list[int] = []
+
+    def rendering(signed_ecf: bytes, recorded: Signature) -> bytes:
+        threads.append(threading.get_ident())
+        return render_pdf(signed_ecf, recorded)
+
+    monkeypatch.setattr(render, "render_pdf", rendering)
     assert await PdfPrinting().pdf(golden("ecf-31"), signature()) == render_pdf(golden("ecf-31"), signature())
+    assert len(threads) == 1
+    assert threads[0] != threading.get_ident()  # not the event loop's thread
 
 
 @pytest.mark.parametrize("name", ["ecf-44", "ecf-45", "ecf-46", "ecf-47", "ecf-33", "ecf-34", "ecf-41"])
@@ -319,3 +332,11 @@ def test_an_export_names_its_buyer_by_its_foreign_identifier() -> None:
     assert "ACME TRADING LLC" in text
     assert "1 MAIN ST, MIAMI FL" in text
     assert "RNC/Cédula" not in text
+
+
+def test_a_type_the_channel_does_not_know_is_unreadable_and_not_repeated() -> None:
+    """A ``TipoeCF`` that is no ``EcfType``: the archive's defect, the value never repeated."""
+    with pytest.raises(SignedEcfUnreadableError) as caught:
+        render_pdf(b"<ECF><Encabezado><IdDoc><TipoeCF>E31</TipoeCF></IdDoc></Encabezado></ECF>", signature())
+    assert "E31" not in str(caught.value)
+    assert caught.value.__cause__ is None

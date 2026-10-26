@@ -128,9 +128,10 @@ def _read(signed_ecf: bytes) -> tuple[_Element, EcfType]:
     except etree.XMLSyntaxError:
         raise SignedEcfUnreadableError from None
     tag = _Element(root, declared(Format.ECF_31)).optional("encabezado", "iddoc", "tipoecf")
-    if tag is None or tag not in _TYPES:
-        raise SignedEcfUnreadableError
-    ecf_type = EcfType(tag)
+    try:
+        ecf_type = EcfType(tag or "")
+    except ValueError:  # not one of the ten types: the message never repeats it
+        raise SignedEcfUnreadableError from None
     return _Element(root, declared(FORMAT_OF[ecf_type])), ecf_type
 
 

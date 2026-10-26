@@ -90,8 +90,7 @@ class Representing:
         pdf = await self._printing.pdf(await self._archive.read(signature.ecf), signature)
         archived = await self._archive.representation(tenant, pdf)
         async with self._units.unit(tenant) as unit:
-            await unit.documents.represented(document.id, archived)
-            recorded = await unit.documents.representation(document.id)
-        if recorded is not None and recorded != archived:  # another render, of other bytes, recorded first
+            recorded = await unit.documents.represented(document.id, archived)
+        if recorded != archived:  # another render, of other bytes, recorded first
             pdf = await self._archive.read(recorded)
         return Represented(encf=document.encf, pdf=pdf)

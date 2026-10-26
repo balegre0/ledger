@@ -19,12 +19,12 @@ URL. It is drawn one filled square per dark module (vector, sharp at any scale),
 its quiet zone of four modules.
 """
 
+from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
 from datetime import UTC
 from io import BytesIO
-from operator import methodcaller
-from typing import Final, final
-lazy from collections.abc import Sequence
+from typing import Final, Protocol, final
+lazy from collections.abc import Callable, Sequence
 lazy from datetime import datetime
 
 import segno
@@ -319,6 +319,27 @@ def _closing(sheet: _Sheet, printed: Printed) -> None:
     sheet.y = top - side
 
 
+type _DateFormatter = Callable[[int, int, int, int, int, int], str]
+"""What reportlab formats a PDF's dates with: the year, month, day, hour, minute and second, to a PDF date."""
+
+
+class _Dated(Protocol, metaclass=ABCMeta):
+    """A canvas whose PDF dates a formatter writes: reportlab's ``Canvas``, its formatter typed here.
+
+    types-reportlab leaves ``setDateFormatter``'s parameter untyped; a ``Canvas`` is passed as a ``_Dated``,
+    so the call is checked (the method's name is reportlab's: ruff's ``extend-ignore-names`` lists it).
+    """
+
+    @abstractmethod
+    def setDateFormatter(self, formatter: _DateFormatter, /) -> None:
+        """Write the PDF's creation and modification dates with ``formatter``."""
+
+
+def _dated(target: _Dated, formatter: _DateFormatter) -> None:
+    """``target``'s PDF dates written by ``formatter``, the call typed through ``_Dated``."""
+    target.setDateFormatter(formatter)
+
+
 def draw(printed: Printed) -> bytes:
     """``printed`` as a PDF (see the module)."""
     out = BytesIO()
@@ -328,8 +349,7 @@ def draw(printed: Printed) -> bytes:
     def dated(*_: int) -> str:
         return stamp
 
-    # types-reportlab leaves the formatter's parameter untyped: called by name, the call stays typed.
-    methodcaller("setDateFormatter", dated)(canvas)
+    _dated(canvas, dated)
     canvas.setTitle(printed.encf)
     canvas.setSubject(printed.title)
     canvas.setCreator(KEY)

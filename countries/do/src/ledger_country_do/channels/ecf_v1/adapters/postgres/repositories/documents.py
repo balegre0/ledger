@@ -19,7 +19,7 @@ lazy from uuid import UUID
 
 from psycopg.errors import UniqueViolation
 from pydantic import TypeAdapter
-from sqlalchemy import insert, select, update
+from sqlalchemy import LargeBinary, Text, func, insert, select, type_coerce, update
 from sqlalchemy.exc import IntegrityError
 lazy from sqlalchemy import ColumnElement, Row, Select
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
@@ -394,12 +394,19 @@ class PgDocuments(Documents):
         return None if key is None or sha256 is None else Archived(key=key, sha256=sha256)
 
     @override
-    async def represented(self, document: UUID, archived: Archived) -> None:
-        await self._connection.execute(
+    async def represented(self, document: UUID, archived: Archived) -> Archived:
+        kept = (DocumentRecord.representation_key, DocumentRecord.representation_sha256)
+        rows = await self._connection.execute(
             update(DocumentRecord)
-            .where(*self._mine(), DocumentRecord.id == document, DocumentRecord.representation_key.is_(None))
-            .values(representation_key=archived.key, representation_sha256=archived.sha256)
+            .where(*self._mine(), DocumentRecord.id == document)
+            .values(
+                representation_key=func.coalesce(kept[0], archived.key),
+                representation_sha256=func.coalesce(kept[1], archived.sha256),
+            )
+            .returning(type_coerce(kept[0], Text), type_coerce(kept[1], LargeBinary))
         )
+        key, sha256 = rows.one()  # the unit's: a document it read; both set now
+        return Archived(key=key, sha256=sha256)
 
     @override
     async def accepted(self, invoices: Collection[DocumentRef]) -> Mapping[DocumentRef, AcceptedEcf]:
