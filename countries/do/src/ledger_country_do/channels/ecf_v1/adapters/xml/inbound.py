@@ -22,7 +22,8 @@ words, never quoting the document (not even an element's name, which a schema vi
 libxml2's own errors, which quote it, are neither chained nor kept as context. Nothing here logs.
 
 ``name_inbound`` reads, leniently, what a receipt of a document that cannot be read names (Task 22's
-reason 1): its issuer, buyer and e-NCF.
+reason 1): its issuer, buyer and e-NCF. ``read_inbound_seed`` reads a seed the receiver gave out, signed by
+whoever asks for a token (DGII's ``SemillaModel``, at most ``MAX_SEED`` bytes): its value.
 """
 
 import re
@@ -44,6 +45,7 @@ from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError
 from ledger_country_do.channels.ecf_v1.domain.exchanges import (
     CommercialApproval,
     InboundEcf,
+    InboundNames,
     NotReceivedReason,
     Receipt,
     is_tax_id,
@@ -62,6 +64,8 @@ from ledger_fiscal_kit.xml.hardened import (
 
 MAX_INBOUND: Final = 2 * 1024 * 1024
 """The largest document read: the receiver's body limit (Task 22). An e-CF of 1,000 lines is far smaller."""
+MAX_SEED: Final = 64 * 1024
+"""The largest signed seed read: a ``SemillaModel`` and its signature, with room for a certificate chain."""
 _ECF_TYPES: Final = frozenset(each.value for each in EcfType)
 _SIGNATURE_VALUE: Final = f"{{{DSIG}}}SignatureValue"
 _BASE64: Final = re.compile(r"[A-Za-z0-9+/]+={0,2}")
@@ -99,11 +103,13 @@ _R_STATE: Final[_Path] = (_RECEIPT, "estado")
 _R_REASON: Final[_Path] = (_RECEIPT, "codigomotivonorecibido")
 _R_AT: Final[_Path] = (_RECEIPT, "fechahoraacuserecibo")
 _ARECF_PATHS: Final = (_R_ISSUER, _R_BUYER, _R_ENCF, _R_STATE, _R_REASON, _R_AT)
+_SEED_VALUE: Final[_Path] = ("valor",)
 
 _MALFORMED: Final = "the document is not well-formed XML"
 _NOT_ECF: Final = "the document is not an e-CF"
 _NOT_ACECF: Final = "the document is not a commercial approval"
 _NOT_ARECF: Final = "the document is not a receipt"
+_NOT_SEED: Final = "the document is not a seed"
 _SCHEMA: Final = "the document is not valid for its schema"
 _ENCF_INVALID: Final = "the e-NCF is not one"
 _ENCF_OTHER_TYPE: Final = "the e-NCF is of another type than the document says"
@@ -121,17 +127,6 @@ class InboundDocumentInvalidError(EcfInvalidError):
 
     def __init__(self, problem: str) -> None:
         super().__init__(f"the received document is refused: {problem}")
-
-
-@final
-@dataclass(frozen=True, slots=True, kw_only=True)
-class InboundNames:
-    """What a receipt of a received document names, read leniently (``name_inbound``)."""
-
-    issuer_rnc: str
-    buyer_rnc: str | None
-    """``None`` when the document names no buyer (a 43): the receipt names the receiver itself."""
-    encf: Encf
 
 
 @final
@@ -358,6 +353,26 @@ def read_inbound_arecf(document: bytes) -> Receipt:
             at=at,
         )
     )
+
+
+def read_inbound_seed(document: bytes) -> str:
+    """The value of ``document``, a seed signed to be exchanged for a receiver's token (see the module).
+
+    Read as every document here is, at most ``MAX_SEED`` bytes; its schema requires the trailing signature,
+    which is the caller's to verify. The value is answered as written.
+    """
+    try:
+        require_readable(document, limit=MAX_SEED)
+    except XmlDocumentError as error:
+        raise InboundDocumentInvalidError(str(error)) from error
+    tree = _tree(
+        document,
+        root_name=PUBLISHED[Format.SEED].root,
+        other_root=_NOT_SEED,
+        format_of=_one_format(Format.SEED),
+        paths=(_SEED_VALUE,),
+    )
+    return tree.required(_SEED_VALUE)
 
 
 def name_inbound(document: bytes) -> InboundNames | None:

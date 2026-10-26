@@ -8,7 +8,9 @@ committed first) is the table's refusal (``documents_invoice_key``), raised as `
 A signature's columns are all there or none: the table checks it
 (``ck_documents_signature``), so a row is signed exactly when it has them all. Past signing, a change keeps
 the submission's mark, DGII's track id, code, ``secuenciaUtilizada`` and messages (``[{code, text}]``),
-how often DGII was asked, delivery, and the number's fate.
+how often DGII was asked, delivery, the number's fate, and its buyer's commercial approval
+(``{approved, reason, at}``, the moment in ISO 8601). A document is found by its number too, the one that
+holds it (``documents_number``: a released number is held by none).
 """
 
 from typing import Final, TypedDict, final, override
@@ -25,6 +27,7 @@ lazy from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ledger_country_do.channels.ecf_v1.adapters.postgres.tables import DocumentRecord, NumberingRangeRecord
 from ledger_country_do.channels.ecf_v1.application.documents import (
+    Approval,
     DocumentExistsError,
     Documents,
     EcfDocument,
@@ -50,8 +53,17 @@ class _StoredMessage(TypedDict):
     text: str
 
 
+class _StoredApproval(TypedDict):
+    """A buyer's commercial approval as ``documents.commercial_approval`` keeps it."""
+
+    approved: bool
+    reason: str | None
+    at: datetime
+
+
 _DRAFT: Final = TypeAdapter[JsonValue](JsonValue)
 _MESSAGES: Final = TypeAdapter(list[_StoredMessage])
+_APPROVAL: Final = TypeAdapter(_StoredApproval | None)
 ONE_PER_INVOICE: Final = "documents_invoice_key"
 """The constraint that gives an invoice one document."""
 _SIGNATURE_COLUMNS: Final[tuple[str, ...]] = (
@@ -97,6 +109,7 @@ _DOCUMENT: Final = select(
     DocumentRecord.sequence_used,
     DocumentRecord.number_fate,
     DocumentRecord.messages,
+    DocumentRecord.commercial_approval,
 ).join(
     NumberingRangeRecord,
     (NumberingRangeRecord.organization_id == DocumentRecord.organization_id)
@@ -136,6 +149,7 @@ type _Row = Row[
     bool | None,
     str | None,
     list[dict[str, str]],
+    dict[str, object] | None,
 ]
 type _Query = Select[
     UUID,
@@ -169,6 +183,7 @@ type _Query = Select[
     bool | None,
     str | None,
     list[dict[str, str]],
+    dict[str, object] | None,
 ]
 
 
@@ -233,6 +248,7 @@ def _document(row: _Row) -> EcfDocument:
         sequence_used,
         fate,
         messages,
+        approval,
     ) = row
     return EcfDocument(
         id=identifier,
@@ -261,7 +277,20 @@ def _document(row: _Row) -> EcfDocument:
             DgiiMessage(message["code"], message["text"]).authority()
             for message in _MESSAGES.validate_python(messages)
         ),
+        commercial_approval=_approval(_APPROVAL.validate_python(approval)),
     )
+
+
+def _approval(stored: _StoredApproval | None) -> Approval | None:
+    if stored is None:
+        return None
+    return Approval(approved=stored["approved"], reason=stored["reason"], at=stored["at"])
+
+
+def _stored(approval: Approval | None) -> Mapping[str, object] | None:
+    if approval is None:
+        return None
+    return {"approved": approval.approved, "reason": approval.reason, "at": approval.at.isoformat()}
 
 
 def _progress_columns(document: EcfDocument) -> Mapping[str, object]:
@@ -276,6 +305,7 @@ def _progress_columns(document: EcfDocument) -> Mapping[str, object]:
         "sequence_used": document.sequence_used,
         "number_fate": None if document.number_fate is None else document.number_fate.value,
         "messages": [{"code": message.code, "text": message.message} for message in document.messages],
+        "commercial_approval": _stored(document.commercial_approval),
     }
 
 
@@ -335,6 +365,17 @@ class PgDocuments(Documents):
     async def get(self, document: UUID, *, lock: bool) -> EcfDocument | None:
         statement = _DOCUMENT.where(*self._mine(), DocumentRecord.id == document)
         return await self._one(statement.with_for_update(of=DocumentRecord) if lock else statement)
+
+    @override
+    async def by_number(self, environment: Environment, encf: Encf) -> EcfDocument | None:
+        statement = _DOCUMENT.where(
+            *self._mine(),
+            DocumentRecord.environment == environment.value,
+            DocumentRecord.ecf_type == encf.ecf_type.value,
+            DocumentRecord.sequence == encf.sequence,
+            DocumentRecord.number_fate.is_distinct_from(NumberFate.RELEASED.value),
+        )
+        return await self._one(statement.with_for_update(of=DocumentRecord))
 
     @override
     async def add(self, document: EcfDocument) -> None:

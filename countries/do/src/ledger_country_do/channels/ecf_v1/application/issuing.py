@@ -46,6 +46,7 @@ from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import ClassVar, Final, Protocol, final
 lazy from datetime import date, datetime
+lazy from decimal import Decimal
 lazy from uuid import UUID
 
 from ledger_country_do.channels.ecf_v1.application.documents import (
@@ -243,6 +244,10 @@ class Issuing:
     def now(self) -> datetime:
         """The channel's clock: what numbers are allocated, and released, by (``Signing.now``)."""
         return self._signing.now()
+
+    async def total(self, unit: NumberingUnit, document: EcfDocument) -> Decimal:
+        """``document``'s ``MontoTotal`` in pesos, as its e-CF states it (rebuilt from its draft)."""
+        return compute_totals(await self._rebuilt(unit, document), self._regime).total
 
     def present(self, document: EcfDocument | None) -> EcfDocument:
         """``document``, or ``DocumentMissingError``, reported (see the module)."""

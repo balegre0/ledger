@@ -62,7 +62,7 @@ lazy from ledger_fiscal_kit.ports import ArchivedObject, CertificateValidity, Se
 lazy from ledger_platform.config.manifest import AppRole
 lazy from ledger_platform.config.settings import Environment as AppEnvironment
 lazy from ledger_platform.data.bound import BoundDatabase
-lazy from ledger_platform.jobs.outcomes import JobOutcome
+lazy from ledger_platform.jobs.outcomes import JobOutcome, JobSpec
 lazy from ledger_platform.runtime.archiving import StoreArchive
 lazy from ledger_platform.runtime.contexts import ChannelContext
 lazy from ledger_testing.clock import ManualClock
@@ -352,6 +352,7 @@ async def test_issue_twice_for_one_invoice_numbers_one_document_once(
         "qr_url": None,
         "emission_mode": None,
         "track_id": None,
+        "commercial_approval": None,
     }
     assert await documents_of(module_database, tenant) == [(str(draft.document), 1, "numbered", 1)]
     other = await channel.issue(call_of(tenant), draft_of(tenant), sign_within=None)
@@ -680,12 +681,20 @@ def job_of(tenant: Tenant, document: UUID) -> Job:
     )
 
 
+def advance_spec(contexts: Contexts, ports: Mapping[str, object]) -> JobSpec:
+    """The channel's ``do_ecf.advance`` job, whatever other kinds it assembles."""
+    (spec,) = [
+        each
+        for each in assemble(contexts(settings=RECEIVED, bound=ports)).jobs
+        if each.kind == "do_ecf.advance"
+    ]
+    return spec
+
+
 async def advanced(
     contexts: Contexts, ports: Mapping[str, object], tenant: Tenant, document: UUID
 ) -> JobOutcome:
-    (spec,) = assemble(contexts(settings=RECEIVED, bound=ports)).jobs
-    assert spec.kind == "do_ecf.advance"
-    return await spec.handler(job_of(tenant, document))
+    return await advance_spec(contexts, ports).handler(job_of(tenant, document))
 
 
 async def test_the_job_signs_a_numbered_document_then_runs_again_at_once_to_submit_it(
@@ -745,7 +754,7 @@ async def test_the_job_of_a_document_that_is_not_there_is_a_defect(
         await advanced(contexts, ports, a_tenant(), new_id())
     assert caught.value.kind == "conflict"  # the job is dead at once: no retry finds it
     assert [(line["event"], line["log_level"]) for line in logged] == [("do_ecf.signing_failed", "error")]
-    (spec,) = assemble(contexts(settings=RECEIVED, bound=ports)).jobs
+    spec = advance_spec(contexts, ports)
     unscoped = replace(
         job_of(a_tenant(), new_id()), scope=Tenant(OrganizationId(new_id()), CompanyId(new_id()), None)
     )

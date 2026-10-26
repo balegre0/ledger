@@ -185,6 +185,21 @@ class InboundEcf:
 
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
+class InboundNames:
+    """What a receipt of a received document names when the document cannot be read whole.
+
+    Read leniently (``adapters.xml.inbound.name_inbound``): reception's receipt of a document refused for its
+    specification names its issuer and e-NCF.
+    """
+
+    issuer_rnc: str
+    buyer_rnc: str | None
+    """``None`` when the document names no buyer (a 43): the receipt names the receiver itself."""
+    encf: Encf
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
 class CommercialApproval:
     """A buyer's approval or rejection of an e-CF (an ACECF's fields): one we send, or one we receive.
 

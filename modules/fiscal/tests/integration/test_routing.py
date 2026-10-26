@@ -36,15 +36,15 @@ from ledger_invoicing.application.queries import InvoicingQueries
 from ledger_kernel.access import Principal, PrincipalKind, SubjectId
 from ledger_kernel.clock import utc_now
 from ledger_kernel.ids import parse_id
+from ledger_kernel.tenancy import Tenant
 from ledger_platform.data.codec import JsonValue
-from ledger_platform.runtime.calls import Call
+from ledger_platform.runtime.calls import Call, SystemCall
 from ledger_platform.runtime.contexts import AssembledChannels
 from ledger_platform.runtime.registries import Regimes
 from ledger_testing.api import document
-lazy from ledger_fiscal_kit.channels import StatusUpdate
+lazy from ledger_fiscal_kit.channels import EnrollmentState, StatusUpdate
 lazy from ledger_fiscal_kit.drafts import DocumentRef, FiscalDraft
 lazy from ledger_platform.runtime.app import App
-lazy from ledger_platform.runtime.calls import SystemCall
 lazy from ledger_testing.api import TestPrincipal
 
 PATH: Final = "/v1/invoices"
@@ -78,6 +78,7 @@ class FakeChannel(Protocol):
     """The conftest's channel, as these tests use it (see the conftest)."""
 
     due: Requirements
+    asked: list[tuple[SystemCall, EnrollmentState]]
     objections: list[Objection]
     checked: list[tuple[SystemCall, FiscalDraft]]
     issued: list[tuple[SystemCall, FiscalDraft, object]]
@@ -337,12 +338,8 @@ async def test_an_installed_channel_the_invoice_was_never_routed_to_renders_noth
     assert (printed.status_code, document(printed)["code"]) == (404, "representation_unavailable")
 
 
-async def test_a_budget_already_spent_asks_the_channel_to_sign_within_nothing(
-    api: App, client: httpx.AsyncClient, owner: TestPrincipal, company: str, channel: FakeChannel
-) -> None:
-    """Review M4: what is left of the budget is never negative: a spent one asks for no signature in time."""
-    await enroll(client, owner, company, channel, active=True)
-    _ = await issued(client, owner, company)
+def by_hand(api: App, channel: FakeChannel, ticks: tuple[float, ...]) -> tuple[FiscalPolicy, InvoicingFacade]:
+    """fiscal's policy over the app's units and ``channel``, its clock reading ``ticks``; invoicing's API."""
     regimes = Regimes.load()
     fake_channels = AssembledChannels()
     fake_channels.add(FAKE, channel)
@@ -362,16 +359,44 @@ async def test_a_budget_already_spent_asks_the_channel_to_sign_within_nothing(
         regimes=regimes,
         clock=utc_now,
     )
-    ticks = iter((0.0, 10.0))
-    policy = FiscalPolicy(router, regimes=regimes, monotonic=lambda: next(ticks))
-    (call, draft, _) = channel.issued[0]
-    issued_invoice = await invoicing.document(call, InvoiceId(draft.document))
+    readings = iter(ticks)
+    return FiscalPolicy(router, regimes=regimes, monotonic=lambda: next(readings)), invoicing
+
+
+def request_of(scope: Tenant) -> Call:
+    """A request of the owner (subject 2001) in ``scope``."""
     principal = Principal(
         subject=SubjectId("2001"),
-        organization=draft.organization,
+        organization=scope.organization,
         provider_organization="1001",
         kind=PrincipalKind.HUMAN,
     )
-    request = Call(principal=principal, scope=draft.scope, request_id="r-1")
-    await policy.after_issue(request, issued_invoice, budget=timedelta(seconds=1.5))
+    return Call(principal=principal, scope=scope, request_id="r-1")
+
+
+async def test_a_budget_already_spent_asks_the_channel_to_sign_within_nothing(
+    api: App, client: httpx.AsyncClient, owner: TestPrincipal, company: str, channel: FakeChannel
+) -> None:
+    """Review M4: what is left of the budget is never negative: a spent one asks for no signature in time."""
+    await enroll(client, owner, company, channel, active=True)
+    _ = await issued(client, owner, company)
+    policy, invoicing = by_hand(api, channel, (0.0, 10.0))
+    (call, draft, _) = channel.issued[0]
+    issued_invoice = await invoicing.document(call, InvoiceId(draft.document))
+    await policy.after_issue(request_of(draft.scope), issued_invoice, budget=timedelta(seconds=1.5))
     assert channel.issued[-1][2] == timedelta(0)
+
+
+async def test_after_issue_routes_through_no_enrollment_made_after_the_invoice_was_issued(
+    api: App, client: httpx.AsyncClient, owner: TestPrincipal, company: str, channel: FakeChannel
+) -> None:
+    """Review minor 1: as the recovery path, ``after_issue`` routes only through enrollments made by the time
+    the invoice was issued (one enrolled between the commit and ``after_issue`` does not take it)."""
+    response = await issued(client, owner, company)  # no enrollment yet: fiscal: []
+    await enroll(client, owner, company, channel, active=True)
+    policy, invoicing = by_hand(api, channel, (0.0, 0.0))
+    (_, state) = channel.asked[-1]  # the enrollment's company, as the channel was asked its requirements
+    scope = Tenant(state.organization, state.company, state.mode)
+    found = await invoicing.document(SystemCall(reason="test", scope=scope), InvoiceId(invoice_of(response)))
+    await policy.after_issue(request_of(found.tenant), found, budget=timedelta(seconds=1.5))
+    assert channel.issued == []

@@ -73,7 +73,7 @@ def test_the_worker_factory_builds_the_worker_app_without_connecting(
     """The workspace's DO channel needs, in the worker, the roots counterparties chain to: the deployment's
     (read when the worker starts, never while it is built); and a pool for its jobs, as compose sizes it."""
     monkeypatch.setenv("LEDGER_DO_ECF_TRUSTED_ROOTS", str(tmp_path / "roots.pem"))
-    monkeypatch.setenv("LEDGER_DATABASE_POOL_SIZE", "50")
+    monkeypatch.setenv("LEDGER_DATABASE_POOL_SIZE", "52")
     app = serving.worker()
     assert (app.title, app.version) == ("ledger-worker", version("ledger-app-worker"))
     assert {"/livez", "/readyz", "/metrics"} <= paths(app)

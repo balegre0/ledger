@@ -4,7 +4,9 @@ A working copy holds more than the repository: virtual environments (binary file
 leftovers, local secrets. Every walk of devtools (manifests, generated files it may delete, Dockerfiles,
 workspace members, a package's layers on disk) goes through here, so none of that is ever read, reported or
 deleted. Each ``.gitignore`` applies under its own directory, the deeper after the shallower, with git's own
-semantics (``pathspec``); an ignored directory is never entered.
+semantics (``pathspec``); an ignored directory is never entered. Nor is a nested repository or worktree (a
+directory holding a ``.git`` of its own, file or directory): git leaves its contents to it, and another
+checkout of this repository (an agent's worktree under ``.claude/worktrees``) would otherwise be read twice.
 """
 
 import os
@@ -67,7 +69,9 @@ def scan(root: Path) -> Scan:
         children[:] = [
             child
             for child in children
-            if child != GIT and not _ignored(_joined(relative, child), rules, directory=True)
+            if child != GIT
+            and not (here / child / GIT).exists()
+            and not _ignored(_joined(relative, child), rules, directory=True)
         ]
         directories.extend(Path(_joined(relative, child)) for child in children)
         files.extend(

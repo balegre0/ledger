@@ -11,9 +11,10 @@ included); with no channel routing the document, nothing may read one, and each 
 ``after_issue`` routes the issued document to each channel within what is left of the request's budget,
 and ``Router.recover`` (the consumer of ``invoicing.invoice.issued``, the recovery path) does the same
 without signing, for every issued document: each step is idempotent by (document, channel), so whichever
-runs second finds the first's work and adds nothing. The recovery path never routes through an enrollment
-made after the document was issued (one issued with ``fiscal: []`` stays commercial-only); a routing kept
-for an enrollment that is no longer active still wins. Routing one document to one enrollment's channel:
+runs second finds the first's work and adds nothing. Neither ``after_issue`` nor the recovery path routes
+through an enrollment made after the document was issued (one issued with ``fiscal: []`` stays
+commercial-only); a routing kept for an enrollment that is no longer active still wins. Routing one document
+to one enrollment's channel:
 
 1. invoicing's mirror gets ``pending`` at version ``ROUTED_VERSION`` (1) **before** any number is
    allocated: a document voided first answers ``DOCUMENT_VOIDED``, and nothing is numbered or routed (so a
@@ -94,6 +95,11 @@ def tenant_of(document: InvoiceInfo) -> Tenant:
     if tenant.mode is None:
         raise InvalidValueError(field="document.tenant", requirement="a company in a mode")
     return tenant
+
+
+def enrolled_by(document: InvoiceInfo) -> datetime:
+    """The latest an enrollment may have been made to take ``document``: when it was issued (none, if not)."""
+    return document.issued_at or datetime.min.replace(tzinfo=UTC)
 
 
 def mirrored_version(update: StatusUpdate) -> int:
@@ -260,8 +266,7 @@ class Router:
         ``fiscal.route`` job, parked until it may.
         """
         document = await self.invoicing.document(call, InvoiceId(invoice))
-        enrolled_by = document.issued_at or datetime.min.replace(tzinfo=UTC)
-        for target in await self.targets(call, document, enrolled_by=enrolled_by):
+        for target in await self.targets(call, document, enrolled_by=enrolled_by(document)):
             try:
                 await self.issue_to(call, document, target, sign_within=None)
             except NumberUnavailableError:
@@ -327,7 +332,7 @@ class FiscalPolicy(IssuePolicy):
             return budget - timedelta(seconds=self._monotonic() - started)
 
         system = SystemCall(reason=ISSUE_REASON, scope=tenant_of(document), traceparent=call.traceparent)
-        for target in await self._router.targets(system, document):
+        for target in await self._router.targets(system, document, enrolled_by=enrolled_by(document)):
             try:
                 await self._router.issue_to(system, document, target, sign_within=left)
             except NumberUnavailableError:  # issued, its fiscal[] pending: the recovery path parks it

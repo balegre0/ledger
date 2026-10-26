@@ -6,6 +6,7 @@ constraints hold whatever the repositories do.
 """
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Final
 from uuid import UUID
 lazy from collections.abc import Callable
@@ -25,6 +26,9 @@ from ledger_country_do.channels.ecf_v1.adapters.postgres.tables import (
     DocumentRecord,
     NumberingRangeRecord,
     NumberingSeriesRecord,
+    ReceivedDocumentRecord,
+    ReceiverSeedRecord,
+    ReceiverTokenRecord,
     ReleasedNumberRecord,
     SubmissionRecord,
 )
@@ -124,6 +128,33 @@ def a_document(tenant: Tenant, **changes: object) -> dict[str, object]:
     return row | changes
 
 
+def a_received(tenant: Tenant, **changes: object) -> dict[str, object]:
+    """An e-CF ``101850043`` sent the company, received."""
+    row: dict[str, object] = (
+        owned(tenant)
+        | SERIES
+        | {
+            "id": new_id(),
+            "issuer_rnc": "101850043",
+            "issuer_name": "FERRETERIA DUARTE SRL",
+            "sequence": 1,
+            "buyer_rnc": "131098193",
+            "issued_on": date(2026, 10, 13),
+            "total": Decimal("4887.58"),
+            "itbis": None,
+            "signed_at": NOW,
+            "security_code": "AbC123",
+            "received_at": NOW,
+            "xml_key": "do-ecf-v1/test/o/c/received/a.xml",
+            "xml_sha256": bytes(32),
+            "arecf_key": "do-ecf-v1/test/o/c/arecf/b.xml",
+            "arecf_sha256": bytes(32),
+            "version": 1,
+        }
+    )
+    return row | changes
+
+
 SIGNED: Final[dict[str, object]] = {
     "state": "signed",
     "signed_at": NOW,
@@ -148,6 +179,7 @@ ROWS: Final[dict[str, tuple[type[DoEcfTable], Callable[[Tenant], dict[str, objec
     "released_numbers": (ReleasedNumberRecord, released),
     "documents": (DocumentRecord, a_document),
     "submissions": (SubmissionRecord, a_submission),
+    "received_documents": (ReceivedDocumentRecord, a_received),
 }
 
 
@@ -457,3 +489,85 @@ async def test_a_submission_belongs_to_a_document_of_its_company_and_is_never_ch
         async with module_database.unit(tenant) as unit:
             await unit.connection.execute(update(SubmissionRecord).values(received_at=NOW))
     assert isinstance(refused.value.orig, InsufficientPrivilege)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"sequence": 0}, {"xml_sha256": bytes(31)}, {"arecf_sha256": b""}, {"ecf_type": "30"}, {"version": 0}],
+)
+async def test_a_received_document_s_number_digests_and_words_are_checked(
+    module_database: BoundDatabase, change: dict[str, object]
+) -> None:
+    tenant = a_tenant()
+    with pytest.raises(IntegrityError) as caught:
+        await inserted(module_database, tenant, [(ReceivedDocumentRecord, a_received(tenant, **change))])
+    assert isinstance(caught.value.orig, CheckViolation)
+
+
+async def test_an_issuer_s_e_ncf_is_received_once_per_environment(module_database: BoundDatabase) -> None:
+    """Decision 16: the same e-NCF again is a duplicate; TesteCF and CerteCF are two worlds."""
+    tenant = a_tenant()
+    await inserted(module_database, tenant, [(ReceivedDocumentRecord, a_received(tenant))])
+    await inserted(
+        module_database, tenant, [(ReceivedDocumentRecord, a_received(tenant, environment="certecf"))]
+    )
+    await inserted(
+        module_database, tenant, [(ReceivedDocumentRecord, a_received(tenant, issuer_rnc="131880738"))]
+    )
+    with pytest.raises(IntegrityError) as caught:
+        await inserted(module_database, tenant, [(ReceivedDocumentRecord, a_received(tenant))])
+    assert isinstance(caught.value.orig, UniqueViolation)
+
+
+def a_seed(**changes: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "seed_hash": bytes(32),
+        "company_id": new_id(),
+        "environment": "testecf",
+        "expires_at": NOW,
+        "used_at": None,
+    }
+    return row | changes
+
+
+def a_token(**changes: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "token_hash": bytes(32),
+        "company_id": new_id(),
+        "mode": "test",
+        "environment": "testecf",
+        "senders": ["101850043"],
+        "stand_in": False,
+        "expires_at": NOW,
+    }
+    return row | changes
+
+
+@pytest.mark.parametrize(
+    ("table", "row"),
+    [
+        (ReceiverSeedRecord, a_seed(seed_hash=bytes(31))),
+        (ReceiverSeedRecord, a_seed(environment="prod")),
+        (ReceiverTokenRecord, a_token(token_hash=b"")),
+        (ReceiverTokenRecord, a_token(mode="live")),
+        (ReceiverTokenRecord, a_token(mode="live", environment="ecf", stand_in=True)),
+    ],
+    ids=["seed-hash", "seed-environment", "token-hash", "token-mode", "stand-in-live"],
+)
+async def test_the_receiver_s_credentials_are_checked(
+    module_database: BoundDatabase, table: type[DoEcfTable], row: dict[str, object]
+) -> None:
+    """Outside row-level security (§6.3): a unit without a scope writes them; a stand-in never serves live."""
+    with pytest.raises(IntegrityError) as caught:
+        async with module_database.unit(None) as unit:
+            await unit.connection.execute(insert(table).values(row))
+    assert isinstance(caught.value.orig, CheckViolation)
+
+
+async def test_the_channel_s_role_never_changes_a_token(module_database: BoundDatabase) -> None:
+    async with module_database.unit(None) as unit:
+        await unit.connection.execute(insert(ReceiverTokenRecord).values(a_token()))
+    with pytest.raises(ProgrammingError) as caught:
+        async with module_database.unit(None) as unit:
+            await unit.connection.execute(update(ReceiverTokenRecord).values(stand_in=True))
+    assert isinstance(caught.value.orig, InsufficientPrivilege)

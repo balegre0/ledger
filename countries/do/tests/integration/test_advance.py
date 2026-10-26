@@ -363,7 +363,7 @@ class Started:
         )
         channel = parts.channel
         assert isinstance(channel, DoEcfChannel)
-        (spec,) = parts.jobs
+        spec, _ = parts.jobs
         async with AsyncExitStack() as stack:
             for resource in parts.resources:
                 await stack.enter_async_context(resource)
