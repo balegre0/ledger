@@ -13,6 +13,7 @@ lazy from datetime import datetime
 lazy from uuid import UUID
 
 lazy from ledger_fiscal.domain.enrollments import Enrollment, EnrollmentId
+lazy from ledger_fiscal.domain.routing import Routing
 lazy from ledger_fiscal.events import FiscalEvent
 lazy from ledger_kernel.pagination import Page, PageRequest
 lazy from ledger_kernel.tenancy import Tenant
@@ -49,6 +50,38 @@ class Enrollments(Protocol, metaclass=ABCMeta):
     async def page(self, request: PageRequest) -> Page[Enrollment]:
         """The enrollments, disabled ones too, in id order."""
 
+    @abstractmethod
+    async def mark_due(self, channel: str) -> None:
+        """Mark the enrollments on ``channel`` not disabled ``review_due`` (Decision 34): one statement."""
+
+
+class Routings(Protocol, metaclass=ABCMeta):
+    """The documents of the unit's company in the unit's mode routed to channels (``fiscal.routings``)."""
+
+    @abstractmethod
+    async def add(self, routing: Routing) -> Routing:
+        """Keep ``routing``; the one kept first for its document and channel when there is one already."""
+
+    @abstractmethod
+    async def of(self, invoice: UUID) -> tuple[Routing, ...]:
+        """Every routing of ``invoice``, by channel."""
+
+    @abstractmethod
+    async def get(self, invoice: UUID, channel: str) -> Routing | None:
+        """The routing of ``invoice`` to ``channel``, or ``None``."""
+
+
+class Jobs(Protocol, metaclass=ABCMeta):
+    """fiscal's own jobs, enqueued and woken with the unit (``fiscal.route``)."""
+
+    @abstractmethod
+    def route_later(self, invoice: UUID, channel: str) -> None:
+        """Route ``invoice`` to ``channel`` again in a job: its channel had no number to give it now."""
+
+    @abstractmethod
+    def wake_routes(self) -> None:
+        """Ready the company's routings parked for a number: what its channels require changed."""
+
 
 class Events(Protocol, metaclass=ABCMeta):
     """What the unit announces once it commits."""
@@ -78,6 +111,8 @@ class FiscalUnit:
     tenant: Tenant
     """The company in its mode the unit is scoped to."""
     enrollments: Enrollments
+    routings: Routings
+    jobs: Jobs
     events: Events
     audit: Audit
     now: datetime

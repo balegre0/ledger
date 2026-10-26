@@ -5,17 +5,22 @@ resources the app opens at start, the trusted roots read then. A refusal names t
 be, never its value.
 """
 
-from typing import Final, Protocol
+from http import HTTPStatus
+from typing import Final, Protocol, final, override
 lazy from collections.abc import Mapping
 lazy from pathlib import Path
 
+import httpx
 import pytest
+from fastapi import FastAPI
+from fastapi.routing import APIRoute
 
 from ledger_country_do.channels.ecf_v1.adapters.buyers.client import BuyerClient
 from ledger_country_do.channels.ecf_v1.adapters.buyers.delivery import BuyerDeliveries
 from ledger_country_do.channels.ecf_v1.adapters.channel import ChannelNotReadyError, DoEcfChannel
 from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
 from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import HostRefusedError
+from ledger_country_do.channels.ecf_v1.adapters.inbound import Inbound, InboundClosedError
 from ledger_country_do.channels.ecf_v1.adapters.outbound import (
     Outbound,
     OutboundClosedError,
@@ -25,20 +30,31 @@ from ledger_country_do.channels.ecf_v1.adapters.outbound import (
 from ledger_country_do.channels.ecf_v1.adapters.routes.deliveries import PREFIX as DELIVERIES
 from ledger_country_do.channels.ecf_v1.adapters.routes.options import PATH as OPTIONS
 from ledger_country_do.channels.ecf_v1.adapters.routes.ranges import PREFIX
-from ledger_country_do.channels.ecf_v1.adapters.signing.trust import CounterpartyTrust
 from ledger_country_do.channels.ecf_v1.application.advancing import SettleTooShortError
 from ledger_country_do.channels.ecf_v1.assembly import SettingRefusedError, assemble
 from ledger_country_do.channels.ecf_v1.domain.fields import CHANNEL_FIELDS
 from ledger_country_do.channels.ecf_v1.settings import DoEcfSettings
 from ledger_fiscal_kit.channels import Channel
 from ledger_fiscal_kit.drafts import DocumentRef
-from ledger_fiscal_kit.ports import ARCHIVE_PORT, SIGNER_PORT
+from ledger_fiscal_kit.ports import (
+    ARCHIVE_PORT,
+    COMPANY_DIRECTORY,
+    SIGNER_PORT,
+    CompanyDirectory,
+    ReceivingCompany,
+)
+from ledger_kernel.access import CompanyNotFoundError
+from ledger_kernel.errors import ErrorKind
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.regimes import Direction, DocumentKind, Locale
 from ledger_kernel.tenancy import Mode, Tenant
+from ledger_platform.http.problems import install_problem_handlers
 from ledger_platform.runtime.calls import SystemCall
+from ledger_platform.runtime.facade import facade
 from ledger_platform.runtime.keys import BindingMissingError
 from ledger_testing.pki import pem
+lazy from ledger_kernel.access import Permission, Principal
+lazy from ledger_kernel.tax_ids import TaxId
 lazy from ledger_platform.config.manifest import AppRole
 lazy from ledger_platform.config.settings import Environment
 lazy from ledger_platform.runtime.contexts import ChannelContext
@@ -84,7 +100,11 @@ def test_the_channel_assembles_with_its_definition_routes_and_migrations(context
     assert [route for router in parts.routers for route in router.routes]  # its ranges, its deliveries
     assert [router.prefix for router in parts.routers] == [PREFIX, DELIVERIES, OPTIONS]
     assert (parts.resources, parts.consumers, parts.receiver_routers) == ((), (), ())
-    assert [spec.kind for spec in parts.jobs] == ["do_ecf.advance", "do_ecf.deliver"]
+    assert [spec.kind for spec in parts.jobs] == [
+        "do_ecf.advance",
+        "do_ecf.deliver",
+        "do_ecf.purge_receiver_credentials",
+    ]
     assert parts.migrations is not None
     assert parts.migrations.schema == "do_ecf"
 
@@ -105,10 +125,12 @@ def test_migrate_reads_no_archive_and_gets_the_channel_s_migrations_alone(
     bound = {name: value for name, value in ports.items() if name != ARCHIVE_PORT.name}
     parts = assemble(contexts(settings=RECEIVED, bound=bound, role="migrate"))
     assert (parts.routers, parts.resources) == ((), ())
+    # declared: every app hands its handler
     assert [spec.kind for spec in parts.jobs] == [
         "do_ecf.advance",
         "do_ecf.deliver",
-    ]  # declared: every app hands its handler
+        "do_ecf.purge_receiver_credentials",
+    ]
     assert parts.migrations is not None
     assert parts.migrations.schema == "do_ecf"
     with pytest.raises(BindingMissingError, match="'ArchivePort'"):
@@ -151,18 +173,33 @@ async def test_the_receiver_reads_its_trusted_roots_at_start_and_opens_no_client
 ) -> None:
     """The documents emitters send the receiver chain to the roots, read when it starts as the worker reads
     them; DGII's and the buyers' clients are the worker's alone (the receiver mounts the channel's receiver
-    routes only: none before Task 22)."""
+    routes, under ``/do-ecf-v1/``, and the api app does not)."""
     with pytest.raises(SettingRefusedError, match=r"LEDGER_DO_ECF_TRUSTED_ROOTS .* the receiver"):
         assemble(contexts(settings=RECEIVED, role="receiver"))
     roots = tmp_path / "roots.pem"
     roots.write_bytes(pem(authority.certificate))
     parts = assemble(contexts(settings=RECEIVED.model_copy(update={"trusted_roots": roots}), role="receiver"))
-    assert parts.receiver_routers == ()
-    assert [spec.kind for spec in parts.jobs] == ["do_ecf.advance", "do_ecf.deliver"]
+    (mounted,) = parts.receiver_routers
+    assert {route.path for route in mounted.routes if isinstance(route, APIRoute)} == {
+        f"/do-ecf-v1/{{environment}}/{{rnc}}/fe/{path}"
+        for path in (
+            "autenticacion/api/semilla",
+            "autenticacion/api/validacioncertificado",
+            "recepcion/api/ecf",
+            "aprobacioncomercial/api/ecf",
+        )
+    }
+    assert [spec.kind for spec in parts.jobs] == [
+        "do_ecf.advance",
+        "do_ecf.deliver",
+        "do_ecf.purge_receiver_credentials",
+    ]
     (opening,) = parts.resources
     async with opening as opened:
-        assert isinstance(opened, CounterpartyTrust)
-        assert list(opened.roots) == [authority.certificate]
+        assert isinstance(opened, Inbound)
+        assert list(opened.trust.roots) == [authority.certificate]
+    with pytest.raises(InboundClosedError):
+        _ = opened.trust
 
 
 async def test_the_worker_opens_its_dgii_and_buyer_clients_at_start_and_closes_them_at_stop(
@@ -205,7 +242,10 @@ async def test_roots_that_cannot_be_read_stop_the_worker_and_the_receiver_withou
 
 
 async def test_the_channel_answers_no_status_or_representation_yet(contexts: Contexts) -> None:
-    """``status``, ``representation``: built by the tasks to come (20, 24); ``resume`` is Task 19's."""
+    """``status``, ``representation``: built by the tasks to come (24); ``resume`` is Task 19's.
+
+    Unavailable, not a defect: invoicing answers a representation the channel cannot render yet 503.
+    """
     channel = assemble(contexts(settings=RECEIVED)).channel
     assert isinstance(channel, DoEcfChannel)
     document = DocumentRef(new_id())
@@ -213,4 +253,55 @@ async def test_the_channel_answers_no_status_or_representation_yet(contexts: Con
         await channel.status(CALL, document)
     with pytest.raises(ChannelNotReadyError):
         await channel.representation(CALL, document)
-    assert ChannelNotReadyError.code == "do_ecf_not_ready"
+    assert (ChannelNotReadyError.code, ChannelNotReadyError.kind) == (
+        "do_ecf_not_ready",
+        ErrorKind.UNAVAILABLE,
+    )
+
+
+@final
+class WrongMode(CompanyDirectory):
+    """A directory that names any tax id's company, in the live mode whatever the environment: a defect."""
+
+    @facade
+    @override
+    async def receiving_company(
+        self, call: SystemCall, *, tax_id: TaxId, channel: str, environment: str
+    ) -> ReceivingCompany | None:
+        del call, channel, environment
+        return ReceivingCompany(
+            organization=OrganizationId(new_id()),
+            company=CompanyId(new_id()),
+            mode=Mode.LIVE,
+            legal_name="RECEPTORA SRL",
+            tax_id=tax_id,
+        )
+
+    @facade
+    @override
+    async def company(self, call: SystemCall, company: CompanyId) -> ReceivingCompany:
+        del call
+        raise CompanyNotFoundError(company)
+
+    @facade
+    @override
+    async def permissions(self, principal: Principal, company: CompanyId) -> frozenset[Permission]:
+        del principal, company
+        return frozenset()
+
+
+async def test_a_company_the_directory_answers_in_another_mode_than_the_environment_s_is_not_found(
+    contexts: Contexts, ports: dict[str, object], tmp_path: Path, authority: Authority
+) -> None:
+    """``testecf`` serves the test mode (``ChannelDef.mode_of``): a live company there is no receiver's."""
+    roots = tmp_path / "roots.pem"
+    roots.write_bytes(pem(authority.certificate))
+    rooted = RECEIVED.model_copy(update={"trusted_roots": roots})
+    bound = ports | {COMPANY_DIRECTORY.name: WrongMode()}
+    (mounted,) = assemble(contexts(settings=rooted, bound=bound, role="receiver")).receiver_routers
+    app = FastAPI()
+    install_problem_handlers(app)
+    app.include_router(mounted)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://r.test") as client:
+        response = await client.get("/do-ecf-v1/testecf/131098193/fe/autenticacion/api/semilla")
+    assert response.status_code == HTTPStatus.NOT_FOUND, response.text

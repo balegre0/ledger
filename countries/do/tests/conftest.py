@@ -7,13 +7,16 @@ test's ``TestSigner``) beside the channel (``ledger_testing.modules``).
 
 import os
 from datetime import UTC, datetime
+from http import HTTPStatus
 from typing import Final, Protocol, final, override
+from uuid import UUID
 lazy from collections.abc import AsyncIterator, Iterator, Mapping
 lazy from pathlib import Path
 
 import httpx
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, TypeAdapter
+lazy import psycopg
 
 from ledger_country_do._manifest import MANIFEST
 from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
@@ -29,6 +32,8 @@ from ledger_country_do_testing.samples import SIGNER_VALID_FROM
 from ledger_country_do_testing.transports import FAKE_HOSTS, outbound_over
 from ledger_fiscal_kit.ports import ARCHIVE_PORT, COMPANY_DIRECTORY, SIGNER_PORT, CompanyDirectory
 from ledger_kernel.access import CompanyNotFoundError
+from ledger_kernel.ids import CompanyId, OrganizationId
+from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.config.settings import Settings
 from ledger_platform.data.audit import Actor, acting_as
 from ledger_platform.http.authentication import Authentication
@@ -41,12 +46,11 @@ from ledger_platform.runtime.keys import Binding, Directory
 from ledger_testing.api import TestPrincipal, created
 from ledger_testing.clock import ManualClock
 from ledger_testing.modules import ModuleUnderTest
-from ledger_testing.pki import Authority
-from ledger_testing.signer import with_test_signer
+from ledger_testing.pki import Authority, pem
+from ledger_testing.signer import TestSigner, with_test_signer
 lazy from ledger_country_do.channels.ecf_v1.settings import DoEcfSettings
 lazy from ledger_fiscal_kit.ports import ReceivingCompany
 lazy from ledger_kernel.access import Permission, Principal
-lazy from ledger_kernel.ids import CompanyId
 lazy from ledger_kernel.tax_ids import TaxId
 lazy from ledger_platform.config.manifest import AppRole
 lazy from ledger_platform.config.settings import Environment
@@ -56,7 +60,6 @@ lazy from ledger_platform.runtime.calls import SystemCall
 lazy from ledger_testing.issuer import LocalIssuer
 lazy from ledger_testing.pki import Issued
 lazy from ledger_testing.postgres import Template
-lazy from ledger_testing.signer import TestSigner
 
 SERVING: Final = ("fiscal", "signer")
 """The modules whose ports the channel reads: fiscal's ``CompanyDirectory``, the signer's ``SignerPort``."""
@@ -202,6 +205,164 @@ def owner(local_issuer: LocalIssuer) -> TestPrincipal:
 async def company(client: httpx.AsyncClient, owner: TestPrincipal) -> str:
     """The public id of a company ``owner`` registered through identity's API (``COMPANY``)."""
     return await created(client, "/v1/companies", COMPANY, owner.posting("company-1"))
+
+
+# ── The receiver: emitters (and DGII, in certification) send the companies documents ──
+
+
+_UUID: Final = TypeAdapter(UUID)
+_TOKEN: Final = TypeAdapter(dict[str, str])
+RECEIVING_RNC: Final = "131098193"
+"""The receiving company's RNC: the sample e-CF's buyer (``CONSTRUCTORA DEL CARIBE SRL``)."""
+SENDER_RNC: Final = "101850043"
+"""The sample e-CF's issuer (``FERRETERIA DUARTE SRL``): the emitter that sends it."""
+RECEIVER_PATHS: Final = "/do-ecf-v1/{environment}/{rnc}/fe"
+SEED_PATH: Final = "autenticacion/api/semilla"
+VALIDATION_PATH: Final = "autenticacion/api/validacioncertificado"
+
+
+class Enroll(Protocol):
+    """``enroll``: a company of ``rnc`` (registered once) enrolled on do-ecf-v1 in ``environment``."""
+
+    async def __call__(self, rnc: str, environment: str = "testecf") -> Tenant: ...
+
+
+class Authenticate(Protocol):
+    """``authenticate``: a seed of the company ``rnc`` in ``environment``, signed by ``signer``, validated."""
+
+    async def __call__(
+        self, signer: KeyPairSigner, *, rnc: str = RECEIVING_RNC, environment: str = "testecf"
+    ) -> httpx.Response: ...
+
+
+def _receiver_path(path: str, *, rnc: str = RECEIVING_RNC, environment: str = "testecf") -> str:
+    """A receiver route of the company ``rnc`` in ``environment``: ``path`` under its base."""
+    return f"{RECEIVER_PATHS.format(environment=environment, rnc=rnc)}/{path}"
+
+
+@pytest.fixture(scope="session")
+def sender(authority: Authority) -> KeyPairSigner:
+    """The emitter the sample e-CF names (``SENDER_RNC``), its certificate issued under the trusted root."""
+    issued = authority.issue(organization(SENDER_RNC), not_before=SIGNER_VALID_FROM)
+    return KeyPairSigner.from_issued(issued)
+
+
+@pytest.fixture
+def roots(tmp_path: Path, authority: Authority) -> Path:
+    """The receiver's trusted roots: the tests' root, which issued every emitter's certificate."""
+    written = tmp_path / "roots.pem"
+    written.write_bytes(pem(authority.certificate))
+    return written
+
+
+@pytest.fixture
+def standins() -> str:
+    """``LEDGER_DO_ECF_TEST_SENDER_STANDINS`` of the receiver: none (a test parametrizes it)."""
+    return ""
+
+
+@pytest.fixture
+def receiver_environment(
+    channel_environment: None, roots: Path, standins: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``LEDGER_DO_ECF_*`` of a receiver: the channel's, its trusted roots and its stand-ins."""
+    del channel_environment
+    monkeypatch.setenv("LEDGER_DO_ECF_TRUSTED_ROOTS", str(roots))
+    monkeypatch.setenv("LEDGER_DO_ECF_TEST_SENDER_STANDINS", standins)
+
+
+@pytest.fixture
+def receiver(
+    archived: Settings,
+    module_under_test: ModuleUnderTest,
+    signer: KeyPairSigner,
+    receiver_environment: None,
+    clock: ManualClock,
+) -> App:
+    """The ``receiver`` app on the test's clock: its receipts signed by ``signer`` (the receiving company's).
+
+    Its per-client limit is out of the tests' way (one client asks everything); the per-RNC one is not.
+    """
+    del receiver_environment
+    settings = archived.model_copy(update={"receiver_rate_burst": 100_000})
+    port = TestSigner(sign=signer.sign, sign_seed=signer.sign)
+    discover = with_test_signer(module_under_test.discovering(), port)
+    return App("receiver", settings=settings, discover=discover, clock=clock)
+
+
+@pytest.fixture
+async def receiver_client(receiver: App, client: httpx.AsyncClient) -> AsyncIterator[httpx.AsyncClient]:
+    """A client of the ``receiver`` app, started after the ``api`` app (whose client sets companies up)."""
+    del client
+    served = receiver.asgi()
+    async with served.router.lifespan_context(served):
+        transport = httpx.ASGITransport(app=served, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url=RECEIVER_URL) as opened:
+            yield opened
+
+
+@pytest.fixture
+def enroll(client: httpx.AsyncClient, owner: TestPrincipal, admin: psycopg.AsyncConnection) -> Enroll:
+    """Companies of the owner's organization enrolled on do-ecf-v1, as identity and fiscal record them."""
+    registered: dict[str, str] = {}
+
+    async def enrolled(rnc: str, environment: str = "testecf") -> Tenant:
+        mode = "live" if environment == "ecf" else "test"
+        if rnc not in registered:
+            registration = {
+                "jurisdiction": {"country": "DO"},
+                "functional_currency": "DOP",
+                "tax_ids": [{"scheme": "do.rnc", "value": rnc}],
+                "legal_name": f"Receptora {rnc} SRL",
+            }
+            registered[rnc] = await created(
+                client, "/v1/companies", registration, owner.posting(f"company-{rnc}")
+            )
+        headers = owner.posting(f"enroll-{rnc}-{environment}", mode) | {"Ledger-Company": registered[rnc]}
+        body = {"channel": "do-ecf-v1", "environment": environment}
+        response = await client.post("/v1/fiscal/enrollments", json=body, headers=headers)
+        assert response.status_code == HTTPStatus.CREATED, response.text
+        found = await admin.execute(
+            "SELECT organization_id, company_id FROM identity.company_tax_ids WHERE value = %s", (rnc,)
+        )
+        row = await found.fetchone()
+        assert row is not None
+        organization, company = _UUID.validate_python(row[0]), _UUID.validate_python(row[1])
+        return Tenant(OrganizationId(organization), CompanyId(company), Mode(mode))
+
+    return enrolled
+
+
+@pytest.fixture
+async def receiving(enroll: Enroll) -> Tenant:
+    """The company ``RECEIVING_RNC``, enrolled on do-ecf-v1 in ``testecf`` (test mode)."""
+    return await enroll(RECEIVING_RNC)
+
+
+@pytest.fixture
+def authenticate(receiver_client: httpx.AsyncClient) -> Authenticate:
+    """DGII's authentication with a receiver: a seed asked for, signed by the sender, validated."""
+
+    async def validated(
+        signer: KeyPairSigner, *, rnc: str = RECEIVING_RNC, environment: str = "testecf"
+    ) -> httpx.Response:
+        seed = await receiver_client.get(_receiver_path(SEED_PATH, rnc=rnc, environment=environment))
+        assert seed.status_code == HTTPStatus.OK, seed.text
+        files = {"xml": ("semilla.xml", signer.sign(seed.content), "text/xml")}
+        return await receiver_client.post(
+            _receiver_path(VALIDATION_PATH, rnc=rnc, environment=environment), files=files
+        )
+
+    return validated
+
+
+@pytest.fixture
+async def token(receiving: Tenant, authenticate: Authenticate, sender: KeyPairSigner) -> str:
+    """A token of ``sender`` (``SENDER_RNC``) for the receiving company in ``testecf``."""
+    del receiving
+    validated = await authenticate(sender)
+    assert validated.status_code == HTTPStatus.OK, validated.text
+    return _TOKEN.validate_json(validated.content)["token"]
 
 
 # ── The channel assembled by hand: its context, as the app makes it ─────────────

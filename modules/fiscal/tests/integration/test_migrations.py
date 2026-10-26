@@ -65,8 +65,13 @@ def test_the_migrate_app_brings_fiscal_s_schema_to_head_from_nothing_and_again_c
 ) -> None:
     assert tables_of(fresh_admin_url, schema=S) == set()
     App("migrate", settings=fresh, discover=module_under_test.discovering()).migrate()
-    assert tables_of(fresh_admin_url, schema=S) == {"enrollments", *CHASSIS_TABLES, "alembic_version"}
-    assert version_of(fresh_admin_url) == MIGRATIONS.head == "0001"
+    assert tables_of(fresh_admin_url, schema=S) == {
+        "enrollments",
+        "routings",
+        *CHASSIS_TABLES,
+        "alembic_version",
+    }
+    assert version_of(fresh_admin_url) == MIGRATIONS.head == "0002"
     App("migrate", settings=fresh, discover=module_under_test.discovering()).migrate()
     assert pending_changes(fresh_admin_url, MODELS, schema=S) is None
 
@@ -97,6 +102,7 @@ def test_the_check_constraints_are_the_models_and_allow_exactly_the_domain_s_wor
         str(status) for status in EnrollmentStatus
     }
     assert checks["ck_enrollments_version"] == "CHECK ((version > 0))"
+    assert set(QUOTED.findall(checks["ck_routings_mode"])) == {str(mode) for mode in Mode}
     assert checks["ck_enrollments_disabled"] == (
         "CHECK ((((status = 'disabled'::text) = "
         "((disabled_at IS NOT NULL) AND (disabled_reason IS NOT NULL)))"
@@ -124,8 +130,13 @@ def test_enrollments_are_under_their_tenant_s_policies_forced_on_their_owner(
     assert [name for owner, name in policies(url, schema=S) if owner == "enrollments"] == [
         f"enrollments_{command}" for command in ("delete", "insert", "select", "update")
     ]
+    assert [name for owner, name in policies(url, schema=S) if owner == "routings"] == [
+        "routings_insert",
+        "routings_select",
+    ]
     assert row_security(url, schema=S) == {
         "enrollments": (True, True),
+        "routings": (True, True),
         "idempotency_keys": (True, True),
         "audit_events": (True, True),
         "outbox": (False, False),
@@ -136,14 +147,24 @@ def test_enrollments_are_under_their_tenant_s_policies_forced_on_their_owner(
     }
 
 
-async def test_fiscal_s_role_never_deletes_an_enrollment(admin: psycopg.AsyncConnection) -> None:
-    """An enrollment is disabled, never deleted: its id stays what an event and an audit row named."""
+async def granted_on(admin: psycopg.AsyncConnection, table_name: str) -> set[str]:
+    """What ``fiscal_rw`` may do to ``table_name`` of fiscal's schema."""
     granted: set[str] = set()
     for privilege in PRIVILEGES:
         answer = await admin.execute(
-            "SELECT has_table_privilege('fiscal_rw', 'fiscal.enrollments', %s)", (privilege,)
+            "SELECT has_table_privilege('fiscal_rw', %s, %s)", (f"fiscal.{table_name}", privilege)
         )
         row = await answer.fetchone()
         if row is not None and GRANTED.validate_python(row[0]):
             granted.add(privilege)
-    assert granted == {"SELECT", "INSERT", "UPDATE"}
+    return granted
+
+
+async def test_fiscal_s_role_never_deletes_an_enrollment(admin: psycopg.AsyncConnection) -> None:
+    """An enrollment is disabled, never deleted: its id stays what an event and an audit row named."""
+    assert await granted_on(admin, "enrollments") == {"SELECT", "INSERT", "UPDATE"}
+
+
+async def test_a_routing_is_kept_once_and_never_changed(admin: psycopg.AsyncConnection) -> None:
+    """A routing names the enrollment a document was sent for: routing again finds it, as it was kept."""
+    assert await granted_on(admin, "routings") == {"SELECT", "INSERT"}

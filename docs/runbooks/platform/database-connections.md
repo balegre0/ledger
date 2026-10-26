@@ -10,14 +10,15 @@ start: the error names the jobs' concurrency, their lease renewals, the runners 
 | App | `LEDGER_DATABASE_POOL_SIZE` | Up to (pool + overflow) | Why |
 |---|---|---|---|
 | api | 30 (default) | 60 | requests |
-| worker | 70 | 140 | `do_ecf.advance` runs 16 at once and `do_ecf.deliver` 8 (58 connections needed); each job kind or outside consumer added raises it |
+| worker | 68 | 136 | 28 for the jobs' concurrency (`do_ecf.advance` 16, `do_ecf.deliver` 8, `fiscal.route`, `do_ecf.purge_receiver_credentials` and the maintenance jobs), 30 for lease renewals (those jobs and fiscal's two outside consumers), 8 for its runners, 2 of headroom; each job kind or outside consumer added raises it |
 | signer | 30 (default) | 60 | its jobs and gRPC calls |
 | receiver (when deployed) | 30 (default) | 60 | DGII's and emitters' calls |
 | ledger-migrate | a few, for its run | | |
 | zitadel | its own pool | | identity provider |
 
 Per replica: scale the sum by the replicas of each app. PostgreSQL's `max_connections` must exceed the sum,
-plus its reserved superuser slots. Locally compose sets `max_connections=400` (`deploy/local/compose.yaml`).
+plus its reserved superuser slots. Locally compose sets `max_connections=352` (`deploy/local/compose.yaml`): api 60, worker 136, signer 60,
+receiver 60 at twice their pools, and zitadel's.
 
 ## When to act
 

@@ -31,7 +31,7 @@ lazy import psycopg
 from ledger_country_do.channels.ecf_v1.adapters.buyers import client as buyers_client
 from ledger_country_do.channels.ecf_v1.adapters.channel import DoEcfChannel
 from ledger_country_do.channels.ecf_v1.adapters.jobs import ADVANCE, DELIVER
-from ledger_country_do.channels.ecf_v1.adapters.postgres.migrations.versions import r0004_do_ecf
+from ledger_country_do.channels.ecf_v1.adapters.postgres.migrations.versions import r0005_do_ecf
 from ledger_country_do.channels.ecf_v1.adapters.postgres.tables import DocumentRecord
 from ledger_country_do.channels.ecf_v1.adapters.postgres.unit import bind
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import INBOUND, verify_enveloped
@@ -314,7 +314,8 @@ class Started:
         parts = assemble(context)
         channel = parts.channel
         assert isinstance(channel, DoEcfChannel)
-        advance, deliver = parts.jobs
+        kinds = {each.kind: each for each in parts.jobs}
+        advance, deliver = kinds[ADVANCE], kinds[DELIVER]
         async with AsyncExitStack() as stack:
             for resource in parts.resources:
                 await stack.enter_async_context(resource)
@@ -766,10 +767,10 @@ async def test_documents_accepted_before_this_revision_get_their_delivery_job(
 
 
 async def swept(admin: psycopg.AsyncConnection) -> None:
-    """Revision 0004's sweep, run as the schema's owner (whom row-level security binds too) runs it."""
+    """Revision 0005's sweep, run as the schema's owner (whom row-level security binds too) runs it."""
     async with admin.transaction():
         await admin.execute("SET LOCAL ROLE do_ecf_owner")
-        for statement in r0004_do_ecf.SWEEP:
+        for statement in r0005_do_ecf.SWEEP:
             await admin.execute(statement.encode())
 
 
@@ -874,7 +875,7 @@ async def copied_live(admin: psycopg.AsyncConnection, document: UUID) -> UUID:
 async def test_the_sweep_enqueues_only_decided_reception_documents_each_in_its_own_scope(
     worker: Worker, module_database: BoundDatabase, admin: psycopg.AsyncConnection
 ) -> None:
-    """Revision 0004's filters: decided (accepted), reception, ``not_started``; the job in the row's scope."""
+    """Revision 0005's filters: decided (accepted), reception, ``not_started``; the job in the row's scope."""
     first = await a_company(module_database, EcfType.CREDIT_INVOICE, EcfType.CONSUMER_INVOICE)
     second = await a_company(module_database)
     accepted = await worker.accepted(draft_of(first))

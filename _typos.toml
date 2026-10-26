@@ -32,6 +32,14 @@ informe = "informe"
 instructivo = "instructivo"
 limite = "limite"
 modificacion = "modificacion"
+# Spanish quoted from Alegra's own page in the 2026-10-25 architecture review.
+utiliza = "utiliza"
+# Abbreviations and names the 2026-10-25 architecture review uses: small and medium enterprise, recovery time
+# objective, GAE Digital (an e-CF gateway), Matthew Skelton (co-author of Team Topologies).
+SME = "SME"
+RTO = "RTO"
+GAE = "GAE"
+Skelton = "Skelton"
 
 [default.extend-identifiers]
 # ISO 3166-1 and ISO 4217 codes the kernel lists (Bosnia, the Faroe Islands, Pitcairn; the Jordanian dinar).

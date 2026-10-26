@@ -88,7 +88,7 @@ async def test_an_app_that_binds_no_archive_keeps_nothing() -> None:
     with pytest.raises(ArchiveNotBoundError):
         await UnboundArchive().read(Archived(key="k", sha256=bytes(32)))
     with pytest.raises(ArchiveNotBoundError):
-        await UnboundArchive().receipt(TENANT, b"<ARECF/>", refused=False)
+        await UnboundArchive().buyer_receipt(TENANT, b"<ARECF/>", refused=False)
 
 
 async def test_a_document_is_read_back_only_as_its_digest_says() -> None:

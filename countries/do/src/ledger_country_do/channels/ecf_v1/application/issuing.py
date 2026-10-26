@@ -4,7 +4,11 @@
 up among the company's accepted ones in the draft's mode), and ``do_ecf_range_missing`` when no number of the
 draft's type could be given now in its environment (a read, no lock; Decision 6).
 
-``issue`` gives an invoice one document (Decision 35): a second call answers the first's. The first numbers
+``issue`` gives an invoice one document (Decision 35): a second call answers the first's, and gives a
+document not yet decided its ``do_ecf.advance`` job again when that job died (a wake past its deadline, its
+attempts spent) or is gone: a fresh one, with a new deadline, the job's own steps deciding what to do (never
+a resend: the submission mark governs). A job ready, running or parked is left as it is. fiscal's recovery
+path calls it again for every issued invoice (Task 19's review, Owner item 13). The first numbers
 it in one unit: the series' row locked (``Ranges.allocate``, a released number first), the document kept
 ``numbered`` with the draft it was numbered for, the ``do_ecf.advance`` job enqueued (at once, or
 ``SIGNING_DELAY`` later when the request signs, so that the worker does not sign what the request is
@@ -42,6 +46,7 @@ from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import ClassVar, Final, Protocol, final
 lazy from datetime import date, datetime
+lazy from decimal import Decimal
 lazy from uuid import UUID
 
 from ledger_country_do.channels.ecf_v1.application.documents import (
@@ -61,6 +66,7 @@ from ledger_country_do.channels.ecf_v1.domain.ecf import (
     EcfDocumentState,
     EmissionMode,
     Step,
+    is_final,
     transition,
 )
 from ledger_country_do.channels.ecf_v1.domain.errors import (
@@ -141,6 +147,11 @@ def _references(draft: FiscalDraft) -> tuple[DocumentRef, ...]:
 def _stated(encf: Encf, expires_on: date | None) -> date | None:
     """The expiry an e-CF of ``encf`` states: its range's, for the types DGII dates (none for 32 and 34)."""
     return None if encf.ecf_type in UNDATED_TYPES else expires_on
+
+
+def _job_time(now: datetime, *, delayed: bool) -> datetime:
+    """When the advance job runs: ``SIGNING_DELAY`` after ``now`` while a request signs (Decision 25)."""
+    return now + SIGNING_DELAY if delayed else now
 
 
 def _next(document: EcfDocument) -> Next:
@@ -234,6 +245,10 @@ class Issuing:
         """The channel's clock: what numbers are allocated, and released, by (``Signing.now``)."""
         return self._signing.now()
 
+    async def total(self, unit: NumberingUnit, document: EcfDocument) -> Decimal:
+        """``document``'s ``MontoTotal`` in pesos, as its e-CF states it (rebuilt from its draft)."""
+        return compute_totals(await self._rebuilt(unit, document), self._regime).total
+
     def present(self, document: EcfDocument | None) -> EcfDocument:
         """``document``, or ``DocumentMissingError``, reported (see the module)."""
         if document is None:
@@ -249,6 +264,8 @@ class Issuing:
             document = await unit.documents.of_invoice(draft.document)
             if document is None:
                 return await self._numbered(unit, draft, environment, delayed=sign_within is not None)
+            if not is_final(document.state):  # a job that died or went is enqueued anew; a live one stays
+                unit.advances.enqueue(document.id, at=_job_time(unit.now, delayed=sign_within is not None))
             if sign_within is not None and document.state is EcfDocumentState.NUMBERED:
                 return document, await self._rebuilt(unit, document)
             return document, None
@@ -290,7 +307,7 @@ class Issuing:
             updated_at=unit.now,
         )
         await unit.documents.add(document)
-        unit.advances.enqueue(document.id, at=unit.now + SIGNING_DELAY if delayed else unit.now)
+        unit.advances.enqueue(document.id, at=_job_time(unit.now, delayed=delayed))
         unit.announcements.document_updated(document)
         return document, ecf
 

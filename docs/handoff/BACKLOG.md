@@ -2,6 +2,33 @@
 
 Read `HANDOFF.md` first (owner rules, process, repo map, current state, pending decisions). This file is the full backlog in priority order.
 
+## 0. Direction (architecture verdict, 2026-10-25)
+
+`docs/reviews/2026-10-25-architecture-review/VERDICT.md` sets the order of work: the e-CF engine first, sales first,
+CRM/ERP breadth decided by a numeric gate (about 2027-01-24). Keep Python, Postgres and the modular monolith; freeze
+the chassis (no new generic platform features); no language migration. Until the owner adopts or amends the verdict,
+read it as the recommended direction.
+
+Owner-side actions (only the owner can do these; engineering does not replace them):
+- Certificate and TesteCF access; the first real TesteCF run (§2).
+- Choose the LICENSE.
+- A counsel session: PSFE as a solo founder, custody under Decreto 587-24 Art. 22, Ley 172-13, an OEM route under an
+  existing authorized provider.
+- A remote-signing cost quote; the runway figure and the legal entity.
+- 10-20 customer conversations.
+
+Engineering added by the verdict (after §1, alongside §3):
+- DGII-sourced fixtures beside the builder-written goldens (`countries/do/tests/contract/test_golden.py`).
+- Mutation testing automated on fiscal and money paths (today it runs by hand in task reports).
+- A fast per-package check next to the full gate.
+- A managed container platform instead of managed Kubernetes in the deployment plan (§4 item 7); per-tenant export,
+  soft delete, a monthly restore drill.
+- Later, only through the gate: a capped Odoo connector in its own repository, portal-lite (§4 item 12), then the
+  accountant console. The metadata layer, a reporting schema and boundary changes need a spec and ADR amendment first.
+
+The 5-day ERP-layer experiment (§4 item 14) is replaced by the verdict's gate; if breadth is ever adopted rather than
+built, the fallback is Odoo Community, not Frappe (Frappe has no confirmed official Postgres support).
+
 ## 1. Critical path to DGII certification (CERT-tagged; finish these first)
 
 Plan: `docs/superpowers/plans/2026-10-19-v2-m3b-fiscal.md`. Each task has files, interfaces, steps and the review notes added later (the notes are binding).
@@ -54,7 +81,7 @@ Plan: `docs/superpowers/plans/2026-10-19-v2-m3b-fiscal.md`. Each task has files,
 7. **Task 24** printed representation (PDF + QR + security code; replaces the `representation` and `status` not-ready paths).
 8. **Task 25** (`signer.certificate.installed` consumer in fiscal).
 9. **Task 26** (fake DGII completed with consultarfce, anularrango and aprobacioncomercial; compose; end-to-end test against the fake DGII).
-   - Needs the trusted-roots file (`deploy/local/do/roots.sh`) plus the buyer simulator's root, the `/archive` volume owned by uid 65532, and Postgres `max_connections=300`.
+   - Needs the trusted-roots file (`deploy/local/do/roots.sh`) plus the buyer simulator's root, the `/archive` volume owned by uid 65532, and Postgres `max_connections=352` (compose sets it since Task 20's merge).
 10. **Task 27** (retire the spike CLI and `emission.py`; runbooks; as-built notes) and **Task 34** (final verification and whole-branch review).
     - From Task 19's review: the outcome-unknown alert and runbook also cover dead `do_ecf.advance` jobs (a signed + marked document whose job died logs no `do_ecf.waiting_for_a_person`) and `require_ready` failures counted as attempts during shutdown; keep the DO runbook's line on the one physical resend (the DGII client re-POSTs a document after a 401 with a renewed token, assuming a 401 means DGII did not take it).
     - LIVE Task 28 (from Task 19's review): honour a 429's `Retry-After` in the advance job. LIVE Task 31 (from Task 19's review): operator commands that wake, unblock or settle a document whose advance job is dead or past its deadline enqueue a fresh `do_ecf.advance` (or re-arm the deadline); reopening the track-id window or adopting a named track id is an operator command, never the wake (Owner item 13).

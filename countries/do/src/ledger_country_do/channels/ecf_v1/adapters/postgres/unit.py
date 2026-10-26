@@ -12,6 +12,7 @@ from ledger_country_do.channels.ecf_v1.adapters.jobs import ADVANCE, DELIVER
 from ledger_country_do.channels.ecf_v1.adapters.postgres.repositories.documents import PgDocuments
 from ledger_country_do.channels.ecf_v1.adapters.postgres.repositories.options import PgCompanyOptions
 from ledger_country_do.channels.ecf_v1.adapters.postgres.repositories.ranges import PgRanges
+from ledger_country_do.channels.ecf_v1.adapters.postgres.repositories.received import PgReceived
 from ledger_country_do.channels.ecf_v1.adapters.postgres.repositories.submissions import PgSubmissions
 from ledger_country_do.channels.ecf_v1.adapters.statuses import update_of
 from ledger_country_do.channels.ecf_v1.application.documents import Advances, Deliveries
@@ -22,11 +23,14 @@ from ledger_country_do.channels.ecf_v1.application.ranges import (
     NumberingUnits,
 )
 from ledger_country_do.channels.ecf_v1.domain.channel import KEY
-from ledger_fiscal_kit.events import DocumentUpdated, RequirementsChanged
+from ledger_country_do.regime.tax_ids import CEDULA, RNC, RNC_DIGITS
+from ledger_fiscal_kit.events import DocumentUpdated, ReceivedDocumentRecorded, RequirementsChanged
 from ledger_kernel.errors import InvalidValueError
+from ledger_kernel.tax_ids import TaxId
 from ledger_kernel.tenancy import Tenant
 lazy from ledger_country_do.channels.ecf_v1.application.documents import EcfDocument
 lazy from ledger_country_do.channels.ecf_v1.application.ranges import AuditAction
+lazy from ledger_country_do.channels.ecf_v1.application.received import ReceivedDocument
 lazy from ledger_country_do.channels.ecf_v1.application.steps import ParkReason
 lazy from ledger_platform.data import BoundDatabase, UnitOfWork
 
@@ -48,6 +52,23 @@ class UnitAnnouncements(Announcements):
     @override
     def document_updated(self, document: EcfDocument) -> None:
         self._unit.publish(DocumentUpdated.of(self._tenant, update_of(document)))
+
+    @override
+    def received(self, document: ReceivedDocument) -> None:
+        issuer = document.ecf.issuer_rnc  # nine digits (an RNC) or eleven (a cédula), as it was read
+        scheme = RNC.key if len(issuer) == RNC_DIGITS else CEDULA.key
+        self._unit.publish(
+            ReceivedDocumentRecorded(
+                scope=self._tenant,
+                subject=document.id,
+                aggregate_version=document.version,
+                received=document.id,
+                channel=KEY,
+                environment=document.environment.value,
+                issuer=TaxId(scheme, issuer),
+                number=str(document.ecf.encf),
+            )
+        )
 
 
 @final
@@ -135,6 +156,7 @@ def bind(unit: UnitOfWork) -> NumberingUnit:
         ranges=PgRanges(unit.connection, scope, scope.mode),
         documents=PgDocuments(unit.connection, scope, scope.mode),
         submissions=PgSubmissions(unit.connection, scope, scope.mode),
+        received=PgReceived(unit.connection, scope, scope.mode),
         advances=UnitAdvances(unit, scope),
         deliveries=UnitDeliveries(unit),
         options=PgCompanyOptions(unit.connection, scope, scope.mode, now=unit.now),

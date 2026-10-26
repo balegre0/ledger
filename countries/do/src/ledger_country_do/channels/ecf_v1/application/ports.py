@@ -376,7 +376,7 @@ class Archive(Protocol, metaclass=ABCMeta):
         """``signed``, a consumer-invoice summary (RFCE) of ``tenant``'s, kept."""
 
     @abstractmethod
-    async def receipt(self, tenant: Tenant, arecf: bytes, *, refused: bool) -> Archived:
+    async def buyer_receipt(self, tenant: Tenant, arecf: bytes, *, refused: bool) -> Archived:
         """``arecf``, a buyer's receipt of one of ``tenant``'s e-CF, kept.
 
         ``refused``: one that failed its checks, kept as evidence apart from the trusted ones

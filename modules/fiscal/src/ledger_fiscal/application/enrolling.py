@@ -9,7 +9,9 @@ the first answer and a failure keeps nothing. Every change is audited and announ
 (``fiscal.enrollment.changed``).
 
 A review whose channel cannot answer now (``UnavailableError``) answers the enrollment as kept; one that
-another review overtook while the channel was asked answers the other's result and keeps nothing.
+another review overtook while the channel was asked answers the other's result and keeps nothing. An
+enrollment its channel marked ``review_due`` (``fiscal.requirements``, Decision 34) is reviewed by the next
+read that routes a document (``current``), which clears the mark.
 """
 
 from dataclasses import dataclass
@@ -140,9 +142,12 @@ class Enrolling:
         except ChannelUnknownError:
             return None
 
-    async def _requirements(self, call: Call, channel: Channel, state: EnrollmentState) -> Requirements:
+    @staticmethod
+    async def _requirements(
+        channel: Channel, state: EnrollmentState, traceparent: str | None
+    ) -> Requirements:
         tenant = Tenant(state.organization, state.company, state.mode)
-        system = SystemCall(reason=REQUIREMENTS_REASON, scope=tenant, traceparent=call.traceparent)
+        system = SystemCall(reason=REQUIREMENTS_REASON, scope=tenant, traceparent=traceparent)
         return await channel.requirements(system, state)
 
     async def prepare(self, call: Call, *, channel: str, environment: str) -> Prepared:
@@ -175,7 +180,7 @@ class Enrolling:
             environment=environment,
             active=False,
         )
-        requirements = await self._requirements(call, found, state)
+        requirements = await self._requirements(found, state, call.traceparent)
         asked = Asked(enrollment=enrollment, tenant=tenant, channel=channel, environment=environment)
         return Prepared(asked=asked, requirements=requirements)
 
@@ -196,6 +201,25 @@ class Enrolling:
         now, is answered as kept; one another review overtook meanwhile, as that review left it.
         """
         tenant, _ = tenant_of(call)
+        return await self._review(tenant, enrollment, call.traceparent)
+
+    async def current(self, tenant: Tenant, *, traceparent: str | None) -> tuple[Enrollment, ...]:
+        """Every enrollment of ``tenant`` (a company in a mode), disabled ones too, by id.
+
+        Those marked ``review_due`` are reviewed first (Decision 34), as ``review`` reviews one.
+        """
+        async with self._units.unit(tenant) as unit:
+            every = await unit.enrollments.every()
+        return tuple(
+            [
+                await self._review(tenant, enrollment.id, traceparent)
+                if enrollment.review_due
+                else enrollment
+                for enrollment in every
+            ]
+        )
+
+    async def _review(self, tenant: Tenant, enrollment: EnrollmentId, traceparent: str | None) -> Enrollment:
         async with self._units.unit(tenant) as unit:
             found = await unit.enrollments.get(enrollment)
         if found is None:
@@ -204,7 +228,7 @@ class Enrolling:
         if found.status is EnrollmentStatus.DISABLED or channel is None:
             return found
         try:
-            requirements = await self._requirements(call, channel, _state(found))
+            requirements = await self._requirements(channel, _state(found), traceparent)
         except UnavailableError:
             return found
         async with self._units.unit(tenant) as unit:
@@ -216,6 +240,7 @@ class Enrolling:
             reviewed = current.reviewed(requirements, live_evidence=live_evidence(current), now=unit.now)
             if reviewed is not current:
                 await unit.enrollments.update(reviewed, version=current.version)
+            if reviewed.version != current.version:  # a review that only cleared its mark announces nothing
                 _changed(unit, "enrollment.review", current, reviewed)
             return reviewed
 

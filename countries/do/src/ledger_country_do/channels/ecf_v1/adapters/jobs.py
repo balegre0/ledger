@@ -1,4 +1,4 @@
-"""The channel's jobs (§3.6): ``do_ecf.advance`` and ``do_ecf.deliver``, one each per document, by its id.
+"""The channel's jobs (§3.6): ``do_ecf.advance`` and ``do_ecf.deliver`` per document; the receiver's purge.
 
 Enqueued with the document (``issuing``); each run takes the document one step on (``advancing``: signed,
 submitted once, polled, decided), at most one call to DGII per run, and answers the platform's outcome:
@@ -10,6 +10,9 @@ DGII decided. The job runs for the company in the mode it was enqueued for (its 
 ``do_ecf.deliver`` is enqueued once DGII accepted the document (``delivering``): each run is one exchange
 with the buyer, ``RunAgain`` on the delivery's schedule while the buyer is out of reach, ``Done`` once
 delivered, failed or not applicable. Its buyers' seeds are signed as ``do_ecf.deliver``.
+
+``do_ecf.purge_receiver_credentials`` (every hour, its schedule's) deletes the receiver's seeds and tokens
+past their expiry (``ReceiverCredentials.purge``): they are kept outside any tenant, so it runs without one.
 """
 
 from typing import Final, assert_type
@@ -20,6 +23,7 @@ from ledger_country_do.channels.ecf_v1.application.steps import Again, Finished,
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.jobs.outcomes import Done, JobSpec, Park, RunAgain
+lazy from ledger_country_do.channels.ecf_v1.adapters.receiver.tokens import ReceiverCredentials
 lazy from ledger_country_do.channels.ecf_v1.application.advancing import Advancing
 lazy from ledger_country_do.channels.ecf_v1.application.delivering import Delivering
 lazy from ledger_country_do.channels.ecf_v1.application.steps import Next
@@ -27,6 +31,8 @@ lazy from ledger_platform.jobs.outcomes import Job, JobOutcome
 
 ADVANCE: Final = "do_ecf.advance"
 """The job kind (the manifest's ``[[channels.jobs]]``)."""
+PURGE: Final = "do_ecf.purge_receiver_credentials"
+"""The receiver's purge (the manifest's job and its schedule)."""
 
 
 DELIVER: Final = "do_ecf.deliver"
@@ -69,3 +75,14 @@ def deliver_job(delivering: Delivering) -> JobSpec:
         return _outcome(await delivering.deliver(_who(job), UUID(job.key)))
 
     return JobSpec(kind=DELIVER, handler=deliver)
+
+
+def purge_job(credentials: ReceiverCredentials) -> JobSpec:
+    """``do_ecf.purge_receiver_credentials`` over ``credentials`` (see the module)."""
+
+    async def purge(job: Job) -> JobOutcome:
+        del job
+        await credentials.purge()
+        return Done()
+
+    return JobSpec(kind=PURGE, handler=purge)

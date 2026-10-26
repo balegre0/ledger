@@ -34,6 +34,7 @@ lazy from ledger_country_do.channels.ecf_v1.application.documents import (
     EcfDocument,
     Submissions,
 )
+lazy from ledger_country_do.channels.ecf_v1.application.received import ReceivedDocument, ReceivedDocuments
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 lazy from ledger_country_do.channels.ecf_v1.domain.numbering import Allocation, Authorization, RangeState
@@ -127,6 +128,10 @@ class Announcements(Protocol, metaclass=ABCMeta):
     def document_updated(self, document: EcfDocument) -> None:
         """``document`` is new, or changed: its state at its version (``fiscal_channel.document.updated``)."""
 
+    @abstractmethod
+    def received(self, document: ReceivedDocument) -> None:
+        """``document`` was received and recorded (``fiscal_channel.received_document.recorded``)."""
+
 
 type AuditAction = Literal[
     "numbering_range.register", "delivery.retry", "delivery_options.set", "do_ecf.buyer_seed.signed"
@@ -162,6 +167,8 @@ class NumberingUnit:
     ranges: Ranges
     documents: Documents
     submissions: Submissions
+    received: ReceivedDocuments
+    """The e-CF other emitters sent the company (the receiver's, Task 22)."""
     advances: Advances
     deliveries: Deliveries
     options: CompanyOptions

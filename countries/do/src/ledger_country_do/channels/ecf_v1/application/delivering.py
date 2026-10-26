@@ -190,7 +190,7 @@ class Delivering:
             return None
         refused = isinstance(handed, BuyerReceiptRefused)
         try:
-            return await self._archive.receipt(tenant, handed.arecf, refused=refused)
+            return await self._archive.buyer_receipt(tenant, handed.arecf, refused=refused)
         except ArchiveUnavailableError:
             async with self._units.unit(tenant) as unit:
                 self._audited(unit, document, handed.seeds)

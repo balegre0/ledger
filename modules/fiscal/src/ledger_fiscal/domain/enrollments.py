@@ -7,7 +7,8 @@ authority authorization is recorded with evidence as well (C4: ``live_evidence``
 stays pending. An active enrollment stays active whatever its channel requires later (Decision 31): a missing
 certificate or range parks documents, not the enrollment. ``disabled`` is final: the company enrolls again
 with a new one. What the channel requires is read anew every time it is reviewed and kept with the status
-the review set.
+the review set. When a channel says what it requires of a company changed (a range registered), its
+enrollments are marked ``review_due``, and the next read that routes a document reviews them first.
 
 The channel's answer reaches the domain as anything with its two fields (``Due``): fiscal-kit's
 ``Requirements`` is one, and the domain imports nothing but the kernel.
@@ -105,6 +106,9 @@ class Enrollment:
     ``Requirements.disabled_reason``); ``None`` when nothing stopped it."""
     disablement: Disabled | None = None
     """Why and when the client disabled it: set exactly when its status is ``disabled``."""
+    review_due: bool = False
+    """Whether its channel said what it requires of the company changed since its last review (Decision 34):
+    the next read reviews it and clears the mark."""
     version: int
     """From 1, one more at each change."""
     created_at: datetime
@@ -170,6 +174,8 @@ class Enrollment:
     def reviewed(self, requirements: Due, *, live_evidence: bool, now: datetime) -> Enrollment:
         """The enrollment as ``requirements`` leave it (see the module); itself when nothing changes.
 
+        Its review mark is cleared; a review that only clears it keeps the version (nothing to announce).
+
         ``live_evidence``: whether the company's authority authorization is recorded (live mode only).
         """
         if self.status is EnrollmentStatus.DISABLED:
@@ -180,12 +186,13 @@ class Enrollment:
             self.currently_due,
             self.requirements_reason,
         ):
-            return self
+            return replace(self, review_due=False) if self.review_due else self
         return replace(
             self,
             status=status,
             currently_due=requirements.currently_due,
             requirements_reason=requirements.disabled_reason,
+            review_due=False,
             version=self.version + 1,
             updated_at=now,
         )

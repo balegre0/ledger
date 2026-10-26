@@ -112,3 +112,12 @@ timeout = "3m"                       # one buyer exchange per run (the buyer cli
 max_attempts = 50                    # failures; RunAgain does not count
 deadline = "8d"
 concurrency = 8
+
+[[channels.jobs]]
+kind = "do_ecf.purge_receiver_credentials"   # the receiver's expired seeds and tokens (Task 22)
+concurrency = 1
+
+[[channels.schedules]]
+name = "do_ecf.purge_receiver_credentials"
+every = "1h"
+enqueues = "do_ecf.purge_receiver_credentials"

@@ -9,7 +9,8 @@ Once signed, it is submitted once (its mark, ``submission_started_at``, committe
 DGII decides: its track id, when its outcome became unknown, how often DGII was asked, DGII's last code,
 ``secuenciaUtilizada``, messages and what became of its number. Once accepted, it is delivered to its buyer
 (``delivery``): since when, how many attempts failed, why it failed or did not apply, and where the archive
-keeps the buyer's receipt.
+keeps the buyer's receipt; its buyer may approve or reject it commercially (an ACECF it sends the receiver):
+the last word it sent, ``commercial_approval``.
 
 ``Documents`` are the unit's company's documents in the unit's mode; ``Advances`` the unit's queue of the
 ``do_ecf.advance`` job, which takes each document on from where it stands; ``Submissions`` the track ids
@@ -62,6 +63,18 @@ class Signature:
 
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
+class Approval:
+    """A buyer's commercial approval (or rejection) of a document, as the document keeps it."""
+
+    approved: bool
+    reason: str | None
+    """Why it rejected it, when it said (never on an approval)."""
+    at: datetime
+    """When the buyer says it decided (its ACECF's ``FechaHoraAprobacionComercial``)."""
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
 class EcfDocument:
     """An invoice's e-CF (see the module)."""
 
@@ -106,6 +119,8 @@ class EcfDocument:
     """Why its delivery failed, failed last, or does not apply: a code, never a tax id or a document."""
     receipt: Archived | None = None
     """Where the archive keeps the buyer's receipt (ARECF): a trusted one, or one refused (as evidence)."""
+    commercial_approval: Approval | None = None
+    """Its buyer's commercial approval or rejection, the last it sent; ``None`` before any."""
 
     def signed(self) -> Signature:
         """Its signature: a document past ``numbered`` has one (``DocumentIncoherentError`` otherwise)."""
@@ -165,6 +180,10 @@ class Documents(Protocol, metaclass=ABCMeta):
         """The document, or ``None``; with ``lock``, its row locked until the unit ends (``FOR UPDATE``)."""
 
     @abstractmethod
+    async def by_number(self, environment: Environment, encf: Encf) -> EcfDocument | None:
+        """The document holding ``encf`` in ``environment`` (not released), its row locked; else ``None``."""
+
+    @abstractmethod
     async def add(self, document: EcfDocument) -> None:
         """Keep a new document, numbered in this unit.
 
@@ -174,9 +193,10 @@ class Documents(Protocol, metaclass=ABCMeta):
 
     @abstractmethod
     async def changed(self, document: EcfDocument) -> None:
-        """Keep ``document``'s new state, signature, progress (mark, track id, DGII's answer) and version.
+        """Keep ``document``'s new state, signature, progress, approval and version.
 
-        Its row is locked in this unit.
+        Its progress: its mark, track id and DGII's answer; its approval: its buyer's. Its row is locked in
+        this unit.
         """
 
     @abstractmethod

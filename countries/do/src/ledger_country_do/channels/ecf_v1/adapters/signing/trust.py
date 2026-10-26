@@ -1,7 +1,8 @@
 """Whether a counterparty's signing certificate is one to trust: the policy an inbound signature answers to.
 
 ``verify_enveloped`` (``INBOUND``) says a signature holds and by which certificate; this says whether that
-certificate may speak for the counterparty (a buyer signing its ARECF):
+certificate may speak for the counterparty (a buyer signing its ARECF, an emitter its e-CF, a buyer its
+ACECF, whoever signs a receiver's seed):
 
 - **Chain.** It chains to one of the configured roots (DGII- and INDOTEL-authorized authorities), through the
   intermediates the document carries, which are never trusted themselves: a root the document carries is just
@@ -10,13 +11,16 @@ certificate may speak for the counterparty (a buyer signing its ARECF):
   more) and none of its rules for the end entity (a signing certificate names no host).
 - **Time.** The certificate, and its whole chain, is valid at the moment the document says it was signed and
   at the moment it was received here, which may differ by ``skew`` at most either way (clocks differ; a
-  receipt dated an hour away is not this exchange's).
+  receipt dated an hour away is not this exchange's). A document sent ``late`` (an e-CF delivered, an
+  approval sent, days after it was signed, retries included) may be signed any time before it arrives, never
+  more than ``skew`` after.
 - **Usage.** It may sign (fiscal-kit's ``dsig.signing_problem``: an end entity, ``digitalSignature`` or
   ``nonRepudiation``); an extended key usage, where present, names one of ``purposes`` (document signing,
   e-mail protection, client authentication as qualified certificates write them, or any).
 - **Identity.** Its subject names the counterparty: an RNC or cédula in ``serialNumber`` (bare, or
   ``IDCDO-``/``TINDO-``/``PNODO-``) or ``organizationIdentifier`` (``VATDO-``/``NTRDO-``), as ``identities``
-  reads them; no other prefix counts.
+  reads them; no other prefix counts. ``vouched`` checks all but this and answers the identities the
+  certificate names (a receiver's seed tells who signs only by them; a test stand-in speaks for anyone).
 
 **Revocation is not checked** (no CRL, no OCSP): a known gap of the spike, recorded in its findings, for
 v2-M4's delivery. A refusal says why without quoting the certificate, the document or a tax id.
@@ -71,7 +75,7 @@ _FAR: Final = "the document is dated too far from its receipt"
 _SIGNED: Final = "it was not valid when it signed"
 _RECEIVED: Final = "it is not valid at receipt"
 _PURPOSE: Final = "its extended key usage does not allow signing documents"
-_NOT_THEM: Final = "it is not the buyer's: its subject names another RNC or cédula, or none"
+_NOT_THEM: Final = "it is not the counterparty's: its subject names another RNC or cédula, or none"
 
 
 class CounterpartyCertificateError(EcfInvalidError):
@@ -157,18 +161,19 @@ class CounterpartyTrust:
             return False
         return True
 
-    def check(
-        self, verified: VerifiedSignature, *, counterparty: str, signed_at: datetime, received_at: datetime
-    ) -> None:
-        """Refuse ``verified``'s certificate unless it may speak for ``counterparty`` (see the module).
+    def vouched(
+        self, verified: VerifiedSignature, *, signed_at: datetime, received_at: datetime, late: bool = False
+    ) -> frozenset[str]:
+        """The RNCs and cédulas ``verified``'s certificate names, once this policy trusts it (see the module).
 
-        ``signed_at``: when the document says it was signed; ``received_at``: when it arrived here.
-        ``CounterpartyCertificateError`` says why it may not.
+        Everything but its identity is checked. ``signed_at``: when the document says it was signed;
+        ``received_at``: when it arrived here; ``late``: whether it may arrive any time after it was signed.
+        ``CounterpartyCertificateError`` says why it is not trusted.
         """
         certificate = verified.certificate
         if len(verified.intermediates) > MAX_INTERMEDIATES:
             raise CounterpartyCertificateError(_TOO_MANY)
-        if abs(received_at - signed_at) > self.skew:
+        if signed_at - received_at > self.skew or (not late and received_at - signed_at > self.skew):
             raise CounterpartyCertificateError(_FAR)
         if (problem := signing_problem(certificate)) is not None:
             raise CounterpartyCertificateError(problem)
@@ -179,5 +184,22 @@ class CounterpartyTrust:
                 raise CounterpartyCertificateError(_UNTRUSTED)
         if not _allows_documents(certificate, self.purposes):
             raise CounterpartyCertificateError(_PURPOSE)
-        if counterparty not in identities(certificate.subject):
+        return identities(certificate.subject)
+
+    def check(
+        self,
+        verified: VerifiedSignature,
+        *,
+        counterparty: str,
+        signed_at: datetime,
+        received_at: datetime,
+        late: bool = False,
+    ) -> None:
+        """Refuse ``verified``'s certificate unless it may speak for ``counterparty`` (see the module).
+
+        As ``vouched``, and its subject must name ``counterparty``. ``CounterpartyCertificateError`` says why
+        it may not.
+        """
+        named = self.vouched(verified, signed_at=signed_at, received_at=received_at, late=late)
+        if counterparty not in named:
             raise CounterpartyCertificateError(_NOT_THEM)
