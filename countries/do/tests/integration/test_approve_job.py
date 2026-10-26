@@ -26,28 +26,36 @@ from sqlalchemy import select, update
 from structlog.testing import capture_logs
 
 from ledger_country_do.channels.ecf_v1.adapters.buyers import client as buyers_client
+from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
 from ledger_country_do.channels.ecf_v1.adapters.jobs import APPROVE
 from ledger_country_do.channels.ecf_v1.adapters.outbound import OutboundClosedError
 from ledger_country_do.channels.ecf_v1.adapters.postgres.tables import ReceivedDocumentRecord
 from ledger_country_do.channels.ecf_v1.adapters.postgres.unit import bind
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import INBOUND, verify_enveloped
+from ledger_country_do.channels.ecf_v1.adapters.xml.acecf import render_acecf
 from ledger_country_do.channels.ecf_v1.application.approving import (
     ApprovalMissingError,
     ApprovalRequest,
     CommercialApprovals,
+    NotTheBuyerError,
     ReceivedNotFoundError,
 )
 from ledger_country_do.channels.ecf_v1.application.documents import DeliveryOptions
-from ledger_country_do.channels.ecf_v1.application.ports import Archived
+from ledger_country_do.channels.ecf_v1.application.ports import (
+    Archived,
+    AuthorityUnavailableError,
+    Failure,
+)
 from ledger_country_do.channels.ecf_v1.application.received import ReceivedDocument
 from ledger_country_do.channels.ecf_v1.assembly import assemble
 from ledger_country_do.channels.ecf_v1.domain.approval import Decision
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
-from ledger_country_do.channels.ecf_v1.domain.exchanges import InboundEcf
+from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError
+from ledger_country_do.channels.ecf_v1.domain.exchanges import CommercialApproval, InboundEcf
 from ledger_country_do.channels.ecf_v1.settings import DoEcfSettings
 from ledger_country_do_testing.transports import FAKE_HOSTS, outbound_over
-from ledger_fiscal_kit.ports import ARCHIVE_PORT, ArchivePort
+from ledger_fiscal_kit.ports import ARCHIVE_PORT, SIGNER_PORT, ArchivePort, archive_key
 from ledger_fiscal_kit.ports import ArchiveUnavailableError as PortUnavailableError
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.tenancy import Mode, Tenant
@@ -104,10 +112,12 @@ class Contexts(Protocol):
 class Network(httpx.AsyncBaseTransport):
     """The way to the fake DGII and its simulator: ``answering`` answers a status of its own (and no body) to
     the requests whose path ends with a key; ``unlisted`` answers DGII's directory empty; ``meanwhile`` runs
-    before a request whose path ends with a key reaches the fake (what another run does meanwhile).
+    before a request whose path ends with a key reaches the fake (what another run does meanwhile); ``dying``
+    lets such a request reach the fake, then fails the run that sent it (``RunDiedError``) before its answer
+    comes back: a process that died after sending.
     """
 
-    __slots__ = ("_inner", "answering", "fake", "meanwhile", "requests", "unlisted")
+    __slots__ = ("_inner", "answering", "dying", "fake", "meanwhile", "requests", "unlisted")
 
     def __init__(self, fake: FakeDgii) -> None:
         self.fake: Final = fake
@@ -116,6 +126,7 @@ class Network(httpx.AsyncBaseTransport):
         self.answering: dict[str, int] = {}
         self.unlisted = False
         self.meanwhile: dict[str, Callable[[], Awaitable[None]]] = {}
+        self.dying: set[str] = set()
 
     def asked(self, part: str) -> int:
         return sum(1 for path in self.requests if path.endswith(part))
@@ -132,7 +143,42 @@ class Network(httpx.AsyncBaseTransport):
         for part, hook in self.meanwhile.items():
             if path.endswith(part):
                 await hook()
-        return await self._inner.handle_async_request(request)
+        answered = await self._inner.handle_async_request(request)
+        if any(path.endswith(part) for part in self.dying):
+            raise RunDiedError
+        return answered
+
+
+class RunDiedError(Exception):
+    """The run died once its request had reached the fake: no answer, no error of the channel's."""
+
+
+@final
+class Watching(ArchivePort):
+    """The test's archive, which keeps the key of every ACECF kept, and runs ``before_acecf`` before the first
+    (what a run that raced does meanwhile)."""
+
+    __slots__ = ("_inner", "before_acecf", "kept")
+
+    def __init__(self, inner: StoreArchive) -> None:
+        self._inner = inner
+        self.kept: list[str] = []
+        self.before_acecf: Callable[[], Awaitable[None]] | None = None
+
+    @override
+    async def put_once(
+        self, key: str, content: bytes, *, retain_until: date, media_type: str
+    ) -> ArchivedObject:
+        if "/acecf/" in key:
+            hook, self.before_acecf = self.before_acecf, None
+            if hook is not None:
+                await hook()
+            self.kept.append(key)
+        return await self._inner.put_once(key, content, retain_until=retain_until, media_type=media_type)
+
+    @override
+    async def get(self, key: str, *, sha256: bytes) -> bytes:
+        return await self._inner.get(key, sha256=sha256)
 
 
 @final
@@ -683,3 +729,149 @@ async def test_nothing_is_marked_for_dgii_while_its_client_is_not_open(
     async with started.worker() as worker:
         assert await worker.run(tenant, document) == Done()
     assert (await approval_of(module_database, tenant, document)).dgii == "sent"
+
+
+# -- The review's cases (2026-10-26) ------------------------------------------------------------------------
+
+
+async def test_the_mark_is_committed_before_dgii_is_called_and_a_run_that_died_after_sending_never_resends(
+    worker: Worker, module_database: BoundDatabase
+) -> None:
+    """Review I1: the call reaches DGII only once its mark is committed; the run that sent it dies before the
+    answer; the next run finds the mark and never sends it again."""
+    tenant, document = await decided(module_database, APPROVED)
+    seen: list[datetime | None] = []
+
+    async def mark_committed() -> None:
+        seen.append((await approval_of(module_database, tenant, document)).dgii_started_at)
+
+    worker.network.meanwhile[DGII_APPROVAL] = mark_committed
+    worker.network.dying.add(DGII_APPROVAL)
+    with pytest.raises(RunDiedError):
+        await worker.run(tenant, document)
+    assert len(seen) == 1
+    assert seen[0] is not None
+    assert len(worker.fake.state.dgii_approvals) == 1  # it reached DGII
+    worker.network.meanwhile.clear()
+    worker.network.dying.clear()
+    with capture_logs() as logs:
+        assert await worker.run(tenant, document) == Done()
+    found = await approval_of(module_database, tenant, document)
+    assert (found.dgii, found.emitter) == ("outcome_unknown", "sent")
+    assert (len(worker.fake.state.dgii_approvals), worker.network.asked(DGII_APPROVAL)) == (1, 1)
+    assert [(entry["party"], entry["outcome"]) for entry in logs] == [("dgii", "outcome_unknown")]
+
+
+def tampered(sign: Callable[[bytes], bytes]) -> Callable[[bytes], bytes]:
+    """``sign``, its ACECF changed after it signed it (an approval turned into a rejection)."""
+
+    def signing(document: bytes) -> bytes:
+        return sign(document).replace(b"<Estado>1</Estado>", b"<Estado>2</Estado>")
+
+    return signing
+
+
+async def test_an_acecf_whose_signature_does_not_hold_is_neither_kept_nor_sent(
+    started: Started, module_database: BoundDatabase, archive: StoreArchive, signer: KeyPairSigner
+) -> None:
+    """Review I2: the signed ACECF is checked (schema, signature) before the archive or anyone sees it."""
+    tenant, document = await decided(module_database, APPROVED)
+    watching = Watching(archive)
+    broken = TestSigner(sign=tampered(signer.sign), sign_seed=signer.sign)
+    async with started.worker(**{ARCHIVE_PORT.name: watching, SIGNER_PORT.name: broken}) as worker:
+        with pytest.raises(EcfInvalidError):
+            await worker.run(tenant, document)
+    assert watching.kept == []
+    assert (await approval_of(module_database, tenant, document)).key is None
+    assert (worker.network.asked(DGII_APPROVAL), worker.network.asked(EMITTER_APPROVAL)) == (0, 0)
+
+
+async def test_dgii_s_client_not_ready_leaves_dgii_to_try_again_and_the_emitter_still_gets_it(
+    worker: Worker, module_database: BoundDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review I3: an error of DGII's client before anything is marked is DGII's alone."""
+
+    def not_ready(self: DgiiClient, environment: Environment) -> None:
+        del self, environment
+        raise AuthorityUnavailableError(Failure.NOT_OPEN, "reception")
+
+    monkeypatch.setattr(DgiiClient, "require_ready", not_ready)
+    tenant, document = await decided(module_database, APPROVED)
+    assert isinstance(await worker.run(tenant, document), RunAgain)
+    found = await approval_of(module_database, tenant, document)
+    assert (found.dgii, found.dgii_reason, found.dgii_started_at, found.emitter) == (
+        "pending",
+        "do_ecf_dgii_unavailable",
+        None,
+        "sent",
+    )
+    assert worker.network.asked(DGII_APPROVAL) == 0
+
+
+async def test_the_run_holding_the_mark_records_dgii_s_answer_over_an_unknown_outcome_another_run_inferred(
+    worker: Worker, module_database: BoundDatabase
+) -> None:
+    """Review M-a: a run that found the mark while the call was under way inferred an unknown outcome; the run
+    that sent it has DGII's answer, which is not lost."""
+    tenant, document = await decided(module_database, APPROVED)
+
+    async def inferred() -> None:
+        await set_row(module_database, tenant, document, approval_dgii="outcome_unknown")
+
+    worker.network.meanwhile[DGII_APPROVAL] = inferred
+    assert await worker.run(tenant, document) == Done()
+    found = await approval_of(module_database, tenant, document)
+    assert (found.dgii, found.dgii_messages) == (
+        "sent",
+        [{"code": "", "text": "Aprobación comercial recibida"}],
+    )
+    assert found.sent_to_dgii_at is not None
+
+
+async def test_of_two_runs_that_signed_the_first_recorded_acecf_is_the_one_sent(
+    started: Started, module_database: BoundDatabase, archive: StoreArchive, signer: KeyPairSigner
+) -> None:
+    """Review M-b: another run signed and recorded its ACECF while this one was keeping its own."""
+    tenant, document = await decided(module_database, APPROVED)
+    first = signer.sign(
+        render_acecf(
+            CommercialApproval(
+                issuer_rnc=ISSUER,
+                buyer_rnc=BUYER,
+                encf=Encf(EcfType.CREDIT_INVOICE, 7),
+                issued_on=date(2026, 10, 13),
+                total=Decimal("1180.00"),
+                approved=True,
+                reason=None,
+                at=SIGNED_AT,
+            )
+        )
+    )
+    watching = Watching(archive)
+
+    async def recorded_first() -> None:
+        key = archive_key(channel="do-ecf-v1", tenant=tenant, kind="acecf", content=first, extension="xml")
+        kept = await archive.put_once(
+            key, first, retain_until=date(2036, 12, 31), media_type="application/xml"
+        )
+        values = {"approval_key": kept.key, "approval_sha256": kept.sha256, "approval_at": SIGNED_AT}
+        await set_row(module_database, tenant, document, **values)
+
+    watching.before_acecf = recorded_first
+    async with started.worker(**{ARCHIVE_PORT.name: watching}) as worker:
+        assert await worker.run(tenant, document) == Done()
+    state = worker.fake.state
+    assert (state.dgii_approvals, state.approvals) == ([first], [first])
+    found = await approval_of(module_database, tenant, document)
+    assert found.at == SIGNED_AT
+
+
+async def test_a_document_that_names_no_buyer_any_more_is_never_retried_silently(
+    worker: Worker, module_database: BoundDatabase
+) -> None:
+    """Review M-c: only what may pass (out of reach, the company's certificate) is tried again."""
+    tenant, document = await decided(module_database, APPROVED)
+    await set_row(module_database, tenant, document, buyer_rnc=None)
+    with pytest.raises(NotTheBuyerError):
+        await worker.run(tenant, document)
+    assert (await approval_of(module_database, tenant, document)).attempts == 0

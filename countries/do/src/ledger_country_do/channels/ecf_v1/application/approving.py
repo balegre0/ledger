@@ -19,7 +19,9 @@ enqueued.
    (``Acknowledged``: ``sent``; ``Refused``: ``refused``, never sent again); its outcome unknown
    (``OutcomeUnknownError``, or a mark found by a later run): ``outcome_unknown``, **never sent again**
    (Review Focus 1), a person settles it; DGII certainly did not take it (out of reach, no token, the
-   company's certificate): the mark cleared, tried again;
+   company's certificate): the mark cleared, tried again. Only the run that set a mark clears it, and only it
+   may replace an unknown outcome another run inferred from it (its answer is DGII's); DGII's client not
+   ready leaves DGII to try again, nothing marked, and the run goes on;
 3. the emitter (the ``urlAceptacion`` of DGII's directory, ``Emitters``; the company's buyer-authentication
    switch, Decision 19), unless settled: taken (``sent``), refused (``refused``, never sent again), no
    receiver listed or no directory in the environment (``not_applicable``), or out of reach: tried again.
@@ -41,7 +43,13 @@ lazy from collections.abc import Callable
 lazy from datetime import datetime
 lazy from uuid import UUID
 
-from ledger_country_do.channels.ecf_v1.application.ports import Acknowledged, OutcomeUnknownError
+from ledger_country_do.channels.ecf_v1.application.ports import (
+    Acknowledged,
+    CertificateMissingError,
+    CertificateNotValidError,
+    OutcomeUnknownError,
+    SignerClockSkewError,
+)
 from ledger_country_do.channels.ecf_v1.application.received import (
     OutgoingApproval,
     PartySending,
@@ -80,8 +88,14 @@ lazy from ledger_kernel.tenancy import Tenant
 
 type Party = Literal["emitter", "dgii"]
 """Whom the company's ACECF goes to."""
-_RETRIED: Final[tuple[type[EcfError], ...]] = (EcfUnavailableError, EcfConflictError)
-"""What leaves a party to try again: something out of reach, or the company's certificate (an operator's)."""
+_RETRIED: Final[tuple[type[EcfError], ...]] = (
+    EcfUnavailableError,
+    CertificateMissingError,
+    CertificateNotValidError,
+    SignerClockSkewError,
+)
+"""What leaves a party to try again: something out of reach, or the company's certificate (an operator's).
+Anything else (a document naming no buyer, a decision or a reception that raced, a defect) fails the run."""
 NO_DIRECTORY: Final = "no_directory_in_environment"
 """Why the emitter is ``not_applicable`` where DGII publishes no directory of receivers (CerteCF)."""
 REFUSED: Final = "refused"
@@ -441,31 +455,42 @@ class CommercialApprovals:
     async def _to_dgii(self, who: SigningAs, document: ReceivedDocument, acecf: bytes) -> None:
         """The ACECF to DGII, once: marked first, sent, its answer recorded (see the module).
 
-        Nothing is marked before DGII's client is ready for the environment: a mark is set only to send.
+        Nothing is marked before DGII's client is ready for the environment: a mark is set only to send. A
+        client not ready (out of reach, not open) leaves DGII to try again, unmarked, and the run goes on to
+        the emitter.
         """
-        authority = self._authority()
-        authority.require_ready(document.environment)
-        mark = await self._marked(who.tenant, document.id)
+        tenant = who.tenant
+        try:
+            authority = self._authority()
+            authority.require_ready(document.environment)
+        except _RETRIED as error:
+            await self._dgii(
+                tenant, document.id, None, PartySending(state=Sending.PENDING, reason=error.code)
+            )
+            return
+        mark = await self._marked(tenant, document.id)
         if mark is None:  # marked by an earlier run that recorded no answer: never sent again
-            await self._dgii(who.tenant, document.id, PartySending(state=Sending.OUTCOME_UNKNOWN))
+            await self._dgii(tenant, document.id, None, PartySending(state=Sending.OUTCOME_UNKNOWN))
             return
         answer: Acknowledged | Refused
         try:
             answer = await authority.commercial_approval(who, document.environment, acecf)
         except OutcomeUnknownError as error:
             unknown = PartySending(state=Sending.OUTCOME_UNKNOWN, reason=error.reason.value)
-            await self._dgii(who.tenant, document.id, unknown)
+            await self._dgii(tenant, document.id, mark, unknown)
             return
         except _RETRIED as error:  # DGII certainly did not take it: the mark cleared, tried again
-            await self._dgii(who.tenant, document.id, PartySending(state=Sending.PENDING, reason=error.code))
+            await self._dgii(
+                tenant, document.id, mark, PartySending(state=Sending.PENDING, reason=error.code)
+            )
             return
         messages = kept(tuple(message.authority() for message in answer.messages))
         if isinstance(answer, Acknowledged):
             took = PartySending(state=Sending.SENT, sent_at=self._clock())
-            await self._dgii(who.tenant, document.id, took, messages=messages)
+            await self._dgii(tenant, document.id, mark, took, messages=messages)
             return
         refused = PartySending(state=Sending.REFUSED, reason=REFUSED)
-        await self._dgii(who.tenant, document.id, refused, messages=messages)
+        await self._dgii(tenant, document.id, mark, refused, messages=messages)
 
     async def _marked(self, tenant: Tenant, document_id: UUID) -> datetime | None:
         """The mark this run set and committed; ``None`` when one was set already (see the module)."""
@@ -481,17 +506,26 @@ class CommercialApprovals:
         self,
         tenant: Tenant,
         document_id: UUID,
+        mark: datetime | None,
         outcome: PartySending,
         *,
         messages: tuple[AuthorityMessage, ...] | None = None,
     ) -> None:
-        """DGII's ``outcome`` recorded, audited, reported if unsent; the mark cleared when it is pending."""
+        """DGII's ``outcome`` recorded, audited, reported if unsent.
+
+        ``mark``: the one this run set and sent under (``None``: it set none). Only that run clears its mark
+        (DGII certainly did not take it), and only it may replace an unknown outcome another run inferred
+        from the mark meanwhile: its answer is DGII's own. Anything else another run recorded stays.
+        """
         async with self._units.unit(tenant) as unit:
             current = await _found(unit, document_id, lock=True)
             approval = _approval(current)
-            if approval.dgii.state.settled:  # recorded by a run that raced this one
+            holds = mark is not None and approval.dgii_started_at == mark
+            inferred = holds and approval.dgii.state is Sending.OUTCOME_UNKNOWN
+            if approval.dgii.state.settled and not inferred:  # recorded by a run that raced this one
                 return
-            started = None if outcome.state is Sending.PENDING else approval.dgii_started_at
+            cleared = holds and outcome.state is Sending.PENDING
+            started = None if cleared else approval.dgii_started_at
             recorded = replace(
                 approval,
                 dgii=outcome,
