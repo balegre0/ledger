@@ -8,7 +8,8 @@ committed first) is the table's refusal (``documents_invoice_key``), raised as `
 A signature's columns are all there or none: the table checks it
 (``ck_documents_signature``), so a row is signed exactly when it has them all. Past signing, a change keeps
 the submission's mark, DGII's track id, code, ``secuenciaUtilizada`` and messages (``[{code, text}]``),
-how often DGII was asked, delivery, and the number's fate.
+how often DGII was asked, delivery, and the number's fate. A printed representation is recorded apart, once
+(the first recorded stays), and changes neither the version nor the state.
 """
 
 from typing import Final, TypedDict, final, override
@@ -380,6 +381,24 @@ class PgDocuments(Documents):
                 version=document.version,
                 updated_at=document.updated_at,
             )
+        )
+
+    @override
+    async def representation(self, document: UUID) -> Archived | None:
+        rows = await self._connection.execute(
+            select(DocumentRecord.representation_key, DocumentRecord.representation_sha256).where(
+                *self._mine(), DocumentRecord.id == document
+            )
+        )
+        key, sha256 = rows.one()  # the unit's: a document it read
+        return None if key is None or sha256 is None else Archived(key=key, sha256=sha256)
+
+    @override
+    async def represented(self, document: UUID, archived: Archived) -> None:
+        await self._connection.execute(
+            update(DocumentRecord)
+            .where(*self._mine(), DocumentRecord.id == document, DocumentRecord.representation_key.is_(None))
+            .values(representation_key=archived.key, representation_sha256=archived.sha256)
         )
 
     @override

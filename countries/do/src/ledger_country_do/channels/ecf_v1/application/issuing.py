@@ -230,6 +230,11 @@ class Issuing:
             return _next(await self._recorded(who.tenant, document_id, Step.BLOCK, None))
         return _next(await self._recorded(who.tenant, document_id, Step.SIGN, signature))
 
+    async def document(self, tenant: Tenant, invoice: DocumentRef) -> EcfDocument | None:
+        """``invoice``'s document in ``tenant``'s company and mode, as it stands; ``None`` if it has none."""
+        async with self._units.unit(tenant) as unit:
+            return await unit.documents.of_invoice(invoice)
+
     def now(self) -> datetime:
         """The channel's clock: what numbers are allocated, and released, by (``Signing.now``)."""
         return self._signing.now()

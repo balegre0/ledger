@@ -12,7 +12,8 @@ leading its keys (§6.3), in schema ``do_ecf`` (§6.2):
 - ``documents``: the e-CF numbered from them, one per invoice (Decision 35), each number held by one document
   until DGII releases it; the draft it was numbered for (``draft``, the platform codec's JSON), where it
   stands and, once signed, the keys and SHA-256 of what the archive keeps (§6.8: never the bytes); once
-  submitted, the submission's mark, DGII's track id and answer;
+  submitted, the submission's mark, DGII's track id and answer; once first printed, its printed
+  representation's key and SHA-256;
 - ``submissions``: every track id a document was given or adopted, by its number (Decision 9).
 """
 
@@ -211,6 +212,12 @@ FATE_CHECK: Final = (
     "AND (state NOT IN ('accepted', 'accepted_conditionally') OR number_fate = 'used')"
 )
 """A number's fate is known exactly once DGII decided: used if accepted, burned or released if rejected."""
+REPRESENTATION_CHECK: Final = (
+    "(representation_key IS NULL) = (representation_sha256 IS NULL) "
+    "AND (representation_sha256 IS NULL OR octet_length(representation_sha256) = 32) "
+    "AND (representation_key IS NULL OR signed_at IS NOT NULL)"
+)
+"""A printed representation is archived whole (key and SHA-256), and only of a signed document."""
 
 
 class DocumentRecord(DoEcfTable):
@@ -244,6 +251,7 @@ class DocumentRecord(DoEcfTable):
         CheckConstraint(UNKNOWN_CHECK, name="ck_documents_unknown"),
         CheckConstraint(FATE_CHECK, name="ck_documents_fate"),
         CheckConstraint("polls >= 0", name="ck_documents_polls"),
+        CheckConstraint(REPRESENTATION_CHECK, name="ck_documents_representation"),
         Index("documents_number", *SERIES, "sequence", unique=True, postgresql_where=text(HELD_NUMBER)),
     )
 
@@ -289,6 +297,9 @@ class DocumentRecord(DoEcfTable):
     """DGII's ``secuenciaUtilizada``, once it said."""
     messages: Mapped[list[dict[str, str]]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
     """DGII's messages about it (``code``, ``text``), verbatim within the kit's bounds."""
+    representation_key: Mapped[str | None] = mapped_column(Text)
+    """Where the archive keeps its printed representation, once first rendered (§8.6.7)."""
+    representation_sha256: Mapped[bytes | None] = mapped_column(LargeBinary)
 
 
 class SubmissionRecord(DoEcfTable):

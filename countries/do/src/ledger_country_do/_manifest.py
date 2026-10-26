@@ -34,12 +34,17 @@ MANIFEST: Final = PackageManifest.model_validate(
                 "psycopg>=3.3.6",
                 "pydantic>=2.14.1",
                 "pydantic-settings>=2.15.0",
+                "reportlab>=5.1.0",
+                "segno>=1.6.6",
                 "sqlalchemy>=2.1.4",
             ],
             "test": [
+                "pypdf>=6.21.2",
                 "signxml>=5.1.0",
                 "types-lxml>=2026.2.16",
+                "types-reportlab>=5.0.0.20261008",
                 "xmlschema>=4.3.2",
+                "zxing-cpp>=3.1.1",
             ],
         },
         "country": {

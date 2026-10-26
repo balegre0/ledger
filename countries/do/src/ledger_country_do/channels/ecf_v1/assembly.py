@@ -12,7 +12,7 @@ worker opens its DGII and buyer clients at start (their trusted roots, which it 
 receiver requires the trusted roots too, and reads them at start the same way (the documents emitters send
 it chain to them: ``inbound``).
 ``migrate`` runs its revisions; every app checks its schema is current. Documents are signed with the QR's
-hosts of the DGII hosts configured (a test's fake's, or DGII's).
+hosts of the DGII hosts configured (a test's fake's, or DGII's), and printed as PDFs (``adapters.pdf``).
 """
 
 from dataclasses import replace
@@ -29,6 +29,7 @@ from ledger_country_do.channels.ecf_v1.adapters.inbound import inbound_trust
 from ledger_country_do.channels.ecf_v1.adapters.jobs import advance_job
 from ledger_country_do.channels.ecf_v1.adapters.logs import AdvanceLog, SigningLog
 from ledger_country_do.channels.ecf_v1.adapters.outbound import DgiiAccess, Outbound, unopened
+from ledger_country_do.channels.ecf_v1.adapters.pdf.render import PdfPrinting
 from ledger_country_do.channels.ecf_v1.adapters.postgres.schema import migrations
 from ledger_country_do.channels.ecf_v1.adapters.postgres.unit import PgUnits
 from ledger_country_do.channels.ecf_v1.adapters.routes import ranges
@@ -37,6 +38,7 @@ from ledger_country_do.channels.ecf_v1.adapters.xml.documents import DgiiXml
 from ledger_country_do.channels.ecf_v1.application.advancing import Advancing, SettleTooShortError
 from ledger_country_do.channels.ecf_v1.application.issuing import Issuing
 from ledger_country_do.channels.ecf_v1.application.ranges import Ranging
+from ledger_country_do.channels.ecf_v1.application.representation import Representing
 from ledger_country_do.channels.ecf_v1.application.requirements import Requiring
 from ledger_country_do.channels.ecf_v1.application.signing import Signing
 from ledger_country_do.channels.ecf_v1.domain.channel import KEY
@@ -127,7 +129,9 @@ def assemble(context: ChannelContext) -> ChannelParts:
     outbound = _outbound(settings, context, signer, DgiiAccess(hosts=hosts, timeouts=timeouts))
     authority = unopened if outbound is None else outbound.authority
     advancing = Advancing(units, issuing, archive, authority, AdvanceLog(context.telemetry))
-    channel = DoEcfChannel(definition, requiring, issuing, advancing)
+    channel = DoEcfChannel(
+        definition, requiring, issuing, advancing, Representing(units, archive, PdfPrinting())
+    )
     jobs = (advance_job(advancing),)
     if not archiving:  # migrate: its revisions, nothing to serve, open or keep
         return ChannelParts(channel=channel, jobs=jobs, migrations=migrations())
