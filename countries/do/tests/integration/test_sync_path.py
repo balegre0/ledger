@@ -257,9 +257,11 @@ async def test_a_signer_too_slow_for_the_budget_leaves_the_number_and_the_signat
     await enrolled(client, owner, company)
     await located(client, owner, company)
     gated.held = asyncio.Event()
-    started = asyncio.get_running_loop().time()
-    invoice = await issued(client, owner, company)
-    assert asyncio.get_running_loop().time() - started < 2  # the 1.5 s budget, and the request's own work
+    # The signer is held until the end of the test, so a request that waited for it would never answer. No
+    # tighter wall clock bound: under a loaded gate the 1.5 s budget plus the request's own work ran past 2 s.
+    # The budget is version 2 below (an invoicing timeout leaves version 1 and logs after_issue_timed_out).
+    async with asyncio.timeout(10):
+        invoice = await issued(client, owner, company)
     entry, details = channel_status(invoice)
     assert entry["version"] == 2  # fiscal's pending 1, the channel's numbered 1 + 1
     assert (details["encf"], details.get("security_code"), details.get("qr_url")) == (FIRST, None, None)

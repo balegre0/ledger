@@ -85,6 +85,23 @@ It contains local `main` (v2-M1, DGII spike, GitHub cloud work + 23-commit fix w
     then Task 23 follow, each through the SDD loop (implementer, independent review, fix round, gate twice, merge).
     Run `uv sync --locked --all-packages` in any fresh tree: without it the receiver app is missing from the venv and
     basedpyright fails on `apps/receiver/tests/unit/test_main.py`.
+  - **UPDATE 2026-10-26 (latest): Tasks 20, 21, 22, 23, 24, 25 and the new Task 35 (the issuer's fiscal
+    address, DireccionEmisor, with a dated spec amendment; the address is company-level, owner item 30) are merged
+    into local `main` (5b3b4b8). Each was reviewed until APPROVED and its gate was green twice on the exact tree
+    merged (every merge commit's tree equals its verified branch tree). do_ecf revisions run r0004 (receiver), r0005
+    (delivery), r0006 (representation), r0007 (approvals); the worker pool is 78 and Postgres `max_connections`
+    372. **Task 26 is merged too (7b2eef2; reviewed twice, APPROVED after 6536049): the fake DGII is complete, compose
+    runs the stack, `poe e2e` is part of the gate, and the end-to-end suite covers issue → DGII → buyer delivery →
+    commercial approval → PDF, the slow signer, a lost answer never resent, a real certificate event waking a parked
+    document, and reception plus approval out. It found that the api must sign in the request (spec §3.3/§8.5): the
+    signer now lets the api sign e-CF and RFCE only (ADR 0010 risks 8-9 amended; owner item 32), and plain http to a
+    compose service name is allowed in local and test environments only.** Remaining CERT work: Task 27 (retire the
+    spike CLI, runbooks and the alerts the reviews bound to it: dead `do_ecf.advance`/`deliver`/`approve` jobs, the
+    stuck-pending invoice, the two delivery alerts) and Task 34 (final verification and whole-branch review). Owner
+    items 5 and 13-33 in the plan are open questions for the owner. Follow-ups noted by the reviews (not blocking):
+    Task 22's two untested `to_thread` hand-offs and its limiter-order test; Task 25's facade guard on fiscal's test
+    channel; Task 26's plain-http case on the `fc` host only; the CI job's 30-minute limit. Pushed to GitHub `main`
+    on the owner's request (2026-10-26).**
   - **UPDATE 2026-10-26: Task 22 is merged into local `main` (b1331c3; reviewed twice, APPROVED after its fix
     round 4b67429), with a devtools fix: the tree scan no longer enters a nested repository or worktree (another
     session's worktree under `.claude/worktrees/` had failed `ledger-devtools check`). Task 20 is APPROVED after its
