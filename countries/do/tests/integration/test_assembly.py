@@ -17,7 +17,7 @@ from fastapi.routing import APIRoute
 
 from ledger_country_do.channels.ecf_v1.adapters.buyers.client import BuyerClient
 from ledger_country_do.channels.ecf_v1.adapters.buyers.delivery import BuyerDeliveries
-from ledger_country_do.channels.ecf_v1.adapters.channel import ChannelNotReadyError, DoEcfChannel
+from ledger_country_do.channels.ecf_v1.adapters.channel import DoEcfChannel
 from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
 from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import HostRefusedError
 from ledger_country_do.channels.ecf_v1.adapters.inbound import Inbound, InboundClosedError
@@ -35,7 +35,6 @@ from ledger_country_do.channels.ecf_v1.assembly import SettingRefusedError, asse
 from ledger_country_do.channels.ecf_v1.domain.fields import CHANNEL_FIELDS
 from ledger_country_do.channels.ecf_v1.settings import DoEcfSettings
 from ledger_fiscal_kit.channels import Channel
-from ledger_fiscal_kit.drafts import DocumentRef
 from ledger_fiscal_kit.ports import (
     ARCHIVE_PORT,
     COMPANY_DIRECTORY,
@@ -44,12 +43,10 @@ from ledger_fiscal_kit.ports import (
     ReceivingCompany,
 )
 from ledger_kernel.access import CompanyNotFoundError
-from ledger_kernel.errors import ErrorKind
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.regimes import Direction, DocumentKind, Locale
-from ledger_kernel.tenancy import Mode, Tenant
+from ledger_kernel.tenancy import Mode
 from ledger_platform.http.problems import install_problem_handlers
-from ledger_platform.runtime.calls import SystemCall
 from ledger_platform.runtime.facade import facade
 from ledger_platform.runtime.keys import BindingMissingError
 from ledger_testing.pki import pem
@@ -57,14 +54,12 @@ lazy from ledger_kernel.access import Permission, Principal
 lazy from ledger_kernel.tax_ids import TaxId
 lazy from ledger_platform.config.manifest import AppRole
 lazy from ledger_platform.config.settings import Environment
+lazy from ledger_platform.runtime.calls import SystemCall
 lazy from ledger_platform.runtime.contexts import ChannelContext
 lazy from ledger_testing.pki import Authority
 
 FINGERPRINT: Final = "ab" * 32
 RECEIVED: Final = DoEcfSettings(receiver_public_url="https://receiver.ledger.test")
-CALL: Final = SystemCall(
-    reason="fiscal:issue", scope=Tenant(OrganizationId(new_id()), CompanyId(new_id()), Mode.TEST)
-)
 
 
 class Contexts(Protocol):
@@ -239,24 +234,6 @@ async def test_roots_that_cannot_be_read_stop_the_worker_and_the_receiver_withou
             pytest.fail("an app that cannot verify a counterparty never runs")
     assert "secret-roots" not in str(caught.value)
     assert caught.value.code == "do_ecf_trusted_roots_unreadable"
-
-
-async def test_the_channel_answers_no_status_or_representation_yet(contexts: Contexts) -> None:
-    """``status``, ``representation``: built by the tasks to come (24); ``resume`` is Task 19's.
-
-    Unavailable, not a defect: invoicing answers a representation the channel cannot render yet 503.
-    """
-    channel = assemble(contexts(settings=RECEIVED)).channel
-    assert isinstance(channel, DoEcfChannel)
-    document = DocumentRef(new_id())
-    with pytest.raises(ChannelNotReadyError, match="do-ecf-v1 does not answer this yet"):
-        await channel.status(CALL, document)
-    with pytest.raises(ChannelNotReadyError):
-        await channel.representation(CALL, document)
-    assert (ChannelNotReadyError.code, ChannelNotReadyError.kind) == (
-        "do_ecf_not_ready",
-        ErrorKind.UNAVAILABLE,
-    )
 
 
 @final

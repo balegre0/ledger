@@ -144,7 +144,7 @@ PRINTED: Final[dict[int | str, dict[str, object]]] = {
     }
 }
 """A representation's answer: a PDF (what DGII's printed form is), shown inline under its file name."""
-RENDERED: Final = problems(400, 401, 403, 404, 422) | PRINTED
+RENDERED: Final = problems(400, 401, 403, 404, 409, 422) | PRINTED
 
 
 class _Answered(TypedDict):
@@ -330,7 +330,8 @@ def representations(context: ApiContext, renderers: Renderers) -> APIRouter:
         """A document's printed representation for a fiscal channel (a PDF), as that channel renders it.
 
         404 ``representation_unavailable`` when no installed channel renders it (not issued through it, or a
-        draft); 503 while the channel cannot render it.
+        draft), or the channel's own when it issued no document for it; 409 while the channel cannot print it
+        yet (do-ecf-v1: not signed yet, ``do_ecf_not_signed``); 503 while the channel cannot render it now.
         """
         found = await queries.document(caller.call, parse_invoice_ref(invoice_id))
         rendered = await renderers.render(caller.call, info_of(found), channel)

@@ -191,4 +191,6 @@ def test_a_representation_names_its_channel_and_answers_a_document_to_print() ->
     answers = operation.get("responses", {})
     assert list(answers["200"].get("content", {})) == ["application/pdf"]
     assert "Content-Disposition" in answers["200"].get("headers", {})
-    assert "404" in answers
+    assert {"404", "409", "503"} <= set(
+        answers
+    )  # none renders it; not printable yet; the channel unavailable

@@ -10,7 +10,7 @@ The representation is the channel's, for a document routed to it.
 """
 
 from datetime import timedelta
-from typing import Final, LiteralString, Protocol
+from typing import ClassVar, Final, LiteralString, Protocol
 lazy from collections.abc import Awaitable, Callable, Mapping
 lazy from uuid import UUID
 
@@ -35,6 +35,7 @@ from ledger_invoicing.application.mirror import FiscalMirroring
 from ledger_invoicing.application.queries import InvoicingQueries
 from ledger_kernel.access import Principal, PrincipalKind, SubjectId
 from ledger_kernel.clock import utc_now
+from ledger_kernel.errors import ConflictError, NotFoundError
 from ledger_kernel.ids import parse_id
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.data.codec import JsonValue
@@ -44,6 +45,7 @@ from ledger_platform.runtime.registries import Regimes
 from ledger_testing.api import document
 lazy from ledger_fiscal_kit.channels import EnrollmentState, StatusUpdate
 lazy from ledger_fiscal_kit.drafts import DocumentRef, FiscalDraft
+lazy from ledger_kernel.errors import LedgerError
 lazy from ledger_platform.runtime.app import App
 lazy from ledger_testing.api import TestPrincipal
 
@@ -88,6 +90,25 @@ class FakeChannel(Protocol):
     no_number: bool
     before_issue: Callable[[FiscalDraft], Awaitable[None]] | None
     printed: Representation | None
+    unprintable: LedgerError | None
+
+
+class NotSignedYetError(ConflictError):
+    """The fake channel's document not signed yet: no printed representation until it is."""
+
+    code: ClassVar[str] = "fiscal_tests_not_signed"
+
+    def __init__(self) -> None:
+        super().__init__("the fake channel's document is not signed yet")
+
+
+class NoDocumentError(NotFoundError):
+    """The fake channel never issued the document (it was routed, then no number was available)."""
+
+    code: ClassVar[str] = "fiscal_tests_no_document"
+
+    def __init__(self) -> None:
+        super().__init__("the fake channel issued no document for it")
 
 
 def headers(principal: TestPrincipal, company: str, key: str | None = None) -> dict[str, str]:
@@ -322,6 +343,38 @@ async def test_the_representation_is_the_channel_s_for_a_document_routed_to_it(
     )
     other = await client.get(path, params={"channel": "do-other-v1"}, headers=headers(owner, company))
     assert (other.status_code, document(other)["code"]) == (404, "representation_unavailable")
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        (NotSignedYetError(), 409, "fiscal_tests_not_signed"),  # do-ecf-v1's do_ecf_not_signed
+        (
+            NoDocumentError(),
+            404,
+            "fiscal_tests_no_document",
+        ),  # routed, no number then: do_ecf_document_not_issued
+    ],
+    ids=["not signed yet", "never issued"],
+)
+async def test_a_channel_s_refusal_to_print_a_routed_document_is_answered_as_its_kind(
+    client: httpx.AsyncClient,
+    owner: TestPrincipal,
+    company: str,
+    channel: FakeChannel,
+    refusal: tuple[LedgerError, int, str],
+) -> None:
+    """A document not signed yet is a conflict; one routed but never issued (no number then) is not found."""
+    raised, status, code = refusal
+    await enroll(client, owner, company, channel, active=True)
+    response = await issued(client, owner, company)
+    channel.unprintable = raised
+    printed = await client.get(
+        f"{PATH}/{document(response)['id']}/representation",
+        params={"channel": FAKE},
+        headers=headers(owner, company),
+    )
+    assert (printed.status_code, document(printed)["code"]) == (status, code)
 
 
 async def test_an_installed_channel_the_invoice_was_never_routed_to_renders_nothing(

@@ -167,6 +167,7 @@ SIGNED: Final[dict[str, object]] = {
 """What a signed document records beside its number."""
 SUBMITTED: Final = SIGNED | {"state": "submitted", "submission_started_at": NOW, "track_id": "0d1e2f"}
 """What a document DGII took records beside its signature: the mark, the track id."""
+REPRESENTATION: Final = "do-ecf-v1/test/o/c/representation/d.pdf"
 SUMMARIZED: Final = SIGNED | {
     "route": "rfce",
     "rfce_key": "do-ecf-v1/test/o/c/rfce/d.xml",
@@ -383,6 +384,10 @@ async def with_a_range(module_database: BoundDatabase, tenant: Tenant) -> None:
         {"polls": -1},
         {"sequence": 0},
         {"version": 0},
+        {"representation_key": REPRESENTATION, "representation_sha256": bytes(32)},  # printed before signing
+        SIGNED | {"representation_key": REPRESENTATION},  # its digest unknown
+        SIGNED | {"representation_sha256": bytes(32)},
+        SIGNED | {"representation_key": REPRESENTATION, "representation_sha256": bytes(31)},
     ],
 )
 async def test_a_document_s_words_and_signature_are_checked(
@@ -404,6 +409,7 @@ async def test_a_document_s_words_and_signature_are_checked(
         {"state": "outcome_unknown", "submission_started_at": NOW, "track_id_since": NOW},
         {"state": "accepted", "submission_started_at": NOW, "number_fate": "used"},
         {"state": "rejected", "submission_started_at": NOW, "number_fate": "released"},
+        {"state": "signed", "representation_key": REPRESENTATION, "representation_sha256": bytes(32)},
     ],
 )
 async def test_a_signed_document_records_its_signature_and_a_summary_its_own(

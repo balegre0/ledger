@@ -97,7 +97,7 @@ def test_the_migrate_app_brings_the_channel_s_schema_to_head_from_nothing_and_ag
         *CHASSIS_TABLES,
         "alembic_version",
     }
-    assert version_of(fresh_admin_url) == MIGRATIONS.head == "0005"
+    assert version_of(fresh_admin_url) == MIGRATIONS.head == "0006"
     App("migrate", settings=fresh, discover=module_under_test.discovering()).migrate()
     assert pending_changes(fresh_admin_url, MODELS, schema=S) is None
 

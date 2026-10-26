@@ -7,12 +7,13 @@ words; ``check`` and ``issue`` a draft's objections and its document, numbered, 
 request's budget (``application.issuing``), answered as the kit's ``StatusUpdate`` (``statuses``). A draft
 is the call's tenant's, in an environment of its mode (``InvalidValueError`` otherwise: a defect of fiscal's
 routing). ``resume`` wakes the documents waiting for what its reason settles (``application.advancing``).
-The rest arrives with the tasks that build it (``status``, ``representation``): until then each is
-``ChannelNotReadyError``.
+``status`` is an invoice's document as it stands (``None`` if the channel never issued it), and
+``representation`` its printed representation, a PDF named after its e-NCF (``application.representation``):
+each is asked in the call's tenant, a company in a mode (``InvalidValueError`` otherwise).
 """
 
 from types import MappingProxyType
-from typing import ClassVar, Final, final, override
+from typing import Final, final, override
 lazy from collections.abc import Mapping, Sequence
 lazy from datetime import timedelta
 
@@ -20,21 +21,15 @@ from ledger_country_do.channels.ecf_v1.adapters.statuses import update_of
 from ledger_country_do.channels.ecf_v1.application.ports import SigningAs
 from ledger_country_do.channels.ecf_v1.application.steps import ParkReason
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
-from ledger_country_do.channels.ecf_v1.domain.errors import EcfUnavailableError
-from ledger_fiscal_kit.channels import Channel, Issued, Requirements, ResumeReason
+from ledger_fiscal_kit.channels import Channel, Issued, Representation, Requirements, ResumeReason
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.tenancy import Tenant
 from ledger_platform.runtime.facade import facade
 lazy from ledger_country_do.channels.ecf_v1.application.advancing import Advancing
 lazy from ledger_country_do.channels.ecf_v1.application.issuing import Issuing
+lazy from ledger_country_do.channels.ecf_v1.application.representation import Representing
 lazy from ledger_country_do.channels.ecf_v1.application.requirements import Requiring
-lazy from ledger_fiscal_kit.channels import (
-    ChannelDef,
-    EnrollmentState,
-    Objection,
-    Representation,
-    StatusUpdate,
-)
+lazy from ledger_fiscal_kit.channels import ChannelDef, EnrollmentState, Objection, StatusUpdate
 lazy from ledger_fiscal_kit.drafts import DocumentRef, FiscalDraft
 lazy from ledger_kernel.ids import CompanyId
 lazy from ledger_platform.runtime.calls import SystemCall
@@ -52,33 +47,36 @@ _WOKEN: Final[Mapping[ResumeReason, tuple[ParkReason, ...]]] = MappingProxyType(
     }
 )
 """What each reason to resume wakes."""
+PDF: Final = "application/pdf"
 
 
-class ChannelNotReadyError(EcfUnavailableError):
-    """A call the channel does not answer yet (see the module).
-
-    Unavailable until the task that builds it: invoicing answers a representation asked meanwhile 503.
-    """
-
-    code: ClassVar[str] = "do_ecf_not_ready"
-
-    def __init__(self) -> None:
-        super().__init__("do-ecf-v1 does not answer this yet")
+def _tenant(call: SystemCall) -> Tenant:
+    """The call's tenant: a company in a mode (``InvalidValueError`` otherwise, a defect of fiscal's call)."""
+    scope = call.scope
+    if not isinstance(scope, Tenant) or scope.mode is None:
+        raise InvalidValueError(field="call.scope", requirement="a company in a mode")
+    return scope
 
 
 @final
 class DoEcfChannel(Channel):
     """The channel fiscal routes to (see the module)."""
 
-    __slots__ = ("_advancing", "_definition", "_issuing", "_requiring")
+    __slots__ = ("_advancing", "_definition", "_issuing", "_representing", "_requiring")
 
     def __init__(
-        self, definition: ChannelDef, requiring: Requiring, issuing: Issuing, advancing: Advancing
+        self,
+        definition: ChannelDef,
+        requiring: Requiring,
+        issuing: Issuing,
+        advancing: Advancing,
+        representing: Representing,
     ) -> None:
         self._definition = definition
         self._requiring = requiring
         self._issuing = issuing
         self._advancing = advancing
+        self._representing = representing
 
     def _environment(self, call: SystemCall, draft: FiscalDraft) -> Environment:
         """``draft``'s environment, once ``draft`` is ``call``'s tenant's and the environment of its mode."""
@@ -135,7 +133,9 @@ class DoEcfChannel(Channel):
     @facade
     @override
     async def status(self, call: SystemCall, document: DocumentRef) -> StatusUpdate | None:
-        raise ChannelNotReadyError
+        """The invoice's document as it stands (``statuses``); ``None`` if the channel never issued it."""
+        found = await self._issuing.document(_tenant(call), document)
+        return None if found is None else update_of(found)
 
     @facade
     @override
@@ -154,4 +154,9 @@ class DoEcfChannel(Channel):
     @facade
     @override
     async def representation(self, call: SystemCall, document: DocumentRef) -> Representation:
-        raise ChannelNotReadyError
+        """The invoice's e-CF as printed, a PDF named ``<e-NCF>.pdf`` (``representing``).
+
+        ``NotSignedError`` before it is signed, ``DocumentNotIssuedError`` if the channel never issued it.
+        """
+        represented = await self._representing.representation(_tenant(call), document)
+        return Representation(media_type=PDF, content=represented.pdf, filename=f"{represented.encf}.pdf")

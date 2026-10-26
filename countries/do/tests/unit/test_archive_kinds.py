@@ -69,6 +69,22 @@ async def test_a_document_is_kept_once_under_its_key_for_ten_years_from_the_day_
     assert await store.retained_until(kept.key) == date(2036, 10, 20)
 
 
+async def test_a_printed_representation_is_kept_as_a_pdf_for_ten_years() -> None:
+    store = MemoryImmutableStore()
+    clock = ManualClock(datetime(2026, 10, 20, 15, tzinfo=UTC))
+    archive = PortArchive(StoreArchive(store, retention_years=1, clock=clock), clock=clock)
+    kept = await archive.representation(TENANT, b"%PDF-1.4")
+    assert kept.key == archive_key(
+        channel="do-ecf-v1",
+        tenant=TENANT,
+        kind=ArchiveKind.REPRESENTATION,
+        content=b"%PDF-1.4",
+        extension="pdf",
+    )
+    assert await archive.read(kept) == b"%PDF-1.4"
+    assert await store.retained_until(kept.key) == date(2036, 10, 20)
+
+
 async def test_an_archive_out_of_reach_is_the_channel_s_unavailable() -> None:
     clock = ManualClock()
     archive = PortArchive(
@@ -81,7 +97,7 @@ async def test_an_archive_out_of_reach_is_the_channel_s_unavailable() -> None:
 
 async def test_an_app_that_binds_no_archive_keeps_nothing() -> None:
     """``ledger-migrate``'s channel: asked to keep or read a document, a defect."""
-    for keep in (UnboundArchive().ecf, UnboundArchive().rfce):
+    for keep in (UnboundArchive().ecf, UnboundArchive().rfce, UnboundArchive().representation):
         with pytest.raises(ArchiveNotBoundError, match="binds no archive") as caught:
             await keep(TENANT, b"<ECF/>")
         assert caught.value.kind == "internal"

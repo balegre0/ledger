@@ -20,8 +20,11 @@ channel `do-ecf-v1` (DGII's e-CF: XML, schemas, signature, DGII's web services, 
   schema `do_ecf` (numbering series, ranges and released numbers; documents come with issuing), settings
   `LEDGER_DO_ECF_*` (`settings.py`: DGII's hosts and waits, trusted roots, test stand-ins, the receiver's URL),
   the public routes under `/v1/do` (`numbering_ranges`; snapshot in `openapi.json`) and what an enrollment
-  requires (`certificate`, `numbering_range`, `receiver_url`). Until issuing is built, every other `Channel`
-  method is `do_ecf_not_ready`.
+  requires (`certificate`, `numbering_range`, `receiver_url`). Every `Channel` method is answered: `status` is
+  an invoice's document as it stands, `representation` its printed representation.
+- The printed representation (`adapters/pdf/`) is a PDF drawn with reportlab, its QR encoded with segno, from
+  the signed e-CF the archive keeps: archived on its first render, answered from the archive after
+  (`application/representation.py`).
 - [`docs/runbooks/do/testecf-spike.md`](../../docs/runbooks/do/testecf-spike.md): running the spike against
   DGII's TesteCF; [`docs/spike-findings.md`](docs/spike-findings.md): what it settled.
 

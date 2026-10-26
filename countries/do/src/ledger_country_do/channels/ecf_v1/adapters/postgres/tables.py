@@ -13,7 +13,8 @@ leading its keys (§6.3), in schema ``do_ecf`` (§6.2):
   until DGII releases it; the draft it was numbered for (``draft``, the platform codec's JSON), where it
   stands and, once signed, the keys and SHA-256 of what the archive keeps (§6.8: never the bytes); once
   submitted, the submission's mark, DGII's track id and answer; once accepted, its delivery to the buyer
-  (since when, the attempts failed, why, the key and SHA-256 of the buyer's receipt);
+  (since when, the attempts failed, why, the key and SHA-256 of the buyer's receipt); once first printed,
+  its printed representation's key and SHA-256;
 - ``submissions``: every track id a document was given or adopted, by its number (Decision 9);
 - ``received_documents``: the e-CF other emitters sent the company and the receiver received (§3.8), each
   once per environment, issuer and e-NCF (Decision 16), with the keys and SHA-256 of what the archive keeps
@@ -230,6 +231,12 @@ RECEIPT_CHECK: Final = (
 """A buyer's receipt is kept by its key and SHA-256, both or neither."""
 DELIVERING_CHECK: Final = "delivery_state <> 'delivering' OR delivery_since IS NOT NULL"
 """A delivery under way started at a moment: its seven days run from it (Decision 21)."""
+REPRESENTATION_CHECK: Final = (
+    "(representation_key IS NULL) = (representation_sha256 IS NULL) "
+    "AND (representation_sha256 IS NULL OR octet_length(representation_sha256) = 32) "
+    "AND (representation_key IS NULL OR signed_at IS NOT NULL)"
+)
+"""A printed representation is archived whole (key and SHA-256), and only of a signed document."""
 
 
 class DocumentRecord(DoEcfTable):
@@ -266,6 +273,7 @@ class DocumentRecord(DoEcfTable):
         CheckConstraint(RECEIPT_CHECK, name="ck_documents_receipt"),
         CheckConstraint(DELIVERING_CHECK, name="ck_documents_delivering"),
         CheckConstraint("delivery_attempts >= 0", name="ck_documents_delivery_attempts"),
+        CheckConstraint(REPRESENTATION_CHECK, name="ck_documents_representation"),
         Index("documents_number", *SERIES, "sequence", unique=True, postgresql_where=text(HELD_NUMBER)),
     )
 
@@ -322,6 +330,9 @@ class DocumentRecord(DoEcfTable):
     receipt_sha256: Mapped[bytes | None] = mapped_column(LargeBinary)
     commercial_approval: Mapped[dict[str, object] | None] = mapped_column(JSONB)
     """Its buyer's last commercial approval or rejection (``approved``, ``reason``, ``at``), once one came."""
+    representation_key: Mapped[str | None] = mapped_column(Text)
+    """Where the archive keeps its printed representation, once first rendered (§8.6.7)."""
+    representation_sha256: Mapped[bytes | None] = mapped_column(LargeBinary)
 
 
 class SubmissionRecord(DoEcfTable):

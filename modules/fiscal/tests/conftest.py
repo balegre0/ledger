@@ -127,7 +127,8 @@ class FakeChannel(Channel):
     draft once per document (``E31`` and a counter, ``numbered``), answering the document it numbered to a
     second call; signs it at once when asked within a budget (version 2, a security code) unless ``slow``;
     raises ``NoNumberError`` while ``no_number`` (keeping nothing) and runs ``before_issue`` first; renders
-    ``printed`` when set, else is unavailable. ``issued`` holds every ``issue`` call.
+    ``printed`` when set, else is unavailable, unless ``unprintable`` names what it raises instead. ``issued``
+    holds every ``issue`` call.
     """
 
     __slots__ = (
@@ -144,6 +145,7 @@ class FakeChannel(Channel):
         "objections",
         "printed",
         "slow",
+        "unprintable",
     )
 
     def __init__(self) -> None:
@@ -164,6 +166,8 @@ class FakeChannel(Channel):
         self.no_number = False
         self.before_issue: BeforeIssue | None = None
         self.printed: Representation | None = None
+        self.unprintable: LedgerError | None = None
+        """What asking its representation raises, when a test sets it (before ``printed`` is looked at)."""
 
     @property
     @override
@@ -226,6 +230,8 @@ class FakeChannel(Channel):
 
     @override
     async def representation(self, call: SystemCall, document: DocumentRef) -> Representation:
+        if self.unprintable is not None:
+            raise self.unprintable
         if self.printed is None:
             raise NotPrintableError
         return self.printed

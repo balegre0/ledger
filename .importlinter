@@ -65,6 +65,8 @@ forbidden_modules =
     pydantic_settings
     pytest
     python_multipart
+    reportlab
+    segno
     signxml
     sqlalchemy
     starlette
@@ -469,6 +471,8 @@ forbidden_modules =
     pydantic_settings
     pytest
     python_multipart
+    reportlab
+    segno
     signxml
     sqlalchemy
     starlette
@@ -523,6 +527,8 @@ forbidden_modules =
     pydantic_settings
     pytest
     python_multipart
+    reportlab
+    segno
     signxml
     sqlalchemy
     starlette
@@ -588,6 +594,8 @@ forbidden_modules =
     pydantic_settings
     pytest
     python_multipart
+    reportlab
+    segno
     signxml
     sqlalchemy
     starlette
@@ -697,6 +705,8 @@ forbidden_modules =
     pydantic_settings
     pytest
     python_multipart
+    reportlab
+    segno
     signxml
     sqlalchemy
     starlette
@@ -737,6 +747,8 @@ forbidden_modules =
     pydantic_settings
     pytest
     python_multipart
+    reportlab
+    segno
     signxml
     sqlalchemy
     starlette
@@ -825,6 +837,8 @@ forbidden_modules =
     pydantic_settings
     pytest
     python_multipart
+    reportlab
+    segno
     signxml
     sqlalchemy
     starlette
@@ -865,6 +879,8 @@ forbidden_modules =
     pydantic_settings
     pytest
     python_multipart
+    reportlab
+    segno
     signxml
     sqlalchemy
     starlette
@@ -953,6 +969,8 @@ forbidden_modules =
     pydantic_settings
     pytest
     python_multipart
+    reportlab
+    segno
     signxml
     sqlalchemy
     starlette
@@ -993,6 +1011,8 @@ forbidden_modules =
     pydantic_settings
     pytest
     python_multipart
+    reportlab
+    segno
     signxml
     sqlalchemy
     starlette
@@ -1081,6 +1101,8 @@ forbidden_modules =
     pydantic_settings
     pytest
     python_multipart
+    reportlab
+    segno
     signxml
     sqlalchemy
     starlette
@@ -1121,6 +1143,8 @@ forbidden_modules =
     pydantic_settings
     pytest
     python_multipart
+    reportlab
+    segno
     signxml
     sqlalchemy
     starlette
