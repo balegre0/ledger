@@ -14,14 +14,22 @@ person (an outcome unknown for a day, or in CerteCF; an answer about another e-N
 A buyer that requires authentication while the company keeps it switched off is an error at every attempt
 (``do_ecf.delivery_needs_authentication``, Decision 19: the client may switch it on and retry), and so is a
 delivery failed for good (``do_ecf.delivery_failed``, its reason a code: Decision 21's alert).
+
+A commercial approval the company sent that will not reach a party (``do_ecf.approval_unsent``, the party,
+``emitter`` or ``dgii``, and the outcome: ``refused``, ``failed`` or ``outcome_unknown``) is an error, and so
+is an emitter that requires authentication while it is switched off
+(``do_ecf.approval_needs_authentication``): a person looks.
 """
 
 from typing import final, override
 
 from ledger_country_do.channels.ecf_v1.application.advancing import AdvanceReport
+from ledger_country_do.channels.ecf_v1.application.approving import ApprovalReport
 from ledger_country_do.channels.ecf_v1.application.delivering import DeliveryReport
 from ledger_country_do.channels.ecf_v1.application.issuing import SigningReport
+lazy from ledger_country_do.channels.ecf_v1.application.approving import Party
 lazy from ledger_country_do.channels.ecf_v1.application.steps import ParkReason
+lazy from ledger_country_do.channels.ecf_v1.domain.approval import Sending
 lazy from ledger_platform.observability.telemetry import Telemetry
 
 
@@ -77,3 +85,21 @@ class DeliveryLog(DeliveryReport):
     @override
     def failed(self, reason: str) -> None:
         self._telemetry.logger.error("do_ecf.delivery_failed", reason=reason)
+
+
+@final
+class ApprovalLog(ApprovalReport):
+    """``ApprovalReport`` on the channel's logger: what the alerts read."""
+
+    __slots__ = ("_telemetry",)
+
+    def __init__(self, telemetry: Telemetry) -> None:
+        self._telemetry = telemetry
+
+    @override
+    def needs_authentication(self) -> None:
+        self._telemetry.logger.error("do_ecf.approval_needs_authentication")
+
+    @override
+    def unsent(self, party: Party, outcome: Sending) -> None:
+        self._telemetry.logger.error("do_ecf.approval_unsent", party=party, outcome=outcome.value)

@@ -90,6 +90,9 @@ def test_the_document_holds_the_ranges_and_deliveries_operations_and_a_post_take
         "/v1/do/numbering_ranges/{range_id}": ["get"],
         "/v1/do/deliveries/{invoice}/retry": ["post"],
         "/v1/do/delivery_options": ["get", "put"],
+        "/v1/do/received_documents": ["get"],
+        "/v1/do/received_documents/{document_id}": ["get"],
+        "/v1/do/received_documents/{document_id}/approval": ["post"],
     }
     retry = parsed["paths"]["/v1/do/deliveries/{invoice}/retry"]["post"]
     for header in ("Idempotency-Key", "Ledger-Mode", "Ledger-Company"):

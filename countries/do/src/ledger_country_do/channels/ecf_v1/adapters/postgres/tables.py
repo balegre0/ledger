@@ -18,7 +18,8 @@ leading its keys (§6.3), in schema ``do_ecf`` (§6.2):
 - ``submissions``: every track id a document was given or adopted, by its number (Decision 9);
 - ``received_documents``: the e-CF other emitters sent the company and the receiver received (§3.8), each
   once per environment, issuer and e-NCF (Decision 16), with the keys and SHA-256 of what the archive keeps
-  of it and of the receipt it was answered with;
+  of it and of the receipt it was answered with, and the company's commercial approval of it (Task 23: its
+  decision, the ACECF signed, where sending it to the emitter and to DGII stands);
 - ``company_options``: how a company delivers to its buyers in a mode (Decision 19).
 
 Outside row-level security by design (§6.3), the receiver's own credentials: ``receiver_seeds`` (a seed's
@@ -52,6 +53,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.schema import SchemaItem
 
+from ledger_country_do.channels.ecf_v1.domain.approval import Decision, Sending
 from ledger_country_do.channels.ecf_v1.domain.ecf import DeliveryState, EcfDocumentState, EmissionMode
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
@@ -369,13 +371,37 @@ class SubmissionRecord(DoEcfTable):
 
 
 RECEIVED_DIGESTS_CHECK: Final = "octet_length(xml_sha256) = 32 AND octet_length(arecf_sha256) = 32"
+APPROVAL_CHECK: Final = (
+    "(approval_decision IS NULL) = (approval_requested_at IS NULL) "
+    "AND (approval_decision IS NULL) = (approval_emitter IS NULL) "
+    "AND (approval_decision IS NULL) = (approval_dgii IS NULL)"
+)
+"""A decision has its moment and both parties' states, or the document has none of them."""
+APPROVAL_REASON_CHECK: Final = (
+    "(approval_decision IS NOT DISTINCT FROM 'rejected') = (approval_reason IS NOT NULL)"
+)
+"""A rejection says why; an approval does not."""
+APPROVAL_ACECF_CHECK: Final = (
+    "(approval_key IS NULL) = (approval_sha256 IS NULL) "
+    "AND (approval_key IS NULL) = (approval_at IS NULL) "
+    "AND (approval_sha256 IS NULL OR octet_length(approval_sha256) = 32)"
+)
+"""The ACECF signed is kept by its moment, key and SHA-256: all or none."""
+APPROVAL_SENT_CHECK: Final = (
+    "(approval_emitter IS DISTINCT FROM 'sent' OR approval_sent_to_emitter_at IS NOT NULL) "
+    "AND (approval_dgii IS DISTINCT FROM 'sent' OR approval_sent_to_dgii_at IS NOT NULL) "
+    "AND (approval_key IS NOT NULL OR (approval_dgii_started_at IS NULL "
+    "AND approval_sent_to_emitter_at IS NULL AND approval_sent_to_dgii_at IS NULL))"
+)
+"""A party took it at a moment; nothing is marked or sent before the ACECF is signed."""
 
 
 class ReceivedDocumentRecord(DoEcfTable):
     """An e-CF another emitter sent the company, received: what reception read of it, where it is kept.
 
-    One per environment, issuer and e-NCF (Decision 16): the same e-NCF again is a duplicate. Nothing changes
-    or deletes it here (the company's commercial answer to it is Task 23's).
+    One per environment, issuer and e-NCF (Decision 16): the same e-NCF again is a duplicate. Nothing deletes
+    it; what changes is the company's commercial approval of it (Task 23): its decision, the ACECF signed for
+    it, and where sending that to the emitter and to DGII stands.
     """
 
     __tablename__: str = "received_documents"
@@ -387,6 +413,14 @@ class ReceivedDocumentRecord(DoEcfTable):
         CheckConstraint("sequence BETWEEN 1 AND 9999999999", name="ck_received_documents_sequence"),
         CheckConstraint(RECEIVED_DIGESTS_CHECK, name="ck_received_documents_digests"),
         CheckConstraint("version > 0", name="ck_received_documents_version"),
+        _one_of("approval_decision", Decision, name="ck_received_documents_approval_decision"),
+        _one_of("approval_emitter", Sending, name="ck_received_documents_approval_emitter"),
+        _one_of("approval_dgii", Sending, name="ck_received_documents_approval_dgii"),
+        CheckConstraint(APPROVAL_CHECK, name="ck_received_documents_approval"),
+        CheckConstraint(APPROVAL_REASON_CHECK, name="ck_received_documents_approval_reason"),
+        CheckConstraint(APPROVAL_ACECF_CHECK, name="ck_received_documents_approval_acecf"),
+        CheckConstraint(APPROVAL_SENT_CHECK, name="ck_received_documents_approval_sent"),
+        CheckConstraint("approval_attempts >= 0", name="ck_received_documents_approval_attempts"),
     )
 
     organization_id: Mapped[UUID] = mapped_column(primary_key=True)
@@ -414,6 +448,35 @@ class ReceivedDocumentRecord(DoEcfTable):
     """Where the archive keeps the signed receipt it was answered with (``arecf``)."""
     arecf_sha256: Mapped[bytes] = mapped_column(LargeBinary)
     version: Mapped[int] = mapped_column(BigInteger)
+    approval_decision: Mapped[str | None] = mapped_column(Text)
+    """The company's commercial decision (``approved``, ``rejected``); ``None`` before it decides."""
+    approval_reason: Mapped[str | None] = mapped_column(Text)
+    """Why it rejected it."""
+    approval_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    """When it decided: the emitter and DGII are tried for seven days from then (Decision 21)."""
+    approval_attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    """How many runs of ``do_ecf.approve`` left a party to try again."""
+    approval_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    """The ACECF's ``FechaHoraAprobacionComercial``: the moment it was signed."""
+    approval_key: Mapped[str | None] = mapped_column(Text)
+    """Where the archive keeps the ACECF signed (``acecf``)."""
+    approval_sha256: Mapped[bytes | None] = mapped_column(LargeBinary)
+    approval_emitter: Mapped[str | None] = mapped_column(Text)
+    """Where sending it to the emitter stands (``Sending``)."""
+    approval_emitter_reason: Mapped[str | None] = mapped_column(Text)
+    """Why it is not sent, or not sent yet: a code."""
+    approval_sent_to_emitter_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approval_dgii: Mapped[str | None] = mapped_column(Text)
+    """Where sending it to DGII stands (``Sending``)."""
+    approval_dgii_reason: Mapped[str | None] = mapped_column(Text)
+    """Why it is not sent, or not sent yet: a code."""
+    approval_dgii_messages: Mapped[list[dict[str, str]]] = mapped_column(
+        JSONB, server_default=text("'[]'::jsonb")
+    )
+    """DGII's messages about it (``code``, ``text``), verbatim within the kit's bounds."""
+    approval_dgii_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    """The submission's mark, committed before the one call that sends it to DGII: never sent again."""
+    approval_sent_to_dgii_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ReceiverSeedRecord(DoEcfTable):
