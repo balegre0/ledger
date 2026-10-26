@@ -20,7 +20,7 @@ from ledger_country_do.channels.ecf_v1.adapters.statuses import update_of
 from ledger_country_do.channels.ecf_v1.application.ports import SigningAs
 from ledger_country_do.channels.ecf_v1.application.steps import ParkReason
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
-from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
+from ledger_country_do.channels.ecf_v1.domain.errors import EcfUnavailableError
 from ledger_fiscal_kit.channels import Channel, Issued, Requirements, ResumeReason
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.tenancy import Tenant
@@ -54,8 +54,11 @@ _WOKEN: Final[Mapping[ResumeReason, tuple[ParkReason, ...]]] = MappingProxyType(
 """What each reason to resume wakes."""
 
 
-class ChannelNotReadyError(EcfError):
-    """A call the channel does not answer yet (see the module): a defect of the caller."""
+class ChannelNotReadyError(EcfUnavailableError):
+    """A call the channel does not answer yet (see the module).
+
+    Unavailable until the task that builds it: invoicing answers a representation asked meanwhile 503.
+    """
 
     code: ClassVar[str] = "do_ecf_not_ready"
 

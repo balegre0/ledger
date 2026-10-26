@@ -128,6 +128,24 @@ def test_a_disabled_enrollment_is_final_and_disabling_it_again_changes_nothing()
     assert disabled.disabled("Another reason", now=LATER) is disabled
 
 
+def test_a_review_clears_the_mark_a_channel_left_and_counts_as_a_change_only_when_something_changed() -> None:
+    """Decision 34: ``fiscal.requirements`` marks an enrollment ``review_due``; its next review clears it. A
+    review that changes nothing else leaves the version as it was (nothing to announce)."""
+    pending = enrolled(Due(("do_ecf.range",)))
+    marked = replace(pending, review_due=True)
+    same = marked.reviewed(Due(("do_ecf.range",)), live_evidence=False, now=LATER)
+    assert (same.review_due, same.version, same.updated_at, same.status) == (
+        False,
+        1,
+        NOW,
+        EnrollmentStatus.PENDING,
+    )
+    active = marked.reviewed(NOTHING_DUE, live_evidence=False, now=LATER)
+    assert (active.review_due, active.version, active.status) == (False, 2, EnrollmentStatus.ACTIVE)
+    assert pending.reviewed(Due(("do_ecf.range",)), live_evidence=False, now=LATER) is pending
+    assert enrolled().review_due is False
+
+
 def test_an_enrollment_is_its_tenant_s() -> None:
     enrollment = enrolled(Due(("x",)))
     assert (enrollment.organization, enrollment.company, enrollment.mode) == (

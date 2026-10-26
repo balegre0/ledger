@@ -40,6 +40,7 @@ from ledger_fiscal_kit.ports import (
     ReceivingCompany,
 )
 from ledger_kernel.access import CompanyNotFoundError
+from ledger_kernel.errors import ErrorKind
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.regimes import Direction, DocumentKind, Locale
 from ledger_kernel.tenancy import Mode, Tenant
@@ -220,7 +221,10 @@ async def test_roots_that_cannot_be_read_stop_the_worker_and_the_receiver_withou
 
 
 async def test_the_channel_answers_no_status_or_representation_yet(contexts: Contexts) -> None:
-    """``status``, ``representation``: built by the tasks to come (20, 24); ``resume`` is Task 19's."""
+    """``status``, ``representation``: built by the tasks to come (24); ``resume`` is Task 19's.
+
+    Unavailable, not a defect: invoicing answers a representation the channel cannot render yet 503.
+    """
     channel = assemble(contexts(settings=RECEIVED)).channel
     assert isinstance(channel, DoEcfChannel)
     document = DocumentRef(new_id())
@@ -228,7 +232,10 @@ async def test_the_channel_answers_no_status_or_representation_yet(contexts: Con
         await channel.status(CALL, document)
     with pytest.raises(ChannelNotReadyError):
         await channel.representation(CALL, document)
-    assert ChannelNotReadyError.code == "do_ecf_not_ready"
+    assert (ChannelNotReadyError.code, ChannelNotReadyError.kind) == (
+        "do_ecf_not_ready",
+        ErrorKind.UNAVAILABLE,
+    )
 
 
 @final

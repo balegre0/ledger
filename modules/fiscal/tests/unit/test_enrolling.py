@@ -20,7 +20,15 @@ from ledger_fiscal.api import FISCAL_API, FiscalApi
 from ledger_fiscal.application.directory import FiscalDirectory
 from ledger_fiscal.application.enrolling import Enrolling, governs, tenant_of
 from ledger_fiscal.application.facade import FiscalFacade, organization_of
-from ledger_fiscal.application.ports import Audit, Enrollments, Events, FiscalUnit, FiscalUnits
+from ledger_fiscal.application.ports import (
+    Audit,
+    Enrollments,
+    Events,
+    FiscalUnit,
+    FiscalUnits,
+    Jobs,
+    Routings,
+)
 from ledger_fiscal.domain.enrollments import Asked, Enrollment, EnrollmentId, EnrollmentStatus
 from ledger_fiscal.domain.errors import (
     ChannelNotForJurisdictionError,
@@ -43,6 +51,7 @@ from ledger_platform.runtime.contexts import AssembledChannels
 from ledger_platform.runtime.facade import facade
 from ledger_platform.runtime.registries import Regimes
 lazy from ledger_fiscal.application.ports import AuditAction
+lazy from ledger_fiscal.domain.routing import Routing
 lazy from ledger_fiscal.events import FiscalEvent
 lazy from ledger_fiscal_kit.channels import ChannelDef
 lazy from ledger_identity.api import EstablishmentInfo
@@ -131,6 +140,7 @@ class FakeChannel(Channel, Protocol):
 
     defined: ChannelDef
     failure: LedgerError | None
+    due: Requirements
 
 
 @final
@@ -183,6 +193,37 @@ class MemoryEnrollments(Enrollments):
     async def page(self, request: PageRequest) -> Page[Enrollment]:
         return page_of(await self.every(), request, key=lambda found: found.id)
 
+    @override
+    async def mark_due(self, channel: str) -> None:
+        for identifier, enrollment in tuple(self.kept.items()):
+            if enrollment.channel == channel:
+                self.kept[identifier] = replace(enrollment, review_due=True)
+
+
+@final
+class NoRoutings(Routings, Jobs):
+    """Enrolling routes nothing and runs no job: any use of these is a defect of the code under test."""
+
+    @override
+    async def add(self, routing: Routing) -> Routing:
+        raise AssertionError
+
+    @override
+    async def of(self, invoice: UUID) -> tuple[Routing, ...]:
+        raise AssertionError
+
+    @override
+    async def get(self, invoice: UUID, channel: str) -> Routing | None:
+        raise AssertionError
+
+    @override
+    def route_later(self, invoice: UUID, channel: str) -> None:
+        raise AssertionError
+
+    @override
+    def wake_routes(self) -> None:
+        raise AssertionError
+
 
 @final
 class Recorded(Events, Audit):
@@ -220,8 +261,17 @@ class MemoryUnits(FiscalUnits):
     async def unit(self, tenant: Tenant) -> AsyncGenerator[FiscalUnit]:
         self.tenants.append(tenant)
         yield FiscalUnit(
-            tenant=tenant, enrollments=self.enrollments, events=self.recorded, audit=self.recorded, now=NOW
+            tenant=tenant,
+            enrollments=self.enrollments,
+            routings=NO_ROUTINGS,
+            jobs=NO_ROUTINGS,
+            events=self.recorded,
+            audit=self.recorded,
+            now=NOW,
         )
+
+
+NO_ROUTINGS: Final = NoRoutings()
 
 
 def registry(*channels: tuple[str, Channel]) -> ChannelRegistry:
@@ -281,6 +331,32 @@ async def test_a_review_whose_channel_cannot_answer_now_answers_the_enrollment_a
     fake_channel.failure = SignerUnavailableError()
     assert await enrolling(units, ("do-fake-v1", fake_channel)).review(CALL, enrollment.id) is enrollment
     assert (units.enrollments.updates, units.recorded.events) == (0, [])
+
+
+async def test_current_reviews_the_enrollments_a_channel_marked_and_answers_the_others_as_kept(
+    fake_channel: FakeChannel,
+) -> None:
+    """Decision 34: ``fiscal.requirements`` marks; the next read that routes a document reviews the marked
+    ones (clearing the mark, a version on only when something else changed) and asks nothing of the rest."""
+    units = MemoryUnits()
+    marked = kept(units)
+    other = kept(units, channel="do-other-v1")
+    await units.enrollments.mark_due("do-fake-v1")
+    fake_channel.due = Requirements(currently_due=("x",))
+    found = await enrolling(units, ("do-fake-v1", fake_channel)).current(TENANT, traceparent=None)
+    assert {each.id: (each.review_due, each.version) for each in found} == {
+        marked.id: (False, 1),
+        other.id: (False, 1),
+    }
+    assert (units.enrollments.updates, units.recorded.events, units.recorded.actions) == (1, [], [])
+    await units.enrollments.mark_due("do-fake-v1")
+    fake_channel.due = Requirements(currently_due=())
+    (active, _) = sorted(
+        await enrolling(units, ("do-fake-v1", fake_channel)).current(TENANT, traceparent=None),
+        key=lambda each: each.channel != "do-fake-v1",
+    )
+    assert (active.status, active.version, active.review_due) == (EnrollmentStatus.ACTIVE, 2, False)
+    assert units.recorded.actions == ["enrollment.review"]
 
 
 async def test_a_channel_of_another_jurisdiction_is_refused_before_it_is_asked(

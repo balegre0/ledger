@@ -171,7 +171,7 @@
             "$ref": "#/components/schemas/FiscalStatusName"
           },
           "version": {
-            "description": "The channel's version of this status: a newer one replaces it.",
+            "description": "The mirror's version (fiscal's pending 1, then the channel's + 1): newer replaces older.",
             "title": "Version",
             "type": "integer"
           }

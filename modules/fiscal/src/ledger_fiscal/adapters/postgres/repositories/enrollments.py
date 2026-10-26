@@ -5,9 +5,10 @@ row-level security enforces it again (§2). Adding is one statement against the 
 enrollment not disabled per company, mode and channel: ``ON CONFLICT DO UPDATE`` with no change locks the row
 that holds the channel and returns it, so a taken channel is an answer (its holder) and never a race (a holder
 disabled meanwhile no longer conflicts: PostgreSQL inserts then). An update names the version it replaces and
-must find it (``EnrollmentMovedError`` otherwise: its caller holds the row's lock). An enrollment of another
-tenant handed to it is refused before any statement (``ForeignTenantError``). A list is read in its page's
-direction.
+must find it (``EnrollmentMovedError`` otherwise: its caller holds the row's lock). Marking a channel's
+enrollments for review (``mark_due``) is one statement that changes nothing else (no version: Decision 34).
+An enrollment of another tenant handed to it is refused before any statement (``ForeignTenantError``). A
+list is read in its page's direction.
 """
 
 from typing import ClassVar, Final, final, override
@@ -49,6 +50,7 @@ _ENROLLMENT: Final = select(
     EnrollmentRecord.version,
     EnrollmentRecord.created_at,
     EnrollmentRecord.updated_at,
+    EnrollmentRecord.review_due,
 )
 type _Query = Select[
     UUID,
@@ -65,6 +67,7 @@ type _Query = Select[
     int,
     datetime,
     datetime,
+    bool,
 ]
 type _Row = Row[
     UUID,
@@ -81,6 +84,7 @@ type _Row = Row[
     int,
     datetime,
     datetime,
+    bool,
 ]
 
 
@@ -118,6 +122,7 @@ def _enrollment(row: _Row) -> Enrollment:
         version,
         created_at,
         updated_at,
+        review_due,
     ) = row
     disablement = (
         None
@@ -138,6 +143,7 @@ def _enrollment(row: _Row) -> Enrollment:
         version=version,
         created_at=created_at,
         updated_at=updated_at,
+        review_due=review_due,
     )
 
 
@@ -152,6 +158,7 @@ def _changing(enrollment: Enrollment) -> dict[str, object]:
         "disabled_at": None if disablement is None else disablement.at,
         "version": enrollment.version,
         "updated_at": enrollment.updated_at,
+        "review_due": enrollment.review_due,
     }
 
 
@@ -239,6 +246,18 @@ class PgEnrollments(Enrollments):
     async def every(self) -> tuple[Enrollment, ...]:
         rows = (await self._connection.execute(self._selected().order_by(EnrollmentRecord.id))).all()
         return tuple(_enrollment(row) for row in rows)
+
+    @override
+    async def mark_due(self, channel: str) -> None:
+        _ = await self._connection.execute(
+            update(EnrollmentRecord)
+            .where(
+                *self._mine(),
+                EnrollmentRecord.channel == channel,
+                EnrollmentRecord.status != EnrollmentStatus.DISABLED.value,
+            )
+            .values(review_due=True)
+        )
 
     @override
     async def page(self, request: PageRequest) -> Page[Enrollment]:
