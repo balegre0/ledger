@@ -28,6 +28,7 @@ MANIFEST: Final = PackageManifest.model_validate(
             ],
             "modules": [
                 "identity",
+                "invoicing",
             ],
             "python": [
                 "alembic>=1.20.0",
@@ -74,8 +75,41 @@ MANIFEST: Final = PackageManifest.model_validate(
                     "public": "enrollment.updated",
                 },
             ],
+            "consumes": [
+                {
+                    "consumer": "fiscal.commercial_documents",
+                    "types": [
+                        "invoicing.invoice.issued",
+                    ],
+                    "style": "outside",
+                },
+                {
+                    "consumer": "fiscal.channel_documents",
+                    "types": [
+                        "fiscal_channel.document.updated",
+                    ],
+                    "style": "outside",
+                },
+                {
+                    "consumer": "fiscal.requirements",
+                    "types": [
+                        "fiscal_channel.requirements.changed",
+                    ],
+                },
+            ],
         },
+        "jobs": [
+            {
+                "kind": "fiscal.route",
+                "max_attempts": 50,
+                "concurrency": 1,
+            },
+        ],
         "extension_points": {
+            "implements": [
+                "invoicing.IssuePolicy",
+                "invoicing.Renderer",
+            ],
             "provides": [
                 "CompanyDirectory",
             ],

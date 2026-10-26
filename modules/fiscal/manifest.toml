@@ -6,7 +6,7 @@ owners = ["@balegre0"]
 
 [dependencies]
 packages = ["kernel", "platform", "fiscal-kit"]
-modules = ["identity"]
+modules = ["identity", "invoicing"]  # signer added by Task 25
 python = ["alembic>=1.20.0", "fastapi>=0.143.0", "pydantic>=2.14.1", "sqlalchemy>=2.1.4"]
 
 [data]
@@ -31,7 +31,32 @@ type = "fiscal.enrollment.changed"
 version = 1
 public = "enrollment.updated"
 
+# The recovery path (§8.5): an issued document routed and numbered by the worker when the request did not.
+[[events.consumes]]
+consumer = "fiscal.commercial_documents"
+types = ["invoicing.invoice.issued"]
+style = "outside"
+
+# The mirror: each channel's status kept in invoicing's, version-monotonic, so unordered.
+[[events.consumes]]
+consumer = "fiscal.channel_documents"
+types = ["fiscal_channel.document.updated"]
+style = "outside"
+
+# Decision 34: a channel's requirements of a company changed; its enrollments are reviewed at the next read.
+[[events.consumes]]
+consumer = "fiscal.requirements"
+types = ["fiscal_channel.requirements.changed"]
+
+# A routing whose channel had no number to give (a range ran out between check and numbering): parked
+# until the channel's requirements change (a range registered), then routed again.
+[[jobs]]
+kind = "fiscal.route"
+max_attempts = 50
+concurrency = 1
+
 [extension_points]
+implements = ["invoicing.IssuePolicy", "invoicing.Renderer"]
 provides = ["CompanyDirectory"]  # fiscal-kit's, to channels: companies by tax id, and their permissions
 
 [http]

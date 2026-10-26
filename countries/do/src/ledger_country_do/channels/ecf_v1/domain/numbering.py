@@ -32,6 +32,7 @@ from ledger_country_do.channels.ecf_v1.domain.encf import MAX_SEQUENCE, EcfType,
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfConflictError, EcfInvalidError
 from ledger_country_do.channels.ecf_v1.domain.notation import local_date, require_aware
 from ledger_country_do.channels.ecf_v1.domain.polling import RECEIPT_TOLERANCE
+from ledger_fiscal_kit.objections import NumberUnavailableError
 
 
 class RangeStatus(StrEnum):
@@ -53,8 +54,12 @@ class RangeInvalidError(EcfInvalidError):
         )
 
 
-class NoNumberAvailableError(EcfConflictError):
-    """No range of the type can number a document now."""
+class NoNumberAvailableError(EcfConflictError, NumberUnavailableError):
+    """No range of the type can number a document now.
+
+    The kit's ``NumberUnavailableError``, as fiscal reads it: it routes the document again once a range is
+    registered.
+    """
 
     code: ClassVar[str] = "do_ecf_range_missing"
 

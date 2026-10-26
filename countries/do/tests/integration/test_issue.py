@@ -41,6 +41,7 @@ from ledger_country_do.channels.ecf_v1.domain.numbering import (
 from ledger_country_do.channels.ecf_v1.settings import DoEcfSettings
 from ledger_country_do_testing.fiscal import Priced, fiscal_draft
 from ledger_fiscal_kit.drafts import DocumentRef, FiscalReference
+from ledger_fiscal_kit.objections import NumberUnavailableError
 from ledger_fiscal_kit.ports import ARCHIVE_PORT, SIGNER_PORT, ArchivePort, SignatureRefusedError, SignerPort
 from ledger_fiscal_kit.status import FiscalStatus, Severity
 from ledger_kernel.errors import InvalidValueError
@@ -72,6 +73,17 @@ EXPIRES: Final = date(2028, 12, 31)
 CHASSIS: Final = chassis_tables("do_ecf")
 PAYLOAD: Final = TypeAdapter(dict[str, JsonValue])
 RUN: Final = TypeAdapter(tuple[datetime, str])
+JOB: Final = TypeAdapter(tuple[str, int, datetime | None])
+KILLED: Final = """
+    UPDATE do_ecf.jobs SET status = 'dead', attempts = 50, deadline_at = now() - interval '1 day',
+                           last_error_code = 'deadline_passed'
+    WHERE kind = 'do_ecf.advance' AND key = %s
+"""
+"""A document's advance job dead past its deadline, as a wake more than 15 days late leaves it."""
+PARKED: Final = """
+    UPDATE do_ecf.jobs SET status = 'parked', parked_reason = 'certificate', attempts = 3
+    WHERE kind = 'do_ecf.advance' AND key = %s
+"""
 COUNT: Final = TypeAdapter(int)
 LOCK_WAITS: Final = (
     "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()"
@@ -362,6 +374,71 @@ async def test_a_document_issued_without_signing_is_the_advance_job_s_at_once(
     assert (recording.kept, test_signer.calls) == ([], [])
 
 
+async def advance_job(module_database: BoundDatabase, document: UUID) -> tuple[str, int, datetime | None]:
+    """The status, attempts and deadline of the document's ``do_ecf.advance`` job."""
+    jobs = CHASSIS.jobs
+    async with module_database.unit(None) as unit:
+        rows = await unit.connection.execute(
+            select(jobs.c.status, jobs.c.attempts, jobs.c.deadline_at).where(
+                jobs.c.kind == "do_ecf.advance", jobs.c.key == str(document)
+            )
+        )
+        return JOB.validate_python(tuple(rows.one()))
+
+
+async def test_issue_again_gives_an_undecided_document_whose_job_died_or_went_a_fresh_advance_job(
+    contexts: Contexts, module_database: BoundDatabase, admin: psycopg.AsyncConnection, clock: ManualClock
+) -> None:
+    """Task 19's review: a job woken past its deadline dies at once, its document left undecided. fiscal's
+    recovery path calls ``issue`` again: that enqueues ``do_ecf.advance`` anew, with a new deadline (never a
+    resend: the job's own steps decide what to do with the document)."""
+    tenant = a_tenant()
+    await with_range(module_database, tenant)
+    channel = channel_of(contexts)
+    draft = draft_of(tenant)
+    await channel.issue(call_of(tenant), draft, sign_within=None)
+    document, _ = await document_row(module_database, tenant)
+    key = str(document)
+    await admin.execute(
+        KILLED,
+        (key,),
+    )
+    await channel.issue(call_of(tenant), draft, sign_within=None)
+    status, attempts, deadline = await advance_job(module_database, document)
+    assert (status, attempts) == ("ready", 0)
+    assert deadline is not None
+    assert deadline > clock() + timedelta(days=14)
+    await admin.execute("DELETE FROM do_ecf.jobs WHERE kind = 'do_ecf.advance' AND key = %s", (key,))
+    await channel.issue(call_of(tenant), draft, sign_within=None)
+    assert (await advance_job(module_database, document))[:2] == ("ready", 0)
+    assert await documents_of(module_database, tenant) == [(str(draft.document), 1, "numbered", 1)]
+
+
+async def test_issue_again_leaves_a_live_job_and_a_decided_document_s_job_as_they_are(
+    contexts: Contexts, module_database: BoundDatabase, admin: psycopg.AsyncConnection
+) -> None:
+    tenant = a_tenant()
+    await with_range(module_database, tenant)
+    channel = channel_of(contexts)
+    draft = draft_of(tenant)
+    await channel.issue(call_of(tenant), draft, sign_within=None)
+    document, _ = await document_row(module_database, tenant)
+    key = str(document)
+    await admin.execute(
+        PARKED,
+        (key,),
+    )
+    await channel.issue(call_of(tenant), draft, sign_within=None)
+    assert (await advance_job(module_database, document))[:2] == ("parked", 3)
+    await admin.execute("UPDATE do_ecf.documents SET state = 'voided' WHERE id = %s", (document,))
+    await admin.execute(
+        "UPDATE do_ecf.jobs SET status = 'dead', parked_reason = NULL WHERE key = %s",
+        (key,),
+    )
+    await channel.issue(call_of(tenant), draft, sign_within=None)
+    assert (await advance_job(module_database, document))[:2] == ("dead", 3)
+
+
 async def test_issue_within_the_budget_signs_archives_then_records(
     contexts: Contexts,
     module_database: BoundDatabase,
@@ -499,8 +576,9 @@ async def test_a_type_without_a_number_to_give_numbers_nothing(
     contexts: Contexts, module_database: BoundDatabase
 ) -> None:
     tenant = a_tenant()
-    with pytest.raises(NoNumberAvailableError):
+    with pytest.raises(NoNumberAvailableError) as refused:
         await channel_of(contexts).issue(call_of(tenant), draft_of(tenant), sign_within=None)
+    assert isinstance(refused.value, NumberUnavailableError)  # fiscal parks the routing on the kit's error
     assert await documents_of(module_database, tenant) == []
 
 
