@@ -2,31 +2,53 @@
 
 Bound to its unit's tenant (a company in a mode), named in every statement; row-level security enforces it
 again (§2). A document is received once per environment, issuer and e-NCF (``received_documents_number_key``,
-Decision 16): a second one meets the key and is ``ReceivedExistsError``, with nothing written. Nothing is
-changed or deleted here.
+Decision 16): a second one meets the key and is ``ReceivedExistsError``, with nothing written. What changes
+is the company's commercial approval of it (``approval_*``: its decision, the ACECF signed, where sending it
+to the emitter and to DGII stands, DGII's messages as ``[{code, text}]``) and its version; nothing is
+deleted. A list is read in its page's direction.
 """
 
-from typing import final, override
+from typing import Final, TypedDict, final, override
+lazy from collections.abc import Mapping
 lazy from datetime import date, datetime
 lazy from decimal import Decimal
 lazy from uuid import UUID
 
-from sqlalchemy import Row, select
+from pydantic import TypeAdapter
+from sqlalchemy import Row, select, update
 from sqlalchemy.dialects.postgresql import insert
+lazy from sqlalchemy import ColumnElement
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ledger_country_do.channels.ecf_v1.adapters.postgres.tables import ReceivedDocumentRecord
 from ledger_country_do.channels.ecf_v1.application.ports import Archived
 from ledger_country_do.channels.ecf_v1.application.received import (
+    OutgoingApproval,
+    PartySending,
     ReceivedDocument,
     ReceivedDocuments,
     ReceivedExistsError,
+    SignedApproval,
 )
+from ledger_country_do.channels.ecf_v1.domain.approval import Decided, Decision, Sending
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 from ledger_country_do.channels.ecf_v1.domain.exchanges import InboundEcf
+from ledger_country_do.channels.ecf_v1.domain.status_map import DgiiMessage
+from ledger_kernel.pagination import page_of
+from ledger_platform.data import paged
+lazy from ledger_kernel.pagination import Page, PageRequest
 lazy from ledger_kernel.tenancy import Mode, Tenant
 
+
+class _StoredMessage(TypedDict):
+    """One of DGII's messages as ``approval_dgii_messages`` keeps it."""
+
+    code: str
+    text: str
+
+
+_MESSAGES: Final = TypeAdapter(list[_StoredMessage])
 _COLUMNS = (
     ReceivedDocumentRecord.id,
     ReceivedDocumentRecord.environment,
@@ -46,6 +68,21 @@ _COLUMNS = (
     ReceivedDocumentRecord.arecf_key,
     ReceivedDocumentRecord.arecf_sha256,
     ReceivedDocumentRecord.version,
+    ReceivedDocumentRecord.approval_decision,
+    ReceivedDocumentRecord.approval_reason,
+    ReceivedDocumentRecord.approval_requested_at,
+    ReceivedDocumentRecord.approval_attempts,
+    ReceivedDocumentRecord.approval_at,
+    ReceivedDocumentRecord.approval_key,
+    ReceivedDocumentRecord.approval_sha256,
+    ReceivedDocumentRecord.approval_emitter,
+    ReceivedDocumentRecord.approval_emitter_reason,
+    ReceivedDocumentRecord.approval_sent_to_emitter_at,
+    ReceivedDocumentRecord.approval_dgii,
+    ReceivedDocumentRecord.approval_dgii_reason,
+    ReceivedDocumentRecord.approval_dgii_messages,
+    ReceivedDocumentRecord.approval_dgii_started_at,
+    ReceivedDocumentRecord.approval_sent_to_dgii_at,
 )
 type _Row = Row[
     UUID,
@@ -66,7 +103,35 @@ type _Row = Row[
     str,
     bytes,
     int,
+    str | None,
+    str | None,
+    datetime | None,
+    int,
+    datetime | None,
+    str | None,
+    bytes | None,
+    str | None,
+    str | None,
+    datetime | None,
+    str | None,
+    str | None,
+    list[dict[str, str]],
+    datetime | None,
+    datetime | None,
 ]
+type _Party = tuple[str | None, str | None, datetime | None]
+"""A party's columns: its state, why, when it took the ACECF."""
+
+
+def _party(columns: _Party) -> PartySending:
+    state, reason, sent_at = columns
+    return PartySending(state=Sending(state or Sending.PENDING), reason=reason, sent_at=sent_at)
+
+
+def _signed(at: datetime | None, key: str | None, sha256: bytes | None) -> SignedApproval | None:
+    if at is None or key is None or sha256 is None:
+        return None
+    return SignedApproval(at=at, acecf=Archived(key=key, sha256=sha256))
 
 
 def _received(row: _Row) -> ReceivedDocument:
@@ -89,8 +154,41 @@ def _received(row: _Row) -> ReceivedDocument:
         arecf_key,
         arecf_sha256,
         version,
+        decision,
+        reason,
+        requested_at,
+        attempts,
+        approval_at,
+        approval_key,
+        approval_sha256,
+        emitter,
+        emitter_reason,
+        sent_to_emitter_at,
+        dgii,
+        dgii_reason,
+        messages,
+        dgii_started_at,
+        sent_to_dgii_at,
     ) = row
     kind = EcfType(ecf_type)
+    approval = (
+        None
+        if decision is None or requested_at is None
+        else OutgoingApproval(
+            decision=Decision(decision),
+            reason=reason,
+            requested_at=requested_at,
+            emitter=_party((emitter, emitter_reason, sent_to_emitter_at)),
+            dgii=_party((dgii, dgii_reason, sent_to_dgii_at)),
+            attempts=attempts,
+            signed=_signed(approval_at, approval_key, approval_sha256),
+            dgii_messages=tuple(
+                DgiiMessage(message["code"], message["text"]).authority()
+                for message in _MESSAGES.validate_python(messages)
+            ),
+            dgii_started_at=dgii_started_at,
+        )
+    )
     return ReceivedDocument(
         id=identifier,
         environment=Environment(environment),
@@ -110,7 +208,40 @@ def _received(row: _Row) -> ReceivedDocument:
         document=Archived(key=xml_key, sha256=xml_sha256),
         receipt=Archived(key=arecf_key, sha256=arecf_sha256),
         version=version,
+        approval=approval,
     )
+
+
+def _approval_columns(approval: OutgoingApproval | None) -> Mapping[str, object]:
+    """The columns ``approval`` fills (all empty without one)."""
+    if approval is None:
+        return {}
+    signed = approval.signed
+    return {
+        "approval_decision": approval.decision.value,
+        "approval_reason": approval.reason,
+        "approval_requested_at": approval.requested_at,
+        "approval_attempts": approval.attempts,
+        "approval_at": None if signed is None else signed.at,
+        "approval_key": None if signed is None else signed.acecf.key,
+        "approval_sha256": None if signed is None else signed.acecf.sha256,
+        "approval_emitter": approval.emitter.state.value,
+        "approval_emitter_reason": approval.emitter.reason,
+        "approval_sent_to_emitter_at": approval.emitter.sent_at,
+        "approval_dgii": approval.dgii.state.value,
+        "approval_dgii_reason": approval.dgii.reason,
+        "approval_dgii_messages": [
+            {"code": message.code, "text": message.message} for message in approval.dgii_messages
+        ],
+        "approval_dgii_started_at": approval.dgii_started_at,
+        "approval_sent_to_dgii_at": approval.dgii.sent_at,
+    }
+
+
+def _decided(decided: Decided) -> ColumnElement[bool]:
+    if decided is Decided.NONE:
+        return ReceivedDocumentRecord.approval_decision.is_(None)
+    return ReceivedDocumentRecord.approval_decision == decided.value
 
 
 @final
@@ -125,14 +256,19 @@ class PgReceived(ReceivedDocuments):
         self._tenant = tenant
         self._mode = mode
 
+    def _mine(self) -> tuple[ColumnElement[bool], ...]:
+        return (
+            ReceivedDocumentRecord.organization_id == self._tenant.organization,
+            ReceivedDocumentRecord.company_id == self._tenant.company,
+            ReceivedDocumentRecord.mode == self._mode.value,
+        )
+
     @override
     async def find(self, environment: Environment, issuer_rnc: str, encf: Encf) -> ReceivedDocument | None:
         row = (
             await self._connection.execute(
                 select(*_COLUMNS).where(
-                    ReceivedDocumentRecord.organization_id == self._tenant.organization,
-                    ReceivedDocumentRecord.company_id == self._tenant.company,
-                    ReceivedDocumentRecord.mode == self._mode.value,
+                    *self._mine(),
                     ReceivedDocumentRecord.environment == environment.value,
                     ReceivedDocumentRecord.issuer_rnc == issuer_rnc,
                     ReceivedDocumentRecord.ecf_type == encf.ecf_type.value,
@@ -141,6 +277,33 @@ class PgReceived(ReceivedDocuments):
             )
         ).one_or_none()
         return None if row is None else _received(row)
+
+    @override
+    async def get(self, document: UUID, *, lock: bool) -> ReceivedDocument | None:
+        statement = select(*_COLUMNS).where(*self._mine(), ReceivedDocumentRecord.id == document)
+        row = (
+            await self._connection.execute(statement.with_for_update() if lock else statement)
+        ).one_or_none()
+        return None if row is None else _received(row)
+
+    @override
+    async def page(
+        self,
+        request: PageRequest,
+        *,
+        environment: Environment | None,
+        issuer: str | None,
+        decided: Decided | None,
+    ) -> Page[ReceivedDocument]:
+        statement = select(*_COLUMNS).where(*self._mine())
+        if environment is not None:
+            statement = statement.where(ReceivedDocumentRecord.environment == environment.value)
+        if issuer is not None:
+            statement = statement.where(ReceivedDocumentRecord.issuer_rnc == issuer)
+        if decided is not None:
+            statement = statement.where(_decided(decided))
+        rows = (await self._connection.execute(paged(statement, ReceivedDocumentRecord.id, request))).all()
+        return page_of([_received(row) for row in rows], request, key=lambda found: found.id)
 
     @override
     async def add(self, document: ReceivedDocument) -> None:
@@ -169,9 +332,18 @@ class PgReceived(ReceivedDocuments):
                 arecf_key=document.receipt.key,
                 arecf_sha256=document.receipt.sha256,
                 version=document.version,
+                **_approval_columns(document.approval),
             )
             .on_conflict_do_nothing()
             .returning(ReceivedDocumentRecord.id)
         )
         if added.one_or_none() is None:
             raise ReceivedExistsError
+
+    @override
+    async def changed(self, document: ReceivedDocument) -> None:
+        await self._connection.execute(
+            update(ReceivedDocumentRecord)
+            .where(*self._mine(), ReceivedDocumentRecord.id == document.id)
+            .values(version=document.version, **_approval_columns(document.approval))
+        )

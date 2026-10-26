@@ -34,7 +34,11 @@ lazy from ledger_country_do.channels.ecf_v1.application.documents import (
     EcfDocument,
     Submissions,
 )
-lazy from ledger_country_do.channels.ecf_v1.application.received import ReceivedDocument, ReceivedDocuments
+lazy from ledger_country_do.channels.ecf_v1.application.received import (
+    ApprovalJobs,
+    ReceivedDocument,
+    ReceivedDocuments,
+)
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 lazy from ledger_country_do.channels.ecf_v1.domain.numbering import Allocation, Authorization, RangeState
@@ -134,7 +138,12 @@ class Announcements(Protocol, metaclass=ABCMeta):
 
 
 type AuditAction = Literal[
-    "numbering_range.register", "delivery.retry", "delivery_options.set", "do_ecf.buyer_seed.signed"
+    "numbering_range.register",
+    "delivery.retry",
+    "delivery_options.set",
+    "do_ecf.buyer_seed.signed",
+    "received_document.approve",
+    "received_document.approval_sent",
 ]
 """What a use case records it did; the part before the dot names the kind of subject."""
 
@@ -171,6 +180,8 @@ class NumberingUnit:
     """The e-CF other emitters sent the company (the receiver's, Task 22)."""
     advances: Advances
     deliveries: Deliveries
+    approvals: ApprovalJobs
+    """The ``do_ecf.approve`` jobs: the company's commercial decisions sent out (Task 23)."""
     options: CompanyOptions
     announcements: Announcements
     audit: Audit

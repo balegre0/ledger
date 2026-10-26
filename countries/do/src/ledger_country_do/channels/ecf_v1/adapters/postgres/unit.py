@@ -8,7 +8,7 @@ lazy from uuid import UUID
 
 from sqlalchemy import select
 
-from ledger_country_do.channels.ecf_v1.adapters.jobs import ADVANCE, DELIVER
+from ledger_country_do.channels.ecf_v1.adapters.jobs import ADVANCE, APPROVE, DELIVER
 from ledger_country_do.channels.ecf_v1.adapters.postgres.repositories.documents import PgDocuments
 from ledger_country_do.channels.ecf_v1.adapters.postgres.repositories.options import PgCompanyOptions
 from ledger_country_do.channels.ecf_v1.adapters.postgres.repositories.ranges import PgRanges
@@ -22,6 +22,7 @@ from ledger_country_do.channels.ecf_v1.application.ranges import (
     NumberingUnit,
     NumberingUnits,
 )
+from ledger_country_do.channels.ecf_v1.application.received import ApprovalJobs
 from ledger_country_do.channels.ecf_v1.domain.channel import KEY
 from ledger_country_do.regime.tax_ids import CEDULA, RNC, RNC_DIGITS
 from ledger_fiscal_kit.events import DocumentUpdated, ReceivedDocumentRecorded, RequirementsChanged
@@ -125,6 +126,20 @@ class UnitDeliveries(Deliveries):
 
 
 @final
+class UnitApprovals(ApprovalJobs):
+    """The ``do_ecf.approve`` jobs, in the unit's queue: enqueued with the decision, or not at all."""
+
+    __slots__ = ("_unit",)
+
+    def __init__(self, unit: UnitOfWork) -> None:
+        self._unit = unit
+
+    @override
+    def enqueue(self, document: UUID) -> None:
+        self._unit.jobs.enqueue(APPROVE, str(document))
+
+
+@final
 class UnitAudit(Audit):
     """The channel's audit rows, in the unit's ``audit_events``: the acting call is the actor."""
 
@@ -159,6 +174,7 @@ def bind(unit: UnitOfWork) -> NumberingUnit:
         received=PgReceived(unit.connection, scope, scope.mode),
         advances=UnitAdvances(unit, scope),
         deliveries=UnitDeliveries(unit),
+        approvals=UnitApprovals(unit),
         options=PgCompanyOptions(unit.connection, scope, scope.mode, now=unit.now),
         announcements=UnitAnnouncements(unit, scope),
         audit=UnitAudit(unit),

@@ -1,4 +1,6 @@
-"""The channel's jobs (§3.6): ``do_ecf.advance`` and ``do_ecf.deliver`` per document; the receiver's purge.
+"""The channel's jobs (§3.6): per document, per received document; the receiver's purge.
+
+``do_ecf.advance`` and ``do_ecf.deliver`` run per document, ``do_ecf.approve`` per received document.
 
 Enqueued with the document (``issuing``); each run takes the document one step on (``advancing``: signed,
 submitted once, polled, decided), at most one call to DGII per run, and answers the platform's outcome:
@@ -10,6 +12,10 @@ DGII decided. The job runs for the company in the mode it was enqueued for (its 
 ``do_ecf.deliver`` is enqueued once DGII accepted the document (``delivering``): each run is one exchange
 with the buyer, ``RunAgain`` on the delivery's schedule while the buyer is out of reach, ``Done`` once
 delivered, failed or not applicable. Its buyers' seeds are signed as ``do_ecf.deliver``.
+
+``do_ecf.approve`` is enqueued once the company decided of a document it received: each run signs its ACECF
+once and sends it to DGII and to the emitter, ``RunAgain`` on the delivery's schedule while one is out of
+reach, ``Done`` once neither is left. Its signatures are named ``do_ecf.approve``.
 
 ``do_ecf.purge_receiver_credentials`` (every hour, its schedule's) deletes the receiver's seeds and tokens
 past their expiry (``ReceiverCredentials.purge``): they are kept outside any tenant, so it runs without one.
@@ -25,6 +31,7 @@ from ledger_kernel.tenancy import Tenant
 from ledger_platform.jobs.outcomes import Done, JobSpec, Park, RunAgain
 lazy from ledger_country_do.channels.ecf_v1.adapters.receiver.tokens import ReceiverCredentials
 lazy from ledger_country_do.channels.ecf_v1.application.advancing import Advancing
+lazy from ledger_country_do.channels.ecf_v1.application.approving import CommercialApprovals
 lazy from ledger_country_do.channels.ecf_v1.application.delivering import Delivering
 lazy from ledger_country_do.channels.ecf_v1.application.steps import Next
 lazy from ledger_platform.jobs.outcomes import Job, JobOutcome
@@ -37,6 +44,8 @@ PURGE: Final = "do_ecf.purge_receiver_credentials"
 
 DELIVER: Final = "do_ecf.deliver"
 """The delivery's job kind (the manifest's ``[[channels.jobs]]``)."""
+APPROVE: Final = "do_ecf.approve"
+"""The commercial approval's job kind (the manifest's ``[[channels.jobs]]``)."""
 
 
 def _who(job: Job) -> SigningAs:
@@ -75,6 +84,15 @@ def deliver_job(delivering: Delivering) -> JobSpec:
         return _outcome(await delivering.deliver(_who(job), UUID(job.key)))
 
     return JobSpec(kind=DELIVER, handler=deliver)
+
+
+def approve_job(approvals: CommercialApprovals) -> JobSpec:
+    """``do_ecf.approve`` as the app runs it, over ``approvals`` (see the module)."""
+
+    async def approve(job: Job) -> JobOutcome:
+        return _outcome(await approvals.approve(_who(job), UUID(job.key)))
+
+    return JobSpec(kind=APPROVE, handler=approve)
 
 
 def purge_job(credentials: ReceiverCredentials) -> JobSpec:
