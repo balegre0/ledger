@@ -345,6 +345,7 @@ async def test_issue_twice_for_one_invoice_numbers_one_document_once(
     assert (status.authority_number, status.messages) == ("E310000000001", ())
     assert do(status) == {
         "encf": "E310000000001",
+        "ecf_type": "31",
         "route": "reception",
         "delivery": "not_started",
         "delivery_reason": None,

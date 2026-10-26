@@ -2,10 +2,12 @@
 
 The state is the channel's own (``signed``...), the fiscal status and severity ``ecf.status_of``'s, the
 authority number the e-NCF, the messages DGII's about it. ``details["do"]`` is what a client prints and
-follows: the e-NCF, the route, delivery to the buyer (and why it failed or does not apply, a code), once
-signed its moment of signing (ISO 8601), security code, QR URL and emission mode (``None`` before), DGII's
-track id once it gave one (``None`` before, and for a summary), and its buyer's commercial approval once the
-receiver recorded one (``{approved, reason, at}``, ``None`` before).
+follows: the e-NCF and its e-CF type (DGII's two-digit code), the route, delivery to the buyer (and why it
+failed or does not apply, a code), once signed its moment of signing (ISO 8601), security code, QR URL and
+emission mode (``None`` before), DGII's track id once it gave one (``None`` before, and for a summary), and
+its buyer's commercial approval once the receiver recorded one (``{approved, reason, at}``, ``None``
+before). With the invoice's own parties, lines and totals, they are everything the printed representation
+prints (§9.8), so a client may print its own.
 """
 
 from typing import Final
@@ -26,6 +28,7 @@ def update_of(document: EcfDocument) -> StatusUpdate:
     signature, approval = document.signature, document.commercial_approval
     details: dict[str, JsonValue] = {
         "encf": str(document.encf),
+        "ecf_type": document.encf.ecf_type.value,
         "route": document.route.value,
         "delivery": document.delivery.value,
         "delivery_reason": document.delivery_reason,

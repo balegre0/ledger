@@ -17,7 +17,7 @@ chain to them: ``inbound``) and mounts the channel's receiver routes (``adapters
 tokens, e-CF received and answered with a signed receipt, commercial approvals. Every role hands the
 receiver's purge (``do_ecf.purge_receiver_credentials``) beside ``do_ecf.advance``.
 ``migrate`` runs its revisions; every app checks its schema is current. Documents are signed with the QR's
-hosts of the DGII hosts configured (a test's fake's, or DGII's).
+hosts of the DGII hosts configured (a test's fake's, or DGII's), and printed as PDFs (``adapters.pdf``).
 """
 
 from dataclasses import replace
@@ -41,6 +41,7 @@ from ledger_country_do.channels.ecf_v1.adapters.outbound import (
     unopened_buyers,
     unopened_emitters,
 )
+from ledger_country_do.channels.ecf_v1.adapters.pdf.render import PdfPrinting
 from ledger_country_do.channels.ecf_v1.adapters.postgres.schema import migrations
 from ledger_country_do.channels.ecf_v1.adapters.postgres.unit import PgUnits
 from ledger_country_do.channels.ecf_v1.adapters.receiver import routes as receiver
@@ -59,6 +60,7 @@ from ledger_country_do.channels.ecf_v1.application.delivering import Delivering
 from ledger_country_do.channels.ecf_v1.application.issuing import Issuing
 from ledger_country_do.channels.ecf_v1.application.ranges import Ranging
 from ledger_country_do.channels.ecf_v1.application.receiving import Receiving
+from ledger_country_do.channels.ecf_v1.application.representation import Representing
 from ledger_country_do.channels.ecf_v1.application.requirements import Requiring
 from ledger_country_do.channels.ecf_v1.application.signing import Signing
 from ledger_country_do.channels.ecf_v1.domain.channel import KEY
@@ -158,7 +160,8 @@ def assemble(context: ChannelContext) -> ChannelParts:
         ApprovalSigning(signatures=signer, xml=DgiiXml(), clock=context.clock),
         ApprovalSending(authority=authority, emitters=emitters, report=ApprovalLog(context.telemetry)),
     )
-    channel = DoEcfChannel(definition, requiring, issuing, advancing)
+    representing = Representing(units, archive, PdfPrinting())
+    channel = DoEcfChannel(definition, requiring, issuing, advancing, representing)
     credentials = ReceiverCredentials(context.database, clock=context.clock)
     jobs = (
         advance_job(advancing),

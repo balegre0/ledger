@@ -27,7 +27,9 @@ Enrollments in fiscal channels, routing of commercial documents to them, and the
   first, then the routing is kept, the channel numbers (and signs, in time) the draft, and its status is
   mirrored at the channel's version + 1. Consumers: `fiscal.commercial_documents` (outside, the recovery path
   for every issued document), `fiscal.channel_documents` (outside, the mirror, unordered),
-  `fiscal.requirements` (inside, marks enrollments for review and wakes parked routings); job `fiscal.route`
+  `fiscal.requirements` (inside, marks enrollments for review and wakes parked routings),
+  `fiscal.certificates` (outside, Task 25: a certificate installed marks the company's enrollments in each mode
+  it serves for review and resumes their channels' documents parked for a certificate); job `fiscal.route`
   (a routing whose channel had no number to give, parked `range_missing`).
 - Error codes are prefixed `fiscal_` (`fiscal_channel_unknown`, `fiscal_channel_not_in_force`,
   `fiscal_channel_not_for_jurisdiction`, `fiscal_environment_unknown`, `fiscal_environment_not_allowed`,

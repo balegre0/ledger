@@ -174,9 +174,15 @@ def test_the_consumers_are_declared_as_the_platform_runs_them_and_the_points_are
             False,
             timedelta(seconds=60),
         ),
+        "fiscal.certificates": (
+            ("signer.certificate.installed",),
+            "outside",
+            False,
+            timedelta(seconds=60),
+        ),
     }
     assert MANIFEST.extension_points.implements == ("invoicing.IssuePolicy", "invoicing.Renderer")
-    assert "invoicing" in MANIFEST.dependencies.modules
+    assert {"invoicing", "signer"} <= set(MANIFEST.dependencies.modules)
 
 
 def test_every_coroutine_another_module_calls_is_a_facade() -> None:

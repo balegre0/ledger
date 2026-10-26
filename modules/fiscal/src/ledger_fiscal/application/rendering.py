@@ -1,8 +1,10 @@
 """fiscal's ``Renderer`` (Decision 22): a document's printed representation, as its channel renders it.
 
 A document never routed to the channel has none here (``None``: invoicing answers 404
-``representation_unavailable``), nor has one whose channel is no longer installed. A channel that cannot
-render it now raises its own ``UnavailableError`` (invoicing answers 503).
+``representation_unavailable``), nor has one whose channel is no longer installed. The channel's own errors
+pass as they are: one that cannot render it now raises an ``UnavailableError`` (invoicing answers 503), one
+that cannot print it yet a ``ConflictError`` (409: do-ecf-v1's document not signed yet), one that issued no
+document for it (routed, then no number was available) a ``NotFoundError`` (404).
 """
 
 from typing import Final, final, override

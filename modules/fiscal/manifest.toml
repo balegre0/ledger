@@ -6,7 +6,7 @@ owners = ["@balegre0"]
 
 [dependencies]
 packages = ["kernel", "platform", "fiscal-kit"]
-modules = ["identity", "invoicing"]  # signer added by Task 25
+modules = ["identity", "invoicing", "signer"]  # signer: its certificates installed (Task 25)
 python = ["alembic>=1.20.0", "fastapi>=0.143.0", "pydantic>=2.14.1", "sqlalchemy>=2.1.4"]
 
 [data]
@@ -47,6 +47,13 @@ style = "outside"
 [[events.consumes]]
 consumer = "fiscal.requirements"
 types = ["fiscal_channel.requirements.changed"]
+
+# A certificate installed (§3.2, §8.6.4): the documents its company's channels parked for one move again, and
+# its enrollments are reviewed at the next read.
+[[events.consumes]]
+consumer = "fiscal.certificates"
+types = ["signer.certificate.installed"]
+style = "outside"
 
 # A routing whose channel had no number to give (a range ran out between check and numbering): parked
 # until the channel's requirements change (a range registered), then routed again.

@@ -7,12 +7,16 @@ owners = ["@balegre0"]
 # The regime is the kernel's data alone (import-linter keeps it pure); the channel's adapters read XML with
 # fiscal-kit's hardened reader and verify its signature profile, and sign through its SignerPort (whose calls
 # are the platform's SystemCall). Without a channel entry the pack gets no generated _manifest.py (whose model
-# is the platform's) until a channel (v2-M3) brings one.
+# is the platform's) until a channel (v2-M3) brings one. The printed representation is drawn with reportlab
+# (BSD) and its QR encoded with segno (BSD) (Decision 26); its tests read the PDF back with pypdf (BSD) and
+# decode the QR with zxing-cpp (Apache-2.0).
 [dependencies]
 packages = ["kernel", "platform", "fiscal-kit"]
 python = ["alembic>=1.20.0", "cryptography>=50.0.2", "fastapi>=0.143.0", "httpx>=0.28.1", "lxml>=6.1.3",
-          "psycopg>=3.3.6", "pydantic>=2.14.1", "pydantic-settings>=2.15.0", "sqlalchemy>=2.1.4"]
-test = ["signxml>=5.1.0", "types-lxml>=2026.2.16", "xmlschema>=4.3.2"]
+          "psycopg>=3.3.6", "pydantic>=2.14.1", "pydantic-settings>=2.15.0", "reportlab>=5.1.0", "segno>=1.6.6",
+          "sqlalchemy>=2.1.4"]
+test = ["pypdf>=6.21.2", "signxml>=5.1.0", "types-lxml>=2026.2.16", "types-reportlab>=5.0.0.20261008",
+        "xmlschema>=4.3.2", "zxing-cpp>=3.1.1"]
 
 [country]
 iso = "DO"

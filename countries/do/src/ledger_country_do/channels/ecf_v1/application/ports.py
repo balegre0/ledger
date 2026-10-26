@@ -362,6 +362,8 @@ class ArchiveUnavailableError(EcfUnavailableError):
 class Archive(Protocol, metaclass=ABCMeta):
     """The legal archive (§6.8, Decisions 11-13): a company's signed documents, kept once, for ten years.
 
+    A signed e-CF's printed representation is kept the same way.
+
     A document is kept under a key its bytes name, so keeping the same bytes again is the same object, and
     other bytes are another; nothing kept is ever changed or removed. Each method raises
     ``ArchiveUnavailableError`` when the archive cannot be reached (keeping it again later may succeed).
@@ -374,6 +376,10 @@ class Archive(Protocol, metaclass=ABCMeta):
     @abstractmethod
     async def rfce(self, tenant: Tenant, signed: bytes) -> Archived:
         """``signed``, a consumer-invoice summary (RFCE) of ``tenant``'s, kept."""
+
+    @abstractmethod
+    async def representation(self, tenant: Tenant, pdf: bytes) -> Archived:
+        """``pdf``, the printed representation of an e-CF of ``tenant``'s, kept."""
 
     @abstractmethod
     async def buyer_receipt(self, tenant: Tenant, arecf: bytes, *, refused: bool) -> Archived:

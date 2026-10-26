@@ -17,6 +17,8 @@ dependencies = [
     "psycopg>=3.3.6",
     "pydantic>=2.14.1",
     "pydantic-settings>=2.15.0",
+    "reportlab>=5.1.0",
+    "segno>=1.6.6",
     "sqlalchemy>=2.1.4",
 ]
 

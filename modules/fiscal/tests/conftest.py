@@ -9,8 +9,8 @@ No real channel is assembled here (a module's suite assembles none; the Dominica
 its country's suite): the ``api`` app is served with one channel, ``FakeChannel`` (key ``do-fake-v1``, of the
 installed ``do`` regime, environments ``testecf``, ``certecf`` and the live ``ecf``), whatever channels are
 installed. A test sets what it requires (``due``), what it is (``defined``), how asking it fails
-(``failure``), what it objects to and how it issues and renders, and reads what it was asked. Its schema is
-never touched: the fake opens no unit, and nothing here asks the app's readiness. The template holds
+(``failure``), what it objects to and how it issues and renders, and reads what it was asked and resumed. Its
+schema is never touched: the fake opens no unit, and nothing here asks the app's readiness. The template holds
 invoicing's schema too: fiscal depends on it (its ``IssuePolicy`` and ``Renderer``).
 """
 
@@ -89,7 +89,7 @@ DEFINITION: Final = ChannelDef.of(
 
 
 class UnusedChannelMethodError(LedgerError):
-    """fiscal asks a channel what it requires, checks, issues and renders: nothing else of it."""
+    """fiscal asks a channel what it requires, checks, issues, resumes and renders: nothing else of it."""
 
     code: ClassVar[str] = "fiscal_tests_channel_unused"
 
@@ -127,7 +127,8 @@ class FakeChannel(Channel):
     draft once per document (``E31`` and a counter, ``numbered``), answering the document it numbered to a
     second call; signs it at once when asked within a budget (version 2, a security code) unless ``slow``;
     raises ``NoNumberError`` while ``no_number`` (keeping nothing) and runs ``before_issue`` first; renders
-    ``printed`` when set, else is unavailable. ``issued`` holds every ``issue`` call.
+    ``printed`` when set, else is unavailable, unless ``unprintable`` names what it raises instead. ``issued``
+    holds every ``issue`` call, ``resumed`` every ``resume`` call.
     """
 
     __slots__ = (
@@ -143,7 +144,9 @@ class FakeChannel(Channel):
         "numbered",
         "objections",
         "printed",
+        "resumed",
         "slow",
+        "unprintable",
     )
 
     def __init__(self) -> None:
@@ -164,6 +167,10 @@ class FakeChannel(Channel):
         self.no_number = False
         self.before_issue: BeforeIssue | None = None
         self.printed: Representation | None = None
+        self.unprintable: LedgerError | None = None
+        """What asking its representation raises, when a test sets it (before ``printed`` is looked at)."""
+        self.resumed: list[tuple[SystemCall, CompanyId, ResumeReason]] = []
+        """Every ``resume`` call, in order."""
 
     @property
     @override
@@ -222,10 +229,12 @@ class FakeChannel(Channel):
 
     @override
     async def resume(self, call: SystemCall, company: CompanyId, reason: ResumeReason) -> None:
-        raise UnusedChannelMethodError
+        self.resumed.append((call, company, reason))
 
     @override
     async def representation(self, call: SystemCall, document: DocumentRef) -> Representation:
+        if self.unprintable is not None:
+            raise self.unprintable
         if self.printed is None:
             raise NotPrintableError
         return self.printed

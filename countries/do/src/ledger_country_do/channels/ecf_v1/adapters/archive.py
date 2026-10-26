@@ -1,8 +1,8 @@
 """What the channel archives (§6.8; Decisions 11-13), and how: ``ArchiveKind`` and ``PortArchive``.
 
 A key is fiscal-kit's ``archive_key(...)`` with ``kind`` an ``ArchiveKind``:
-``do-ecf-v1/<mode>/<organization>/<company>/<kind>/<sha256 hex>.<extension>``. The kit checks only a kind's
-shape; which kinds exist is the channel's.
+``do-ecf-v1/<mode>/<organization>/<company>/<kind>/<sha256 hex>.<extension>`` (``xml``; ``pdf`` for a printed
+representation). The kit checks only a kind's shape; which kinds exist is the channel's.
 
 ``PortArchive`` is the use cases' ``Archive`` (and the receiver's ``ReceptionArchive``: documents received
 as they arrived, ``received`` and ``acecf``, and the receipts answered, ``arecf``; and the ``ApprovalArchive``
@@ -32,6 +32,7 @@ lazy from ledger_kernel.tenancy import Tenant
 RETENTION_YEARS: Final = 10
 """How long a signed document is kept from the day it is (Código Tributario art. 50 h; DGII's IT §9.1)."""
 XML: Final = "application/xml"
+PDF: Final = "application/pdf"
 
 
 class ArchiveKind(StrEnum):
@@ -74,6 +75,10 @@ class PortArchive(Archive, ReceptionArchive, ApprovalArchive):
         return await self._kept(tenant, ArchiveKind.RFCE, signed)
 
     @override
+    async def representation(self, tenant: Tenant, pdf: bytes) -> Archived:
+        return await self._kept(tenant, ArchiveKind.REPRESENTATION, pdf, extension="pdf", media_type=PDF)
+
+    @override
     async def buyer_receipt(self, tenant: Tenant, arecf: bytes, *, refused: bool) -> Archived:
         return await self._kept(tenant, ArchiveKind.ARECF_REFUSED if refused else ArchiveKind.ARECF, arecf)
 
@@ -96,11 +101,19 @@ class PortArchive(Archive, ReceptionArchive, ApprovalArchive):
         except PortUnavailableError as error:
             raise ArchiveUnavailableError from error
 
-    async def _kept(self, tenant: Tenant, kind: ArchiveKind, content: bytes) -> Archived:
-        key = archive_key(channel=KEY, tenant=tenant, kind=kind.value, content=content, extension="xml")
+    async def _kept(
+        self,
+        tenant: Tenant,
+        kind: ArchiveKind,
+        content: bytes,
+        *,
+        extension: str = "xml",
+        media_type: str = XML,
+    ) -> Archived:
+        key = archive_key(channel=KEY, tenant=tenant, kind=kind.value, content=content, extension=extension)
         retain_until = years_after(self._clock().date(), RETENTION_YEARS)
         try:
-            stored = await self._port.put_once(key, content, retain_until=retain_until, media_type=XML)
+            stored = await self._port.put_once(key, content, retain_until=retain_until, media_type=media_type)
         except PortUnavailableError as error:
             raise ArchiveUnavailableError from error
         return Archived(key=stored.key, sha256=stored.sha256)
@@ -127,6 +140,10 @@ class UnboundArchive(Archive, ApprovalArchive):
 
     @override
     async def rfce(self, tenant: Tenant, signed: bytes) -> Archived:
+        raise ArchiveNotBoundError
+
+    @override
+    async def representation(self, tenant: Tenant, pdf: bytes) -> Archived:
         raise ArchiveNotBoundError
 
     @override

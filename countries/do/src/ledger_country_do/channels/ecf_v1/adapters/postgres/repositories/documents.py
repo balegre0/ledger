@@ -12,6 +12,8 @@ how often DGII was asked, delivery (since when, the attempts failed, why, the bu
 SHA-256, both or neither), the number's fate, and its buyer's commercial approval (``{approved, reason,
 at}``, the moment in ISO 8601). A document is found by its number too, the one that holds it
 (``documents_number``: a released number is held by none).
+A printed representation is recorded apart, once (the first recorded stays), and changes neither the
+version nor the state.
 """
 
 from typing import Final, TypedDict, final, override
@@ -21,7 +23,7 @@ lazy from uuid import UUID
 
 from psycopg.errors import UniqueViolation
 from pydantic import TypeAdapter
-from sqlalchemy import insert, select, update
+from sqlalchemy import LargeBinary, Text, func, insert, select, type_coerce, update
 from sqlalchemy.exc import IntegrityError
 lazy from sqlalchemy import ColumnElement, Row, Select
 lazy from sqlalchemy.ext.asyncio import AsyncConnection
@@ -454,6 +456,31 @@ class PgDocuments(Documents):
                 updated_at=document.updated_at,
             )
         )
+
+    @override
+    async def representation(self, document: UUID) -> Archived | None:
+        rows = await self._connection.execute(
+            select(DocumentRecord.representation_key, DocumentRecord.representation_sha256).where(
+                *self._mine(), DocumentRecord.id == document
+            )
+        )
+        key, sha256 = rows.one()  # the unit's: a document it read
+        return None if key is None or sha256 is None else Archived(key=key, sha256=sha256)
+
+    @override
+    async def represented(self, document: UUID, archived: Archived) -> Archived:
+        kept = (DocumentRecord.representation_key, DocumentRecord.representation_sha256)
+        rows = await self._connection.execute(
+            update(DocumentRecord)
+            .where(*self._mine(), DocumentRecord.id == document)
+            .values(
+                representation_key=func.coalesce(kept[0], archived.key),
+                representation_sha256=func.coalesce(kept[1], archived.sha256),
+            )
+            .returning(type_coerce(kept[0], Text), type_coerce(kept[1], LargeBinary))
+        )
+        key, sha256 = rows.one()  # the unit's: a document it read; both set now
+        return Archived(key=key, sha256=sha256)
 
     @override
     async def accepted(self, invoices: Collection[DocumentRef]) -> Mapping[DocumentRef, AcceptedEcf]:

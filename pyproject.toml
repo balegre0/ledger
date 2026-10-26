@@ -38,11 +38,14 @@ workspace = [
     "ledger-country-do-testing",
     "ledger-devtools",
     "ledger-testing",
+    "pypdf>=6.21.2",
     "signxml>=5.1.0",
     "types-boto3>=1.43.100",
     "types-lxml>=2026.2.16",
     "types-protobuf>=7.35.1.20260906",
+    "types-reportlab>=5.0.0.20261008",
     "xmlschema>=4.3.2",
+    "zxing-cpp>=3.1.1",
 ]
 
 [tool.uv.sources]
@@ -314,6 +317,11 @@ ignore = [
     "S603",    # a test may run this interpreter on code of its own
     "INP001",  # tests are not a package: each package's tests/ is its own root
 ]
+
+[tool.ruff.lint.pep8-naming]
+# A third party's method a structural Protocol must spell as it is: reportlab's Canvas.setDateFormatter, whose
+# parameter types-reportlab leaves untyped (ledger_country_do's adapters/pdf/layout.py types it through _Dated).
+extend-ignore-names = ["setDateFormatter"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

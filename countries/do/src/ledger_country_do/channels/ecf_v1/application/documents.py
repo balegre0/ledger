@@ -200,6 +200,23 @@ class Documents(Protocol, metaclass=ABCMeta):
         """
 
     @abstractmethod
+    async def representation(self, document: UUID) -> Archived | None:
+        """Where the archive keeps the document's printed representation; ``None`` before its first render.
+
+        ``document`` is one of the unit's company's, in its mode.
+        """
+
+    @abstractmethod
+    async def represented(self, document: UUID, archived: Archived) -> Archived:
+        """Record ``archived`` as the document's printed representation, unless one is recorded already.
+
+        Answers the one recorded: ``archived``, or the one recorded before it. ``document`` is one of the
+        unit's company's, in its mode.
+
+        Neither its version nor its state changes, and nothing is announced: it is not a step of the e-CF.
+        """
+
+    @abstractmethod
     async def accepted(self, invoices: Collection[DocumentRef]) -> Mapping[DocumentRef, AcceptedEcf]:
         """The e-CF DGII accepted (with or without observations) of those of ``invoices`` that have one."""
 
