@@ -61,6 +61,7 @@ from ledger_kernel.tenancy import Mode, Tenant
 from ledger_platform.blobs.archive import ArchiveDigestMismatchError
 from ledger_platform.data.codec import JsonValue
 from ledger_platform.data.tables import chassis_tables
+from ledger_platform.events.consumers import Outside, RawEvent
 from ledger_platform.jobs.outcomes import Done, Job, Park, RunAgain
 from ledger_platform.jobs.runner import JobRunner
 from ledger_platform.runtime.calls import SystemCall
@@ -77,6 +78,7 @@ lazy from ledger_platform.config.settings import Environment as AppEnvironment
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.http.outbound import OutboundHttp
 lazy from ledger_platform.jobs.outcomes import JobHandler, JobOutcome
+lazy from ledger_platform.runtime.app import App
 lazy from ledger_platform.runtime.contexts import ChannelContext
 lazy from ledger_testing.clock import ManualClock
 lazy from ledger_testing.pki import Authority
@@ -977,6 +979,56 @@ async def test_a_company_that_cannot_sign_dgii_s_seed_waits_for_its_certificate_
         moments.append(datetime.now(UTC))
         call = SystemCall(reason="fiscal.certificates", scope=tenant)
         await worker.channel.resume(call, tenant.company, ResumeReason.CERTIFICATE_INSTALLED)
+        assert (await worker.job(document))[0] == "ready"
+        assert await worker.drain(document) == ["again:1", "done"]
+        assert worker.network.posts(RECEPTION) == 1
+
+
+class Enroll(Protocol):
+    async def __call__(self, rnc: str, environment: str = "testecf") -> Tenant: ...
+
+
+def certificate_installed(tenant: Tenant) -> RawEvent:
+    """``signer.certificate.installed`` of ``tenant``'s company, its mode, as the signer's outbox keeps it."""
+    certificate = new_id()
+    payload: dict[str, JsonValue] = {
+        "certificate": str(certificate),
+        "modes": [str(tenant.mode)],
+        "backend": "local",
+        "not_after": "2028-01-01T00:00:00+00:00",
+        "replaces": [],
+    }
+    return RawEvent(
+        id=new_id(),
+        type="signer.certificate.installed",
+        version=1,
+        source="signer",
+        scope=Tenant(tenant.organization, tenant.company, None),
+        subject=certificate,
+        aggregate_version=1,
+        occurred_at=datetime.now(UTC),
+        traceparent=None,
+        payload=payload,
+    )
+
+
+async def test_a_certificate_installed_wakes_through_fiscal_the_document_waiting_for_it_and_it_finishes(
+    started: Started, module_database: BoundDatabase, signer: KeyPairSigner, api: App, enroll: Enroll
+) -> None:
+    """Task 25: fiscal's ``fiscal.certificates`` (the app's own handler) resumes the company's channel."""
+    tenant = await enroll("101850043")
+    await with_range(module_database, tenant)
+    moments = [datetime(2200, 1, 1, tzinfo=UTC)]
+    expired = TestSigner(sign=signer.sign, sign_seed=signer.sign, clock=lambda: moments[-1])
+    async with started.worker(expired) as worker:
+        document = await worker.issued(draft_of(tenant))
+        assert await worker.drain(document) == ["parked:certificate"]
+        moments.append(datetime.now(UTC))
+        (fiscal,) = [member for member in api.members if member.name == "fiscal"]
+        (consumer,) = [each for each in fiscal.consumers if each.name == "fiscal.certificates"]
+        handler = consumer.handler
+        assert isinstance(handler, Outside)
+        await handler.handler(certificate_installed(tenant))
         assert (await worker.job(document))[0] == "ready"
         assert await worker.drain(document) == ["again:1", "done"]
         assert worker.network.posts(RECEPTION) == 1
