@@ -133,7 +133,9 @@ def test_two_migrations_started_at_once_both_succeed(fresh: Settings, fresh_admi
 
 
 def test_the_migrated_schema_is_exactly_the_models(migrated: WorkerDatabase) -> None:
-    assert MIGRATIONS.head == "0003"  # 0001 squashes v1's two; 0002 is chassis v2; 0003 API clients' policies
+    assert (
+        MIGRATIONS.head == "0004"
+    )  # 0001 squashes v1's two; 0002 chassis v2; 0003 API clients' policies; 0004 addresses
     assert pending_changes(superuser(migrated), MODELS, schema=S) is None
 
 
@@ -172,6 +174,10 @@ def test_the_check_constraints_are_the_models_and_allow_exactly_the_domains_word
         "ck_companies_version": "CHECK ((version > 0))",
         "ck_memberships_version": "CHECK ((version > 0))",
     }
+    assert checks["ck_companies_address"] == (
+        "CHECK (((address_line IS NOT NULL)"
+        " OR ((address_municipality IS NULL) AND (address_province IS NULL))))"
+    )
 
 
 def test_every_table_of_a_tenant_s_data_is_under_its_policies_forced_on_its_owner(

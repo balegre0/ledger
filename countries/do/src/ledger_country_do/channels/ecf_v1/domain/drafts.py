@@ -21,6 +21,7 @@ lazy from datetime import date
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError
 from ledger_country_do.regime.rounding import round_amount
+from ledger_country_do.regime.subdivisions import SUBDIVISIONS
 from ledger_country_do.regime.tax_ids import normalize, scheme_of
 from ledger_kernel.money import Currency
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
@@ -232,6 +233,8 @@ class Rule(StrEnum):
     DISCOUNT_TOO_LARGE = "discount_too_large"
     WITHHELD_TOO_LARGE = "withheld_too_large"
     WITHHELD_PRECISION = "withheld_precision"
+    CODE_UNKNOWN = "code_unknown"
+    """A municipality or a province that is no code of DGII's catalogue (``ProvinciaMunicipioType``)."""
 
 
 @final
@@ -470,6 +473,19 @@ def _text(field_name: str, value: str, limit: int) -> None:
         raise DraftInvalidError(field_name, violation.requirement)
 
 
+def code_violation(code: str) -> Violation | None:
+    """The rule ``code`` breaks as a municipality or a province of DGII's catalogue; ``None`` if none."""
+    if code not in SUBDIVISIONS:
+        return Violation(Rule.CODE_UNKNOWN, "is a code of DGII's catalogue of municipalities and provinces")
+    return None
+
+
+def _code(field_name: str, code: str | None) -> None:
+    violation = None if code is None else code_violation(code)
+    if violation is not None:
+        raise DraftInvalidError(field_name, violation.requirement)
+
+
 def _tax_id(field_name: str, value: str) -> None:
     if scheme_of(value) is None or normalize(value) != value:
         raise DraftInvalidError(field_name, "is an RNC (9 digits) or a cédula (11 digits), digits only")
@@ -483,16 +499,20 @@ def exchange_rate_valid(rate: Decimal) -> bool:
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Issuer:
-    """The company issuing the e-CF."""
+    """The company issuing the e-CF, at its address (``DireccionEmisor``, ``Municipio``, ``Provincia``)."""
 
     rnc: str
     legal_name: str
     address: str
+    municipality: str | None = None
+    province: str | None = None
 
     def __post_init__(self) -> None:
         _tax_id("issuer.rnc", self.rnc)
         _text("issuer.legal_name", self.legal_name, LEGAL_NAME)
         _text("issuer.address", self.address, ADDRESS)
+        _code("issuer.municipality", self.municipality)
+        _code("issuer.province", self.province)
 
 
 @final

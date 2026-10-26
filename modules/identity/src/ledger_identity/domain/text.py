@@ -2,7 +2,9 @@
 
 A name is trimmed, its runs of white space are one space, it is in Unicode NFC, it holds no control or format
 character, and it is neither empty nor longer than its limit. A code is 1 to ``MAX_CODE`` upper-case ASCII
-letters and digits (``001``, ``SUC1``). A refusal says which field and what is wrong, never the text.
+letters and digits (``001``, ``SUC1``). A fiscal address's line is a name of up to the generic limit, and
+its codes are shaped as a catalogue's (``010100``). A refusal says which field and what is wrong, never the
+text.
 """
 
 import re
@@ -10,7 +12,13 @@ import unicodedata
 from typing import Final, NewType
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from ledger_identity.domain.errors import InvalidCodeError, InvalidNameError, InvalidTimeZoneError
+from ledger_identity.domain.errors import (
+    AddressCodeUnknownError,
+    InvalidCodeError,
+    InvalidNameError,
+    InvalidTimeZoneError,
+)
+from ledger_kernel.addresses import MAX_ADDRESS_LINE, FiscalAddress, is_subdivision_code
 
 LegalName = NewType("LegalName", str)
 """A company's registered name, as its tax authority knows it."""
@@ -52,6 +60,25 @@ def parse_legal_name(text: str) -> LegalName:
 def parse_name(text: str, *, field: str = "name") -> Name:
     """The name of an establishment; ``field`` is how a refusal names it."""
     return Name(_cleaned(field, text, MAX_NAME))
+
+
+def _subdivision(field: str, code: str | None) -> str | None:
+    if code is not None and not is_subdivision_code(code):
+        raise AddressCodeUnknownError(field)
+    return code
+
+
+def parse_address(line: str, *, municipality: str | None, province: str | None) -> FiscalAddress:
+    """A fiscal address: its line cleaned as a name is (generic limit), each code checked for its shape.
+
+    Whether the jurisdiction's regime takes it (its line's limit, its catalogue's codes) is
+    ``company.require_address_fits``'s to say.
+    """
+    return FiscalAddress(
+        line=_cleaned("address.line", line, MAX_ADDRESS_LINE),
+        municipality=_subdivision("address.municipality", municipality),
+        province=_subdivision("address.province", province),
+    )
 
 
 def parse_code(text: str) -> Code:

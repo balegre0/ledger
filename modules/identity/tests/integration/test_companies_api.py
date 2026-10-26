@@ -860,6 +860,96 @@ async def test_a_locked_profile_changes_no_more_though_the_name_still_does(
     assert (renamed.status_code, renamed.headers["etag"]) == (200, '"2"')
 
 
+# ── The fiscal address (Task 35) ────────────────────────────────────────────────
+
+ADDRESS: Final = {"line": "Av. Duarte 10, Villa Consuelo", "municipality": "010100", "province": "010000"}
+"""An address in Santo Domingo de Guzmán, Distrito Nacional: codes of DGII's catalogue (regime ``do``)."""
+
+
+async def test_a_company_is_registered_with_its_fiscal_address_or_without_one(
+    client: httpx.AsyncClient, owner: TestPrincipal
+) -> None:
+    sent = DUARTE | {"address": {"line": "  Av. Duarte 	 10, Villa Consuelo ", "province": "010000"}}
+    made = await client.post("/v1/companies", json=sent, headers=owner.posting("k-address"))
+    assert made.status_code == 201, made.text
+    assert document(made)["address"] == {
+        "line": "Av. Duarte 10, Villa Consuelo",
+        "municipality": None,
+        "province": "010000",
+    }
+    read = await client.get(str(made.headers["location"]), headers=owner.bearer())
+    assert document(read)["address"] == document(made)["address"]
+    other = body({"scheme": "do.rnc", "value": "130000012"})
+    bare = await client.post("/v1/companies", json=other, headers=owner.posting("k-bare"))
+    assert document(bare)["address"] is None
+
+
+@pytest.mark.parametrize(
+    ("address", "code", "field"),
+    [
+        ({"line": "x" * 101}, "invalid_name", "address.line is longer than 100 characters"),
+        ({"line": "   "}, "invalid_name", "address.line is empty"),
+        ({"line": "Calle 1", "municipality": "999999"}, "address_code_unknown", "address.municipality "),
+        ({"line": "Calle 1", "province": "01-00"}, "address_code_unknown", "address.province "),
+        ({"municipality": "010100"}, "invalid_request", "line"),
+        ({"line": "Calle 1", "zip": "10101"}, "invalid_request", "zip"),
+    ],
+)
+async def test_an_address_the_dominican_regime_does_not_take_is_refused(
+    client: httpx.AsyncClient, owner: TestPrincipal, address: dict[str, str], code: str, field: str
+) -> None:
+    """DGII's ``DireccionEmisor`` holds 100 characters; ``Municipio`` and ``Provincia``, its catalogue's."""
+    refused = await client.post(
+        "/v1/companies", json=DUARTE | {"address": address}, headers=owner.posting("k-x")
+    )
+    assert (refused.status_code, document(refused)["code"]) == (422, code), refused.text
+    assert field in refused.text
+    assert "999999" not in refused.text
+
+
+async def test_a_company_moves_its_address_or_clears_it_even_once_its_profile_is_locked(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str, admin: psycopg.AsyncConnection
+) -> None:
+    await admin.execute("UPDATE identity.companies SET fiscal_profile_locked_at = now()")
+    path = f"/v1/companies/{company}"
+    moved = await client.patch(path, json={"address": ADDRESS}, headers=owner.bearer() | {"If-Match": '"1"'})
+    assert (moved.status_code, moved.headers["etag"], document(moved)["address"]) == (200, '"2"', ADDRESS)
+    same = await client.patch(path, json={"address": ADDRESS}, headers=owner.bearer() | {"If-Match": '"2"'})
+    assert (same.status_code, same.headers["etag"]) == (200, '"2"')  # what it is already is no change
+    renamed = await client.patch(
+        path, json={"legal_name": "Duarte e Hijos"}, headers=owner.bearer() | {"If-Match": "*"}
+    )
+    assert document(renamed)["address"] == ADDRESS  # a change that names no address keeps it
+    cleared = await client.patch(path, json={"address": None}, headers=owner.bearer() | {"If-Match": "*"})
+    assert (cleared.status_code, document(cleared)["address"], cleared.headers["etag"]) == (200, None, '"4"')
+    refused = await client.patch(
+        path,
+        json={"address": {"line": "Calle 1", "province": "999999"}},
+        headers=owner.bearer() | {"If-Match": "*"},
+    )
+    assert (refused.status_code, document(refused)["code"]) == (422, "address_code_unknown")
+
+
+COMPANY_ACTIONS: Final = (
+    "SELECT action FROM identity.audit_events WHERE subject_type = 'company' ORDER BY occurred_at, action"
+)
+
+
+async def test_a_change_of_the_address_is_audited_as_such(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str, admin: psycopg.AsyncConnection
+) -> None:
+    path = f"/v1/companies/{company}"
+    both = {"address": ADDRESS, "legal_name": "Duarte e Hijos"}
+    changed = await client.patch(path, json=both, headers=owner.bearer() | {"If-Match": '"1"'})
+    assert changed.status_code == 200, changed.text
+    rows = await admin.execute(COMPANY_ACTIONS)
+    assert [row[0] for row in await rows.fetchall()] == [
+        "company.register",
+        "company.change_address",
+        "company.rename",
+    ]
+
+
 async def test_of_two_changes_of_one_version_only_one_applies(
     client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:

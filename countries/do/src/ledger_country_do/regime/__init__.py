@@ -12,6 +12,7 @@ from ledger_country_do.regime.fields import FIELDS
 from ledger_country_do.regime.parameters import PARAMETERS
 from ledger_country_do.regime.rounding import ROUNDING
 from ledger_country_do.regime.sources import ALL
+from ledger_country_do.regime.subdivisions import ADDRESS
 from ledger_country_do.regime.tax_ids import SCHEMES
 from ledger_country_do.regime.taxes import CATEGORIES
 from ledger_kernel.jurisdiction import CountryCode, Jurisdiction
@@ -31,4 +32,5 @@ REGIME: Final = RegimeDef(
     fields=FIELDS,
     parameters=PARAMETERS,
     sources=ALL,
+    address=ADDRESS,
 )

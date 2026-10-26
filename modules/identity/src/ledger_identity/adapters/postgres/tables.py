@@ -34,6 +34,7 @@ from ledger_identity.domain.company import CompanyStatus
 from ledger_identity.domain.membership import MembershipStatus
 from ledger_identity.domain.text import MAX_CODE, MAX_LEGAL_NAME, MAX_NAME
 from ledger_kernel.access import MAX_PROVIDER_ORGANIZATION_LENGTH, MAX_SUBJECT_LENGTH, Role
+from ledger_kernel.addresses import MAX_ADDRESS_LINE
 from ledger_kernel.tax_ids import MAX_TAX_ID_LENGTH
 from ledger_kernel.tenancy import Mode
 from ledger_platform.data import ModuleTable
@@ -52,6 +53,8 @@ TIME_ZONE_LENGTH: Final = 64
 """The longest IANA zone name ``ledger_identity.domain.text`` reads."""
 WORD_LENGTH: Final = 16
 """For a status or a role: a short word of a closed list, which a check constraint names."""
+SUBDIVISION_CODE_LENGTH: Final = 16
+"""The longest code of a subdivisions' catalogue the kernel reads (``ledger_kernel.addresses``)."""
 
 
 def _one_of(column: str, words: type[StrEnum], *, name: str) -> CheckConstraint:
@@ -89,13 +92,21 @@ class OrganizationRecord(IdentityTable):
 
 
 class CompanyRecord(IdentityTable):
-    """A company of an organization, at its current version (its tax id is held in ``tax_registrations``)."""
+    """A company of an organization, at its current version (its tax id is held in ``tax_registrations``).
+
+    Its fiscal address, if it states one: a line and, where its regime keeps a catalogue, the codes of its
+    municipality and province (revision 0004); a code goes with a line only.
+    """
 
     __tablename__: str = "companies"
     __table_args__: tuple[SchemaItem, ...] = (
         UniqueConstraint("organization_id", "id", name="uq_companies_organization"),
         _one_of("status", CompanyStatus, name="ck_companies_status"),
         _positive_version("companies"),
+        CheckConstraint(
+            "address_line IS NOT NULL OR (address_municipality IS NULL AND address_province IS NULL)",
+            name="ck_companies_address",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True)
@@ -109,6 +120,9 @@ class CompanyRecord(IdentityTable):
     version: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    address_line: Mapped[str | None] = mapped_column(String(MAX_ADDRESS_LINE))
+    address_municipality: Mapped[str | None] = mapped_column(String(SUBDIVISION_CODE_LENGTH))
+    address_province: Mapped[str | None] = mapped_column(String(SUBDIVISION_CODE_LENGTH))
 
 
 class CompanyTaxIdRecord(IdentityTable):

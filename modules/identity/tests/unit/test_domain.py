@@ -11,8 +11,16 @@ from hypothesis import strategies as st
 
 from ledger_identity._manifest import MANIFEST
 from ledger_identity.domain.api_clients import ApiClient, ApiClientSpec, ApiClientStatus
-from ledger_identity.domain.company import Company, CompanyStatus, FiscalProfile, require_fits
+from ledger_identity.domain.company import (
+    Company,
+    CompanyStatus,
+    FiscalProfile,
+    Keep,
+    require_address_fits,
+    require_fits,
+)
 from ledger_identity.domain.errors import (
+    AddressCodeUnknownError,
     CompanyInactiveError,
     CurrencyUnsupportedError,
     EstablishmentCodeTakenError,
@@ -58,6 +66,7 @@ from ledger_identity.domain.text import (
     MAX_LEGAL_NAME,
     MAX_NAME,
     LegalName,
+    parse_address,
     parse_code,
     parse_legal_name,
     parse_name,
@@ -79,6 +88,7 @@ from ledger_kernel.access import (
     SubjectId,
     parse_permission,
 )
+from ledger_kernel.addresses import AddressDef, FiscalAddress
 from ledger_kernel.errors import ErrorKind, InvalidValueError
 from ledger_kernel.ids import (
     COMPANY_PREFIX,
@@ -443,6 +453,89 @@ def test_a_profile_fits_the_regime_of_its_jurisdiction_or_is_refused() -> None:
         "currency_unsupported",
         "tax_id_foreign",
     ]
+
+
+# ── The fiscal address (Task 35) ────────────────────────────────────────────────
+
+CATALOGUE: Final = AddressDef(
+    max_line=100, municipalities=frozenset({"010100"}), provinces=frozenset({"010000"})
+)
+ADDRESS: Final = FiscalAddress(line="Av. Duarte 10, Villa Consuelo", municipality="010100", province="010000")
+
+
+def test_an_address_s_line_is_cleaned_as_a_name_is_and_its_codes_kept_as_sent() -> None:
+    assert parse_address("  Av. Duarte \t 10 ", municipality="010100", province=None) == FiscalAddress(
+        line="Av. Duarte 10", municipality="010100"
+    )
+    with pytest.raises(InvalidNameError, match=r"^address\.line is empty$"):
+        parse_address(" \n ", municipality=None, province=None)
+    with pytest.raises(InvalidNameError, match=r"^address\.line holds a control or format character$"):
+        parse_address("Calle\u200b1", municipality=None, province=None)
+
+
+@pytest.mark.parametrize("code", ["X-1", "01-01", "abc", "1" * 17])
+def test_a_code_no_catalogue_could_hold_is_unknown_and_never_repeated(code: str) -> None:
+    with pytest.raises(AddressCodeUnknownError) as caught:
+        parse_address("Calle 1", municipality=None, province=code)
+    assert (caught.value.kind, caught.value.code) == (ErrorKind.INVALID, "address_code_unknown")
+    assert code not in str(caught.value)
+    assert str(caught.value) == "address.province is not a code of the regime's catalogue"
+
+
+def test_an_address_fits_its_regime_s_definition_or_is_refused_by_part() -> None:
+    catalogued = replace(regime_of("DO"), address=CATALOGUE)
+    require_address_fits(ADDRESS, catalogued)
+    require_address_fits(None, catalogued)  # a company may state none
+    with pytest.raises(InvalidNameError, match=r"^address\.line is longer than 100 characters$"):
+        require_address_fits(FiscalAddress(line="x" * 101), catalogued)
+    with pytest.raises(AddressCodeUnknownError, match=r"^address\.municipality "):
+        require_address_fits(replace(ADDRESS, municipality="999999"), catalogued)
+    with pytest.raises(AddressCodeUnknownError, match=r"^address\.province "):
+        require_address_fits(replace(ADDRESS, province="010100"), catalogued)
+
+
+def test_a_regime_that_declares_no_address_or_none_installed_takes_a_line_and_no_code() -> None:
+    for generic in (regime_of("DO"), None):
+        require_address_fits(FiscalAddress(line="x" * 300), generic)
+        with pytest.raises(AddressCodeUnknownError, match=r"^address\.municipality "):
+            require_address_fits(ADDRESS, generic)
+
+
+def test_a_company_is_registered_with_its_address_or_none() -> None:
+    assert registered().address is None
+    company, created = Company.register(
+        organization=ORGANIZATION,
+        profile=profile(RNC),
+        legal_name=parse_legal_name("D"),
+        address=ADDRESS,
+        now=NOW,
+    )
+    assert (company.address, company.version) == (ADDRESS, 1)
+    assert created.legal_name == "D"  # identity's events carry no address (v1)
+
+
+def test_a_new_address_or_none_makes_a_new_version_and_the_same_one_nothing() -> None:
+    company = registered()
+    moved, updated = company.change(address=ADDRESS, now=LATER)
+    assert (moved.address, moved.version, moved.updated_at, moved.legal_name) == (
+        ADDRESS,
+        2,
+        LATER,
+        company.legal_name,
+    )
+    assert updated == moved.updated()
+    assert moved.change(address=ADDRESS, now=LATER) == (moved, None)
+    assert moved.change(address=Keep.KEEP, now=LATER) == (moved, None)
+    cleared, _ = moved.change(address=None, now=LATER)
+    assert (cleared.address, cleared.version) == (None, 3)
+
+
+def test_a_locked_company_still_moves_its_address_and_a_deactivated_one_does_not() -> None:
+    locked, _ = registered().lock_fiscal_profile(now=LATER)
+    moved, _ = locked.change(address=ADDRESS, now=LATER)
+    assert (moved.address, moved.fiscal_profile_locked_at) == (ADDRESS, LATER)
+    with pytest.raises(CompanyInactiveError):
+        deactivated().change(address=ADDRESS, now=LATER)
 
 
 def test_a_deactivated_company_says_so_and_changes_no_more() -> None:

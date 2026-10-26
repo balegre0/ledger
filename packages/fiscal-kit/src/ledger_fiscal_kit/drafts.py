@@ -6,10 +6,11 @@ tax point, the kernel calculator's totals) for one channel, environment and mode
 numbers it and builds its authority's format from it. Nothing here reads or writes anything.
 
 The parties follow invoicing's ``InvoiceInfo``: ``issuer`` is its ``seller``, the company that issues the
-document whatever its direction; ``counterparty`` is its ``buyer``, the other party as the client sent it (a
-sale's buyer; for a self-billed purchase, DGII's types 41, 43 and 47, the supplier the company buys from), or
-``None`` when the document names none. A channel maps them onto its format's blocks (DO: the issuer is always
-``Emisor``, the counterparty always ``Comprador``).
+document whatever its direction, at the fiscal address it had then (its line, and the codes of its
+municipality and province where the regime keeps a catalogue); ``counterparty`` is its ``buyer``, the other
+party as the client sent it (a sale's buyer; for a self-billed purchase, DGII's types 41, 43 and 47, the
+supplier the company buys from), or ``None`` when the document names none. A channel maps them onto its
+format's blocks (DO: the issuer is always ``Emisor``, the counterparty always ``Comprador``).
 
 A draft is built by our own code from a document invoicing already validated, so a draft that breaks a rule
 here is a defect of that code (``FiscalDraftInvalidError``, internal), never a client's input: what a channel
@@ -69,7 +70,12 @@ class FiscalParty:
     """Shown masked (``TaxId``'s ``repr``)."""
     legal_name: str | None = field(repr=False)
     address: str | None = field(default=None, repr=False)
+    """Its address's line: for the issuer, the company's fiscal address when the document was issued."""
     email: str | None = field(default=None, repr=False)
+    municipality: str | None = field(default=None, repr=False)
+    """The code of the address's municipality in the regime's catalogue (DGII's ``Municipio``), if given."""
+    province: str | None = field(default=None, repr=False)
+    """The code of the address's province in the regime's catalogue (DGII's ``Provincia``), if given."""
 
 
 @final

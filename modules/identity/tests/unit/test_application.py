@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Final, final, override
 lazy from collections.abc import Callable, Iterable, Mapping
 lazy from uuid import UUID
@@ -22,11 +23,13 @@ from ledger_identity.application.ports import (
 from ledger_identity.domain.api_clients import ApiClientSpec
 from ledger_identity.domain.company import CompanyStatus, FiscalProfile
 from ledger_identity.domain.errors import (
+    AddressCodeUnknownError,
     ApiClientExistsError,
     ApiClientNotFoundError,
     CompanyInactiveError,
     EstablishmentCodeTakenError,
     EstablishmentNotFoundError,
+    InvalidNameError,
     JurisdictionUnsupportedError,
     LastOwnerError,
     MembershipNotFoundError,
@@ -54,11 +57,13 @@ from ledger_kernel.access import (
     Role,
     SubjectId,
 )
+from ledger_kernel.addresses import AddressDef, FiscalAddress
 from ledger_kernel.errors import ErrorKind
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.jurisdiction import parse_jurisdiction
-from ledger_kernel.money import Currency
+from ledger_kernel.money import Currency, RoundingMode
 from ledger_kernel.pagination import PageRequest, decode_cursor, page_of
+from ledger_kernel.regimes import Locale, RegimeDef, RegimeKey, RoundingRule, Source
 from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_kernel.tenancy import Mode, Tenant
 lazy from ledger_identity.application.ports import AuditAction
@@ -71,7 +76,6 @@ lazy from ledger_identity.domain.text import Code, LegalName
 lazy from ledger_identity.events import IdentityEvent
 lazy from ledger_kernel.jurisdiction import Jurisdiction
 lazy from ledger_kernel.pagination import Page
-lazy from ledger_kernel.regimes import RegimeDef
 
 NOW: Final = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
 LATER: Final = NOW + timedelta(minutes=5)
@@ -582,6 +586,102 @@ async def test_a_company_that_does_not_exist_is_not_found(state: State) -> None:
         )
     with pytest.raises(CompanyNotFoundError):
         await queries.company(state.unit(), missing)
+
+
+# ── The fiscal address (Task 35) ────────────────────────────────────────────────
+
+CATALOGUE: Final = AddressDef(
+    max_line=100, municipalities=frozenset({"010100"}), provinces=frozenset({"010000"})
+)
+ADDRESS: Final = FiscalAddress(line="Av. Duarte 10", municipality="010100", province="010000")
+
+
+def catalogued(jurisdiction: Jurisdiction) -> RegimeDef:
+    """A regime of ``jurisdiction`` that keeps a catalogue of codes (as DO's does), and nothing else."""
+    return RegimeDef(
+        key=RegimeKey(jurisdiction.country.lower()),
+        jurisdiction=jurisdiction,
+        currency=Currency.of("DOP"),
+        time_zone="America/Santo_Domingo",
+        labels={Locale("es"): jurisdiction.country},
+        tax_id_schemes=(),
+        tax_categories=(),
+        document_types=(),
+        rounding=RoundingRule(
+            mode=RoundingMode.HALF_UP, points=frozenset(), places=2, line_tolerance=Decimal("0.01")
+        ),
+        fields=(),
+        parameters={},
+        sources=(Source(title="Law", url="https://law.invalid", version="1", retrieved_on=date(2026, 1, 1)),),
+        address=CATALOGUE,
+    )
+
+
+def narrow(jurisdiction: Jurisdiction) -> RegimeDef:
+    """A regime of ``jurisdiction`` that takes foreign tax ids and an address line of 5 characters at most."""
+    return replace(catalogued(jurisdiction), address=AddressDef(max_line=5), foreign_tax_ids=True)
+
+
+def moving(address: FiscalAddress | None, regime_of: commands.RegimeOf = catalogued) -> commands.Changes:
+    """A change of the address alone, judged by ``regime_of``."""
+    return commands.Changes(regime_of=regime_of, address=address)
+
+
+async def test_a_company_is_registered_at_the_address_its_registration_states(state: State) -> None:
+    located = replace(registration(RNC), address=ADDRESS)
+    company = await commands.create_company(state.unit(), FOUNDER, located)
+    assert state.companies[company.id].address == ADDRESS
+
+
+async def test_a_new_address_is_a_new_version_announced_and_audited(state: State) -> None:
+    company = await created(state)
+    moved = await commands.change_company(
+        state.unit(LATER), company.id, moving(ADDRESS), admits=anything, actor=OWNER
+    )
+    assert (moved.address, moved.version, state.companies[company.id]) == (ADDRESS, 2, moved)
+    assert state.events[-1] == moved.updated()
+    assert state.audited[-1] == Audited("company.change_address", company.id, company, moved, {})
+    cleared = await commands.change_company(
+        state.unit(LATER), company.id, moving(None), admits=anything, actor=OWNER
+    )
+    assert (cleared.address, cleared.version) == (None, 3)
+    again = await commands.change_company(
+        state.unit(LATER), company.id, moving(None), admits=anything, actor=OWNER
+    )
+    assert again == cleared  # so already: nothing changes, nothing is recorded
+    assert [entry.action for entry in state.audited[3:]] == ["company.change_address"] * 2
+
+
+async def test_a_rename_with_a_new_address_is_one_version_audited_for_each(state: State) -> None:
+    company = await created(state)
+    both = replace(moving(ADDRESS), legal_name=parse_legal_name("Duarte Hermanos"))
+    changed = await commands.change_company(state.unit(LATER), company.id, both, admits=anything, actor=OWNER)
+    assert (changed.legal_name, changed.address, changed.version) == ("Duarte Hermanos", ADDRESS, 2)
+    assert [entry.action for entry in state.audited[3:]] == ["company.rename", "company.change_address"]
+
+
+async def test_an_address_the_regime_does_not_take_is_refused_and_nothing_changes(state: State) -> None:
+    company = await created(state)
+    unknown = moving(replace(ADDRESS, province="999999"))
+    with pytest.raises(AddressCodeUnknownError):
+        await commands.change_company(state.unit(LATER), company.id, unknown, admits=anything, actor=OWNER)
+    uninstalled = moving(ADDRESS, no_regime)  # no regime installed: a line, no code
+    with pytest.raises(AddressCodeUnknownError):
+        await commands.change_company(
+            state.unit(LATER), company.id, uninstalled, admits=anything, actor=OWNER
+        )
+    assert (state.companies[company.id], len(state.events), len(state.audited)) == (company, 2, 3)
+
+
+async def test_an_address_kept_is_judged_again_by_the_regime_of_a_new_jurisdiction(state: State) -> None:
+    located = replace(registration(RNC), address=ADDRESS)
+    company = await commands.create_company(state.unit(), FOUNDER, located)
+    abroad = commands.Changes(
+        regime_of=narrow, jurisdiction=parse_jurisdiction("US"), time_zone=parse_time_zone("America/New_York")
+    )
+    with pytest.raises(InvalidNameError, match=r"^address\.line is longer than 5 characters$"):
+        await commands.change_company(state.unit(LATER), company.id, abroad, admits=anything, actor=OWNER)
+    assert state.companies[company.id] == company
 
 
 # ── Audit ───────────────────────────────────────────────────────────────────────

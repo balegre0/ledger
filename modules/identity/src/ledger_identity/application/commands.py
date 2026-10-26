@@ -7,7 +7,7 @@ lazy from datetime import date
 
 from ledger_identity.application.queries import main_establishment
 from ledger_identity.domain.api_clients import ApiClient
-from ledger_identity.domain.company import Company, FiscalProfile, require_fits
+from ledger_identity.domain.company import Company, FiscalProfile, Keep, require_address_fits, require_fits
 from ledger_identity.domain.errors import (
     ApiClientExistsError,
     ApiClientHumanError,
@@ -31,6 +31,7 @@ lazy from ledger_identity.domain.ids import ApiClientId
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_identity.domain.text import Code, LegalName, Name, TimeZone
 lazy from ledger_kernel.access import Principal, Role, SubjectId
+lazy from ledger_kernel.addresses import FiscalAddress
 lazy from ledger_kernel.ids import CompanyId
 lazy from ledger_kernel.jurisdiction import Jurisdiction
 lazy from ledger_kernel.money import Currency
@@ -47,10 +48,11 @@ type RegimeOf = Callable[[Jurisdiction], RegimeDef | None]
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Changes:
-    """What a change of a company sets; whatever is ``None`` stays as it is.
+    """What a change of a company sets; whatever is ``None`` (the address: ``Keep.KEEP``) stays as it is.
 
     The jurisdiction, the functional currency and the tax ids make its fiscal profile (the tax ids as a whole
-    list, the first its primary one): they change only until the profile is locked.
+    list, the first its primary one): they change only until the profile is locked. The address changes at any
+    time; ``None`` clears it.
     """
 
     regime_of: RegimeOf
@@ -61,6 +63,7 @@ class Changes:
     tax_ids: tuple[TaxId, ...] | None = None
     time_zone: TimeZone | None = None
     """The zone ``MAIN`` keeps once the jurisdiction changes: required then, refused otherwise."""
+    address: FiscalAddress | Keep | None = Keep.KEEP
 
     def profile_of(self, company: Company) -> FiscalProfile | None:
         """``company``'s profile with these changes, if any part of it changes at all."""
@@ -94,14 +97,16 @@ class Opening:
 class Registration:
     """What a company is registered with.
 
-    Its fiscal profile, its name, the zone its main establishment keeps, and the API version its organization
-    is pinned to if this is the organization's first company.
+    Its fiscal profile, its name, the zone its main establishment keeps, the API version its organization
+    is pinned to if this is the organization's first company, and its fiscal address if it states one (which
+    the caller has checked against the regime, as the profile: ``require_address_fits``).
     """
 
     profile: FiscalProfile
     legal_name: LegalName
     time_zone: TimeZone
     api_version: date
+    address: FiscalAddress | None = None
 
 
 @final
@@ -137,6 +142,7 @@ async def create_company(unit: IdentityUnit, founder: Principal, registration: R
         organization=founder.organization,
         profile=registration.profile,
         legal_name=registration.legal_name,
+        address=registration.address,
         now=unit.now,
     )
     if not await unit.companies.add(registered):
@@ -196,28 +202,39 @@ async def change_company(
 
     A fiscal profile changes only until it is locked (``FiscalProfileLockedError``), and only to one the
     regime of its jurisdiction allows (``require_fits``); a tax id it lists anew that an active company
-    holds refuses the change (``TaxIdTakenError``), and one it no longer lists is released. Nothing that is
-    so already is changed, announced or recorded.
+    holds refuses the change (``TaxIdTakenError``), and one it no longer lists is released. Its address, new
+    or kept under a new profile, is one that regime takes (``require_address_fits``). Nothing that is so
+    already is changed, announced or recorded. A new address is recorded as such
+    (``company.change_address``), beside the rename or the change of profile made with it.
     """
     current = await _admitted(unit, company_id, admits, actor)
     profile = changes.profile_of(current)
-    changed, updated = current.change(legal_name=changes.legal_name, profile=profile, now=unit.now)
+    changed, updated = current.change(
+        legal_name=changes.legal_name, profile=profile, address=changes.address, now=unit.now
+    )
     moved = changed.profile.jurisdiction != current.profile.jurisdiction
     if not moved and changes.time_zone is not None:
         raise TimeZoneUnusedError
     if updated is None:
         return current
     refiled = changed.profile != current.profile
-    if refiled:
-        _ = require_fits(changed.profile, changes.regime_of(changed.profile.jurisdiction))
+    relocated = changed.address != current.address
+    if refiled or relocated:
+        regime = changes.regime_of(changed.profile.jurisdiction)
+        if refiled:
+            _ = require_fits(changed.profile, regime)
+        require_address_fits(changed.address, regime)
     if moved:
         await _move_main(unit, current, changes.time_zone)
     await _replace(unit, current, changed)
     if changed.profile.tax_ids != current.profile.tax_ids and not await unit.companies.retax(changed):
         raise TaxIdTakenError
     unit.events.publish(updated)
-    action: AuditAction = "company.change_profile" if refiled else "company.rename"
-    unit.audit.record(action, current.id, before=current, after=changed)
+    if refiled or changed.legal_name != current.legal_name:
+        action: AuditAction = "company.change_profile" if refiled else "company.rename"
+        unit.audit.record(action, current.id, before=current, after=changed)
+    if relocated:
+        unit.audit.record("company.change_address", current.id, before=current, after=changed)
     return changed
 
 

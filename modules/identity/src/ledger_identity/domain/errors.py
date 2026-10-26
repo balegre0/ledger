@@ -96,6 +96,15 @@ class InvalidCodeError(InvalidInputError):
         super().__init__("a code is 1 to 10 upper-case letters and digits")
 
 
+class AddressCodeUnknownError(InvalidInputError):
+    """A municipality or a province that is no code of the catalogue the jurisdiction's regime keeps."""
+
+    code: ClassVar[str] = "address_code_unknown"
+
+    def __init__(self, field: str) -> None:
+        super().__init__(f"{field} is not a code of the regime's catalogue")  # the code sent is not repeated
+
+
 class OrganizationNotFoundError(NotFoundError):
     """The organization has no company yet, so identity holds nothing of it."""
 

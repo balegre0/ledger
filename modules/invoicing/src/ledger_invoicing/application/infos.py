@@ -66,7 +66,9 @@ def info_of(invoice: Invoice) -> InvoiceInfo:
         exchange_rate=terms.exchange_rate,
         issue_date=pricing.issue_date,
         tax_point=pricing.tax_point,
-        seller=None if seller is None else SellerInfo(legal_name=seller.legal_name, tax_id=seller.tax_id),
+        seller=None
+        if seller is None
+        else SellerInfo(legal_name=seller.legal_name, tax_id=seller.tax_id, address=seller.address),
         buyer=None if terms.buyer is None else _party(terms.buyer),
         lines=tuple(_line(line) for line in pricing.lines),
         totals=pricing.totals,

@@ -82,6 +82,7 @@ def company(jurisdiction: Jurisdiction, *, active: bool = True) -> CompanyInfo:
         functional_currency=Currency.of("DOP"),
         tax_ids=(RNC,),
         legal_name="Acme SRL",
+        address=None,
         active=active,
         fiscal_profile_locked=False,
         version=1,

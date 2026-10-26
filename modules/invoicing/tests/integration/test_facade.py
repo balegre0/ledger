@@ -86,7 +86,9 @@ async def kept(database: BoundDatabase, regime: RegimeDef, *, draft: bool = Fals
         dating=Dating(today=date(2026, 10, 12)),
     )
     seller = (
-        None if draft else Seller(legal_name="Acme SRL", tax_id=TaxId(TaxIdScheme("do.rnc"), "101850043"))
+        None
+        if draft
+        else Seller(legal_name="Acme SRL", tax_id=TaxId(TaxIdScheme("do.rnc"), "101850043"), address=None)
     )
     invoice, _ = Invoice.new(opening, corrects=None, pricing=pricing, seller=seller, now=NOW)
     async with PgUnits(database).unit(TENANT) as unit:

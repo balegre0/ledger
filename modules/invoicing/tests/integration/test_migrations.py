@@ -49,7 +49,8 @@ def superuser(worker: WorkerDatabase) -> str:
 def test_the_schema_holds_the_chassis_s_tables_and_a_document_s_at_one_revision(
     migrated: WorkerDatabase,
 ) -> None:
-    assert MIGRATIONS.head == "0002"  # 0001: the chassis and a document; 0002: the fiscal mirror
+    assert MIGRATIONS.head == "0003"  # 0001: the chassis and a document; 0002: the fiscal mirror; 0003: the
+    # seller's address (Task 35)
     assert tables_of(superuser(migrated), schema=SCHEMA) == {
         *DOCUMENT_TABLES,
         *CHASSIS_TABLES,

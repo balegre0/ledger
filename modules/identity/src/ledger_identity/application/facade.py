@@ -30,6 +30,7 @@ def info(company: Company) -> CompanyInfo:
         functional_currency=company.profile.functional_currency,
         tax_ids=company.profile.tax_ids,
         legal_name=company.legal_name,
+        address=company.address,
         active=company.status is CompanyStatus.ACTIVE,
         fiscal_profile_locked=company.fiscal_profile_locked_at is not None,
         version=company.version,

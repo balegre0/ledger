@@ -6,6 +6,7 @@ from typing import Final
 lazy from collections.abc import Mapping
 
 import pytest
+from pydantic import TypeAdapter
 lazy import httpx
 
 from ledger_invoicing.adapters.http.context import MAX_STORED_ANSWER
@@ -57,6 +58,60 @@ def code_of(response: httpx.Response) -> tuple[int, object]:
     return response.status_code, document(response)["code"]
 
 
+ADDRESS: Final = {"line": "Av. Duarte 10, Villa Consuelo", "municipality": "010100", "province": "010000"}
+MOVED: Final = {"line": "Calle El Sol 5, Santiago", "municipality": None, "province": "250000"}
+SELLER: Final = TypeAdapter(dict[str, object])
+
+
+async def moved_to(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str, address: Mapping[str, object] | None
+) -> None:
+    """The company's fiscal address changed through identity's API (``None``: cleared)."""
+    response = await client.patch(
+        f"/v1/companies/{company}", json={"address": address}, headers=owner.bearer() | {"If-Match": "*"}
+    )
+    assert response.status_code == 200, response.text
+
+
+async def test_an_issued_document_keeps_the_seller_s_address_it_was_issued_with(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
+) -> None:
+    """Task 35: the seller is snapshotted at issue, its fiscal address with it; a draft has no seller yet."""
+    await moved_to(client, owner, company, ADDRESS)
+    issued = await made(client, owner, company, INVOICE, "i-address")
+    drafted = await made(client, owner, company, DRAFT, "d-address")
+    assert issued["seller"] == {
+        "legal_name": "Acme SRL",
+        "tax_id": {"scheme": "do.rnc", "value": "101850043"},
+        "address": ADDRESS,
+    }
+    await moved_to(client, owner, company, MOVED)
+    again = await client.get(f"/v1/invoices/{issued['id']}", headers=reading(owner, company))
+    assert document(again)["seller"] == issued["seller"]
+    issuing = await client.post(
+        f"/v1/invoices/{drafted['id']}/issue",
+        json={},
+        headers=posting(owner, company, "issue-address", version=1),
+    )
+    assert issuing.status_code == 200, issuing.text
+    assert SELLER.validate_python(document(issuing)["seller"])["address"] == MOVED  # the company as it is now
+    await moved_to(client, owner, company, None)
+    bare = await made(client, owner, company, INVOICE, "i-bare")
+    assert SELLER.validate_python(bare["seller"])["address"] is None
+
+
+async def test_the_seller_s_address_is_not_the_client_s_to_send(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str
+) -> None:
+    """Read-only: a document names its seller only once identity says who it is."""
+    refused = await client.post(
+        "/v1/invoices",
+        json=INVOICE | {"seller": {"address": ADDRESS}},
+        headers=posting(owner, company, "i-seller"),
+    )
+    assert (refused.status_code, document(refused)["code"]) == (422, "invalid_request")
+
+
 async def test_an_invoice_is_created_issued_and_read_back_with_its_version(
     client: httpx.AsyncClient, owner: TestPrincipal, company: str
 ) -> None:
@@ -82,7 +137,11 @@ async def test_an_invoice_is_created_issued_and_read_back_with_its_version(
         "MAIN",
         [],
     )
-    assert made_["seller"] == {"legal_name": "Acme SRL", "tax_id": {"scheme": "do.rnc", "value": "101850043"}}
+    assert made_["seller"] == {
+        "legal_name": "Acme SRL",
+        "tax_id": {"scheme": "do.rnc", "value": "101850043"},
+        "address": None,
+    }
     assert made_["totals"] == {
         "currency": "DOP",
         "net": "100.00",

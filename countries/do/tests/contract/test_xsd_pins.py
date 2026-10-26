@@ -247,6 +247,34 @@ def test_dgii_s_limits_are_the_draft_s(ecf_type: EcfType) -> None:
         assert roles == {str(each.value) for each in WithholdingRole}
 
 
+def _issuer_elements(format_: Format) -> dict[str, tuple[str | None, str]]:
+    """``Emisor``'s address elements in ``format_``: each one's type and ``minOccurs``."""
+    schema = etree.fromstring(DO_SCHEMAS.corrected(format_))
+    (issuer,) = (found for found in schema.iter(f"{XS}element") if found.get("name") == "Emisor")
+    return {
+        name: (found.get("type"), found.get("minOccurs", "1"))
+        for found in issuer.iter(f"{XS}element")
+        if (name := found.get("name")) in {"DireccionEmisor", "Municipio", "Provincia"}
+    }
+
+
+@pytest.mark.parametrize("ecf_type", list(EcfType))
+def test_the_regime_s_fiscal_address_is_what_every_e_cf_takes_as_its_issuer_s(ecf_type: EcfType) -> None:
+    """Task 35: the line required, of DGII's length; municipality and province optional, of one catalogue."""
+    format_ = _ecf(ecf_type)
+    assert _issuer_elements(format_) == {
+        "DireccionEmisor": ("AlfNum100Type", "1"),
+        "Municipio": ("ProvinciaMunicipioType", "0"),
+        "Provincia": ("ProvinciaMunicipioType", "0"),
+    }
+    assert all(
+        int(facet["maxLength"]) == REGIME.address.max_line for facet in _facets(format_, "DireccionEmisor")
+    )
+    catalogue = _enumeration(format_, "ProvinciaMunicipioType")
+    assert REGIME.address.municipalities == catalogue == REGIME.address.provinces
+    assert len(catalogue) == 582
+
+
 def test_the_foreign_currencies_are_those_dgii_lists_that_money_knows() -> None:
     listed = _enumeration(Format.ECF_31, "TipoMonedaType")
     assert {code for code in listed if code in CURRENCIES} == FOREIGN_CURRENCIES

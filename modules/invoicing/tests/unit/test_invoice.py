@@ -42,7 +42,7 @@ NOW: Final = datetime(2026, 10, 12, 13, 0, tzinfo=UTC)
 LATER: Final = NOW + timedelta(hours=1)
 ORGANIZATION: Final = OrganizationId(new_id())
 TENANT: Final = Tenant(ORGANIZATION, CompanyId(new_id()), Mode.TEST)
-SELLER: Final = Seller(legal_name="Acme SRL", tax_id=TaxId(TaxIdScheme("do.rnc"), "101850043"))
+SELLER: Final = Seller(legal_name="Acme SRL", tax_id=TaxId(TaxIdScheme("do.rnc"), "101850043"), address=None)
 DOP: Final = Currency.of("DOP")
 TERMS: Final = Terms(
     currency=DOP,

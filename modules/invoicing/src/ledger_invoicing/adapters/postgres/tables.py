@@ -49,6 +49,7 @@ from ledger_invoicing.domain.text import (
     MAX_LEGAL_NAME,
     MAX_REASON,
 )
+from ledger_kernel.addresses import MAX_ADDRESS_LINE
 from ledger_kernel.regimes import Direction, DocumentKind, TaxCategoryKind
 from ledger_kernel.tax_ids import MAX_TAX_ID_LENGTH
 from ledger_kernel.tenancy import Mode
@@ -68,6 +69,14 @@ TIME_ZONE_LENGTH: Final = 64
 """An IANA zone name, as identity keeps it."""
 TAX_SCHEME_LENGTH: Final = 34
 """The longest scheme key ``ledger_kernel.tax_ids`` reads: a country code, a dot and 31 characters."""
+SUBDIVISION_CODE_LENGTH: Final = 16
+"""The longest code of a subdivisions' catalogue the kernel reads (``ledger_kernel.addresses``)."""
+SELLER_ADDRESS_CHECK: Final = (
+    "(seller_legal_name IS NOT NULL OR seller_address_line IS NULL)"
+    " AND (seller_address_line IS NOT NULL"
+    " OR num_nonnulls(seller_address_municipality, seller_address_province) = 0)"
+)
+"""A seller's address goes with a seller, and its codes with its line (revision 0003 spells it out)."""
 CHANNEL_LENGTH: Final = 64
 """A channel's key (``do-ecf-v1``), as manifests name it."""
 STATUS_LENGTH: Final = 32
@@ -101,7 +110,8 @@ class InvoiceRecord(InvoicingTable):
     ``requested_*`` are the terms as the client wrote them (``None``: the default), which a draft is priced
     with again when it is issued; ``issue_date``, ``tax_point``, ``regime`` and the establishment are what
     they were priced as. The ``functional_*`` totals are those of a document in another currency than the
-    company's functional one, and only then set. The seller is set once the document is issued.
+    company's functional one, and only then set. The seller is set once the document is issued, with its
+    fiscal address if the company stated one then (revision 0003): a code goes with a line only.
     """
 
     __tablename__: str = "invoices"
@@ -130,6 +140,7 @@ class InvoiceRecord(InvoicingTable):
         CheckConstraint(
             "num_nulls(buyer_tax_scheme, buyer_tax_value) IN (0, 2)", name="ck_invoices_buyer_tax_id"
         ),
+        CheckConstraint(SELLER_ADDRESS_CHECK, name="ck_invoices_seller_address"),
         CheckConstraint(
             "buyer_legal_name IS NOT NULL OR num_nonnulls(buyer_tax_scheme, buyer_address, buyer_email) = 0",
             name="ck_invoices_buyer_named",
@@ -186,6 +197,9 @@ class InvoiceRecord(InvoicingTable):
     seller_legal_name: Mapped[str | None] = mapped_column(String(MAX_LEGAL_NAME))
     seller_tax_scheme: Mapped[str | None] = mapped_column(String(TAX_SCHEME_LENGTH))
     seller_tax_value: Mapped[str | None] = mapped_column(String(MAX_TAX_ID_LENGTH))
+    seller_address_line: Mapped[str | None] = mapped_column(String(MAX_ADDRESS_LINE))
+    seller_address_municipality: Mapped[str | None] = mapped_column(String(SUBDIVISION_CODE_LENGTH))
+    seller_address_province: Mapped[str | None] = mapped_column(String(SUBDIVISION_CODE_LENGTH))
     void_reason: Mapped[str | None] = mapped_column(String(MAX_REASON))
     version: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

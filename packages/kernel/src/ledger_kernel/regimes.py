@@ -17,6 +17,7 @@ from typing import ClassVar, Final, NewType, final
 lazy from collections.abc import Callable, Iterable, Mapping, Sequence
 lazy from datetime import date
 
+from ledger_kernel.addresses import GENERIC_ADDRESS
 from ledger_kernel.errors import InvalidInputError, InvalidValueError, LedgerError, excerpt
 from ledger_kernel.money import MAX_SCALE, Money, RoundingMode
 from ledger_kernel.tax_ids import (
@@ -27,6 +28,7 @@ from ledger_kernel.tax_ids import (
     is_storable,
     parse_scheme,
 )
+lazy from ledger_kernel.addresses import AddressDef
 lazy from ledger_kernel.dated import Timeline
 lazy from ledger_kernel.jurisdiction import CountryCode, Jurisdiction
 lazy from ledger_kernel.money import Currency
@@ -273,6 +275,9 @@ class RegimeDef:
     foreign_tax_ids: bool = False
     """Whether a company of the jurisdiction may list tax ids of other countries' schemes (a foreign company's
     own ids beside its local one); by default it lists its own country's only."""
+    address: AddressDef = GENERIC_ADDRESS
+    """What a company of the jurisdiction states as its fiscal address (§7.1): the line's limit and the
+    catalogues of its subdivisions' codes; by default a generic line and no code."""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "labels", _frozen(self.labels))

@@ -129,8 +129,8 @@ def tenant_of(call: Call | SystemCall) -> Tenant:
 
 
 def seller_from_company(company: CompanyInfo) -> Seller:
-    """The company as a document's seller: its legal name and its primary tax id."""
-    return Seller(legal_name=company.legal_name, tax_id=company.tax_ids[0])
+    """The company as a document's seller: its legal name, its primary tax id and its fiscal address."""
+    return Seller(legal_name=company.legal_name, tax_id=company.tax_ids[0], address=company.address)
 
 
 @final

@@ -156,6 +156,7 @@ type AuditAction = Literal[
     "company.register",
     "company.rename",
     "company.change_profile",
+    "company.change_address",
     "company.deactivate",
     "company.lock_fiscal_profile",
     "api_client.register",

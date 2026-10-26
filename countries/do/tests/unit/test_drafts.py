@@ -270,6 +270,17 @@ def test_a_text_holds_any_character_xml_can_hold(text: str) -> None:
     assert replace(LINE, name=text).name == text
 
 
+def test_an_issuer_s_municipality_and_province_are_codes_of_dgii_s_catalogue() -> None:
+    issuer = Issuer(
+        rnc="101850043", legal_name="D", address="CALLE 1", municipality="250100", province="250000"
+    )
+    assert (issuer.municipality, issuer.province) == ("250100", "250000")
+    with refused("issuer.municipality"):
+        Issuer(rnc="101850043", legal_name="D", address="CALLE 1", municipality="999999")
+    with refused("issuer.province"):
+        Issuer(rnc="101850043", legal_name="D", address="CALLE 1", province="")
+
+
 def test_a_cedula_is_taken_wherever_an_rnc_is() -> None:
     assert Issuer(rnc="00113918205", legal_name="JUAN PEREZ", address="CALLE 1").rnc == "00113918205"
 

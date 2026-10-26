@@ -402,9 +402,45 @@ def test_the_parties_texts_and_ids_are_dgii_s() -> None:
     ]
     foreign_seller = fiscal_draft(issuer=replace(ISSUER, tax_id=PASSPORT, address=None))
     assert found(foreign_seller) == [
-        ("do_ecf_value_required", "seller.address"),
+        ("do_ecf_company_address_missing", "seller.address"),
         ("do_ecf_tax_id_invalid", "seller.tax_id"),
     ]
+
+
+def test_a_company_that_states_no_fiscal_address_is_told_to_state_it_on_the_company() -> None:
+    """Task 35: ``DireccionEmisor`` is required by every e-CF; the client cannot send it with the invoice."""
+    (objection,) = objections(fiscal_draft(issuer=replace(ISSUER, address=None)), accepted=NONE_ACCEPTED)
+    assert (objection.code, objection.field) == ("do_ecf_company_address_missing", "seller.address")
+    assert objection.message == (
+        "seller.address is the company's fiscal address as DGII has it on record: state it on the company "
+        "(PATCH /v1/companies/{id}, address)"
+    )
+
+
+def test_a_municipality_or_province_outside_dgii_s_catalogue_is_objected() -> None:
+    located = replace(ISSUER, municipality="010100", province="010000")
+    assert found(fiscal_draft(issuer=located)) == []
+    unknown = replace(ISSUER, municipality="999999", province="01")
+    assert found(fiscal_draft(issuer=unknown)) == [
+        ("do_ecf_code_unknown", "seller.municipality"),
+        ("do_ecf_code_unknown", "seller.province"),
+    ]
+    assert all(
+        "999999" not in each.message
+        for each in objections(fiscal_draft(issuer=unknown), accepted=NONE_ACCEPTED)
+    )
+
+
+def test_an_e_cf_draft_names_the_issuer_s_municipality_and_province_when_the_company_states_them() -> None:
+    located = fiscal_draft(issuer=replace(ISSUER, municipality="010100", province="010000"))
+    drafted = ecf_draft(located, number=NUMBER, accepted=NONE_ACCEPTED, expires_on=EXPIRES_ON)
+    assert (drafted.issuer.address, drafted.issuer.municipality, drafted.issuer.province) == (
+        "AV. DUARTE 100, SANTO DOMINGO",
+        "010100",
+        "010000",
+    )
+    plain = ecf_draft(fiscal_draft(), number=NUMBER, accepted=NONE_ACCEPTED, expires_on=EXPIRES_ON)
+    assert (plain.issuer.municipality, plain.issuer.province) == (None, None)
 
 
 def test_several_problems_are_all_returned_by_line_then_field_and_never_quote_a_value() -> None:

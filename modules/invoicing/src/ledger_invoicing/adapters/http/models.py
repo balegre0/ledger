@@ -44,6 +44,7 @@ lazy from ledger_invoicing.domain.fiscal import FiscalStatus
 lazy from ledger_invoicing.domain.parties import Party, Seller
 lazy from ledger_invoicing.domain.pricing import PricedLine
 lazy from ledger_invoicing.domain.text import Reason
+lazy from ledger_kernel.addresses import FiscalAddress
 lazy from ledger_kernel.money import Money
 lazy from ledger_kernel.regimes import CategoryTotal, TaxIdSchemes, Totals
 lazy from ledger_kernel.tax_ids import TaxId
@@ -337,16 +338,45 @@ class PartyView(_Shape):
         )
 
 
+class SellerAddressView(_Shape):
+    """The seller's fiscal address as it was when the document was issued.
+
+    Its line and, where its regime keeps a catalogue (the Dominican Republic: DGII's), the codes of its
+    municipality and province.
+    """
+
+    line: str
+    municipality: str | None
+    province: str | None
+
+    @classmethod
+    def of(cls, address: FiscalAddress) -> Self:
+        """The view of ``address``."""
+        return cls(line=address.line, municipality=address.municipality, province=address.province)
+
+
 class SellerView(_Shape):
-    """The company that issued the document, as it was then."""
+    """The company that issued the document, as it was then.
+
+    Read-only: identity's company, snapshotted at issue; a later change of the company changes no document
+    issued before it.
+    """
 
     legal_name: str
     tax_id: PartyTaxId
+    address: SellerAddressView | None = Field(
+        description="Its fiscal address when the document was issued; null if the company stated none."
+    )
 
     @classmethod
     def of(cls, seller: Seller) -> Self:
         """The view of ``seller``."""
-        return cls(legal_name=seller.legal_name, tax_id=PartyTaxId.of(seller.tax_id))
+        address = seller.address
+        return cls(
+            legal_name=seller.legal_name,
+            tax_id=PartyTaxId.of(seller.tax_id),
+            address=None if address is None else SellerAddressView.of(address),
+        )
 
 
 class AuthorityMessageView(_Shape):

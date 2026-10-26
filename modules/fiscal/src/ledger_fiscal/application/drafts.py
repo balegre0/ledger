@@ -3,8 +3,9 @@
 invoicing's ``InvoiceInfo`` read into fiscal-kit's ``FiscalDraft``, for the channel and environment of one
 enrollment.
 
-The issuer is the document's seller as it was when it was issued (its primary tax id), the counterparty its
-buyer as the client sent it (``None`` when it names none; a buyer without a tax id keeps none); the
+The issuer is the document's seller as it was when it was issued (its primary tax id; its fiscal address, the
+line with the codes of its municipality and province, or none if the company stated none), the counterparty
+its buyer as the client sent it (``None`` when it names none; a buyer without a tax id keeps none); the
 establishment's code and time zone, the lines with their tax snapshots, the totals, and for a document in
 another currency than the company's the rate and the functional totals, all as invoicing priced them. A note
 refers to the invoice it corrects, by its id and its issue date (``corrected``: invoicing's view names the id
@@ -31,7 +32,7 @@ from ledger_kernel.errors import InvalidValueError
 lazy from ledger_fiscal.domain.enrollments import Enrollment
 lazy from ledger_fiscal_kit.drafts import FieldValue
 lazy from ledger_invoicing.api import FieldValue as SentValue
-lazy from ledger_invoicing.api import InvoiceInfo, LineInfo, PartyInfo
+lazy from ledger_invoicing.api import InvoiceInfo, LineInfo, PartyInfo, SellerInfo
 lazy from ledger_kernel.regimes import RegimeDef
 
 
@@ -40,6 +41,19 @@ def _counterparty(buyer: PartyInfo | None) -> FiscalParty | None:
         return None
     return FiscalParty(
         tax_id=buyer.tax_id, legal_name=buyer.legal_name, address=buyer.address, email=buyer.email
+    )
+
+
+def _issuer(seller: SellerInfo) -> FiscalParty:
+    address = seller.address
+    if address is None:
+        return FiscalParty(tax_id=seller.tax_id, legal_name=seller.legal_name)
+    return FiscalParty(
+        tax_id=seller.tax_id,
+        legal_name=seller.legal_name,
+        address=address.line,
+        municipality=address.municipality,
+        province=address.province,
     )
 
 
@@ -113,7 +127,7 @@ def fiscal_draft(
         regime=regime.key,
         kind=document.kind,
         direction=document.direction,
-        issuer=FiscalParty(tax_id=seller.tax_id, legal_name=seller.legal_name),
+        issuer=_issuer(seller),
         establishment_code=document.establishment.code,
         time_zone=document.establishment.time_zone,
         counterparty=_counterparty(document.buyer),

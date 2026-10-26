@@ -21,7 +21,8 @@ to one enrollment's channel:
    document a channel may number can no longer be voided, only credited);
 2. the routing is kept (``fiscal.routings``, the first one of (document, channel) wins);
 3. the channel issues the draft (``Channel.issue``: a second call answers the document it numbered,
-   Decision 35), signing it within ``sign_within`` when given;
+   Decision 35), signing it within ``sign_within`` when given (what is left of the budget, less
+   ``MIRRORING``);
 4. invoicing's mirror gets the channel's status at its version + 1 (``mirrored_version``): fiscal's
    ``pending`` is the mirror's version 1, so the channel's first status (numbered, its version 1) is newer.
 
@@ -84,6 +85,11 @@ FIELD_UNKNOWN: Final = "field_unknown"
 """The objection of an undeclared field no channel routing the document may read (Decision 24)."""
 ROUTED_VERSION: Final = 1
 """The mirror's version of the ``pending`` fiscal applies before a channel numbers the document."""
+MIRRORING: Final = timedelta(milliseconds=250)
+"""What ``after_issue`` keeps of the budget, once the channel is asked, to mirror its answer: a channel that
+signs no faster than the budget is cut short in time for its numbered status to reach the answer (§8.5 step
+5: the e-NCF, without the security code). Found on the real channel (Task 35): without it the signing took
+the whole budget, invoicing's timeout cancelled the policy, and the answer carried no e-NCF."""
 _NOTHING: Final = timedelta(0)
 _NAME: Final = re.compile(r"[a-z][a-z0-9_]{0,63}", re.ASCII)
 """A field's name an objection may name as it is: anything else is named by its namespace only."""
@@ -251,7 +257,7 @@ class Router:
             regime=self.regimes.get(document.regime),
             corrected=await self.corrected(call, document),
         )
-        within = None if sign_within is None else max(sign_within(), _NOTHING)
+        within = None if sign_within is None else max(sign_within() - MIRRORING, _NOTHING)
         issued = await channel.issue(call, draft, sign_within=within)
         update = issued.status
         _ = await self.invoicing.apply_fiscal_status(

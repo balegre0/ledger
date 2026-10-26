@@ -123,6 +123,17 @@ NOTE: Final = replace(
     references=(FiscalReference(document=CORRECTED, issue_date=date(2026, 10, 1)),),
     external_reference="NC-0001",
 )
+LOCATED: Final = replace(
+    DRAFT,
+    issuer=FiscalParty(
+        tax_id=ISSUER_RNC,
+        legal_name="Ferretería Duarte SRL",
+        address="Av. Duarte 10, Villa Consuelo",
+        municipality="010100",
+        province="010000",
+    ),
+)
+"""Task 35: the issuer at its fiscal address, with the codes of its municipality and province."""
 FOREIGN: Final = replace(
     DRAFT,
     currency=USD,
@@ -247,9 +258,21 @@ def test_the_time_zone_is_one_the_system_knows(zone: str) -> None:
         replace(DRAFT, time_zone=zone)
 
 
-@pytest.mark.parametrize("draft", [DRAFT, NOTE, FOREIGN, replace(DRAFT, counterparty=None)])
+@pytest.mark.parametrize("draft", [DRAFT, NOTE, FOREIGN, LOCATED, replace(DRAFT, counterparty=None)])
 def test_a_draft_reads_back_from_its_json_form(draft: FiscalDraft) -> None:
     assert read_draft(through_json(draft)) == draft
+
+
+def test_a_party_names_no_subdivision_unless_given_and_a_draft_stored_before_reads_back() -> None:
+    """A draft kept before Task 35 holds no ``municipality`` or ``province``: it reads back without them."""
+    assert (DRAFT.issuer.municipality, DRAFT.issuer.province) == (None, None)
+    assert (LOCATED.issuer.municipality, LOCATED.issuer.province) == ("010100", "010000")
+    stored = JSON.validate_json(canonical_json(encode(DRAFT)))
+    assert isinstance(stored, dict)
+    issuer = stored["issuer"]
+    assert isinstance(issuer, dict)
+    del issuer["municipality"], issuer["province"]
+    assert read_draft(stored) == DRAFT
 
 
 def test_fields_read_back_as_they_were_written() -> None:
@@ -307,4 +330,5 @@ def test_a_draft_shows_no_party_and_no_line() -> None:
     party = repr(DRAFT.counterparty)
     for secret in ("131880681", "Peña", "Santiago", "compras@example.com"):
         assert secret not in party
+    assert "Duarte 10" not in repr(LOCATED.issuer)
     assert "Cemento" not in repr(DRAFT.lines[0])
