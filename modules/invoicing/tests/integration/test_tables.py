@@ -222,6 +222,18 @@ async def test_invoicing_s_role_reaches_no_other_schema(
         ({"buyer_tax_scheme": "do.rnc", "buyer_tax_value": "130000012"}, "ck_invoices_buyer_named"),
         ({"buyer_email": "compras@beta.example"}, "ck_invoices_buyer_named"),
         ({"void_reason": "Wrong buyer"}, "ck_invoices_void_reason"),
+        ({"seller_address_province": "010000"}, "ck_invoices_seller_address"),
+        (
+            {
+                "status": "draft",
+                "seller_legal_name": None,
+                "seller_tax_scheme": None,
+                "seller_tax_value": None,
+                "issued_at": None,
+                "seller_address_line": "Calle 1",
+            },
+            "ck_invoices_seller_address",
+        ),
     ],
     ids=[
         "seller-half-tax-id",
@@ -230,6 +242,8 @@ async def test_invoicing_s_role_reaches_no_other_schema(
         "buyer-unnamed",
         "email",
         "reason",
+        "seller-address-codes-without-a-line",
+        "seller-address-without-a-seller",
     ],
 )
 async def test_a_row_holds_the_columns_that_go_together_whole(

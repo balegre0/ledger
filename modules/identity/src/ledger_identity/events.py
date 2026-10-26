@@ -32,7 +32,11 @@ class CompanyRegistered(Event):
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CompanyUpdated(Event):
-    """A company's details changed: its legal name, its fiscal profile, or the profile was locked."""
+    """A company's details changed: its legal name, fiscal profile or address, or the profile was locked.
+
+    Its fiscal address is among them (Task 35), but the payload carries no address (v1 as it was): a consumer
+    that needs the address reads the company.
+    """
 
     TYPE: ClassVar[str] = "identity.company.updated"
     VERSION: ClassVar[int] = 1

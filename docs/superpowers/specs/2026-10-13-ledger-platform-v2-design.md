@@ -1229,7 +1229,7 @@ Organization (Zitadel organization; shard key; pinned API version)
   (`POST /v1/companies`, `address`) and changeable at any time with `PATCH /v1/companies/{id}` and `If-Match`
   (`address` as a whole; `null` clears it; absent, it stays), the profile's lock notwithstanding: an issued
   document keeps the address it was issued with (§7.5). A change is audited `company.change_address` (beside
-  a rename made with it) and announced as `identity.company.updated` v1, whose payload carries no address (a
+  the `company.rename` or `company.change_profile` made with it) and announced as `identity.company.updated` v1, whose payload carries no address (a
   consumer reads the company). A kept address is judged again by the regime of a new jurisdiction. Stored in
   `identity.companies` (`address_line`, `address_municipality`, `address_province`; a code goes with a line),
   revision 0004, expand-only; RLS and the tenant-carrying keys unchanged. A channel that needs it says so

@@ -891,6 +891,7 @@ async def test_a_company_is_registered_with_its_fiscal_address_or_without_one(
         ({"line": "   "}, "invalid_name", "address.line is empty"),
         ({"line": "Calle 1", "municipality": "999999"}, "address_code_unknown", "address.municipality "),
         ({"line": "Calle 1", "province": "01-00"}, "address_code_unknown", "address.province "),
+        ({"line": "Calle 1", "municipality": "01-01"}, "address_code_unknown", "address.municipality "),
         ({"municipality": "010100"}, "invalid_request", "line"),
         ({"line": "Calle 1", "zip": "10101"}, "invalid_request", "zip"),
     ],
