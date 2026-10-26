@@ -4,9 +4,11 @@ DGII registers a receiver's URLs per taxpayer and environment: ``/do-ecf-v1/{env
 (Decision 15). The environment must be one of the channel's, and ``rnc`` an RNC or cédula (nine or eleven
 ASCII digits) that fiscal's directory names a company by, enrolled on the channel in that environment, in the
 mode the environment serves (``ChannelDef.mode_of``); anything else is a bare 404. Each ``(environment,
-rnc)`` is held to ``RATE_PER_SECOND`` requests a second, ``RATE_BURST`` at once (429 with ``Retry-After``),
-before anything is looked up; the app holds each client address to its own rate too (Task 13). The
-receiver's app lower-cases the paths (DGII's are case-insensitive), so every parameter arrives in lower case.
+rnc)`` of a known environment and a well-formed RNC or cédula is held to ``RATE_PER_SECOND`` requests a
+second, ``RATE_BURST`` at once (429 with ``Retry-After``), before the directory is asked (an arbitrary path
+fills no bucket, so it never pushes a company's out of the limiter); the app holds each client address to
+its own rate too (Task 13). The receiver's app lower-cases the paths (DGII's are case-insensitive), so every
+parameter arrives in lower case.
 
 - ``GET /fe/autenticacion/api/semilla``: a seed (``answers.seed_answer``).
 - ``POST /fe/autenticacion/api/validacioncertificado``: a signed seed (multipart ``xml``, ``MAX_SEED`` bytes
@@ -16,12 +18,17 @@ receiver's app lower-cases the paths (DGII's are case-insensitive), so every par
   ``xml``, at most ``MAX_INBOUND``: the app refuses a larger body with 413 before it is read), answered with
   the signed receipt (``application.receiving``); 400 when no receipt can name it, 401 when it is not the
   token's sender's.
-- ``POST /fe/aprobacioncomercial/api/ecf``: a token, then an ACECF (``application.approvals_in``): 200, or a
-  bare 400 (401 when it is not the token's sender's).
+- ``POST /fe/aprobacioncomercial/api/ecf``: a token, then an ACECF (``application.approvals_in``, at most
+  ``MAX_SMALL_BODY``): 200, or a bare 400 (401 when it is not the token's sender's).
+
+Each route that takes a body declares its limit (``larger_body``: the route's in place of the app's 1 MiB):
+2 MiB for a reception, ``MAX_SMALL_BODY`` (64 KiB) for a validation or an approval, refused 413 before the
+form is parsed.
 
 Every refusal is a problem with its code and nothing of the request.
 """
 
+import asyncio
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Final, final
@@ -64,6 +71,8 @@ PREFIX: Final = f"/{KEY}/{{environment}}/{{rnc}}/fe"
 RATE_PER_SECOND: Final = 10
 RATE_BURST: Final = 50
 MAX_SEED_BYTES: Final = MAX_SEED
+MAX_SMALL_BODY: Final = MAX_SEED
+"""The body of a validation or an approval: a signed seed, an ACECF (with a certificate chain), far below."""
 LOOKUP_REASON: Final = "do_ecf:receiver"
 """What fiscal's directory is asked as: the receiver looking a company up by the path's tax id."""
 SIGNING_REASON: Final = "do_ecf.receive"
@@ -109,20 +118,18 @@ class _Endpoints:
 
     async def _receiver(self, environment: str, rnc: str) -> Receiver:
         """The company the path names, receiving in its environment (404 otherwise; 429 over its rate)."""
+        api = self._api
+        scheme = scheme_of(rnc) if rnc.isascii() and rnc.isdigit() else None
+        if environment not in api.definition.environments or scheme is None:
+            raise HTTPException(HTTPStatus.NOT_FOUND)  # counted by no company's bucket: none to fill
         wait = self._limiter.wait(f"{environment}/{rnc}")
         if wait > 0:
             raise RateLimitedError(wait)
-        api = self._api
-        scheme = scheme_of(rnc) if rnc.isascii() and rnc.isdigit() else None
-        found = (
-            None
-            if environment not in api.definition.environments or scheme is None
-            else await api.directory.receiving_company(
-                SystemCall(reason=LOOKUP_REASON, scope=None),
-                tax_id=TaxId(scheme.key, rnc),
-                channel=KEY,
-                environment=environment,
-            )
+        found = await api.directory.receiving_company(
+            SystemCall(reason=LOOKUP_REASON, scope=None),
+            tax_id=TaxId(scheme.key, rnc),
+            channel=KEY,
+            environment=environment,
         )
         if found is None or found.mode is not api.definition.mode_of(environment):
             raise HTTPException(HTTPStatus.NOT_FOUND)
@@ -155,9 +162,11 @@ class _Endpoints:
         """A seed, signed, exchanged for a token of an hour."""
         at = await self._receiver(environment, rnc)
         api = self._api
-        document = await uploaded(request, limit=MAX_SEED)
+        document = await uploaded(request)
         try:
-            signed = api.inbound.seed(document, environment=at.environment, received_at=api.clock())
+            signed = await asyncio.to_thread(
+                api.inbound.seed, document, environment=at.environment, received_at=api.clock()
+            )
         except SeedUnreadableError:
             raise HTTPException(HTTPStatus.BAD_REQUEST) from None
         except SeedUntrustedError:
@@ -173,7 +182,7 @@ class _Endpoints:
         """An e-CF, answered with a signed receipt."""
         at = await self._receiver(environment, rnc)
         sender = await self._sender(request, at)
-        document = await uploaded(request, limit=MAX_INBOUND)
+        document = await uploaded(request)
         try:
             signed = await self._api.receiving.receive(at, sender, document)
         except NoReceiptError:
@@ -186,7 +195,7 @@ class _Endpoints:
         """A buyer's commercial approval (or rejection) of one of the company's accepted e-CF."""
         at = await self._receiver(environment, rnc)
         sender = await self._sender(request, at)
-        document = await uploaded(request, limit=MAX_INBOUND)
+        document = await uploaded(request)
         try:
             await self._api.approving.receive(at, sender, document)
         except ApprovalRefusedError:
@@ -213,6 +222,7 @@ def router(api: ReceiverApi) -> APIRouter:
         methods=["POST"],
         response_class=Response,
         responses=VALIDATION_ANSWERS,
+        dependencies=[Depends(larger_body(MAX_SMALL_BODY))],
     )
     routes.add_api_route(
         "/recepcion/api/ecf",
@@ -228,5 +238,6 @@ def router(api: ReceiverApi) -> APIRouter:
         methods=["POST"],
         response_class=Response,
         responses=APPROVAL_ANSWERS,
+        dependencies=[Depends(larger_body(MAX_SMALL_BODY))],
     )
     return routes

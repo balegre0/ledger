@@ -300,3 +300,32 @@ async def test_dgii_s_paths_are_case_insensitive(
 ) -> None:
     mixed = f"/Do-Ecf-V1/TESTECF/{RECEIVING_RNC}/FE/Recepcion/Api/ECF"
     assert receipt(await send(sender.sign(golden()), where=mixed), signer) == received()
+
+
+async def test_a_document_naming_no_buyer_is_not_this_receiver_s(
+    send: Send, sender: KeyPairSigner, signer: KeyPairSigner, admin: psycopg.AsyncConnection
+) -> None:
+    """A 32 without RNCComprador (or a 43, a 47) is sent to no electronic receiver: none receives it."""
+    response = await send(sender.sign(golden("ecf-32-anonymous")))
+    assert receipt(response, signer) == Receipt(
+        issuer_rnc=SENDER_RNC,
+        buyer_rnc=RECEIVING_RNC,
+        encf=Encf(EcfType.CONSUMER_INVOICE, 1),
+        received=False,
+        reason=NotReceivedReason.NOT_THIS_RECEIVER,
+        at=RECEIVED_AT,
+    )
+    assert await recorded(admin) == (0, 0)
+
+
+@pytest.mark.parametrize("refusal", ["unreadable", "untrusted"])
+async def test_a_refused_document_of_another_issuer_than_the_token_s_gets_no_receipt(
+    send: Send, archived_at: Path, refusal: str
+) -> None:
+    """Even a refusal names its issuer: the token's sender gets none about another's document."""
+    other = golden().replace(f"<RNCEmisor>{SENDER_RNC}".encode(), f"<RNCEmisor>{OTHER_RNC}".encode())
+    stranger = signer_of(Authority.root(now=SIGNER_VALID_FROM), OTHER_RNC)
+    document = stranger.sign(other if refusal == "untrusted" else other.replace(NAME, b""))
+    response = await send(document)
+    assert response.status_code == HTTPStatus.UNAUTHORIZED, response.text
+    assert archived(archived_at) == {"received": 1}

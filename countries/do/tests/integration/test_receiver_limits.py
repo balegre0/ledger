@@ -8,9 +8,9 @@ Seeds and tokens past their expiry are deleted every hour (``do_ecf.purge_receiv
 
 from datetime import timedelta
 from http import HTTPStatus
+from pathlib import Path
 from typing import Final, Protocol
 from uuid import uuid4
-lazy from pathlib import Path
 
 import pytest
 from pydantic import TypeAdapter
@@ -19,6 +19,7 @@ lazy import psycopg
 
 from ledger_country_do.channels.ecf_v1.adapters.receiver.routes import (
     MAX_SEED_BYTES,
+    MAX_SMALL_BODY,
     RATE_BURST,
     RATE_PER_SECOND,
 )
@@ -42,6 +43,8 @@ BASE: Final = f"/do-ecf-v1/testecf/{RECEIVING_RNC}/fe"
 SEED: Final = f"{BASE}/autenticacion/api/semilla"
 VALIDATION: Final = f"{BASE}/autenticacion/api/validacioncertificado"
 RECEPTION: Final = f"{BASE}/recepcion/api/ecf"
+APPROVAL: Final = f"{BASE}/aprobacioncomercial/api/ecf"
+GOLDEN: Final = Path(__file__).parents[1] / "contract" / "golden" / "ecf-31.xml"
 PURGE: Final = "do_ecf.purge_receiver_credentials"
 COUNTS: Final = TypeAdapter(list[tuple[int, int]])
 
@@ -136,3 +139,39 @@ async def test_expired_seeds_and_tokens_are_purged_a_batch_at_a_time(
     (purge,) = [spec for spec in assemble(contexts(settings=settings)).jobs if spec.kind == PURGE]
     assert isinstance(await purge.handler(purge_job()), Done)
     assert await counted(admin) == (0, 0)
+
+
+async def test_a_reception_of_one_and_a_half_mib_is_read(
+    receiver_client: httpx.AsyncClient, token: str, sender: KeyPairSigner
+) -> None:
+    """Over the app's 1 MiB, under the route's 2 MiB: read (the padding breaks its signature: reason 2)."""
+    signed = sender.sign(GOLDEN.read_bytes())
+    large = signed.replace(b"</ECF>", b" " * (3 * 512 * 1024) + b"</ECF>")
+    response = await receiver_client.post(
+        RECEPTION, files={"xml": ("e.xml", large, "text/xml")}, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == HTTPStatus.OK, response.text
+
+
+@pytest.mark.usefixtures("receiving")
+async def test_validation_and_approval_bodies_over_64_kib_are_refused_before_they_are_parsed(
+    receiver_client: httpx.AsyncClient, token: str
+) -> None:
+    """A body that is no form at all would be a 400 once parsed: refused for its size first, it is a 413."""
+    assert MAX_SMALL_BODY == 64 * 1024
+    body = b"<a/>" + b" " * (512 * 1024)
+    headers = {"Content-Type": "text/xml", "Authorization": f"Bearer {token}"}
+    for route in (VALIDATION, APPROVAL):
+        response = await receiver_client.post(route, content=body, headers=headers)
+        assert response.status_code == HTTPStatus.CONTENT_TOO_LARGE, response.text
+
+
+@pytest.mark.usefixtures("receiving")
+@pytest.mark.parametrize("where", [SEED.replace("/testecf/", "/prod/"), SEED.replace("131098193", "abc")])
+async def test_a_path_that_names_no_environment_or_tax_id_is_held_to_no_company_s_rate(
+    receiver_client: httpx.AsyncClient, where: str
+) -> None:
+    """Only a known environment and an RNC or cédula are counted: arbitrary paths fill no bucket, so they can
+    never push a company's out (the app's per-address limit still counts them)."""
+    for _ in range(RATE_BURST + 1):
+        assert (await receiver_client.get(where)).status_code == HTTPStatus.NOT_FOUND

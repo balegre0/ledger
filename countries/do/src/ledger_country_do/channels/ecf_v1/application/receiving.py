@@ -13,8 +13,9 @@ never gets a receipt about another issuer's document). The answer is an ARECF th
 - not received (``Estado`` 1) for DGII's reason: **1** specification, when the document cannot be read whole
   (the receipt names what it names, read leniently; one that names nothing a receipt can hold is
   ``NoReceiptError``: no receipt, a 400); **2** signature, when its signature does not hold or its
-  certificate is not trusted for its issuer; **4** not this receiver, when its buyer is another taxpayer;
-  **3** duplicate, when the issuer sent the same e-NCF before with other bytes;
+  certificate is not trusted for its issuer; **4** not this receiver, when its buyer is another taxpayer or
+  it names none (no electronic receiver receives a 43, a 47 or a 32 without a buyer's RNC); **3**
+  duplicate, when the issuer sent the same e-NCF before with other bytes;
 - received (``Estado`` 0) once the document is recorded (``ReceivedDocuments``) and announced, in one unit.
 
 The same bytes again are answered with the receipt they were given (read back from the archive). A receipt
@@ -22,6 +23,7 @@ names the receiving company as its buyer, always: it never signs a statement abo
 Nothing but the raw copy is kept of a document before its signature is trusted.
 """
 
+import asyncio
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
 from typing import ClassVar, Protocol, assert_type, final
@@ -182,7 +184,9 @@ class Receiving:
         tenant = receiver.who.tenant
         kept = await self._archive.received(tenant, document)
         now = self._clock()
-        inspection = self._inbound.ecf(document, environment=receiver.environment, received_at=now)
+        inspection = await asyncio.to_thread(  # CPU work on up to 2 MiB: off the event loop
+            self._inbound.ecf, document, environment=receiver.environment, received_at=now
+        )
         match inspection:
             case Unreadable(names=InboundNames() as names):
                 return await self._refused(
@@ -201,7 +205,7 @@ class Receiving:
     async def _trusted(self, receiver: Receiver, sender: Sender, ecf: InboundEcf, kept: Archived) -> bytes:
         if not sender.sends_for(ecf.issuer_rnc):
             raise NotTheSenderError
-        if ecf.buyer_rnc not in {None, receiver.rnc}:
+        if ecf.buyer_rnc != receiver.rnc:  # another buyer's, or a document naming none (a 32, 43, 47)
             return await self._answered(
                 receiver, ecf.issuer_rnc, ecf.encf, NotReceivedReason.NOT_THIS_RECEIVER
             )

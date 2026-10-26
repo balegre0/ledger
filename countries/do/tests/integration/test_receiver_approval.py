@@ -9,7 +9,7 @@ document's date and total. Then the document records it (``commercial_approval``
 """
 
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from http import HTTPStatus
 from typing import Final, Protocol
@@ -37,8 +37,9 @@ from ledger_country_do_testing.fiscal import fiscal_draft
 from ledger_country_do_testing.local_signer import KeyPairSigner
 from ledger_country_do_testing.pki import organization
 from ledger_country_do_testing.samples import SIGNER_VALID_FROM
-from ledger_fiscal_kit.drafts import DocumentRef
+from ledger_fiscal_kit.drafts import DocumentRef, FiscalParty
 from ledger_kernel.ids import new_id
+from ledger_kernel.tax_ids import TaxId, TaxIdScheme
 from ledger_testing.pki import Authority
 lazy from ledger_kernel.tenancy import Tenant
 lazy from ledger_platform.data.bound import BoundDatabase
@@ -71,7 +72,14 @@ class Approve(Protocol):
 
 
 class Ours(Protocol):
-    async def __call__(self, state: EcfDocumentState = EcfDocumentState.ACCEPTED) -> EcfDocument: ...
+    async def __call__(
+        self, state: EcfDocumentState = EcfDocumentState.ACCEPTED, *, buyer: str | None = SENDER_RNC
+    ) -> EcfDocument: ...
+
+
+def party(rnc: str) -> FiscalParty:
+    """A buyer of our e-CF, by its RNC."""
+    return FiscalParty(tax_id=TaxId(TaxIdScheme("do.rnc"), rnc), legal_name=f"Compradora {rnc} SRL")
 
 
 def upload(document: bytes) -> dict[str, tuple[str, bytes, str]]:
@@ -96,10 +104,12 @@ def approve(receiver_client: httpx.AsyncClient, token: str) -> Approve:
 def ours(receiving: Tenant, module_database: BoundDatabase) -> Ours:
     """Our company's e-CF ``E310000000001`` of 1,180.00, decided by DGII (accepted unless told otherwise)."""
 
-    async def kept(state: EcfDocumentState = EcfDocumentState.ACCEPTED) -> EcfDocument:
+    async def kept(
+        state: EcfDocumentState = EcfDocumentState.ACCEPTED, *, buyer: str | None = SENDER_RNC
+    ) -> EcfDocument:
         now = datetime.now(UTC)
         draft = replace(
-            fiscal_draft(),
+            fiscal_draft(counterparty=None if buyer is None else party(buyer)),
             organization=receiving.organization,
             company=receiving.company,
             document=DocumentRef(new_id()),
@@ -256,3 +266,30 @@ async def test_an_approval_not_trusted_not_readable_or_not_the_sender_s_is_refus
         HTTPStatus.UNAUTHORIZED,
     )
     assert await updates(admin, document.id) == (None, 3)
+
+
+@pytest.mark.parametrize("buyer", [RECEIVING_RNC, None], ids=["another-buyer", "no-buyer"])
+async def test_an_approval_by_a_taxpayer_that_is_not_the_document_s_buyer_is_refused(
+    ours: Ours, approve: Approve, sender: KeyPairSigner, admin: psycopg.AsyncConnection, buyer: str | None
+) -> None:
+    """Spec §8.6.5 step 5: the buyer approves; a trusted third party (or anyone, for a document naming no
+    buyer) does not, whatever its signature."""
+    document = await ours(buyer=buyer)
+    bare(await approve(sender.sign(render_acecf(APPROVED))), HTTPStatus.BAD_REQUEST)
+    assert await updates(admin, document.id) == (None, 3)
+
+
+async def test_an_older_word_of_the_buyer_never_overwrites_a_newer_one(
+    ours: Ours, approve: Approve, sender: KeyPairSigner, admin: psycopg.AsyncConnection
+) -> None:
+    """The latest by its moment (``FechaHoraAprobacionComercial``) is kept, whatever arrives last."""
+    document = await ours()
+    assert (await approve(sender.sign(render_acecf(APPROVED)))).status_code == HTTPStatus.OK
+    earlier = replace(APPROVED, approved=False, reason="TARDE", at=APPROVED_AT - timedelta(minutes=10))
+    assert (await approve(sender.sign(render_acecf(earlier)))).status_code == HTTPStatus.OK
+    recorded = {"approved": True, "reason": None, "at": "2026-10-13T13:00:00+00:00"}
+    assert await updates(admin, document.id) == (recorded, 4, recorded)
+    later = replace(earlier, at=APPROVED_AT + timedelta(minutes=10))
+    assert (await approve(sender.sign(render_acecf(later)))).status_code == HTTPStatus.OK
+    rejected = {"approved": False, "reason": "TARDE", "at": "2026-10-13T13:10:00+00:00"}
+    assert await updates(admin, document.id) == (rejected, 5, recorded, rejected)

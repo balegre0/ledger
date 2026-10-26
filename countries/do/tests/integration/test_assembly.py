@@ -5,11 +5,14 @@ resources the app opens at start, the trusted roots read then. A refusal names t
 be, never its value.
 """
 
-from typing import Final, Protocol
+from http import HTTPStatus
+from typing import Final, Protocol, final, override
 lazy from collections.abc import Mapping
 lazy from pathlib import Path
 
+import httpx
 import pytest
+from fastapi import FastAPI
 from fastapi.routing import APIRoute
 
 from ledger_country_do.channels.ecf_v1.adapters.buyers.client import BuyerClient
@@ -29,13 +32,24 @@ from ledger_country_do.channels.ecf_v1.domain.fields import CHANNEL_FIELDS
 from ledger_country_do.channels.ecf_v1.settings import DoEcfSettings
 from ledger_fiscal_kit.channels import Channel
 from ledger_fiscal_kit.drafts import DocumentRef
-from ledger_fiscal_kit.ports import ARCHIVE_PORT, SIGNER_PORT
+from ledger_fiscal_kit.ports import (
+    ARCHIVE_PORT,
+    COMPANY_DIRECTORY,
+    SIGNER_PORT,
+    CompanyDirectory,
+    ReceivingCompany,
+)
+from ledger_kernel.access import CompanyNotFoundError
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.regimes import Direction, DocumentKind, Locale
 from ledger_kernel.tenancy import Mode, Tenant
+from ledger_platform.http.problems import install_problem_handlers
 from ledger_platform.runtime.calls import SystemCall
+from ledger_platform.runtime.facade import facade
 from ledger_platform.runtime.keys import BindingMissingError
 from ledger_testing.pki import pem
+lazy from ledger_kernel.access import Permission, Principal
+lazy from ledger_kernel.tax_ids import TaxId
 lazy from ledger_platform.config.manifest import AppRole
 lazy from ledger_platform.config.settings import Environment
 lazy from ledger_platform.runtime.contexts import ChannelContext
@@ -215,3 +229,51 @@ async def test_the_channel_answers_no_status_or_representation_yet(contexts: Con
     with pytest.raises(ChannelNotReadyError):
         await channel.representation(CALL, document)
     assert ChannelNotReadyError.code == "do_ecf_not_ready"
+
+
+@final
+class WrongMode(CompanyDirectory):
+    """A directory that names any tax id's company, in the live mode whatever the environment: a defect."""
+
+    @facade
+    @override
+    async def receiving_company(
+        self, call: SystemCall, *, tax_id: TaxId, channel: str, environment: str
+    ) -> ReceivingCompany | None:
+        del call, channel, environment
+        return ReceivingCompany(
+            organization=OrganizationId(new_id()),
+            company=CompanyId(new_id()),
+            mode=Mode.LIVE,
+            legal_name="RECEPTORA SRL",
+            tax_id=tax_id,
+        )
+
+    @facade
+    @override
+    async def company(self, call: SystemCall, company: CompanyId) -> ReceivingCompany:
+        del call
+        raise CompanyNotFoundError(company)
+
+    @facade
+    @override
+    async def permissions(self, principal: Principal, company: CompanyId) -> frozenset[Permission]:
+        del principal, company
+        return frozenset()
+
+
+async def test_a_company_the_directory_answers_in_another_mode_than_the_environment_s_is_not_found(
+    contexts: Contexts, ports: dict[str, object], tmp_path: Path, authority: Authority
+) -> None:
+    """``testecf`` serves the test mode (``ChannelDef.mode_of``): a live company there is no receiver's."""
+    roots = tmp_path / "roots.pem"
+    roots.write_bytes(pem(authority.certificate))
+    rooted = RECEIVED.model_copy(update={"trusted_roots": roots})
+    bound = ports | {COMPANY_DIRECTORY.name: WrongMode()}
+    (mounted,) = assemble(contexts(settings=rooted, bound=bound, role="receiver")).receiver_routers
+    app = FastAPI()
+    install_problem_handlers(app)
+    app.include_router(mounted)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://r.test") as client:
+        response = await client.get("/do-ecf-v1/testecf/131098193/fe/autenticacion/api/semilla")
+    assert response.status_code == HTTPStatus.NOT_FOUND, response.text
