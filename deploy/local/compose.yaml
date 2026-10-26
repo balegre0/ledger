@@ -54,8 +54,8 @@
 # of the production image): DGII's services for emitters, its directory and its emisor-receptor simulator, on
 # 127.0.0.1:${LEDGER_FAKE_DGII_PORT:-8471} on the host and as http://fake-dgii:8471 in this network, which
 # deploy/local/do-ecf.env gives the api, the worker and the receiver as DGII's hosts (plain http, which do-ecf-v1
-# allows on loopback and on a single-label service name only, never for the live environment). It trusts any
-# signer and hands tokens to anyone: it is on `default` alone, never on `signer`. Its simulator signs its receipts
+# allows on loopback, and on a single-label service name in the environments local and test only, never for the
+# live environment). It trusts any signer and hands tokens to anyone: it is on `default` alone, never on `signer`. Its simulator signs its receipts
 # under the fake's root roots.sh wrote (the worker trusts it through roots.pem); the buyer client refuses its
 # plain-http URLs from the directory (a buyer's endpoint is https on a public address), so a delivery to a buyer
 # DGII's directory points at the simulator fails here: deliveries are the end-to-end test's (tests/e2e).

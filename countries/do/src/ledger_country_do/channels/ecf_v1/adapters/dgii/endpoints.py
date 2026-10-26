@@ -8,9 +8,10 @@ sends anything (``ServiceNotInEnvironmentError``). The live
 environment is reached on DGII's own hosts only (``LiveHostRefusedError``), compared exactly: a fake can stand
 in for TesteCF and CerteCF, never for production. Every host is an origin and nothing more
 (``HostRefusedError``): no path, user, query or fragment, and ``https``, except a fake on this machine
-(``LOOPBACK``: 127.0.0.1, ::1, localhost) or on the local stack's network (a single-label name, a compose
-service such as ``fake-dgii``: no public name is one label), which may be plain ``http`` and, not being
-DGII's, never serves the live environment. The ``ecf`` host is also the audience of DGII's seeds
+(``LOOPBACK``: 127.0.0.1, ::1, localhost) or on the local stack's network (a single-label name led by a
+letter, a compose service such as ``fake-dgii``: no public name is one label; the assembly allows it in the
+environments ``local`` and ``test`` alone), which may be plain ``http`` and, not being DGII's, never serves
+the live environment. The ``ecf`` host is also the audience of DGII's seeds
 (``DgiiHosts.audience``), so it must be one the signer can audit (fiscal-kit's ``is_audience``). DGII's paths
 ignore case; DT-DGII's lower-case spelling is used.
 """
@@ -87,9 +88,10 @@ class LiveHostRefusedError(EcfError):
 
 LOOPBACK: Final = frozenset({"127.0.0.1", "::1", "localhost"})
 """The hosts a fake on this machine answers on: plain ``http`` may reach them."""
-LOCAL_SERVICE: Final = re.compile(r"(?=[a-z0-9-]*[a-z])[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
-"""A single-label host name, a letter in it (``134744072`` is an address some resolvers read): a service of
-the local stack's network, which plain ``http`` may reach too."""
+LOCAL_SERVICE: Final = re.compile(r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?")
+"""A single-label host name led by a letter (``134744072`` and ``0x7f000001`` are addresses some resolvers
+read): a service of the local stack's network, which plain ``http`` may reach too, in the environments
+``local`` and ``test`` alone (the assembly refuses it elsewhere: ``DgiiHosts.beyond_loopback``)."""
 
 
 class HostRefusedError(EcfError):
@@ -145,6 +147,14 @@ class DgiiHosts:
     def audience(self) -> str:
         """DGII's seeds' audience: the ``ecf`` host, with its port if it names one (checked when built)."""
         return urlsplit(self.ecf).netloc
+
+    @property
+    def beyond_loopback(self) -> bool:
+        """Whether either host is plain ``http`` to a local service's name, not to this machine."""
+        return any(
+            urlsplit(host).scheme == "http" and urlsplit(host).hostname not in LOOPBACK
+            for host in (self.ecf, self.fc)
+        )
 
     @property
     def official(self) -> bool:

@@ -74,8 +74,11 @@ from ledger_fiscal_kit.ports import ARCHIVE_PORT, COMPANY_DIRECTORY, SIGNER_PORT
 from ledger_kernel.regimes import Locale
 from ledger_platform.runtime.contexts import ChannelPack, ChannelParts
 lazy from ledger_platform.config.manifest import AppRole
+lazy from ledger_platform.config.settings import Environment
 lazy from ledger_platform.runtime.contexts import ChannelContext
 
+_LOCAL_STACK: Final[frozenset[Environment]] = frozenset({"local", "test"})
+"""Where DGII's hosts may be a local service's over plain http (compose's fake DGII, a test's)."""
 ARCHIVING_ROLES: Final[frozenset[AppRole]] = frozenset({"api", "worker", "receiver"})
 """The roles that sign or receive documents, and archive them: they need the archive; ``migrate`` does not."""
 LABELS: Final = {
@@ -90,6 +93,7 @@ class Refusal(StrEnum):
     """A setting the app's role or environment refuses, and why."""
 
     STANDINS_IN_PRODUCTION = "TEST_SENDER_STANDINS is refused in production: certification runs only"
+    PLAIN_HTTP_DEPLOYED = "ECF_HOST and FC_HOST reach a local service over http in local and test only"
     WORKER_WITHOUT_ROOTS = "TRUSTED_ROOTS is required by the worker: it verifies counterparties"
     RECEIVER_WITHOUT_ROOTS = "TRUSTED_ROOTS is required by the receiver: it verifies what emitters send"
 
@@ -107,6 +111,9 @@ def _checked(settings: DoEcfSettings, context: ChannelContext) -> DgiiTimeouts:
     """DGII's waits from ``settings``, once they and the rest suit the app (see the module)."""
     if settings.test_sender_standins and context.environment == "production":
         raise SettingRefusedError(Refusal.STANDINS_IN_PRODUCTION)
+    hosts = DgiiHosts(ecf=settings.ecf_host, fc=settings.fc_host)
+    if hosts.beyond_loopback and context.environment not in _LOCAL_STACK:
+        raise SettingRefusedError(Refusal.PLAIN_HTTP_DEPLOYED)
     timeouts = DgiiTimeouts(
         connect=settings.dgii_connect_seconds,
         total=settings.dgii_attempt_seconds,

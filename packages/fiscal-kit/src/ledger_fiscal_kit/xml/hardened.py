@@ -145,6 +145,16 @@ def require_tree(root: object) -> None:
 
 def texts(document: bytes, *paths: str) -> tuple[str | None, ...]:
     """The text at each of ``paths`` (ElementPath from the root, ``{namespace}name``); ``None`` if absent."""
+    return _read(document, paths)[1]
+
+
+def root_name(document: bytes) -> str:
+    """The tag of ``document``'s root element (``{namespace}name`` in one), read as ``texts`` reads."""
+    return _read(document, ())[0]
+
+
+def _read(document: bytes, paths: tuple[str, ...]) -> tuple[str, tuple[str | None, ...]]:
+    """``document``'s root tag and the text at each of ``paths``, read with every check above."""
     require_readable(document)
     try:
         root = etree.fromstring(document, parser())
@@ -152,4 +162,4 @@ def texts(document: bytes, *paths: str) -> tuple[str | None, ...]:
         raise MalformedDocumentError from None
     require_plain(root.getroottree().docinfo)
     require_tree(root)
-    return tuple(root.findtext(path) for path in paths)
+    return etree.QName(root).text, tuple(root.findtext(path) for path in paths)
