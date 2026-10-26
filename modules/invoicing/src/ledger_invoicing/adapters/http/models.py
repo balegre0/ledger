@@ -377,7 +377,9 @@ class FiscalView(BaseModel):
     channel: str = Field(examples=["do-ecf-v1"])
     environment: str = Field(examples=["testecf"])
     status: FiscalStatusName
-    version: int = Field(description="The channel's version of this status: a newer one replaces it.")
+    version: int = Field(
+        description="The mirror's version (fiscal's pending 1, then the channel's + 1): newer replaces older."
+    )
     messages: list[AuthorityMessageView]
 
     @classmethod

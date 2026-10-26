@@ -9,6 +9,7 @@ issues with ``fiscal: []``, and a field of the regime's namespace the regime doe
 The representation is the channel's, for a document routed to it.
 """
 
+from datetime import timedelta
 from typing import Final, LiteralString, Protocol
 lazy from collections.abc import Awaitable, Callable, Mapping
 lazy from uuid import UUID
@@ -20,13 +21,29 @@ from structlog.testing import capture_logs
 lazy import httpx
 lazy import psycopg
 
-from ledger_fiscal_kit.channels import Representation, Requirements
+from ledger_fiscal.adapters.postgres.unit import PgUnits
+from ledger_fiscal.application.enrolling import Enrolling
+from ledger_fiscal.application.issuing import FiscalPolicy, Router
+from ledger_fiscal_kit.channels import ChannelRegistry, Representation, Requirements
 from ledger_fiscal_kit.objections import Objection
+from ledger_identity.adapters.postgres.unit import PgUnits as IdentityUnits
+from ledger_identity.application.facade import IdentityFacade
+from ledger_invoicing.adapters.postgres.unit import PgUnits as InvoicingUnits
+from ledger_invoicing.api import InvoiceId
+from ledger_invoicing.application.facade import InvoicingFacade
+from ledger_invoicing.application.mirror import FiscalMirroring
+from ledger_invoicing.application.queries import InvoicingQueries
+from ledger_kernel.access import Principal, PrincipalKind, SubjectId
+from ledger_kernel.clock import utc_now
 from ledger_kernel.ids import parse_id
 from ledger_platform.data.codec import JsonValue
+from ledger_platform.runtime.calls import Call
+from ledger_platform.runtime.contexts import AssembledChannels
+from ledger_platform.runtime.registries import Regimes
 from ledger_testing.api import document
 lazy from ledger_fiscal_kit.channels import StatusUpdate
 lazy from ledger_fiscal_kit.drafts import DocumentRef, FiscalDraft
+lazy from ledger_platform.runtime.app import App
 lazy from ledger_platform.runtime.calls import SystemCall
 lazy from ledger_testing.api import TestPrincipal
 
@@ -304,3 +321,57 @@ async def test_the_representation_is_the_channel_s_for_a_document_routed_to_it(
     )
     other = await client.get(path, params={"channel": "do-other-v1"}, headers=headers(owner, company))
     assert (other.status_code, document(other)["code"]) == (404, "representation_unavailable")
+
+
+async def test_an_installed_channel_the_invoice_was_never_routed_to_renders_nothing(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str, channel: FakeChannel
+) -> None:
+    """Review M5: the routing names the channel that renders; an installed one is not enough."""
+    channel.printed = Representation(media_type="application/pdf", content=PDF, filename="E310000000001.pdf")
+    response = await issued(client, owner, company)  # no enrollment: routed nowhere
+    printed = await client.get(
+        f"{PATH}/{document(response)['id']}/representation",
+        params={"channel": FAKE},
+        headers=headers(owner, company),
+    )
+    assert (printed.status_code, document(printed)["code"]) == (404, "representation_unavailable")
+
+
+async def test_a_budget_already_spent_asks_the_channel_to_sign_within_nothing(
+    api: App, client: httpx.AsyncClient, owner: TestPrincipal, company: str, channel: FakeChannel
+) -> None:
+    """Review M4: what is left of the budget is never negative: a spent one asks for no signature in time."""
+    await enroll(client, owner, company, channel, active=True)
+    _ = await issued(client, owner, company)
+    regimes = Regimes.load()
+    fake_channels = AssembledChannels()
+    fake_channels.add(FAKE, channel)
+    fake_channels.seal()
+    registry = ChannelRegistry(fake_channels)
+    units = PgUnits(api.bound("fiscal"))
+    invoicing_units = InvoicingUnits(api.bound("invoicing"))
+    invoicing = InvoicingFacade(
+        InvoicingQueries(units=invoicing_units), FiscalMirroring(units=invoicing_units)
+    )
+    identity = IdentityFacade(IdentityUnits(api.bound("identity")))
+    router = Router(
+        units=units,
+        channels=registry,
+        invoicing=invoicing,
+        enrolling=Enrolling(units, registry, identity=identity, regimes=regimes, clock=utc_now),
+        regimes=regimes,
+        clock=utc_now,
+    )
+    ticks = iter((0.0, 10.0))
+    policy = FiscalPolicy(router, regimes=regimes, monotonic=lambda: next(ticks))
+    (call, draft, _) = channel.issued[0]
+    issued_invoice = await invoicing.document(call, InvoiceId(draft.document))
+    principal = Principal(
+        subject=SubjectId("2001"),
+        organization=draft.organization,
+        provider_organization="1001",
+        kind=PrincipalKind.HUMAN,
+    )
+    request = Call(principal=principal, scope=draft.scope, request_id="r-1")
+    await policy.after_issue(request, issued_invoice, budget=timedelta(seconds=1.5))
+    assert channel.issued[-1][2] == timedelta(0)

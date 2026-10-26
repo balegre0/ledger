@@ -11,7 +11,9 @@ included); with no channel routing the document, nothing may read one, and each 
 ``after_issue`` routes the issued document to each channel within what is left of the request's budget,
 and ``Router.recover`` (the consumer of ``invoicing.invoice.issued``, the recovery path) does the same
 without signing, for every issued document: each step is idempotent by (document, channel), so whichever
-runs second finds the first's work and adds nothing. Routing one document to one enrollment's channel:
+runs second finds the first's work and adds nothing. The recovery path never routes through an enrollment
+made after the document was issued (one issued with ``fiscal: []`` stays commercial-only); a routing kept
+for an enrollment that is no longer active still wins. Routing one document to one enrollment's channel:
 
 1. invoicing's mirror gets ``pending`` at version ``ROUTED_VERSION`` (1) **before** any number is
    allocated: a document voided first answers ``DOCUMENT_VOIDED``, and nothing is numbered or routed (so a
@@ -23,10 +25,12 @@ runs second finds the first's work and adds nothing. Routing one document to one
    ``pending`` is the mirror's version 1, so the channel's first status (numbered, its version 1) is newer.
 
 A channel with no number to give now (fiscal-kit's ``NumberUnavailableError``: a range ran out between
-``check`` and numbering) keeps nothing. ``after_issue`` passes over it (never a client's 409: the document is
-issued, its ``fiscal[]`` pending); the recovery path parks a ``fiscal.route`` job for it, woken when the
-channel's requirements of the company change (``fiscal_channel.requirements.changed``: a range registered),
-which routes the document again.
+``check`` and numbering) keeps nothing of the document; fiscal has kept its routing and mirrored ``pending``
+by then (steps 1 and 2), so the invoice can no longer be voided while the channel keeps refusing (Tasks 27
+and 31: a runbook line and an operator command). ``after_issue`` passes over it (never a client's 409: the
+document is issued, its ``fiscal[]`` pending); the recovery path parks a ``fiscal.route`` job for it, woken
+when the channel's requirements of the company change (``fiscal_channel.requirements.changed``: a range
+registered), which routes the document again.
 
 Every call to a channel or to invoicing is a ``SystemCall`` scoped to the document's tenant, with the reason
 of the step; the consumer's carries its event's id (rule 4). No unit is open while either is called (rule 13).
@@ -35,7 +39,7 @@ of the step; the consumer's carries its event's id (rule 4). No unit is open whi
 import re
 import time
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Final, final, override
 lazy from collections.abc import Callable, Mapping, Sequence
 lazy from uuid import UUID
@@ -166,11 +170,14 @@ class Router:
         """``tenant``'s enrollments those marked for review reviewed (``Enrolling.current``)."""
         return await self.enrolling.current(tenant, traceparent=traceparent)
 
-    async def targets(self, call: SystemCall, document: InvoiceInfo) -> tuple[Target, ...]:
+    async def targets(
+        self, call: SystemCall, document: InvoiceInfo, *, enrolled_by: datetime | None = None
+    ) -> tuple[Target, ...]:
         """Where ``document`` goes, one channel each.
 
         The channels it was routed to already (for the enrollment it was routed for, whatever became of it
-        since), then those its active enrollments route it to now.
+        since), then those its active enrollments route it to now: with ``enrolled_by``, only enrollments made
+        by then (the recovery path: an invoice issued before the company enrolled stays unrouted).
         """
         tenant = tenant_of(document)
         enrollments = await self.enrollments(tenant, traceparent=call.traceparent)
@@ -181,7 +188,8 @@ class Router:
         for routing in earlier:  # an enrollment is never deleted: the one a routing names is there
             chosen[routing.channel] = by_id[routing.enrollment]
         for enrollment in routes(document, enrollments, self.channels):
-            _ = chosen.setdefault(enrollment.channel, enrollment)
+            if enrolled_by is None or enrollment.created_at <= enrolled_by:
+                _ = chosen.setdefault(enrollment.channel, enrollment)
         found: list[Target] = []
         for key, enrollment in chosen.items():
             channel = installed(self.channels, key)
@@ -247,10 +255,13 @@ class Router:
     async def recover(self, call: SystemCall, invoice: UUID) -> None:
         """The recovery path for an issued ``invoice`` (see the module): every channel it goes to, unsigned.
 
-        A channel with no number to give it now gets a ``fiscal.route`` job, parked until it may.
+        New routes come only from enrollments made by the time it was issued (``issued_at``; none for a
+        document not issued); the routings kept come first. A channel with no number to give it now gets a
+        ``fiscal.route`` job, parked until it may.
         """
         document = await self.invoicing.document(call, InvoiceId(invoice))
-        for target in await self.targets(call, document):
+        enrolled_by = document.issued_at or datetime.min.replace(tzinfo=UTC)
+        for target in await self.targets(call, document, enrolled_by=enrolled_by):
             try:
                 await self.issue_to(call, document, target, sign_within=None)
             except NumberUnavailableError:

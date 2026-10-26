@@ -59,6 +59,8 @@ UPDATES: Final = TypeAdapter(list[tuple[str, int]])
 JOBS: Final = TypeAdapter(list[tuple[str, str, str | None]])
 FLAGS: Final = TypeAdapter(list[tuple[str, bool]])
 UUIDS: Final = TypeAdapter(UUID)
+BACKDATED: Final = "UPDATE fiscal.enrollments SET created_at = '2000-01-01T00:00:00Z'"
+"""The company's enrollment made long before: its invoices are the recovery path's to route."""
 
 
 class FakeChannel(Protocol):
@@ -303,6 +305,7 @@ async def test_an_invoice_voided_before_it_was_routed_is_never_numbered(
     )
     assert void.status_code == 200, void.text
     await enroll(client, owner, company, channel)
+    await admin.execute(BACKDATED)  # enrolled before the invoice was issued: the recovery may route it
     (event,) = await published(admin, "invoicing.invoice.issued", invoice)
     await outside(api, "fiscal.commercial_documents")(event)
     assert (channel.issued, await mirror_updates(admin, invoice)) == ([], [])
@@ -458,14 +461,29 @@ async def test_an_event_or_a_job_about_no_company_in_a_mode_is_a_defect_of_its_p
         await route(job(scope, {"channel": FAKE}))
 
 
+async def test_the_recovery_path_routes_no_invoice_issued_before_the_company_enrolled(
+    bench: Bench,
+) -> None:
+    """Review I1: an invoice issued with ``fiscal: []`` stays commercial-only when the company enrolls later;
+    the recovery path routes only through enrollments made by the time the invoice was issued."""
+    api, client, owner, company, channel, admin = bench.parts()
+    invoice = invoice_of(await issued(client, owner, company))  # no enrollment yet: fiscal: []
+    await enroll(client, owner, company, channel)
+    (event,) = await published(admin, "invoicing.invoice.issued", invoice)
+    await outside(api, "fiscal.commercial_documents")(event)
+    assert (channel.issued, await mirror_updates(admin, invoice)) == ([], [])
+
+
 async def test_the_recovery_path_mirrors_pending_before_the_channel_numbers_what_the_request_never_routed(
     bench: Bench,
 ) -> None:
     """Task 12's note 12(a) on the recovery path: invoicing's mirror holds ``pending`` (version 1) before the
-    channel is asked to number the invoice, so a void racing the consumer either wins first or is refused."""
+    channel is asked to number an invoice issued while the company was enrolled that the request never routed
+    (here, an enrollment made before the invoice, whose request had nothing routed: the routing gone)."""
     api, client, owner, company, channel, admin = bench.parts()
-    invoice = invoice_of(await issued(client, owner, company))  # no enrollment yet: fiscal: []
+    invoice = invoice_of(await issued(client, owner, company))
     await enroll(client, owner, company, channel)
+    await admin.execute(BACKDATED)
     seen: list[tuple[str, int]] = []
 
     async def mirrored_first(draft: FiscalDraft) -> None:
@@ -479,6 +497,57 @@ async def test_the_recovery_path_mirrors_pending_before_the_channel_numbers_what
     await outside(api, "fiscal.commercial_documents")(event)
     assert seen == [("pending", 1)]
     assert await mirror_updates(admin, invoice) == [("pending", 1), ("pending", 2)]
+
+
+@pytest.mark.parametrize("left", ["pending", "disabled"])
+@pytest.mark.parametrize("path", ["fiscal.route", "fiscal.commercial_documents"])
+async def test_a_routing_kept_still_numbers_the_invoice_once_its_enrollment_left_active(
+    bench: Bench, left: str, path: str
+) -> None:
+    """Review I2: the routing kept, not the enrollment's status now, names where a document goes: the
+    parked job and the recovery path number it after its enrollment was disabled (or, by data, pending)."""
+    api, client, owner, company, channel, admin = bench.parts()
+    await enroll(client, owner, company, channel)
+    channel.no_number = True
+    invoice = invoice_of(await issued(client, owner, company))  # routed, pending, no number
+    scope = channel.issued[0][1].scope
+    if left == "disabled":
+        enrollment = await (await admin.execute("SELECT id FROM fiscal.enrollments")).fetchone()
+        assert enrollment is not None
+        response = await client.post(
+            f"/v1/fiscal/enrollments/{format_id('enr', UUIDS.validate_python(enrollment[0]))}/disable",
+            json={"reason": "moving to another provider"},
+            headers=headers(owner, company, "disable-1"),
+        )
+        assert response.status_code == 200, response.text
+    else:
+        await admin.execute("UPDATE fiscal.enrollments SET status = 'pending'")
+    channel.no_number = False
+    if path == "fiscal.route":
+        payload: dict[str, JsonValue] = {"invoice": str(invoice), "channel": FAKE}
+        assert await route_job(api)(job(scope, payload)) == Done()
+    else:
+        (event,) = await published(admin, "invoicing.invoice.issued", invoice)
+        await outside(api, path)(event)
+    assert channel.numbered == 1
+    assert await mirror_updates(admin, invoice) == [("pending", 1), ("pending", 2)]
+
+
+async def test_marking_a_channel_s_enrollments_for_review_leaves_a_disabled_one_alone(bench: Bench) -> None:
+    """Review M6: a disabled enrollment is final; the mark is for those a review may change."""
+    api, client, owner, company, channel, admin = bench.parts()
+    await enroll(client, owner, company, channel)
+    scope = await enrolled_tenant(admin)
+    asked = Asked(enrollment=EnrollmentId(new_id()), tenant=scope, channel=FAKE, environment="certecf")
+    gone = Enrollment.enroll(asked, requirements=NOTHING_DUE, now=datetime.now(UTC)).disabled(
+        "moved", now=datetime.now(UTC)
+    )
+    async with api.bound("fiscal").unit(scope) as unit:
+        assert await PgEnrollments(unit.connection, scope, Mode.TEST).add(gone) is None
+    async with api.bound("fiscal").unit(scope) as unit:
+        await inside(api, "fiscal.requirements")(requirements_event(scope), unit)
+    flags = await admin.execute("SELECT status, review_due FROM fiscal.enrollments ORDER BY status")
+    assert await flags.fetchall() == [("active", True), ("disabled", False)]
 
 
 async def test_the_recovery_path_after_the_request_routed_and_numbered_the_invoice_changes_nothing(
