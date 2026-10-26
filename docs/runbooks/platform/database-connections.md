@@ -10,7 +10,7 @@ start: the error names the jobs' concurrency, their lease renewals, the runners 
 | App | `LEDGER_DATABASE_POOL_SIZE` | Up to (pool + overflow) | Why |
 |---|---|---|---|
 | api | 30 (default) | 60 | requests |
-| worker | 50 | 100 | `do_ecf.advance` runs 16 at once (42 connections needed); each job kind added raises it |
+| worker | 50 | 100 | `do_ecf.advance` runs 16 at once, the receiver's purge 1 (44 connections needed); each job kind added raises it |
 | signer | 30 (default) | 60 | its jobs and gRPC calls |
 | receiver (when deployed) | 30 (default) | 60 | DGII's and emitters' calls |
 | ledger-migrate | a few, for its run | | |

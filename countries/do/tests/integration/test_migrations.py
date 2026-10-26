@@ -44,8 +44,17 @@ lazy from ledger_testing.postgres import WorkerDatabase
 
 S: Final = "do_ecf"
 TENANT_TABLES: Final = frozenset(
-    {"numbering_series", "numbering_ranges", "released_numbers", "documents", "submissions"}
+    {
+        "numbering_series",
+        "numbering_ranges",
+        "released_numbers",
+        "documents",
+        "submissions",
+        "received_documents",
+    }
 )
+RECEIVER_TABLES: Final = frozenset({"receiver_seeds", "receiver_tokens"})
+"""The receiver's credentials: outside row-level security by design (§6.3)."""
 CHASSIS_TABLES: Final = frozenset(
     {"outbox", "inbox", "jobs", "subscriptions", "idempotency_keys", "audit_events"}
 )
@@ -80,8 +89,13 @@ def test_the_migrate_app_brings_the_channel_s_schema_to_head_from_nothing_and_ag
     assert fresh.archive_backend is None
     assert tables_of(fresh_admin_url, schema=S) == set()
     App("migrate", settings=fresh, discover=module_under_test.discovering()).migrate()
-    assert tables_of(fresh_admin_url, schema=S) == {*TENANT_TABLES, *CHASSIS_TABLES, "alembic_version"}
-    assert version_of(fresh_admin_url) == MIGRATIONS.head == "0003"
+    assert tables_of(fresh_admin_url, schema=S) == {
+        *TENANT_TABLES,
+        *RECEIVER_TABLES,
+        *CHASSIS_TABLES,
+        "alembic_version",
+    }
+    assert version_of(fresh_admin_url) == MIGRATIONS.head == "0004"
     App("migrate", settings=fresh, discover=module_under_test.discovering()).migrate()
     assert pending_changes(fresh_admin_url, MODELS, schema=S) is None
 
@@ -195,6 +209,7 @@ def test_every_tenant_table_is_under_its_tenant_s_policies_forced_on_its_owner(
         "jobs": (False, False),
         "subscriptions": (False, False),
         "alembic_version": (False, False),
+        **dict.fromkeys(RECEIVER_TABLES, (False, False)),
     }
 
 
@@ -220,6 +235,35 @@ async def test_the_channel_s_role_deletes_nothing_but_a_released_number_taken(
     assert await granted(admin, "documents") == {"SELECT", "INSERT", "UPDATE"}
     assert await granted(admin, "submissions") == {"SELECT", "INSERT"}
     assert await granted(admin, "audit_events") == {"SELECT", "INSERT"}
+    assert await granted(admin, "received_documents") == {"SELECT", "INSERT", "UPDATE"}
+    assert await granted(admin, "receiver_seeds") == {"SELECT", "INSERT", "UPDATE", "DELETE"}
+    assert await granted(admin, "receiver_tokens") == {"SELECT", "INSERT", "DELETE"}
+
+
+def test_a_received_document_is_found_by_its_issuer_s_number_and_credentials_by_their_expiry(
+    migrated: WorkerDatabase,
+) -> None:
+    """Decision 16: one received document per environment, issuer and e-NCF; the purge deletes by expiry."""
+    url = superuser(migrated)
+    assert indexes_of(url, "received_documents", schema=S) == {
+        "received_documents_pkey": (
+            "CREATE UNIQUE INDEX received_documents_pkey ON do_ecf.received_documents "
+            "USING btree (organization_id, company_id, mode, id)"
+        ),
+        "received_documents_number_key": (
+            "CREATE UNIQUE INDEX received_documents_number_key ON do_ecf.received_documents "
+            "USING btree (organization_id, company_id, mode, environment, issuer_rnc, ecf_type, sequence)"
+        ),
+    }
+    for table_name, key in (("receiver_seeds", "seed_hash"), ("receiver_tokens", "token_hash")):
+        assert indexes_of(url, table_name, schema=S) == {
+            f"{table_name}_pkey": (
+                f"CREATE UNIQUE INDEX {table_name}_pkey ON do_ecf.{table_name} USING btree ({key})"
+            ),
+            f"{table_name}_expiry": (
+                f"CREATE INDEX {table_name}_expiry ON do_ecf.{table_name} USING btree (expires_at)"
+            ),
+        }
 
 
 async def test_revision_0003_takes_on_the_signed_documents_task_18_s_job_left_waiting(
