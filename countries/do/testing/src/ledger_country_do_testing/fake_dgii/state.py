@@ -26,6 +26,8 @@ TOKEN_LIFETIME: Final = timedelta(hours=1)
 """DT-DGII: a token lasts one hour, "for now" (its words)."""
 SEED_LIFETIME: Final = timedelta(minutes=5)
 """The fake's choice (DGII does not document one); the receiver of spec §3.8 uses the same."""
+_SUBMITTED: Final = frozenset({"ecf", "rfce"})
+"""The kinds of ``Received`` that are submissions to DGII (``buyer`` is the simulator's copy)."""
 
 
 class Status(IntEnum):
@@ -128,6 +130,10 @@ class Scripted:
     """How many result queries answer "En Proceso" first (an RFCE is decided at once: ignored there)."""
     sequence_used: bool = True
     """DGII's ``secuenciaUtilizada``: ``False`` releases the number of a rejected document."""
+    break_after_send: bool = False
+    """The document is taken (kept, counted, answered by its queries) and its answer lost: a bare 500, which
+    an emitter cannot tell from a connection that broke once it had sent everything. Its outcome is unknown
+    to the emitter, which must never send it again (spec §8.6.4)."""
 
 
 @final
@@ -231,6 +237,7 @@ class FakeState:
         "clock",
         "dgii",
         "dgii_approvals",
+        "directories",
         "directory",
         "public_url",
         "received",
@@ -255,6 +262,9 @@ class FakeState:
         self.script: Script = Script()
         self.received: list[Received] = []
         self.directory: dict[str, DirectoryEntry] = {}
+        """Receivers listed in every environment that has a directory, by RNC."""
+        self.directories: dict[tuple[str, str], DirectoryEntry] = {}
+        """Receivers listed in one environment, by ``(environment, RNC)``: before ``directory``'s."""
         self.approvals: list[bytes] = []
         """ACECFs the emisor-receptor simulator received."""
         self.dgii_approvals: list[bytes] = []
@@ -268,6 +278,24 @@ class FakeState:
         """Answer ARECFs whose signature does not hold (for the buyer client's tests)."""
         self.dgii: Credentials = Credentials(clock)
         self.receiver_credentials: Credentials = Credentials(clock)
+
+    def register(self, environment: str, entry: DirectoryEntry) -> None:
+        """List ``entry`` in ``environment``'s directory (a buyer of ours: ``receiver.receiver_of_ours``)."""
+        self.directories[environment, entry.rnc] = entry
+
+    def submissions(self, encf: str, *, environment: str | None = None) -> int:
+        """How many times ``encf`` was sent to DGII (e-CF and RFCE receptions; in ``environment`` if given).
+
+        What the never-resend rule is held to: a document whose outcome was unknown counts once.
+        """
+        wanted = encf.upper()
+        return sum(
+            1
+            for each in self.received
+            if each.kind in _SUBMITTED
+            and each.encf.upper() == wanted
+            and environment in {None, each.environment}
+        )
 
     def token_for_test(self) -> str:
         """A live DGII token, as if a seed had been validated."""

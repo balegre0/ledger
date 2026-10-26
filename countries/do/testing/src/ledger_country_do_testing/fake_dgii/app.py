@@ -9,9 +9,13 @@ each request was sent to is recorded.
 import os
 from datetime import UTC, datetime
 from http import HTTPStatus
-from typing import Final, final
+from pathlib import Path
+from typing import ClassVar, Final, final
 lazy from collections.abc import Callable
 
+from cryptography import x509
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from starlette.applications import Starlette
 from starlette.responses import Response
 from starlette.routing import Route
@@ -21,13 +25,27 @@ from ledger_country_do_testing.fake_dgii.emitter import EmitterServices, UploadT
 from ledger_country_do_testing.fake_dgii.receiver import ReceiverServices
 from ledger_country_do_testing.fake_dgii.state import FakeState, dgii_check
 from ledger_country_do_testing.pki import organization
-from ledger_testing.pki import Authority
+from ledger_kernel.errors import InvalidInputError
+from ledger_testing.pki import Authority, Issued
 lazy from ledger_country_do_testing.fake_dgii.emitter import Handler
 lazy from ledger_country_do_testing.fake_dgii.state import Received, Script, SignatureCheck
-lazy from ledger_testing.pki import Issued
 
 ENVIRONMENTS: Final = frozenset({"testecf", "certecf", "ecf"})
 DEFAULT_PUBLIC_URL: Final = "http://127.0.0.1:8471"
+SIMULATOR_ROOT: Final = "LEDGER FAKE DGII CA"
+"""The root the simulator's certificate is issued under when none is given (made at start, then lost)."""
+_PEM_KEY: Final = b"-----BEGIN PRIVATE KEY-----"
+
+
+class FakeRootUnreadableError(InvalidInputError):
+    """``LEDGER_FAKE_DGII_ROOT`` names no readable PEM of a root and its RSA key (its path is never said)."""
+
+    code: ClassVar[str] = "do_fake_dgii_root_unreadable"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "LEDGER_FAKE_DGII_ROOT must name a readable PEM file of a root certificate and its RSA key"
+        )
 
 
 def _utc_now() -> datetime:
@@ -89,11 +107,26 @@ def create_app() -> Starlette:
 
     Every document's schema and signature are checked as the tests' fake checks them (``dgii_check``: our
     verifier, strict, and signxml), by any signer (the owner's real certificate is unknown to the fake); the
-    simulator signs its ARECFs with a certificate made at start. ``LEDGER_FAKE_DGII_PUBLIC_URL`` is where
-    clients reach it (default ``DEFAULT_PUBLIC_URL``).
+    simulator signs its ARECFs with a certificate made at start, under the root ``LEDGER_FAKE_DGII_ROOT``
+    names (a PEM file of its certificate and key: the local stack's, which its apps trust,
+    ``deploy/local/do/roots.sh``), or else under a root made at start. ``LEDGER_FAKE_DGII_PUBLIC_URL`` is
+    where clients reach it (default ``DEFAULT_PUBLIC_URL``).
     """
     public_url = os.environ.get("LEDGER_FAKE_DGII_PUBLIC_URL", DEFAULT_PUBLIC_URL)
-    receiver = Authority.root("LEDGER FAKE DGII CA").issue(
-        organization("131880738", name="EMISOR RECEPTOR DGII")
-    )
+    given = os.environ.get("LEDGER_FAKE_DGII_ROOT")
+    root = Authority.root(SIMULATOR_ROOT) if given is None else _root(Path(given))
+    receiver = root.issue(organization("131880738", name="EMISOR RECEPTOR DGII"))
     return FakeDgii(check=dgii_check(trusted=None), receiver=receiver, public_url=public_url).app
+
+
+def _root(path: Path) -> Authority:
+    """The authority whose certificate and RSA key ``path`` holds in PEM (``FakeRootUnreadableError``)."""
+    try:
+        content = path.read_bytes()
+        certificate = x509.load_pem_x509_certificate(content)
+        key = load_pem_private_key(content[content.index(_PEM_KEY) :], password=None)
+    except (OSError, ValueError) as error:
+        raise FakeRootUnreadableError from error
+    if not isinstance(key, RSAPrivateKey):
+        raise FakeRootUnreadableError
+    return Authority(Issued(certificate, key))

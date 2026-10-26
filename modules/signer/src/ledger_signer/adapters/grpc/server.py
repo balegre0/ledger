@@ -59,11 +59,13 @@ type Context[Request, Response] = grpc.aio.ServicerContext[Request, Response]
 
 _SIGNING: Final = frozenset({codec.SIGN_XML, codec.SIGN_SEED, codec.DESCRIBE})
 CALLER_METHODS: Final[Mapping[Caller, frozenset[str]]] = {
-    "api": frozenset({codec.IMPORT, codec.DESCRIBE, codec.RETIRE}),
+    "api": frozenset({codec.IMPORT, codec.DESCRIBE, codec.RETIRE, codec.SIGN_XML}),
     "worker": _SIGNING,
     "receiver": _SIGNING,
 }
-"""What each caller may call, by full name (Decision 12)."""
+"""What each caller may call, by full name (Decision 12). The api signs documents too, never a seed: the
+synchronous numbering-and-signing path of ``POST /v1/invoices`` runs in it (spec §8.5, amended 2026-10-26
+by v2-M3b Task 26, which found the api refused there)."""
 _HEADER: Final = "header"
 _CHUNK: Final = "chunk"
 

@@ -109,21 +109,21 @@ arch = { cmd = "lint-imports", help = "Architecture contracts (import-linter, .i
 spell = { cmd = "typos", help = "Spell check" }
 devtools = { cmd = "ledger-devtools check", help = "Manifests valid, generated files current (the root's block too), image pins" }
 sync = { cmd = "ledger-devtools sync", help = "Write every file the manifests and contracts imply (pyprojects, _manifest.py, import contracts, init.sql, gRPC code, OpenAPI)" }
-check = { sequence = ["format-check", "lint", "suppressions", "types", "arch", "deps", "spell", "proto-lint", "proto-breaking", "devtools", "dead", "test"], help = "Everything CI runs" }
+check = { sequence = ["format-check", "lint", "suppressions", "types", "arch", "deps", "spell", "proto-lint", "proto-breaking", "devtools", "dead", "test", "e2e"], help = "Everything CI runs" }
 
 # The per-package loops run over every directory holding a manifest.toml (Decision 22): no list of packages lives
 # here. A package's sources and tests are named, not its directory: countries/<cc> holds countries/<cc>/testing,
 # a package of its own. `all([...])` builds the whole list first, so every package runs and reports even after
 # one has failed.
 [tool.poe.tasks.mypy]
-help = "Type check #2: mypy --strict, one package at a time (each with its own tests)"
+help = "Type check #2: mypy --strict, one package at a time (each with its own tests), then tests/e2e"
 imports = ["glob", "os", "subprocess"]
 assert = true
 expr = """
 all([subprocess.run(["mypy", f"{directory}/src", f"{directory}/tests"]).returncode == 0 for directory in sorted(
     os.path.dirname(path).replace(os.sep, "/")
     for path in glob.glob("*/*/manifest.toml") + glob.glob("countries/*/testing/manifest.toml")
-)])
+)] + [subprocess.run(["mypy", "tests"]).returncode == 0])
 """
 
 [tool.poe.tasks.deps]
@@ -175,6 +175,20 @@ expr = """
 )))
 """
 
+# The end-to-end suite (plan Decision 27): tests/, outside every package (it spans modules and a country, which no
+# package's tests may import together). No coverage of its own: each package's is its own suite's. As `test`,
+# LEDGER_TEST_JOBS is taken out of its environment (Settings refuses a LEDGER_* name it does not know).
+[tool.poe.tasks.e2e]
+help = "The end-to-end suite: every app on one database, the fake DGII (tests/e2e)"
+imports = ["os", "subprocess"]
+assert = true
+expr = """
+subprocess.run(
+    ["pytest", "tests/e2e", "-c", "pyproject.toml", "-p", "no:cacheprovider"],
+    env={name: value for name, value in os.environ.items() if name != "LEDGER_TEST_JOBS"},
+).returncode == 0
+"""
+
 # Dead code in every package's sources. Each package's tests are scanned with them, as their users: the test
 # tooling's helpers and the chassis API the spec asks for are used by tests (and by modules to come).
 [tool.poe.tasks.dead]
@@ -184,7 +198,7 @@ assert = true
 expr = """
 subprocess.run(["vulture", *sorted(
     glob.glob("*/*/src") + glob.glob("*/*/tests") + glob.glob("countries/*/testing/src")
-    + glob.glob("countries/*/testing/tests")
+    + glob.glob("countries/*/testing/tests") + glob.glob("tests")
 )]).returncode == 0
 """
 
@@ -308,7 +322,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"{*/*/tests,countries/*/testing/tests}/**" = [
+"{*/*/tests,countries/*/testing/tests,tests}/**" = [
     "S101",    # assert is the point of a test
     "D",       # test names are the documentation
     "PLR2004", # magic values are fine in assertions
@@ -342,7 +356,7 @@ exclude = ["*.md"]  # ruff 0.17 formats Python blocks inside Markdown; the docs 
 # ── Type checker #1: basedpyright ───────────────────────────────────────────────
 [tool.basedpyright]
 pythonVersion = "3.15"
-include = ["packages", "modules", "countries", "apps", "tools"]
+include = ["packages", "modules", "countries", "apps", "tools", "tests"]
 # protoc's output (ledger_devtools.protos) is neither checked nor reported on: its .pyi stubs, which
 # mypy-protobuf writes, still type every use of it.
 exclude = ["**/.venv", "**/__pycache__", "modules/*/src/*/adapters/grpc/_generated"]

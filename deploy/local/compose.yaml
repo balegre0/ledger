@@ -1,7 +1,7 @@
-# The local stack: PostgreSQL, the migrate job, the api, the worker, the receiver and the signer, and Zitadel
-# behind a profile. Before the first `up`: `sh deploy/local/signer/tokens.sh` (without the signer's file compose
-# refuses the stack) and `sh deploy/local/do/roots.sh` (the worker's and the receiver's trusted roots for
-# do-ecf-v1, mounted read-only).
+# The local stack: PostgreSQL, the migrate job, the api, the worker, the receiver and the signer, the fake DGII, and
+# Zitadel behind a profile. Before the first `up`: `sh deploy/local/signer/tokens.sh` (without the signer's file
+# compose refuses the stack) and `sh deploy/local/do/roots.sh` (the worker's and the receiver's trusted roots for
+# do-ecf-v1, and the fake DGII's root, each mounted read-only; without them compose refuses the stack too).
 #
 # What an app running on the host is configured with (the LEDGER_* variables of Settings), beside ledger.env's:
 #   LEDGER_DATABASE_URL=postgresql+psycopg://ledger_app:ledger_app@127.0.0.1:5432/ledger (or LEDGER_POSTGRES_PORT)
@@ -9,8 +9,10 @@
 #   another project's here
 #   LEDGER_ARCHIVE_PATH=<an absolute directory of the host> (ledger.env's /archive is the containers'), or
 #   LEDGER_ARCHIVE_BACKEND unset: then no archive is bound, and a channel that reads one does not start
-# The containers have no /archive volume yet: nothing archives until the DO channel does (v2-M3b Task 18), and
-# the volume (owned by the image's user, 65532, beside the read-only root) arrives with Task 26.
+# In the containers the file archive is the volume `archive`, mounted read-write at /archive in the api, the
+# worker and the receiver (each archives: what it signs, what it receives, the receipts and the printed
+# representations); the image makes /archive its user's (65532), so a new volume starts with that owner beside the
+# read-only root file system. `down -v` deletes it with the database that records what is in it.
 # An app that runs inside this network uses the same URL with the host name `postgres` in place of 127.0.0.1.
 #
 # PostgreSQL's administrator is `postgres`. A service never connects as that role: a superuser bypasses
@@ -48,6 +50,15 @@
 # adapter exists) and keeps its KMS's master key in the volume `signer-kms`, which it creates on its first start;
 # `down -v` deletes it with the database it protects. That KMS is a file, refused outside the environments `local`
 # and `test`: this stack is the only place the signer runs yet.
+# The fake DGII (plan Decision 28) is a dev-only image of its own (deploy/docker/fake-dgii.Dockerfile, never part
+# of the production image): DGII's services for emitters, its directory and its emisor-receptor simulator, on
+# 127.0.0.1:${LEDGER_FAKE_DGII_PORT:-8471} on the host and as http://fake-dgii:8471 in this network, which
+# deploy/local/do-ecf.env gives the api, the worker and the receiver as DGII's hosts (plain http, which do-ecf-v1
+# allows on loopback and on a single-label service name only, never for the live environment). It trusts any
+# signer and hands tokens to anyone: it is on `default` alone, never on `signer`. Its simulator signs its receipts
+# under the fake's root roots.sh wrote (the worker trusts it through roots.pem); the buyer client refuses its
+# plain-http URLs from the directory (a buyer's endpoint is https on a public address), so a delivery to a buyer
+# DGII's directory points at the simulator fails here: deliveries are the end-to-end test's (tests/e2e).
 # The profile `zitadel` adds a local identity provider (zitadel/README.md); the profile `localstack` adds an S3
 # with object lock for the archive's s3 backend (ledger.env says how to point the apps at it).
 name: ledger
@@ -69,7 +80,8 @@ services:
     # The tag the platform's tests run on: a service meets locally the PostgreSQL it will be tested against.
     image: postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
     # Room for every app's pool and its overflow (each up to twice LEDGER_DATABASE_POOL_SIZE): api 30, worker
-    # 78, signer 30, receiver 30, and zitadel's (docs/runbooks/platform/database-connections.md).
+    # 78, signer 30, receiver 30, and zitadel's (docs/runbooks/platform/database-connections.md); the fake DGII
+    # holds none.
     command: ["postgres", "-c", "max_connections=372"]
     environment:
       POSTGRES_USER: postgres
@@ -107,9 +119,11 @@ services:
         required: false
       - path: signer/.local/api.env  # LEDGER_SIGNER_TOKEN_API: its own token, no other caller's
         required: false  # without it the api starts, its certificate routes answering 503
+      - do-ecf.env  # LEDGER_DO_ECF_*: the fake DGII's hosts, the receiver's public URL (no secret)
     environment:
       LEDGER_SIGNER_ADDRESS: signer:50051
       LEDGER_SIGNER_IMPORT_DEADLINE_SECONDS: "28"  # the signer's; the api waits 2 s more for its answer
+    volumes: ["archive:/archive"]
     ports: ["127.0.0.1:${LEDGER_API_PORT:-8100}:8000"]
     networks: [default, signer]
     stop_grace_period: 40s
@@ -125,6 +139,7 @@ services:
         required: false
       - path: signer/.local/worker.env  # LEDGER_SIGNER_TOKEN_WORKER: its own token, no other caller's
         required: false  # without it the worker starts, its signatures answering signer_unavailable
+      - do-ecf.env
     environment:
       LEDGER_DATABASE_DIRECT_URL: postgresql+psycopg://ledger_app:ledger_app@postgres:5432/ledger
       LEDGER_SIGNER_ADDRESS: signer:50051
@@ -139,6 +154,7 @@ services:
       # do-ecf-v1's trusted roots, which the worker requires: do/roots.sh writes a development root (local only;
       # a deployment's roots are the owner's, Owner item 7). Missing, compose refuses the stack.
       - {type: bind, source: ./do/.local/roots.pem, target: /run/ledger/do-ecf/roots.pem, read_only: true, bind: {create_host_path: false}}
+      - archive:/archive
     ports: ["127.0.0.1:${LEDGER_WORKER_PORT:-8101}:8000"]
     networks: [default, signer]
     stop_grace_period: 40s
@@ -178,6 +194,7 @@ services:
       - ledger.env
       - path: signer/.local/receiver.env  # LEDGER_SIGNER_TOKEN_RECEIVER: its own token, no other caller's
         required: false  # without it the receiver starts, its signatures answering signer_unavailable
+      - do-ecf.env
     environment:
       LEDGER_SIGNER_ADDRESS: signer:50051
       LEDGER_DO_ECF_TRUSTED_ROOTS: /run/ledger/do-ecf/roots.pem
@@ -185,11 +202,30 @@ services:
       # do-ecf-v1's trusted roots, the worker's file (the emitters it receives from chain to them). Missing, compose
       # refuses the stack.
       - {type: bind, source: ./do/.local/roots.pem, target: /run/ledger/do-ecf/roots.pem, read_only: true, bind: {create_host_path: false}}
+      - archive:/archive  # it archives every document it receives, raw, and every receipt it answers
     ports: ["127.0.0.1:${LEDGER_RECEIVER_PORT:-8103}:8000"]
     networks: [default, signer]
     stop_grace_period: 40s
     depends_on:  # not on the signer: its readiness is not the receiver's
       migrate: {condition: service_completed_successfully}
+
+  fake-dgii:
+    # Dev only (see the head of this file): built from deploy/docker/fake-dgii.Dockerfile, read-only, unprivileged.
+    image: ledger:fake-dgii  # the repository's own image name, its dev-only tag
+    build: {context: ../.., dockerfile: deploy/docker/fake-dgii.Dockerfile}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      LEDGER_FAKE_DGII_PUBLIC_URL: http://fake-dgii:8471  # where its directory says its simulator is
+      LEDGER_FAKE_DGII_ROOT: /run/ledger/fake-dgii/root.pem
+    volumes:
+      # The fake's root and its key (do/roots.sh writes them; its certificate is in roots.pem). Missing, compose
+      # refuses the stack.
+      - {type: bind, source: ./do/.local/fake-dgii-root.pem, target: /run/ledger/fake-dgii/root.pem, read_only: true, bind: {create_host_path: false}}
+    ports: ["127.0.0.1:${LEDGER_FAKE_DGII_PORT:-8471}:8471"]
+    networks: [default]  # never `signer`: it trusts anyone
 
   zitadel:
     # The identity provider of the local stack, optional: `docker compose --profile zitadel up -d --wait`. It
@@ -266,6 +302,7 @@ networks:
   signer-edge: {}  # the signer's alone: its published probe port (and, locally, its route out)
 
 volumes:
+  archive: {}
   postgres: {}
   signer-kms: {}
   zitadel-bootstrap: {}

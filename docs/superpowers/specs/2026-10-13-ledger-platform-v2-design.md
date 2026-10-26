@@ -8,6 +8,7 @@
 | Binding inputs | `.superpowers/research/00-controller-rulings.md` (R1-R6); evidence in `01-localization`, `02-modularity`, `03-layout-tooling`, `04-saas-platforms`, `05-audit`, `06-dgii-facts` (cited as **[01]**...**[06]**, rulings as **R1**...**R6**) |
 | Decisions recorded as | `docs/adr/0001`...`0010` (§17) |
 | Amended 2026-10-26 (v2-M3b Task 35) | The company's fiscal address (DGII's `DireccionEmisor`): identity keeps it on the company, judged by its regime (§3.2, §7.1); invoicing snapshots it into an issued document's seller (§7.5); fiscal maps it into the draft's issuer (§8.4) and keeps a margin of the request's budget to mirror the channel's answer (§8.5); regime `do` declares DGII's catalogue and do-ecf-v1 objects to a company without one (§8.6.2); per-establishment addresses stay on the cut list (§16.4). Owner item 30 of the M3b plan may revisit the company-level choice |
+| Amended 2026-10-26 (v2-M3b Task 26) | The signer's allowlist lets the `api` call `SignXml` (never `SignSeed`): the synchronous numbering-and-signing path of §8.5 runs in it (§3.7; ADR 0010). The end-to-end test found the api refused there on the real stack |
 | As built (v2-M1) | Reconciled with the code at the end of v2-M1: the manifest model is `ledger_platform.config.manifest`; the root's package lists are a block `sync` generates; settings sections per package (§3.10); the pool sized by settings and checked (§6.7); `serve(role)`; four RLS scopes and the purge role (§6.3); the route guards (§5.2); devtools `gate` deferred (§4.7) |
 
 > **Supersedes v1.** v1 chose seven microservices on NATS JetStream and Temporal with one database per service.
@@ -452,7 +453,8 @@ Rule 7, ADR 0010.
 - **Callers authenticate** with per-caller tokens (`LEDGER_SIGNER_TOKEN_API`, `_WORKER`, `_RECEIVER`, rotated
   by the secret manager; during a rotation the signer also accepts `LEDGER_SIGNER_TOKEN_<CALLER>_PREVIOUS`;
   each at least 32 visible ASCII characters, none shared, compared as SHA-256 digests in constant time) and a
-  **method allowlist** per caller: `api` → `ImportCertificate`, `DescribeCertificates`, `RetireCertificate`;
+  **method allowlist** per caller: `api` → `ImportCertificate`, `DescribeCertificates`, `RetireCertificate`,
+  `SignXml` (the synchronous numbering-and-signing path, §8.5; amended 2026-10-26, v2-M3b Task 26);
   `worker`, `receiver` → `SignXml`, `SignSeed`, `DescribeCertificates`. A client process holds its own token
   only. The signer trusts the organization, company, mode and actor its caller forwards (the api asserts
   them before it calls) and binds the caller's name from the token: a residual risk until mTLS from the mesh

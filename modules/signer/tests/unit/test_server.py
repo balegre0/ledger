@@ -301,7 +301,7 @@ def document(at: datetime) -> XmlToSign:
 
 def test_the_callers_may_call_what_decision_12_says() -> None:
     assert {
-        "api": {codec.IMPORT, codec.DESCRIBE, codec.RETIRE},
+        "api": {codec.IMPORT, codec.DESCRIBE, codec.RETIRE, codec.SIGN_XML},
         "worker": {codec.SIGN_XML, codec.SIGN_SEED, codec.DESCRIBE},
         "receiver": {codec.SIGN_XML, codec.SIGN_SEED, codec.DESCRIBE},
     } == CALLER_METHODS
@@ -507,11 +507,12 @@ async def test_damaged_custody_is_a_defect_the_caller_is_told_nothing_of(
     assert (cause.status, cause.remote_code) == (grpc.StatusCode.INTERNAL, INTERNAL_CODE)
 
 
-async def test_the_api_cannot_sign_and_the_worker_cannot_import(
-    api: SignerClient, worker: SignerClient, clock: Moving
+async def test_the_api_signs_no_seed_and_the_worker_cannot_import(
+    api: SignerClient, worker: SignerClient
 ) -> None:
+    seed = SeedToSign(tenant=IN_TEST, profile=PROFILE, seed=b"<s>1</s>", audience="ecf.dgii.gov.do")
     with pytest.raises(RemoteDefectError) as signing:
-        await api.sign_xml(CALL, document(clock.now))
+        await api.sign_seed(CALL, seed)
     with pytest.raises(RemoteDefectError) as importing:
         await worker.import_remote(CALL, REQUEST, Secret(CREDENTIAL))
     assert signing.value.remote_code == importing.value.remote_code == MethodNotAllowedError.code

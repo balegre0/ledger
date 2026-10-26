@@ -27,8 +27,10 @@ authorization to manage signature-creation data on the signer's behalf.
   uploads stream through `api` without being parsed there and carry the client's idempotency key. Rotation by
   compare-and-set is deferred (an import replaces the active certificate).
 - Callers authenticate with **per-caller tokens and method allowlists**: `api` may call `ImportCertificate`,
-  `DescribeCertificates` and `RetireCertificate`; `worker` and `receiver` may call `SignXml`, `SignSeed` and
-  `DescribeCertificates` (a channel reads a certificate's validity through it; no method returns a secret).
+  `DescribeCertificates`, `RetireCertificate` and `SignXml` (amended 2026-10-26, v2-M3b Task 26: the api numbers
+  and signs an invoice's e-CF within the request, spec §8.5; it never signs a seed); `worker` and `receiver` may
+  call `SignXml`, `SignSeed` and `DescribeCertificates` (a channel reads a certificate's validity through it; no
+  method returns a secret).
   mTLS from a service mesh replaces the tokens later.
 - Every signature is audited before it is returned. `api`'s readiness does not depend on the signer.
 - import-linter forbids every other app from importing `ledger_signer.adapters.custody`.

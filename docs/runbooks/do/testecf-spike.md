@@ -85,7 +85,7 @@ simulator for every buyer:
 uv run ledger-fake-dgii
 ```
 
-Terminal 2, with the settings above plus the fake's host (plain `http` is allowed on loopback only) and an
+Terminal 2, with the settings above plus the fake's host (plain `http` is allowed on loopback, or on a single-label service name of the local stack, only) and an
 output directory of the dry run's own, so the fake's e-NCF journal never mixes with TesteCF's:
 
 ```powershell
