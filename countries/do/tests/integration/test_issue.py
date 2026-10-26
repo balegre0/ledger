@@ -340,6 +340,7 @@ async def test_issue_twice_for_one_invoice_numbers_one_document_once(
         "qr_url": None,
         "emission_mode": None,
         "track_id": None,
+        "commercial_approval": None,
     }
     assert await documents_of(module_database, tenant) == [(str(draft.document), 1, "numbered", 1)]
     other = await channel.issue(call_of(tenant), draft_of(tenant), sign_within=None)
@@ -605,7 +606,7 @@ def job_of(tenant: Tenant, document: UUID) -> Job:
 async def advanced(
     contexts: Contexts, ports: Mapping[str, object], tenant: Tenant, document: UUID
 ) -> JobOutcome:
-    (spec,) = assemble(contexts(settings=RECEIVED, bound=ports)).jobs
+    spec, _ = assemble(contexts(settings=RECEIVED, bound=ports)).jobs
     assert spec.kind == "do_ecf.advance"
     return await spec.handler(job_of(tenant, document))
 
@@ -667,7 +668,7 @@ async def test_the_job_of_a_document_that_is_not_there_is_a_defect(
         await advanced(contexts, ports, a_tenant(), new_id())
     assert caught.value.kind == "conflict"  # the job is dead at once: no retry finds it
     assert [(line["event"], line["log_level"]) for line in logged] == [("do_ecf.signing_failed", "error")]
-    (spec,) = assemble(contexts(settings=RECEIVED, bound=ports)).jobs
+    spec, _ = assemble(contexts(settings=RECEIVED, bound=ports)).jobs
     unscoped = replace(
         job_of(a_tenant(), new_id()), scope=Tenant(OrganizationId(new_id()), CompanyId(new_id()), None)
     )

@@ -22,7 +22,6 @@ from ledger_country_do.channels.ecf_v1.adapters.xml.arecf import render_arecf
 from ledger_country_do.channels.ecf_v1.adapters.xml.inbound import (
     MAX_INBOUND,
     InboundDocumentInvalidError,
-    InboundNames,
     name_inbound,
     read_inbound_acecf,
     read_inbound_arecf,
@@ -33,6 +32,7 @@ from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
 from ledger_country_do.channels.ecf_v1.domain.exchanges import (
     CommercialApproval,
     InboundEcf,
+    InboundNames,
     NotReceivedReason,
     Receipt,
 )

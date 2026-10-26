@@ -3,8 +3,9 @@
 The state is the channel's own (``signed``...), the fiscal status and severity ``ecf.status_of``'s, the
 authority number the e-NCF, the messages DGII's about it. ``details["do"]`` is what a client prints and
 follows: the e-NCF, the route, delivery to the buyer, once signed its moment of signing (ISO 8601), security
-code, QR URL and emission mode (``None`` before), and DGII's track id once it gave one (``None`` before, and
-for a summary). The buyer's commercial approval joins it with the step that records it (Task 23).
+code, QR URL and emission mode (``None`` before), DGII's track id once it gave one (``None`` before, and
+for a summary), and its buyer's commercial approval once the receiver recorded one (``{approved, reason,
+at}``, ``None`` before).
 """
 
 from typing import Final
@@ -22,7 +23,7 @@ REGIME_KEY: Final = "do"
 def update_of(document: EcfDocument) -> StatusUpdate:
     """``document``'s state at its version (see the module)."""
     status, severity = status_of(document.state)
-    signature = document.signature
+    signature, approval = document.signature, document.commercial_approval
     details: dict[str, JsonValue] = {
         "encf": str(document.encf),
         "route": document.route.value,
@@ -32,6 +33,13 @@ def update_of(document: EcfDocument) -> StatusUpdate:
         "qr_url": None if signature is None else signature.qr_url,
         "emission_mode": None if signature is None else signature.emission_mode.value,
         "track_id": document.track_id,
+        "commercial_approval": None
+        if approval is None
+        else {
+            "approved": approval.approved,
+            "reason": approval.reason,
+            "at": approval.at.isoformat(),
+        },
     }
     return StatusUpdate(
         document=document.invoice,

@@ -10,18 +10,19 @@ lazy from collections.abc import Mapping
 lazy from pathlib import Path
 
 import pytest
+from fastapi.routing import APIRoute
 
 from ledger_country_do.channels.ecf_v1.adapters.buyers.client import BuyerClient
 from ledger_country_do.channels.ecf_v1.adapters.channel import ChannelNotReadyError, DoEcfChannel
 from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
 from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import HostRefusedError
+from ledger_country_do.channels.ecf_v1.adapters.inbound import Inbound, InboundClosedError
 from ledger_country_do.channels.ecf_v1.adapters.outbound import (
     Outbound,
     OutboundClosedError,
     TrustedRootsUnreadableError,
 )
 from ledger_country_do.channels.ecf_v1.adapters.routes.ranges import PREFIX
-from ledger_country_do.channels.ecf_v1.adapters.signing.trust import CounterpartyTrust
 from ledger_country_do.channels.ecf_v1.application.advancing import SettleTooShortError
 from ledger_country_do.channels.ecf_v1.assembly import SettingRefusedError, assemble
 from ledger_country_do.channels.ecf_v1.domain.fields import CHANNEL_FIELDS
@@ -80,7 +81,7 @@ def test_the_channel_assembles_with_its_definition_routes_and_migrations(context
     assert [route for router in parts.routers for route in router.routes]  # its ranges
     assert all(router.prefix == PREFIX for router in parts.routers)
     assert (parts.resources, parts.consumers, parts.receiver_routers) == ((), (), ())
-    assert [spec.kind for spec in parts.jobs] == ["do_ecf.advance"]
+    assert [spec.kind for spec in parts.jobs] == ["do_ecf.advance", "do_ecf.purge_receiver_credentials"]
     assert parts.migrations is not None
     assert parts.migrations.schema == "do_ecf"
 
@@ -101,7 +102,8 @@ def test_migrate_reads_no_archive_and_gets_the_channel_s_migrations_alone(
     bound = {name: value for name, value in ports.items() if name != ARCHIVE_PORT.name}
     parts = assemble(contexts(settings=RECEIVED, bound=bound, role="migrate"))
     assert (parts.routers, parts.resources) == ((), ())
-    assert [spec.kind for spec in parts.jobs] == ["do_ecf.advance"]  # declared: every app hands its handler
+    # declared: every app hands its handler
+    assert [spec.kind for spec in parts.jobs] == ["do_ecf.advance", "do_ecf.purge_receiver_credentials"]
     assert parts.migrations is not None
     assert parts.migrations.schema == "do_ecf"
     with pytest.raises(BindingMissingError, match="'ArchivePort'"):
@@ -144,18 +146,29 @@ async def test_the_receiver_reads_its_trusted_roots_at_start_and_opens_no_client
 ) -> None:
     """The documents emitters send the receiver chain to the roots, read when it starts as the worker reads
     them; DGII's and the buyers' clients are the worker's alone (the receiver mounts the channel's receiver
-    routes only: none before Task 22)."""
+    routes, under ``/do-ecf-v1/``, and the api app does not)."""
     with pytest.raises(SettingRefusedError, match=r"LEDGER_DO_ECF_TRUSTED_ROOTS .* the receiver"):
         assemble(contexts(settings=RECEIVED, role="receiver"))
     roots = tmp_path / "roots.pem"
     roots.write_bytes(pem(authority.certificate))
     parts = assemble(contexts(settings=RECEIVED.model_copy(update={"trusted_roots": roots}), role="receiver"))
-    assert parts.receiver_routers == ()
-    assert [spec.kind for spec in parts.jobs] == ["do_ecf.advance"]
+    (mounted,) = parts.receiver_routers
+    assert {route.path for route in mounted.routes if isinstance(route, APIRoute)} == {
+        f"/do-ecf-v1/{{environment}}/{{rnc}}/fe/{path}"
+        for path in (
+            "autenticacion/api/semilla",
+            "autenticacion/api/validacioncertificado",
+            "recepcion/api/ecf",
+            "aprobacioncomercial/api/ecf",
+        )
+    }
+    assert [spec.kind for spec in parts.jobs] == ["do_ecf.advance", "do_ecf.purge_receiver_credentials"]
     (opening,) = parts.resources
     async with opening as opened:
-        assert isinstance(opened, CounterpartyTrust)
-        assert list(opened.roots) == [authority.certificate]
+        assert isinstance(opened, Inbound)
+        assert list(opened.trust.roots) == [authority.certificate]
+    with pytest.raises(InboundClosedError):
+        _ = opened.trust
 
 
 async def test_the_worker_opens_its_dgii_and_buyer_clients_at_start_and_closes_them_at_stop(

@@ -102,3 +102,12 @@ timeout = "3m"                       # one outbound call per run (Decision 10)
 max_attempts = 50                    # failures; RunAgain does not count
 deadline = "15d"
 concurrency = 16
+
+[[channels.jobs]]
+kind = "do_ecf.purge_receiver_credentials"   # the receiver's expired seeds and tokens (Task 22)
+concurrency = 1
+
+[[channels.schedules]]
+name = "do_ecf.purge_receiver_credentials"
+every = "1h"
+enqueues = "do_ecf.purge_receiver_credentials"
