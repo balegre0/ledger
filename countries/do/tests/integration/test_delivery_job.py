@@ -22,6 +22,7 @@ lazy from uuid import UUID
 
 import httpx
 import pytest
+from psycopg import sql
 from pydantic import BaseModel, TypeAdapter
 from sqlalchemy import Text, cast, select, text, update
 from structlog.testing import capture_logs
@@ -43,7 +44,7 @@ from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 from ledger_country_do.channels.ecf_v1.domain.numbering import RangeState, RangeStatus
 from ledger_country_do.channels.ecf_v1.settings import DoEcfSettings
-from ledger_country_do_testing.fake_dgii.state import DirectoryEntry
+from ledger_country_do_testing.fake_dgii.state import DirectoryEntry, Scripted, Status
 from ledger_country_do_testing.fiscal import fiscal_draft
 from ledger_country_do_testing.pki import organization
 from ledger_country_do_testing.samples import SIGNER_VALID_FROM
@@ -89,6 +90,22 @@ SLACK: Final = timedelta(seconds=5)
 ROWS: Final = TypeAdapter(list[tuple[str | None, ...]])
 DETAIL: Final = TypeAdapter(dict[str, str])
 STATUS: Final = TypeAdapter(str | None)
+NAMES: Final = TypeAdapter(list[str])
+SCOPES: Final = TypeAdapter(list[tuple[str, str, str, str]])
+DELIVER_SCOPES: Final = (
+    "SELECT key, organization_id::text, company_id::text, mode FROM do_ecf.jobs "
+    "WHERE kind = 'do_ecf.deliver' ORDER BY key"
+)
+COLUMNS: Final = (
+    "SELECT column_name FROM information_schema.columns WHERE table_schema = 'do_ecf' "
+    "AND table_name = %s ORDER BY ordinal_position"
+)
+SERIES_TEXT: Final = (
+    "(organization_id, company_id, mode, environment, ecf_type) IN (SELECT organization_id, company_id, "
+    "mode, environment, ecf_type FROM do_ecf.documents WHERE id = %(document)s)"
+)
+SERIES_OF: Final = sql.SQL(SERIES_TEXT)
+RANGE_OF: Final = sql.SQL("id = (SELECT range_id FROM do_ecf.documents WHERE id = %(document)s)")
 
 
 class _Do(BaseModel):
@@ -468,9 +485,10 @@ async def test_an_accepted_e_cf_reaches_its_buyer_whose_receipt_is_archived_and_
     receipt = await archive.get(found.receipt_key, sha256=found.receipt_sha256)
     assert verify_enveloped(receipt, INBOUND).certificate == worker.fake.state.receiver.certificate
     assert (worker.fake.received[-1].kind, worker.network.asked(BUYER_RECEPTION)) == ("buyer", 1)
-    assert (await published_deliveries(module_database, tenant))[-2:] == [
+    assert (await published_deliveries(module_database, tenant))[-3:] == [
         ("not_started", 4),
-        ("delivered", 5),
+        ("delivering", 5),
+        ("delivered", 6),
     ]
     assert await seeds_audited(module_database, tenant) == []  # no seed was signed: none asked
     assert await worker.delivered(tenant, document) == Done()  # settled: nothing sent again
@@ -630,7 +648,11 @@ async def test_a_buyer_that_already_has_the_document_counts_as_delivered_and_one
     )
     assert await worker.delivered(tenant, document) == Done()
     found = await delivery_of(module_database, tenant, document)
-    assert (found.state, worker.network.asked(BUYER_RECEPTION)) == ("delivered", 2)
+    assert (found.state, found.reason, worker.network.asked(BUYER_RECEPTION)) == (
+        "delivered",
+        "not_received_duplicate",
+        2,
+    )
     other = await worker.accepted(draft_of(tenant))
     worker.fake.state.receiver_rncs = frozenset({"101850043"})
     assert await worker.delivered(tenant, other) == Done()
@@ -684,8 +706,14 @@ async def test_a_receipt_the_archive_cannot_keep_fails_the_run_once_its_seeds_ar
         document = await worker.accepted(draft_of(tenant))
         with pytest.raises(ArchiveUnavailableError):
             await worker.delivered(tenant, document)
-    assert len(await seeds_audited(module_database, tenant)) == 1
-    assert (await delivery_of(module_database, tenant, document)).state == "not_started"
+        first = await delivery_of(module_database, tenant, document)
+        with pytest.raises(ArchiveUnavailableError):  # a later run fails the same way
+            await worker.delivered(tenant, document)
+    assert len(await seeds_audited(module_database, tenant)) == 2
+    again = await delivery_of(module_database, tenant, document)
+    assert (first.state, again.state) == ("delivering", "delivering")  # started before the exchange
+    assert first.since is not None
+    assert again.since == first.since  # a run that failed never restarts the seven days
 
 
 async def test_a_delivery_settled_meanwhile_is_left_as_it_is(
@@ -752,3 +780,120 @@ async def test_the_job_runs_for_a_company_in_a_mode_only(worker: Worker) -> None
 
 def a_tenant_without_mode() -> Tenant:
     return Tenant(OrganizationId(new_id()), CompanyId(new_id()), None)
+
+
+# -- The review's cases (2026-10-25) ------------------------------------------------------------------------
+
+
+async def test_seeds_signed_before_the_buyer_failed_are_audited_once(
+    worker: Worker, module_database: BoundDatabase
+) -> None:
+    """Task 15's ``.seeds`` on errors: the token was had, the reception then failed (503)."""
+    tenant = await a_company(module_database, authenticates=True)
+    document = await worker.accepted(draft_of(tenant))
+    worker.network.failing.add(BUYER_RECEPTION)
+    assert isinstance(await worker.delivered(tenant, document), RunAgain)
+    assert await seeds_audited(module_database, tenant) == [
+        {"endpoint_host": "ecf.fake.test", "buyer": "******193"}
+    ]
+    found = await delivery_of(module_database, tenant, document)
+    assert (found.state, found.reason) == ("delivering", "do_ecf_buyer_unavailable")
+
+
+async def test_a_conditionally_accepted_e_cf_is_delivered_like_an_accepted_one(
+    worker: Worker, module_database: BoundDatabase
+) -> None:
+    worker.fake.state.receiver_requires_auth = False
+    worker.fake.script.default = Scripted(
+        status=Status.ACCEPTED_CONDITIONALLY, messages=(("613", "Fuera de tolerancia"),)
+    )
+    tenant = await a_company(module_database)
+    document = await worker.accepted(draft_of(tenant))
+    assert await worker.job(document) == "ready"
+    assert await worker.delivered(tenant, document) == Done()
+    assert (await delivery_of(module_database, tenant, document)).state == "delivered"
+
+
+async def test_a_summarized_32_whose_buyer_has_an_rnc_is_never_delivered_nor_looked_up(
+    worker: Worker, module_database: BoundDatabase
+) -> None:
+    """Step 1 of §8.6.5: never an RFCE-summarized type 32, whoever its buyer."""
+    tenant = await a_company(module_database, EcfType.CONSUMER_INVOICE)
+    document = await worker.accepted(draft_of(tenant, fields={"ecf_type": "32"}))
+    assert await worker.job(document) is None
+    await set_row(module_database, tenant, document, delivery_state="not_started")  # as if enqueued
+    assert await worker.delivered(tenant, document) == Done()
+    found = await delivery_of(module_database, tenant, document)
+    assert (found.state, found.reason, worker.network.asked(DIRECTORY)) == (
+        "not_applicable",
+        "not_deliverable",
+        0,
+    )
+
+
+async def issued(worker: Worker, draft: FiscalDraft, *, sign: bool) -> UUID:
+    """``draft``'s document, numbered, and signed within the budget when told: never sent to DGII."""
+    tenant = tenant_of(draft)
+    call = SystemCall(reason="fiscal:issue", scope=tenant)
+    await worker.channel.issue(call, draft, sign_within=BUDGET if sign else None)
+    async with worker.database.unit(tenant) as unit:
+        found = await bind(unit).documents.of_invoice(draft.document)
+    assert found is not None
+    return found.id
+
+
+async def columns(admin: psycopg.AsyncConnection, table: str) -> list[str]:
+    found = await admin.execute(COLUMNS, (table,))
+    return NAMES.validate_python([row[0] for row in await found.fetchall()])
+
+
+async def copied_live(admin: psycopg.AsyncConnection, document: UUID) -> UUID:
+    """A copy of ``document`` (its series and range too) in the live mode and environment: the copy's id."""
+    live = {"mode": sql.Literal("live"), "environment": sql.Literal("ecf")}
+    copy = new_id()
+    fresh = live | {"id": sql.Literal(copy), "invoice_id": sql.SQL("gen_random_uuid()")}
+    for table, changed, where in (
+        ("numbering_series", live, SERIES_OF),
+        ("numbering_ranges", live, RANGE_OF),
+        ("documents", fresh, sql.SQL("id = %(document)s")),
+    ):
+        names = await columns(admin, table)
+        chosen = [changed.get(name, sql.Identifier(name)) for name in names]
+        statement = sql.SQL(
+            "INSERT INTO {table} ({names}) SELECT {chosen} FROM {table} WHERE {where}"
+        ).format(
+            table=sql.Identifier("do_ecf", table),
+            names=sql.SQL(", ").join(sql.Identifier(name) for name in names),
+            chosen=sql.SQL(", ").join(chosen),
+            where=where,
+        )
+        await admin.execute(statement, {"document": document})
+    return copy
+
+
+async def test_the_sweep_enqueues_only_decided_reception_documents_each_in_its_own_scope(
+    worker: Worker, module_database: BoundDatabase, admin: psycopg.AsyncConnection
+) -> None:
+    """Revision 0004's filters: decided (accepted), reception, ``not_started``; the job in the row's scope."""
+    first = await a_company(module_database, EcfType.CREDIT_INVOICE, EcfType.CONSUMER_INVOICE)
+    second = await a_company(module_database)
+    accepted = await worker.accepted(draft_of(first))
+    elsewhere = await worker.accepted(draft_of(second))
+    summarized = await worker.accepted(draft_of(first, fields={"ecf_type": "32"}))
+    numbered = await issued(worker, draft_of(first), sign=False)
+    signed = await issued(worker, draft_of(first), sign=True)
+    live = await copied_live(admin, accepted)
+    jobs = CHASSIS.jobs
+    async with module_database.unit(None) as unit:  # as before Task 21: no delivery job
+        await unit.connection.execute(jobs.delete().where(jobs.c.kind == DELIVER))
+    await set_row(module_database, first, summarized, delivery_state="not_started")
+    await swept(admin)
+    found = await admin.execute(DELIVER_SCOPES)
+    expected = {
+        (str(accepted), str(first.organization), str(first.company), "test"),
+        (str(elsewhere), str(second.organization), str(second.company), "test"),
+        (str(live), str(first.organization), str(first.company), "live"),
+    }
+    assert set(SCOPES.validate_python(await found.fetchall())) == expected
+    for undecided in (numbered, signed):
+        assert await worker.job(undecided) is None

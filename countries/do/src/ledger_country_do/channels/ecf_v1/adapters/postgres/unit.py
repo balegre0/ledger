@@ -1,10 +1,12 @@
 """The channel's unit of work over a chassis unit: repositories bound to its tenant, outbox, audit, jobs."""
 
 from contextlib import asynccontextmanager
-from typing import final, override
+from typing import Final, final, override
 lazy from collections.abc import AsyncGenerator, Mapping
 lazy from datetime import datetime
 lazy from uuid import UUID
+
+from sqlalchemy import select
 
 from ledger_country_do.channels.ecf_v1.adapters.jobs import ADVANCE, DELIVER
 from ledger_country_do.channels.ecf_v1.adapters.postgres.repositories.documents import PgDocuments
@@ -70,6 +72,10 @@ class UnitAdvances(Advances):
         self._unit.jobs.wake_all(ADVANCE, self._tenant.company, reason.value)
 
 
+PENDING: Final = ("ready", "running", "parked")
+"""A job's statuses while it may still run."""
+
+
 @final
 class UnitDeliveries(Deliveries):
     """The ``do_ecf.deliver`` jobs, in the unit's queue: enqueued with the change that calls for them, or not.
@@ -85,6 +91,16 @@ class UnitDeliveries(Deliveries):
     @override
     def enqueue(self, document: UUID) -> None:
         self._unit.jobs.enqueue(DELIVER, str(document))
+
+    @override
+    async def pending(self, document: UUID) -> bool:
+        jobs = self._unit.tables.jobs
+        found = await self._unit.connection.execute(
+            select(jobs.c.status).where(
+                jobs.c.kind == DELIVER, jobs.c.key == str(document), jobs.c.status.in_(PENDING)
+            )
+        )
+        return found.first() is not None
 
 
 @final

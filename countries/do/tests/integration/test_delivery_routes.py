@@ -39,6 +39,7 @@ lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.http.outbound import OutboundHttp
 lazy from ledger_platform.runtime.contexts import ChannelContext
 lazy from ledger_testing.api import TestPrincipal
+lazy from ledger_testing.issuer import LocalIssuer
 
 RETRY: Final = "/v1/do/deliveries/{}/retry"
 OPTIONS: Final = "/v1/do/delivery_options"
@@ -46,6 +47,15 @@ SETTINGS: Final = DoEcfSettings(receiver_public_url="https://receiver.ledger.tes
 ROWS: Final = TypeAdapter(list[tuple[str, str]])
 ONE: Final = TypeAdapter(tuple[str, str])
 IDENTIFIER: Final = TypeAdapter(UUID)
+NO_JOB: Final = (
+    "DELETE FROM do_ecf.jobs WHERE kind = 'do_ecf.deliver' AND key = "
+    "(SELECT id::text FROM do_ecf.documents WHERE invoice_id = %s)"
+)
+A_JOB: Final = (
+    "INSERT INTO do_ecf.jobs (kind, key, organization_id, company_id, mode, status, run_at, max_attempts, "
+    "payload, created_at, updated_at) SELECT 'do_ecf.deliver', id::text, organization_id, company_id, "
+    "mode, %s, now(), 50, '{}'::jsonb, now(), now() FROM do_ecf.documents WHERE invoice_id = %s"
+)
 ANNOUNCED: Final = (
     "SELECT payload #>> '{update,details,do,delivery}', payload #>> '{update,version}' FROM do_ecf.outbox "
     "WHERE type = 'fiscal_channel.document.updated' ORDER BY aggregate_version DESC"
@@ -211,3 +221,114 @@ async def test_buyer_authentication_is_off_until_the_company_sets_it_once_audite
         OPTIONS, json={"buyer_authentication": True, "x": 1}, headers=managing(owner, company)
     )
     assert unknown.status_code == 422
+
+
+# -- The review's cases (2026-10-25) ------------------------------------------------------------------------
+
+
+async def deliver_job_set(admin: psycopg.AsyncConnection, invoice: DocumentRef, status: str | None) -> None:
+    """The invoice's ``do_ecf.deliver`` job left ``status`` (``None``: there is none)."""
+    await admin.execute(NO_JOB, (invoice,))
+    if status is None:
+        return
+    await admin.execute(A_JOB, (status, invoice))
+
+
+async def delivery_set(admin: psycopg.AsyncConnection, invoice: DocumentRef, state: str) -> None:
+    await admin.execute(
+        "UPDATE do_ecf.documents SET delivery_state = %s, delivery_since = now() WHERE invoice_id = %s",
+        (state, invoice),
+    )
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class Retrying:
+    """The owner retrying deliveries of its company."""
+
+    client: httpx.AsyncClient
+    owner: TestPrincipal
+    company: str
+
+    async def retry(self, invoice: DocumentRef, key: str) -> httpx.Response:
+        headers = posting(self.owner, self.company, key)
+        return await self.client.post(RETRY.format(invoice_ref(invoice)), headers=headers)
+
+
+@pytest.fixture
+def retrying(client: httpx.AsyncClient, owner: TestPrincipal, company: str) -> Retrying:
+    return Retrying(client, owner, company)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("delivering", "dead", 200),  # its job died: stuck for good otherwise
+        ("delivering", None, 200),  # its job is gone (purged): the same
+        ("not_started", "done", 200),
+        ("delivering", "running", 409),  # a run under way may still finish it
+        ("delivering", "ready", 409),
+        ("not_started", "parked", 409),
+        ("delivered", "done", 409),  # the retry raced the run that finished it
+        ("not_applicable", None, 409),
+    ],
+)
+async def test_a_stuck_delivery_is_started_again_only_once_its_job_no_longer_runs(
+    retrying: Retrying, failing: Failing, admin: psycopg.AsyncConnection, case: tuple[str, str | None, int]
+) -> None:
+    """``case``: the delivery's state, its job's status (``None``: none), the answer."""
+    delivery, job, status = case
+    tenant = await tenant_of(admin, retrying.company)
+    invoice = await failing.failed(tenant)
+    await delivery_set(admin, invoice, delivery)
+    await deliver_job_set(admin, invoice, job)
+    response = await retrying.retry(invoice, "stuck")
+    assert response.status_code == status, response.text
+    if status == 200:
+        assert document(response)["delivery"] == "delivering"
+        jobs = await admin.execute("SELECT status FROM do_ecf.jobs WHERE kind = 'do_ecf.deliver'")
+        assert await jobs.fetchall() == [("ready",)]
+    else:
+        assert document(response)["code"] == "do_ecf_delivery_not_retryable"
+
+
+async def test_a_retry_forgets_the_receipt_of_the_failed_attempt(
+    client: httpx.AsyncClient,
+    owner: TestPrincipal,
+    company: str,
+    failing: Failing,
+    admin: psycopg.AsyncConnection,
+) -> None:
+    tenant = await tenant_of(admin, company)
+    invoice = await failing.failed(tenant)
+    await admin.execute(
+        "UPDATE do_ecf.documents SET receipt_key = 'k', receipt_sha256 = %s WHERE invoice_id = %s",
+        (bytes(32), invoice),
+    )
+    response = await client.post(
+        RETRY.format(invoice_ref(invoice)), headers=posting(owner, company, "forget")
+    )
+    assert response.status_code == 200, response.text
+    kept = await admin.execute(
+        "SELECT receipt_key, receipt_sha256 FROM do_ecf.documents WHERE invoice_id = %s", (invoice,)
+    )
+    assert await kept.fetchone() == (None, None)
+
+
+async def test_a_member_without_the_deliveries_permission_is_refused(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str, local_issuer: LocalIssuer
+) -> None:
+    viewer = TestPrincipal(local_issuer, subject="3001")
+    membership = f"/v1/companies/{company}/memberships/3001"
+    assert (await client.put(membership, json={"role": "viewer"}, headers=owner.bearer())).status_code in {
+        200,
+        201,
+    }
+    refused = (
+        await client.post(
+            RETRY.format("inv_01h455vb4pex5vsknk084sn02q"), headers=posting(viewer, company, "v")
+        ),
+        await client.get(OPTIONS, headers=managing(viewer, company)),
+        await client.put(OPTIONS, json={"buyer_authentication": True}, headers=managing(viewer, company)),
+    )
+    assert [code_of(response) for response in refused] == [(403, "permission_denied")] * 3

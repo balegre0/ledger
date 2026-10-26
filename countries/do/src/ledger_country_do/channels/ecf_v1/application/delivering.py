@@ -6,14 +6,17 @@ to DGII's reception (never a summarized 32, RFCE), its buyer has an RNC or cédu
 directory in the environment (not CerteCF); otherwise it is ``not_applicable``, as when DGII's directory lists
 no receiver for the buyer (``NoReceiver``: the client hands it the printed representation).
 
-Each run of the job (one buyer exchange) reads the document and the company's options in one unit, reads the
-signed e-CF back from the archive (its SHA-256 checked), delivers it (``Buyers``: the directory, cached, then
-the buyer's reception, a seed signed for a token only when the company switched **buyer authentication** on,
-Decision 19), keeps whatever receipt the buyer answered in the archive, then records in another unit:
+Each run of the job (one buyer exchange) reads the document and the company's options in one unit, which
+starts the delivery (``not_started`` to ``delivering``, ``delivery_since`` saved and published) before any
+call, so a run that fails later never restarts the seven days; it then reads the signed e-CF back from the
+archive (its SHA-256 checked), delivers it (``Buyers``: the directory, cached, then the buyer's reception, a
+seed signed for a token only when the company switched **buyer authentication** on, Decision 19), keeps
+whatever receipt the buyer answered in the archive, then records in another unit:
 
 * a receipt that holds (``BuyerReceipt``): received, or not received as a duplicate (the buyer has it from an
-  earlier attempt whose answer was lost): ``delivered``; not received for another reason: ``failed`` with it
-  (``not_received_<reason>``), the buyer's signed word, never retried;
+  earlier attempt whose answer was lost): ``delivered`` (the latter with ``not_received_duplicate``); not
+  received for another reason: ``failed`` with it (``not_received_<reason>``), the buyer's signed word, never
+  retried;
 * a receipt that fails its checks (``BuyerReceiptRefused``): kept as ``arecf-refused``, ``failed`` with its
   code, **never retried** (the buyer would answer the same);
 * no receiver: ``not_applicable``;
@@ -26,8 +29,9 @@ Decision 19), keeps whatever receipt the buyer answered in the archive, then rec
 (``do_ecf.buyer_seed.signed``, the document its subject, ``detail`` the endpoint's host and the buyer's tax id
 masked, Decision 20); a receipt the archive could not keep audits them before the run fails. Every change of
 ``delivery`` publishes ``fiscal_channel.document.updated`` (version + 1); an attempt that leaves it
-``delivering`` publishes nothing. A failed delivery is retried by the client (``retry``: ``failed`` to
-``delivering``, the seven days from the retry, the job enqueued again).
+``delivering`` publishes nothing. A delivery is started again by the client (``retry``: ``delivering``, the
+seven days from the retry, the earlier receipt forgotten, the job enqueued again) once it failed, or while it
+is stuck (``not_started`` or ``delivering``) with no job left to run it (done, dead or gone).
 """
 
 from abc import ABCMeta, abstractmethod
@@ -168,14 +172,16 @@ class Delivering:
                 await self._move(unit, document, DeliveryState.NOT_APPLICABLE, not_applicable)
                 return Finished()
             options = await unit.options.get()
-            started = unit.now
+            if document.delivery is DeliveryState.NOT_STARTED:  # started before any call: never restarted
+                started = replace(document, delivery_since=unit.now)
+                document = await self._move(unit, started, DeliveryState.DELIVERING, None)
+        since = document.delivery_since or document.updated_at
         signed = await self._archive.read(document.signed().ecf)
         parties = DeliveryDocument(issuer_rnc=issuer_rnc(document.draft), buyer_rnc=buyer, encf=document.encf)
         handed = await self._buyers().deliver(
             who, document.environment, parties, signed, authenticate=options.buyer_authentication
         )
         kept = await self._kept(who.tenant, document, handed)
-        since = document.delivery_since or started
         return await self._recorded(who.tenant, document, handed, kept, since)
 
     async def _kept(self, tenant: Tenant, document: EcfDocument, handed: Handed) -> Archived | None:
@@ -207,11 +213,11 @@ class Delivering:
             current = await _found(unit, document.id, lock=True)
             if current.delivery not in _UNDER_WAY:  # settled meanwhile (a person's doing): nothing to take
                 return Finished()
-            current = replace(current, delivery_since=since)
             match handed:
                 case BuyerReceipt(received=received, reason=reason):
-                    if received or reason is NotReceivedReason.DUPLICATE:
-                        await self._move(unit, current, DeliveryState.DELIVERED, None, receipt=kept)
+                    if received or reason is NotReceivedReason.DUPLICATE:  # a duplicate: it has it already
+                        why = None if received else _not_received(reason)
+                        await self._move(unit, current, DeliveryState.DELIVERED, why, receipt=kept)
                         return Finished()
                     failed = _not_received(reason)
                     await self._move(unit, current, DeliveryState.FAILED, failed, receipt=kept)
@@ -269,18 +275,21 @@ class Delivering:
     # ── the client's ────────────────────────────────────────────────────────────────
 
     async def retry(self, unit: NumberingUnit, invoice: DocumentRef) -> EcfDocument:
-        """``invoice``'s failed delivery started again in ``unit``: seven days from now, the job enqueued.
+        """``invoice``'s delivery started again in ``unit``: seven days from now, the job enqueued.
 
-        ``DeliveryNotFoundError`` when the invoice has no e-CF; ``DeliveryNotRetryableError`` unless its
-        delivery failed.
+        A delivery that failed; or one stuck (``not_started`` or ``delivering``) whose job no longer runs:
+        it died, or is gone. ``DeliveryNotFoundError`` when the invoice has no e-CF;
+        ``DeliveryNotRetryableError`` otherwise (done, not applicable, or a job still waiting or running,
+        which may finish it). The receipt of an earlier attempt is forgotten (the archive keeps it).
         """
         found = await unit.documents.of_invoice(invoice)
         if found is None:
             raise DeliveryNotFoundError
         current = await _found(unit, found.id, lock=True)
-        if current.delivery is not DeliveryState.FAILED:
+        stuck = current.delivery in _UNDER_WAY and not await unit.deliveries.pending(current.id)
+        if current.delivery is not DeliveryState.FAILED and not stuck:
             raise DeliveryNotRetryableError
-        started = replace(current, delivery_since=unit.now, delivery_attempts=0)
+        started = replace(current, delivery_since=unit.now, delivery_attempts=0, receipt=None)
         moved = await self._move(unit, started, DeliveryState.DELIVERING, None)
         unit.audit.record(
             "delivery.retry",

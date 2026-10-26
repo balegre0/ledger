@@ -8,8 +8,9 @@ directory (Decision 4).
 A retry is answered from its ``Idempotency-Key`` first; a new one, in the unit that claims the key, starts
 the delivery again (``failed`` to ``delivering``, seven days from now), audits it, publishes the e-CF's new
 version and enqueues the delivery job: all commit together, or nothing does. An invoice without an e-CF in
-the company and mode is 404 ``do_ecf_delivery_not_found``; a delivery that did not fail, 409
-``do_ecf_delivery_not_retryable``.
+the company and mode is 404 ``do_ecf_delivery_not_found``. A delivery that failed is retried, and so is one
+stuck (``not_started`` or ``delivering``) whose job is done, dead or gone; any other, or one whose job may
+still run, is 409 ``do_ecf_delivery_not_retryable``.
 """
 
 from dataclasses import dataclass

@@ -239,3 +239,7 @@ class Deliveries(Protocol, metaclass=ABCMeta):
     @abstractmethod
     def enqueue(self, document: UUID) -> None:
         """Deliver ``document`` once the unit commits: a fresh job, unless one is waiting or running."""
+
+    @abstractmethod
+    async def pending(self, document: UUID) -> bool:
+        """Whether ``document``'s job may still run (ready, running, parked): not done, dead or gone."""
