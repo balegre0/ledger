@@ -50,7 +50,8 @@ and one poll; none reopens the window.
 **Decided**: DGII's state, messages, code and ``secuenciaUtilizada``; the number used, burned, or released
 (a ``released_numbers`` row, allocatable from ``release_at`` on, by the channel's clock, which numbers are
 allocated by). A summary (RFCE) and a rejected document are never delivered (``not_applicable``); an
-accepted e-CF's delivery is the delivery job's (Task 21).
+accepted e-CF's delivery is the ``do_ecf.deliver`` job's, enqueued in the unit that records the decision
+(``delivering``).
 
 An answer about another issuer or e-NCF is never taken as the document's (``AnswerMismatchError``): it waits
 for a person, its state as it was. Every state change is published (``fiscal_channel.document.updated``,
@@ -501,6 +502,8 @@ class Advancing:
             delivery=DeliveryState.NOT_APPLICABLE if never_delivered else current.delivery,
         )
         moved = await self._move(unit, decided, Step.DECIDE, to)
+        if not never_delivered:  # accepted: its delivery to the buyer is the delivery job's
+            unit.deliveries.enqueue(moved.id)
         if outcome.number is NumberFate.RELEASED:
             released_at = self._issuing.now()
             await unit.ranges.release(

@@ -2,12 +2,14 @@
 
 Every app builds the channel fiscal routes to (``DoEcfChannel``) over the channel's units, the signer's
 port (``DocumentSigner``) and the archive, with its ``do_ecf.advance`` job (which reaches DGII through the
-worker's client only: in any other role reaching it is a defect), and checks its settings: DGII's
+worker's client only: in any other role reaching it is a defect) and its ``do_ecf.deliver`` job (the worker's
+buyer client likewise), and checks its settings: DGII's
 hosts (``DgiiHosts``), an attempt no longer than the settle delay (``SettleTooShortError``), no test
 stand-in in production. It reads the ports it needs from the app (fiscal-kit's keys): the signer, fiscal's
 company directory (who may do what, and who is enrolled), the archive in the roles that archive (none: the
 channel does not start there, since every document it signs is archived first; ``migrate`` reads none,
-keeps nothing, and gets the channel's revisions alone). The ``api`` app mounts its routes (``/v1/do``); the
+keeps nothing, and gets the channel's revisions alone). The ``api`` app mounts its routes (``/v1/do``: the
+ranges, a delivery's retry, the delivery options); the
 worker opens its DGII and buyer clients at start (their trusted roots, which it requires, read then); the
 receiver requires the trusted roots too, reads them at start the same way (the documents emitters send it
 chain to them: ``inbound``) and mounts the channel's receiver routes (``adapters.receiver``): seeds and
@@ -29,18 +31,24 @@ from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import DgiiHosts
 from ledger_country_do.channels.ecf_v1.adapters.enrollments import DirectoryEnrollments
 from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
 from ledger_country_do.channels.ecf_v1.adapters.inbound import Inbound
-from ledger_country_do.channels.ecf_v1.adapters.jobs import advance_job, purge_job
-from ledger_country_do.channels.ecf_v1.adapters.logs import AdvanceLog, SigningLog
-from ledger_country_do.channels.ecf_v1.adapters.outbound import DgiiAccess, Outbound, unopened
+from ledger_country_do.channels.ecf_v1.adapters.jobs import advance_job, deliver_job, purge_job
+from ledger_country_do.channels.ecf_v1.adapters.logs import AdvanceLog, DeliveryLog, SigningLog
+from ledger_country_do.channels.ecf_v1.adapters.outbound import (
+    DgiiAccess,
+    Outbound,
+    unopened,
+    unopened_buyers,
+)
 from ledger_country_do.channels.ecf_v1.adapters.postgres.schema import migrations
 from ledger_country_do.channels.ecf_v1.adapters.postgres.unit import PgUnits
 from ledger_country_do.channels.ecf_v1.adapters.receiver import routes as receiver
 from ledger_country_do.channels.ecf_v1.adapters.receiver.tokens import ReceiverCredentials
-from ledger_country_do.channels.ecf_v1.adapters.routes import ranges
+from ledger_country_do.channels.ecf_v1.adapters.routes import deliveries, options, ranges
 from ledger_country_do.channels.ecf_v1.adapters.signing.port import DocumentSigner
 from ledger_country_do.channels.ecf_v1.adapters.xml.documents import DgiiXml
 from ledger_country_do.channels.ecf_v1.application.advancing import Advancing, SettleTooShortError
 from ledger_country_do.channels.ecf_v1.application.approvals_in import Approving
+from ledger_country_do.channels.ecf_v1.application.delivering import Delivering
 from ledger_country_do.channels.ecf_v1.application.issuing import Issuing
 from ledger_country_do.channels.ecf_v1.application.ranges import Ranging
 from ledger_country_do.channels.ecf_v1.application.receiving import Receiving
@@ -133,13 +141,22 @@ def assemble(context: ChannelContext) -> ChannelParts:
     )
     outbound = _outbound(settings, context, signer, DgiiAccess(hosts=hosts, timeouts=timeouts))
     authority = unopened if outbound is None else outbound.authority
+    buyers = unopened_buyers if outbound is None else outbound.deliveries
     advancing = Advancing(units, issuing, archive, authority, AdvanceLog(context.telemetry))
+    delivering = Delivering(units, archive, buyers, DeliveryLog(context.telemetry))
     channel = DoEcfChannel(definition, requiring, issuing, advancing)
     credentials = ReceiverCredentials(context.database, clock=context.clock)
-    jobs = (advance_job(advancing), purge_job(credentials))
+    jobs = (advance_job(advancing), deliver_job(delivering), purge_job(credentials))
     if not archiving:  # migrate: its revisions, nothing to serve, open or keep
         return ChannelParts(channel=channel, jobs=jobs, migrations=migrations())
-    parts = ChannelParts(channel=channel, routers=(ranges.router(api),), jobs=jobs, migrations=migrations())
+    managed = deliveries.DeliveriesApi(
+        database=context.database,
+        delivering=delivering,
+        authentication=context.auth,
+        permissions=directory,
+    )
+    routers = (ranges.router(api), deliveries.router(managed), options.router(managed))
+    parts = ChannelParts(channel=channel, routers=routers, jobs=jobs, migrations=migrations())
     if context.role == "receiver":
         roots = settings.trusted_roots
         if roots is None:

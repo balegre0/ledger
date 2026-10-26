@@ -45,7 +45,6 @@ lazy import httpx
 
 from ledger_country_do.channels.ecf_v1.adapters.buyers.client import (
     BuyerClient,
-    DeliveryDocument,
     NotApplicable,
     ReceiptRefused,
 )
@@ -56,6 +55,7 @@ from ledger_country_do.channels.ecf_v1.adapters.signing.port import DocumentSign
 from ledger_country_do.channels.ecf_v1.adapters.signing.trust import CounterpartyTrust
 from ledger_country_do.channels.ecf_v1.adapters.xml.documents import DgiiXml
 from ledger_country_do.channels.ecf_v1.application.emission import Emitter
+from ledger_country_do.channels.ecf_v1.application.ports import DeliveryDocument
 from ledger_country_do.channels.ecf_v1.domain.drafts import Buyer, Issuer
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
 from ledger_country_do.channels.ecf_v1.domain.environments import (

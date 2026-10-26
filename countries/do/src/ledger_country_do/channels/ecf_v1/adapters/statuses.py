@@ -2,10 +2,10 @@
 
 The state is the channel's own (``signed``...), the fiscal status and severity ``ecf.status_of``'s, the
 authority number the e-NCF, the messages DGII's about it. ``details["do"]`` is what a client prints and
-follows: the e-NCF, the route, delivery to the buyer, once signed its moment of signing (ISO 8601), security
-code, QR URL and emission mode (``None`` before), DGII's track id once it gave one (``None`` before, and
-for a summary), and its buyer's commercial approval once the receiver recorded one (``{approved, reason,
-at}``, ``None`` before).
+follows: the e-NCF, the route, delivery to the buyer (and why it failed or does not apply, a code), once
+signed its moment of signing (ISO 8601), security code, QR URL and emission mode (``None`` before), DGII's
+track id once it gave one (``None`` before, and for a summary), and its buyer's commercial approval once the
+receiver recorded one (``{approved, reason, at}``, ``None`` before).
 """
 
 from typing import Final
@@ -28,6 +28,7 @@ def update_of(document: EcfDocument) -> StatusUpdate:
         "encf": str(document.encf),
         "route": document.route.value,
         "delivery": document.delivery.value,
+        "delivery_reason": document.delivery_reason,
         "signed_at": None if signature is None else signature.signed_at.isoformat(),
         "security_code": None if signature is None else signature.security_code,
         "qr_url": None if signature is None else signature.qr_url,

@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.routing import APIRoute
 
 from ledger_country_do.channels.ecf_v1.adapters.buyers.client import BuyerClient
+from ledger_country_do.channels.ecf_v1.adapters.buyers.delivery import BuyerDeliveries
 from ledger_country_do.channels.ecf_v1.adapters.channel import ChannelNotReadyError, DoEcfChannel
 from ledger_country_do.channels.ecf_v1.adapters.dgii.client import DgiiClient
 from ledger_country_do.channels.ecf_v1.adapters.dgii.endpoints import HostRefusedError
@@ -24,7 +25,10 @@ from ledger_country_do.channels.ecf_v1.adapters.outbound import (
     Outbound,
     OutboundClosedError,
     TrustedRootsUnreadableError,
+    unopened_buyers,
 )
+from ledger_country_do.channels.ecf_v1.adapters.routes.deliveries import PREFIX as DELIVERIES
+from ledger_country_do.channels.ecf_v1.adapters.routes.options import PATH as OPTIONS
 from ledger_country_do.channels.ecf_v1.adapters.routes.ranges import PREFIX
 from ledger_country_do.channels.ecf_v1.application.advancing import SettleTooShortError
 from ledger_country_do.channels.ecf_v1.assembly import SettingRefusedError, assemble
@@ -93,10 +97,14 @@ def test_the_channel_assembles_with_its_definition_routes_and_migrations(context
     assert definition.fields == CHANNEL_FIELDS
     assert set(definition.labels) == {Locale("es"), Locale("en")}
     assert definition.sources
-    assert [route for router in parts.routers for route in router.routes]  # its ranges
-    assert all(router.prefix == PREFIX for router in parts.routers)
+    assert [route for router in parts.routers for route in router.routes]  # its ranges, its deliveries
+    assert [router.prefix for router in parts.routers] == [PREFIX, DELIVERIES, OPTIONS]
     assert (parts.resources, parts.consumers, parts.receiver_routers) == ((), (), ())
-    assert [spec.kind for spec in parts.jobs] == ["do_ecf.advance", "do_ecf.purge_receiver_credentials"]
+    assert [spec.kind for spec in parts.jobs] == [
+        "do_ecf.advance",
+        "do_ecf.deliver",
+        "do_ecf.purge_receiver_credentials",
+    ]
     assert parts.migrations is not None
     assert parts.migrations.schema == "do_ecf"
 
@@ -118,7 +126,11 @@ def test_migrate_reads_no_archive_and_gets_the_channel_s_migrations_alone(
     parts = assemble(contexts(settings=RECEIVED, bound=bound, role="migrate"))
     assert (parts.routers, parts.resources) == ((), ())
     # declared: every app hands its handler
-    assert [spec.kind for spec in parts.jobs] == ["do_ecf.advance", "do_ecf.purge_receiver_credentials"]
+    assert [spec.kind for spec in parts.jobs] == [
+        "do_ecf.advance",
+        "do_ecf.deliver",
+        "do_ecf.purge_receiver_credentials",
+    ]
     assert parts.migrations is not None
     assert parts.migrations.schema == "do_ecf"
     with pytest.raises(BindingMissingError, match="'ArchivePort'"):
@@ -177,7 +189,11 @@ async def test_the_receiver_reads_its_trusted_roots_at_start_and_opens_no_client
             "aprobacioncomercial/api/ecf",
         )
     }
-    assert [spec.kind for spec in parts.jobs] == ["do_ecf.advance", "do_ecf.purge_receiver_credentials"]
+    assert [spec.kind for spec in parts.jobs] == [
+        "do_ecf.advance",
+        "do_ecf.deliver",
+        "do_ecf.purge_receiver_credentials",
+    ]
     (opening,) = parts.resources
     async with opening as opened:
         assert isinstance(opened, Inbound)
@@ -197,10 +213,15 @@ async def test_the_worker_opens_its_dgii_and_buyer_clients_at_start_and_closes_t
         assert isinstance(opened, Outbound)
         assert isinstance(opened.dgii, DgiiClient)
         assert isinstance(opened.buyers, BuyerClient)
+        assert isinstance(opened.deliveries(), BuyerDeliveries)
     with pytest.raises(OutboundClosedError):
         _ = opened.dgii
     with pytest.raises(OutboundClosedError):
         _ = opened.buyers
+    with pytest.raises(OutboundClosedError):
+        opened.deliveries()
+    with pytest.raises(OutboundClosedError):  # every other role's: the delivery job is the worker's
+        unopened_buyers()
 
 
 @pytest.mark.parametrize("content", [None, b"", b"-----BEGIN CERTIFICATE-----\nnot base64\n"])

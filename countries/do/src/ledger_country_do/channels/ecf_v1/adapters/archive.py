@@ -72,6 +72,10 @@ class PortArchive(Archive, ReceptionArchive):
         return await self._kept(tenant, ArchiveKind.RFCE, signed)
 
     @override
+    async def buyer_receipt(self, tenant: Tenant, arecf: bytes, *, refused: bool) -> Archived:
+        return await self._kept(tenant, ArchiveKind.ARECF_REFUSED if refused else ArchiveKind.ARECF, arecf)
+
+    @override
     async def received(self, tenant: Tenant, document: bytes) -> Archived:
         return await self._kept(tenant, ArchiveKind.RECEIVED, document)
 
@@ -121,6 +125,10 @@ class UnboundArchive(Archive):
 
     @override
     async def rfce(self, tenant: Tenant, signed: bytes) -> Archived:
+        raise ArchiveNotBoundError
+
+    @override
+    async def buyer_receipt(self, tenant: Tenant, arecf: bytes, *, refused: bool) -> Archived:
         raise ArchiveNotBoundError
 
     @override

@@ -43,7 +43,7 @@ lazy from ledger_testing.modules import ModuleUnderTest
 lazy from ledger_testing.postgres import WorkerDatabase
 
 S: Final = "do_ecf"
-TENANT_TABLES: Final = frozenset(
+SERIES_TABLES: Final = frozenset(
     {
         "numbering_series",
         "numbering_ranges",
@@ -53,6 +53,8 @@ TENANT_TABLES: Final = frozenset(
         "received_documents",
     }
 )
+"""The tenant tables whose rows are of a series (an environment and an e-CF type)."""
+TENANT_TABLES: Final = SERIES_TABLES | {"company_options"}
 RECEIVER_TABLES: Final = frozenset({"receiver_seeds", "receiver_tokens"})
 """The receiver's credentials: outside row-level security by design (§6.3)."""
 CHASSIS_TABLES: Final = frozenset(
@@ -95,7 +97,7 @@ def test_the_migrate_app_brings_the_channel_s_schema_to_head_from_nothing_and_ag
         *CHASSIS_TABLES,
         "alembic_version",
     }
-    assert version_of(fresh_admin_url) == MIGRATIONS.head == "0004"
+    assert version_of(fresh_admin_url) == MIGRATIONS.head == "0005"
     App("migrate", settings=fresh, discover=module_under_test.discovering()).migrate()
     assert pending_changes(fresh_admin_url, MODELS, schema=S) is None
 
@@ -126,7 +128,8 @@ def test_the_check_constraints_are_the_models_and_allow_exactly_the_domain_s_wor
     }
     assert declared <= set(checks)
     modes, environments, types = {str(mode) for mode in Mode}, set(Environment), set(EcfType)
-    for owner in TENANT_TABLES:
+    assert words(checks, "ck_company_options_mode") == modes
+    for owner in SERIES_TABLES:
         assert words(checks, f"ck_{owner}_mode") == modes
         assert words(checks, f"ck_{owner}_environment") == environments
         assert words(checks, f"ck_{owner}_ecf_type") == types
@@ -234,6 +237,7 @@ async def test_the_channel_s_role_deletes_nothing_but_a_released_number_taken(
     assert await granted(admin, "released_numbers") == {"SELECT", "INSERT", "DELETE"}
     assert await granted(admin, "documents") == {"SELECT", "INSERT", "UPDATE"}
     assert await granted(admin, "submissions") == {"SELECT", "INSERT"}
+    assert await granted(admin, "company_options") == {"SELECT", "INSERT", "UPDATE"}
     assert await granted(admin, "audit_events") == {"SELECT", "INSERT"}
     assert await granted(admin, "received_documents") == {"SELECT", "INSERT", "UPDATE"}
     assert await granted(admin, "receiver_seeds") == {"SELECT", "INSERT", "UPDATE", "DELETE"}

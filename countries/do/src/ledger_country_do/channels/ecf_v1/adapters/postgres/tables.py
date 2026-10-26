@@ -12,11 +12,13 @@ leading its keys (§6.3), in schema ``do_ecf`` (§6.2):
 - ``documents``: the e-CF numbered from them, one per invoice (Decision 35), each number held by one document
   until DGII releases it; the draft it was numbered for (``draft``, the platform codec's JSON), where it
   stands and, once signed, the keys and SHA-256 of what the archive keeps (§6.8: never the bytes); once
-  submitted, the submission's mark, DGII's track id and answer;
+  submitted, the submission's mark, DGII's track id and answer; once accepted, its delivery to the buyer
+  (since when, the attempts failed, why, the key and SHA-256 of the buyer's receipt);
 - ``submissions``: every track id a document was given or adopted, by its number (Decision 9);
 - ``received_documents``: the e-CF other emitters sent the company and the receiver received (§3.8), each
   once per environment, issuer and e-NCF (Decision 16), with the keys and SHA-256 of what the archive keeps
-  of it and of the receipt it was answered with.
+  of it and of the receipt it was answered with;
+- ``company_options``: how a company delivers to its buyers in a mode (Decision 19).
 
 Outside row-level security by design (§6.3), the receiver's own credentials: ``receiver_seeds`` (a seed's
 SHA-256, never the seed) and ``receiver_tokens`` (a token's SHA-256, never the token), each naming the
@@ -221,6 +223,13 @@ FATE_CHECK: Final = (
     "AND (state NOT IN ('accepted', 'accepted_conditionally') OR number_fate = 'used')"
 )
 """A number's fate is known exactly once DGII decided: used if accepted, burned or released if rejected."""
+RECEIPT_CHECK: Final = (
+    "(receipt_key IS NULL) = (receipt_sha256 IS NULL) "
+    "AND (receipt_sha256 IS NULL OR octet_length(receipt_sha256) = 32)"
+)
+"""A buyer's receipt is kept by its key and SHA-256, both or neither."""
+DELIVERING_CHECK: Final = "delivery_state <> 'delivering' OR delivery_since IS NOT NULL"
+"""A delivery under way started at a moment: its seven days run from it (Decision 21)."""
 
 
 class DocumentRecord(DoEcfTable):
@@ -254,6 +263,9 @@ class DocumentRecord(DoEcfTable):
         CheckConstraint(UNKNOWN_CHECK, name="ck_documents_unknown"),
         CheckConstraint(FATE_CHECK, name="ck_documents_fate"),
         CheckConstraint("polls >= 0", name="ck_documents_polls"),
+        CheckConstraint(RECEIPT_CHECK, name="ck_documents_receipt"),
+        CheckConstraint(DELIVERING_CHECK, name="ck_documents_delivering"),
+        CheckConstraint("delivery_attempts >= 0", name="ck_documents_delivery_attempts"),
         Index("documents_number", *SERIES, "sequence", unique=True, postgresql_where=text(HELD_NUMBER)),
     )
 
@@ -299,6 +311,15 @@ class DocumentRecord(DoEcfTable):
     """DGII's ``secuenciaUtilizada``, once it said."""
     messages: Mapped[list[dict[str, str]]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
     """DGII's messages about it (``code``, ``text``), verbatim within the kit's bounds."""
+    delivery_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    """When its delivery to the buyer started (its first run, or the client's retry)."""
+    delivery_attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    """How many attempts at delivering it failed since then."""
+    delivery_reason: Mapped[str | None] = mapped_column(Text)
+    """Why its delivery failed, failed last, or does not apply: a code."""
+    receipt_key: Mapped[str | None] = mapped_column(Text)
+    """Where the archive keeps the buyer's receipt (ARECF), trusted or refused."""
+    receipt_sha256: Mapped[bytes | None] = mapped_column(LargeBinary)
     commercial_approval: Mapped[dict[str, object] | None] = mapped_column(JSONB)
     """Its buyer's last commercial approval or rejection (``approved``, ``reason``, ``at``), once one came."""
 
@@ -426,3 +447,21 @@ class ReceiverTokenRecord(DoEcfTable):
     senders: Mapped[list[str]] = mapped_column(ARRAY(Text))
     stand_in: Mapped[bool] = mapped_column(Boolean)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class CompanyOptionsRecord(DoEcfTable):
+    """How a company delivers to its buyers in a mode; no row is the defaults (authentication off)."""
+
+    __tablename__: str = "company_options"
+    __table_args__: tuple[SchemaItem, ...] = (
+        _one_of("mode", Mode, name="ck_company_options_mode"),
+        CheckConstraint("version > 0", name="ck_company_options_version"),
+    )
+
+    organization_id: Mapped[UUID] = mapped_column(primary_key=True)
+    company_id: Mapped[UUID] = mapped_column(primary_key=True)
+    mode: Mapped[str] = mapped_column(Text, primary_key=True)
+    buyer_authentication: Mapped[bool] = mapped_column(Boolean)
+    """Whether the company signs a buyer's seed for a token (Decision 19; F14)."""
+    version: Mapped[int] = mapped_column(BigInteger)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

@@ -347,6 +347,7 @@ async def test_issue_twice_for_one_invoice_numbers_one_document_once(
         "encf": "E310000000001",
         "route": "reception",
         "delivery": "not_started",
+        "delivery_reason": None,
         "security_code": None,
         "signed_at": None,
         "qr_url": None,
