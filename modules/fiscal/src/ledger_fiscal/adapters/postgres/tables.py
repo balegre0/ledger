@@ -2,8 +2,11 @@
 
 ``enrollments`` holds a company's enrollments in one mode (row-level security scope ``tenant``): one that is
 not disabled per company, mode and channel (§7.6, a partial unique index), each with what its channel required
-at its last review (``currently_due``, ``requirements_reason``) and, once disabled, the client's reason and
-when (``disabled_reason``, ``disabled_at``, set exactly then). Every table is in schema ``fiscal`` (§6.2).
+at its last review (``currently_due``, ``requirements_reason``), whether its channel asked for another review
+since (``review_due``, Decision 34) and, once disabled, the client's reason and when (``disabled_reason``,
+``disabled_at``, set exactly then). ``routings`` holds the documents routed to a channel (scope ``tenant``):
+one per document and channel, for the enrollment it was routed for (a foreign key with the tenant), never
+changed or deleted. Every table is in schema ``fiscal`` (§6.2).
 """
 
 from datetime import datetime
@@ -11,7 +14,17 @@ from typing import Final
 from uuid import UUID
 lazy from enum import StrEnum
 
-from sqlalchemy import ARRAY, BigInteger, CheckConstraint, DateTime, Index, Text, text
+from sqlalchemy import (
+    ARRAY,
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKeyConstraint,
+    Index,
+    Text,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.schema import SchemaItem
 
@@ -74,3 +87,32 @@ class EnrollmentRecord(FiscalTable):
     version: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    review_due: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    """Whether its channel said what it requires changed since its last review (Decision 34)."""
+
+
+class RoutingRecord(FiscalTable):
+    """A document routed to a channel for one of the company's enrollments: once per document and channel."""
+
+    __tablename__: str = "routings"
+    __table_args__: tuple[SchemaItem, ...] = (
+        _one_of("mode", Mode, name="ck_routings_mode"),
+        ForeignKeyConstraint(
+            ("organization_id", "company_id", "mode", "enrollment_id"),
+            (
+                f"{SCHEMA}.enrollments.organization_id",
+                f"{SCHEMA}.enrollments.company_id",
+                f"{SCHEMA}.enrollments.mode",
+                f"{SCHEMA}.enrollments.id",
+            ),
+            name="fk_routings_enrollment",
+        ),
+    )
+
+    organization_id: Mapped[UUID] = mapped_column(primary_key=True)
+    company_id: Mapped[UUID] = mapped_column(primary_key=True)
+    mode: Mapped[str] = mapped_column(Text, primary_key=True)
+    invoice_id: Mapped[UUID] = mapped_column(primary_key=True)
+    channel: Mapped[str] = mapped_column(Text, primary_key=True)
+    enrollment_id: Mapped[UUID] = mapped_column()
+    routed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

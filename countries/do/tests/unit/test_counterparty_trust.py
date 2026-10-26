@@ -154,6 +154,32 @@ def test_a_receipt_dated_more_than_the_skew_from_its_receipt_is_refused(
         )
 
 
+def test_a_document_sent_late_may_be_signed_long_before_it_arrives_never_after(
+    policy: CounterpartyTrust, seal: Issued, middle: Authority
+) -> None:
+    """An e-CF is delivered, an approval sent, days after either was signed (retries included)."""
+    carried = signature(seal, middle.certificate)
+    week = AT + timedelta(days=7)
+    policy.check(carried, counterparty=BUYER_RNC, signed_at=AT, received_at=week, late=True)
+    with pytest.raises(CounterpartyCertificateError, match="far from"):
+        policy.check(carried, counterparty=BUYER_RNC, signed_at=AT, received_at=week)
+    early = AT - DEFAULT_SKEW - timedelta(seconds=1)
+    with pytest.raises(CounterpartyCertificateError, match="far from"):
+        policy.check(carried, counterparty=BUYER_RNC, signed_at=AT, received_at=early, late=True)
+
+
+def test_a_trusted_certificate_vouches_for_whoever_its_subject_names(
+    policy: CounterpartyTrust, seal: Issued, middle: Authority
+) -> None:
+    """What a seed's signer is: no counterparty is known beforehand, the certificate tells."""
+    carried = signature(seal, middle.certificate)
+    assert policy.vouched(carried, signed_at=AT, received_at=AT) == {BUYER_RNC}
+    with pytest.raises(CounterpartyCertificateError, match="trusted authority"):
+        CounterpartyTrust((Authority.root("OTHER", now=AT).certificate,)).vouched(
+            carried, signed_at=AT, received_at=AT
+        )
+
+
 def test_a_signing_certificate_that_is_an_authority_is_refused(
     policy: CounterpartyTrust, root: Authority
 ) -> None:
@@ -199,7 +225,7 @@ def test_an_extended_key_usage_for_other_purposes_is_refused(
 def test_a_certificate_of_someone_other_than_the_counterparty_is_refused(
     policy: CounterpartyTrust, seal: Issued, middle: Authority
 ) -> None:
-    with pytest.raises(CounterpartyCertificateError, match="not the buyer") as raised:
+    with pytest.raises(CounterpartyCertificateError, match="not the counterparty's") as raised:
         policy.check(
             signature(seal, middle.certificate), counterparty="101850043", signed_at=AT, received_at=AT
         )

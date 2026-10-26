@@ -10,6 +10,7 @@ dependencies = [
     "ledger-platform",
     "ledger-fiscal-kit",
     "ledger-identity",
+    "ledger-invoicing",
     "alembic>=1.20.0",
     "fastapi>=0.143.0",
     "pydantic>=2.14.1",
@@ -24,6 +25,7 @@ ledger-kernel = { workspace = true }
 ledger-platform = { workspace = true }
 ledger-fiscal-kit = { workspace = true }
 ledger-identity = { workspace = true }
+ledger-invoicing = { workspace = true }
 
 [build-system]
 requires = ["uv_build>=0.13.0,<0.14.0"]
@@ -45,4 +47,5 @@ partial_branches = []  # no "pragma: no branch": every branch counts
 [tool.deptry.per_rule_ignores]
 DEP002 = [
     "ledger-identity",
+    "ledger-invoicing",
 ]

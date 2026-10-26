@@ -2,10 +2,11 @@
 
 A key is fiscal-kit's ``archive_key(...)`` with ``kind`` an ``ArchiveKind``:
 ``do-ecf-v1/<mode>/<organization>/<company>/<kind>/<sha256 hex>.<extension>`` (``xml``; ``pdf`` for a printed
-representation). The kit checks only a kind's
-shape; which kinds exist is the channel's.
+representation). The kit checks only a kind's shape; which kinds exist is the channel's.
 
-``PortArchive`` is the use cases' ``Archive`` over fiscal-kit's ``ArchivePort`` (the app's archive): each
+``PortArchive`` is the use cases' ``Archive`` (and the receiver's ``ReceptionArchive``: documents received
+as they arrived, ``received`` and ``acecf``, and the receipts answered, ``arecf``) over fiscal-kit's
+``ArchivePort`` (the app's archive): each
 document kept once under its key, until ten years from the day kept (Código Tributario art. 50 h; the app's
 archive keeps none less than its own retention), and read back checked against its SHA-256 (a mismatch or a
 missing object passes as the archive's defect); its unavailability the channel's ``ArchiveUnavailableError``.
@@ -16,6 +17,7 @@ from enum import StrEnum
 from typing import ClassVar, Final, final, override
 
 from ledger_country_do.channels.ecf_v1.application.ports import Archive, Archived, ArchiveUnavailableError
+from ledger_country_do.channels.ecf_v1.application.receiving import ReceptionArchive
 from ledger_country_do.channels.ecf_v1.domain.channel import KEY
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 from ledger_fiscal_kit.ports import ArchiveUnavailableError as PortUnavailableError
@@ -53,7 +55,7 @@ class ArchiveKind(StrEnum):
 
 
 @final
-class PortArchive(Archive):
+class PortArchive(Archive, ReceptionArchive):
     """``Archive`` over the app's ``ArchivePort`` (see the module)."""
 
     __slots__ = ("_clock", "_port")
@@ -73,6 +75,22 @@ class PortArchive(Archive):
     @override
     async def representation(self, tenant: Tenant, pdf: bytes) -> Archived:
         return await self._kept(tenant, ArchiveKind.REPRESENTATION, pdf, extension="pdf", media_type=PDF)
+
+    @override
+    async def buyer_receipt(self, tenant: Tenant, arecf: bytes, *, refused: bool) -> Archived:
+        return await self._kept(tenant, ArchiveKind.ARECF_REFUSED if refused else ArchiveKind.ARECF, arecf)
+
+    @override
+    async def received(self, tenant: Tenant, document: bytes) -> Archived:
+        return await self._kept(tenant, ArchiveKind.RECEIVED, document)
+
+    @override
+    async def receipt(self, tenant: Tenant, signed: bytes) -> Archived:
+        return await self._kept(tenant, ArchiveKind.ARECF, signed)
+
+    @override
+    async def approval(self, tenant: Tenant, document: bytes) -> Archived:
+        return await self._kept(tenant, ArchiveKind.ACECF, document)
 
     @override
     async def read(self, archived: Archived) -> bytes:
@@ -124,6 +142,10 @@ class UnboundArchive(Archive):
 
     @override
     async def representation(self, tenant: Tenant, pdf: bytes) -> Archived:
+        raise ArchiveNotBoundError
+
+    @override
+    async def buyer_receipt(self, tenant: Tenant, arecf: bytes, *, refused: bool) -> Archived:
         raise ArchiveNotBoundError
 
     @override

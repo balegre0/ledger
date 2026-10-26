@@ -14,7 +14,7 @@ lazy import httpx
 
 from ledger_invoicing.api import RenderedDocument, Renderer
 from ledger_invoicing.domain.ids import INVOICE_PREFIX
-from ledger_kernel.errors import UnavailableError
+from ledger_kernel.errors import ConflictError, UnavailableError
 from ledger_kernel.ids import format_id, new_id, parse_id
 from ledger_platform.runtime import facade
 from ledger_testing.api import TestPrincipal, document
@@ -40,6 +40,7 @@ class Rendering(Renderer):
     def __init__(self) -> None:
         self.answer: RenderedDocument | None = None
         self.unavailable = False
+        self.not_yet = False
         self.asked: list[tuple[InvoiceInfo, str]] = []
 
     @override
@@ -48,16 +49,27 @@ class Rendering(Renderer):
         self.asked.append((document, channel))
         if self.unavailable:
             raise ChannelUnavailableError
+        if self.not_yet:
+            raise NotPrintableYetError
         return self.answer
 
 
 class ChannelUnavailableError(UnavailableError):
-    """What a channel answers while it cannot render (fiscal's ``ChannelNotReadyError``, say)."""
+    """What a channel answers while it cannot render now (its signer or archive out of reach, say)."""
 
     code: ClassVar[str] = "probe_channel_unavailable"
 
     def __init__(self) -> None:
         super().__init__("the channel cannot render now")
+
+
+class NotPrintableYetError(ConflictError):
+    """What a channel answers for a document it cannot print yet (do-ecf-v1's ``do_ecf_not_signed``, say)."""
+
+    code: ClassVar[str] = "probe_not_signed"
+
+    def __init__(self) -> None:
+        super().__init__("the document is not signed yet")
 
 
 @pytest.fixture
@@ -176,6 +188,17 @@ async def test_a_renderer_whose_channel_is_unavailable_answers_503(
         PATH.format(invoice), params={"channel": "do-ecf-v1"}, headers=reading(owner, company)
     )
     assert (response.status_code, document(response)["code"]) == (503, "probe_channel_unavailable")
+
+
+async def test_a_document_its_channel_cannot_print_yet_answers_409(
+    client: httpx.AsyncClient, owner: TestPrincipal, company: str, first: Rendering
+) -> None:
+    invoice = await issued(client, owner, company)
+    first.not_yet = True
+    response = await client.get(
+        PATH.format(invoice), params={"channel": "do-ecf-v1"}, headers=reading(owner, company)
+    )
+    assert (response.status_code, document(response)["code"]) == (409, "probe_not_signed")
 
 
 async def test_a_draft_has_no_representation_and_no_renderer_is_asked(

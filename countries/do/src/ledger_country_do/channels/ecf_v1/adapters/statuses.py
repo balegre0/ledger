@@ -2,11 +2,12 @@
 
 The state is the channel's own (``signed``...), the fiscal status and severity ``ecf.status_of``'s, the
 authority number the e-NCF, the messages DGII's about it. ``details["do"]`` is what a client prints and
-follows: the e-NCF and its e-CF type (DGII's two-digit code), the route, delivery to the buyer, once signed
-its moment of signing (ISO 8601), security code, QR URL and emission mode (``None`` before), and DGII's track
-id once it gave one (``None`` before, and for a summary). With the invoice's own parties, lines and totals,
-they are everything the printed representation prints (§9.8), so a client may print its own. The buyer's
-commercial approval joins it with the step that records it (Task 23).
+follows: the e-NCF and its e-CF type (DGII's two-digit code), the route, delivery to the buyer (and why it
+failed or does not apply, a code), once signed its moment of signing (ISO 8601), security code, QR URL and
+emission mode (``None`` before), DGII's track id once it gave one (``None`` before, and for a summary), and
+its buyer's commercial approval once the receiver recorded one (``{approved, reason, at}``, ``None``
+before). With the invoice's own parties, lines and totals, they are everything the printed representation
+prints (§9.8), so a client may print its own.
 """
 
 from typing import Final
@@ -24,17 +25,25 @@ REGIME_KEY: Final = "do"
 def update_of(document: EcfDocument) -> StatusUpdate:
     """``document``'s state at its version (see the module)."""
     status, severity = status_of(document.state)
-    signature = document.signature
+    signature, approval = document.signature, document.commercial_approval
     details: dict[str, JsonValue] = {
         "encf": str(document.encf),
         "ecf_type": document.encf.ecf_type.value,
         "route": document.route.value,
         "delivery": document.delivery.value,
+        "delivery_reason": document.delivery_reason,
         "signed_at": None if signature is None else signature.signed_at.isoformat(),
         "security_code": None if signature is None else signature.security_code,
         "qr_url": None if signature is None else signature.qr_url,
         "emission_mode": None if signature is None else signature.emission_mode.value,
         "track_id": document.track_id,
+        "commercial_approval": None
+        if approval is None
+        else {
+            "approved": approval.approved,
+            "reason": approval.reason,
+            "at": approval.at.isoformat(),
+        },
     }
     return StatusUpdate(
         document=document.invoice,

@@ -5,17 +5,19 @@ schema, identity's (the module its manifest depends on: companies and roles are 
 brought to head by its revisions. What is fiscal's own is here: who its use cases act as, its principals, a
 company, and the channel its enrollments are on.
 
-No real channel is assembled here (the Dominican one assembles in Task 17): the ``api`` app is served with one
-channel, ``FakeChannel`` (key ``do-fake-v1``, of the installed ``do`` regime, environments ``testecf``,
-``certecf`` and the live ``ecf``), whatever channels are installed. A test sets what it requires (``due``),
-what it is (``defined``) or how asking it fails (``failure``), and reads the questions it was asked
-(``asked``). Its schema is never touched: the fake opens no unit, and nothing here asks the app's readiness.
+No real channel is assembled here (a module's suite assembles none; the Dominican one is tested with fiscal in
+its country's suite): the ``api`` app is served with one channel, ``FakeChannel`` (key ``do-fake-v1``, of the
+installed ``do`` regime, environments ``testecf``, ``certecf`` and the live ``ecf``), whatever channels are
+installed. A test sets what it requires (``due``), what it is (``defined``), how asking it fails
+(``failure``), what it objects to and how it issues and renders, and reads what it was asked. Its schema is
+never touched: the fake opens no unit, and nothing here asks the app's readiness. The template holds
+invoicing's schema too: fiscal depends on it (its ``IssuePolicy`` and ``Renderer``).
 """
 
-from datetime import date
+from datetime import UTC, date, datetime
 from functools import partial
 from typing import ClassVar, Final, final, override
-lazy from collections.abc import Iterator, Sequence
+lazy from collections.abc import Awaitable, Callable, Iterator, Sequence
 lazy from datetime import timedelta
 
 import pytest
@@ -24,7 +26,9 @@ lazy import httpx
 from ledger_fiscal._manifest import MANIFEST
 from ledger_fiscal.adapters.postgres.schema import MIGRATIONS
 from ledger_fiscal_kit.channels import Channel, ChannelDef, Requirements
-from ledger_kernel.errors import LedgerError
+from ledger_fiscal_kit.objections import NumberUnavailableError
+from ledger_fiscal_kit.status import FiscalStatus, Severity
+from ledger_kernel.errors import LedgerError, UnavailableError
 from ledger_kernel.regimes import Locale, RegimeKey
 from ledger_platform.config.manifest import ChannelEntry
 from ledger_platform.data.audit import Actor, acting_as
@@ -45,6 +49,7 @@ lazy from ledger_fiscal_kit.drafts import DocumentRef, FiscalDraft
 lazy from ledger_fiscal_kit.objections import Objection
 lazy from ledger_kernel.ids import CompanyId
 lazy from ledger_platform.config.settings import Settings
+lazy from ledger_platform.data.codec import JsonValue
 lazy from ledger_platform.runtime.calls import SystemCall
 lazy from ledger_platform.runtime.contexts import ChannelContext
 lazy from ledger_platform.runtime.registries import Discover
@@ -84,19 +89,64 @@ DEFINITION: Final = ChannelDef.of(
 
 
 class UnusedChannelMethodError(LedgerError):
-    """Enrollments ask a channel only what it requires: anything else is a defect of the code under test."""
+    """fiscal asks a channel what it requires, checks, issues and renders: nothing else of it."""
 
     code: ClassVar[str] = "fiscal_tests_channel_unused"
 
     def __init__(self) -> None:
-        super().__init__("enrollments ask a channel what it requires, and nothing else")
+        super().__init__("fiscal never asks a channel this")
+
+
+class NoNumberError(NumberUnavailableError):
+    """The fake channel's own "no number now" (a channel raises a subclass of the kit's)."""
+
+    code: ClassVar[str] = "fiscal_tests_no_number"
+
+    def __init__(self) -> None:
+        super().__init__("the fake channel has no number to give now")
+
+
+class NotPrintableError(UnavailableError):
+    """The fake channel cannot render a representation now."""
+
+    code: ClassVar[str] = "fiscal_tests_not_printable"
+
+    def __init__(self) -> None:
+        super().__init__("the fake channel renders nothing yet")
+
+
+type BeforeIssue = Callable[[FiscalDraft], Awaitable[None]]
+"""What a test runs when the channel is asked to issue a draft, before it numbers anything."""
 
 
 @final
 class FakeChannel(Channel):
-    """A channel that requires what its test sets, and remembers what it was asked (see the module)."""
+    """A channel as fiscal uses it, in memory (see the module).
 
-    __slots__ = ("asked", "defined", "due", "failure")
+    It requires what its test sets (``due``); objects ``objections`` to every draft (``checked``); numbers a
+    draft once per document (``E31`` and a counter, ``numbered``), answering the document it numbered to a
+    second call; signs it at once when asked within a budget (version 2, a security code) unless ``slow``;
+    raises ``NoNumberError`` while ``no_number`` (keeping nothing) and runs ``before_issue`` first; renders
+    ``printed`` when set, else is unavailable, unless ``unprintable`` names what it raises instead. ``issued``
+    holds every ``issue`` call.
+    """
+
+    __slots__ = (
+        "asked",
+        "before_issue",
+        "checked",
+        "defined",
+        "documents",
+        "due",
+        "failure",
+        "issued",
+        "no_number",
+        "numbered",
+        "objections",
+        "printed",
+        "slow",
+        "unprintable",
+    )
 
     def __init__(self) -> None:
         self.due = Requirements(currently_due=("do_ecf.range",))
@@ -107,6 +157,17 @@ class FakeChannel(Channel):
         """What it is, until a test changes it (its dates, say)."""
         self.failure: LedgerError | None = None
         """What asking its requirements raises, when a test sets it."""
+        self.objections: list[Objection] = []
+        self.checked: list[tuple[SystemCall, FiscalDraft]] = []
+        self.issued: list[tuple[SystemCall, FiscalDraft, timedelta | None]] = []
+        self.documents: dict[DocumentRef, StatusUpdate] = {}
+        self.numbered = 0
+        self.slow = False
+        self.no_number = False
+        self.before_issue: BeforeIssue | None = None
+        self.printed: Representation | None = None
+        self.unprintable: LedgerError | None = None
+        """What asking its representation raises, when a test sets it (before ``printed`` is looked at)."""
 
     @property
     @override
@@ -122,11 +183,42 @@ class FakeChannel(Channel):
 
     @override
     async def check(self, call: SystemCall, draft: FiscalDraft) -> Sequence[Objection]:
-        raise UnusedChannelMethodError
+        self.checked.append((call, draft))
+        return tuple(self.objections)
+
+    def update(self, draft: FiscalDraft, *, version: int, signed: bool) -> StatusUpdate:
+        """The status of ``draft``'s document at ``version``: numbered, or signed with a security code."""
+        number = f"E31{self.numbered:010d}"
+        details: dict[str, JsonValue] = {"encf": number, "security_code": "Ab12Cd" if signed else None}
+        return StatusUpdate(
+            document=draft.document,
+            channel=FAKE,
+            environment=draft.environment,
+            state="signed" if signed else "numbered",
+            status=FiscalStatus.PENDING,
+            severity=Severity.INFO,
+            version=version,
+            authority_number=number,
+            messages=(),
+            details={"do": details},
+            occurred_at=datetime.now(UTC),
+        )
 
     @override
     async def issue(self, call: SystemCall, draft: FiscalDraft, *, sign_within: timedelta | None) -> Issued:
-        raise UnusedChannelMethodError
+        self.issued.append((call, draft, sign_within))
+        if self.before_issue is not None:
+            await self.before_issue(draft)
+        found = self.documents.get(draft.document)
+        if found is not None:
+            return Issued(status=found, signed=found.version > 1)
+        if self.no_number:
+            raise NoNumberError
+        self.numbered += 1
+        signs = sign_within is not None and not self.slow
+        kept = self.update(draft, version=2 if signs else 1, signed=signs)
+        self.documents[draft.document] = kept
+        return Issued(status=kept, signed=signs)
 
     @override
     async def status(self, call: SystemCall, document: DocumentRef) -> StatusUpdate | None:
@@ -138,7 +230,11 @@ class FakeChannel(Channel):
 
     @override
     async def representation(self, call: SystemCall, document: DocumentRef) -> Representation:
-        raise UnusedChannelMethodError
+        if self.unprintable is not None:
+            raise self.unprintable
+        if self.printed is None:
+            raise NotPrintableError
+        return self.printed
 
 
 def _same[T](value: T) -> T:

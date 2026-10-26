@@ -77,7 +77,6 @@ from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import (
     pinned,
     system_resolve,
 )
-from ledger_country_do.channels.ecf_v1.adapters.buyers.seeds import SeedSigned
 from ledger_country_do.channels.ecf_v1.adapters.dgii.wire import TokenAnswer
 from ledger_country_do.channels.ecf_v1.adapters.http import (
     ACCEPTED_ENCODING,
@@ -87,16 +86,20 @@ from ledger_country_do.channels.ecf_v1.adapters.http import (
 )
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import INBOUND, verify_enveloped
 from ledger_country_do.channels.ecf_v1.adapters.xml.inbound import read_inbound_arecf
+from ledger_country_do.channels.ecf_v1.application.ports import SeedSigned
 from ledger_country_do.channels.ecf_v1.domain.errors import EcfInvalidError, EcfUnavailableError
-from ledger_country_do.channels.ecf_v1.domain.exchanges import require_tax_id
 from ledger_fiscal_kit.xml.hardened import XmlDocumentError
 from ledger_fiscal_kit.xml.schemas import SchemaViolationError
 lazy from ledger_country_do.channels.ecf_v1.adapters.buyers.endpoints import Endpoint, Resolve
 lazy from ledger_country_do.channels.ecf_v1.adapters.dgii.directory import DirectoryLookup
 lazy from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
 lazy from ledger_country_do.channels.ecf_v1.adapters.signing.trust import CounterpartyTrust
-lazy from ledger_country_do.channels.ecf_v1.application.ports import DirectoryEntry, Signatures, SigningAs
-lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
+lazy from ledger_country_do.channels.ecf_v1.application.ports import (
+    DeliveryDocument,
+    DirectoryEntry,
+    Signatures,
+    SigningAs,
+)
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 lazy from ledger_country_do.channels.ecf_v1.domain.exchanges import NotReceivedReason
 lazy from ledger_platform.http.outbound import OutboundHttp
@@ -143,23 +146,6 @@ def _refused(status: int, step: _Step) -> bool:
     if status not in {_OK, _BAD_REQUEST}:
         raise BuyerUnavailableError(step.name)
     return status == _BAD_REQUEST
-
-
-@final
-@dataclass(frozen=True, slots=True, kw_only=True)
-class DeliveryDocument:
-    """What a receipt is checked against: the e-CF's issuer, its buyer and its e-NCF.
-
-    Both parties are an RNC or a cédula: ``ExchangeInvalidError`` otherwise, naming the field, not the value.
-    """
-
-    issuer_rnc: str
-    buyer_rnc: str
-    encf: Encf
-
-    def __post_init__(self) -> None:
-        require_tax_id("delivery_document.issuer_rnc", self.issuer_rnc)
-        require_tax_id("delivery_document.buyer_rnc", self.buyer_rnc)
 
 
 @final

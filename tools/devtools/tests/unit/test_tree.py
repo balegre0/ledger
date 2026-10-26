@@ -43,6 +43,20 @@ def test_a_tree_without_a_gitignore_leaves_out_git_s_own_only(tmp_path: Path) ->
     assert visible_files(tmp_path) == (Path("x/y.txt"),)
 
 
+def test_a_nested_repository_or_worktree_is_left_out_as_git_leaves_it(tmp_path: Path) -> None:
+    put(tmp_path, "kept.txt")
+    put(tmp_path, "vendor/lib/.git/HEAD")  # a repository of its own
+    put(tmp_path, "vendor/lib/code.py")
+    put(tmp_path, ".claude/worktrees/other/.git", b"gitdir: ../../../.git/worktrees/other\n")  # a worktree
+    put(tmp_path, ".claude/worktrees/other/modules/m/manifest.toml", UNREADABLE)
+    assert visible_files(tmp_path) == (Path("kept.txt"),)
+    assert scan(tmp_path).directories == (
+        Path(".claude"),
+        Path(".claude/worktrees"),
+        Path("vendor"),
+    )
+
+
 def test_devtools_never_reads_an_ignored_manifest_or_dockerfile(tree: Path) -> None:
     put(tree, ".gitignore", b".venv\nbuild/\n")
     put(tree, "tools/build/manifest.toml", UNREADABLE)  # tools/* would match it

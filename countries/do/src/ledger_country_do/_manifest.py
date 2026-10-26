@@ -190,6 +190,24 @@ MANIFEST: Final = PackageManifest.model_validate(
                         "deadline": "15d",
                         "concurrency": 16,
                     },
+                    {
+                        "kind": "do_ecf.deliver",
+                        "timeout": "3m",
+                        "max_attempts": 50,
+                        "deadline": "8d",
+                        "concurrency": 8,
+                    },
+                    {
+                        "kind": "do_ecf.purge_receiver_credentials",
+                        "concurrency": 1,
+                    },
+                ],
+                "schedules": [
+                    {
+                        "name": "do_ecf.purge_receiver_credentials",
+                        "every": "1h",
+                        "enqueues": "do_ecf.purge_receiver_credentials",
+                    },
                 ],
             },
         ],

@@ -10,11 +10,16 @@ A submission whose outcome became unknown is a warning (``do_ecf.submission_unkn
 failure, ``marked`` or ``undocumented``); its track ids settle it, usually. A document left waiting for a
 person (an outcome unknown for a day, or in CerteCF; an answer about another e-NCF) is an error
 (``do_ecf.waiting_for_a_person``, its reason; runbook ``docs/runbooks/do/outcome-unknown.md``, Task 27).
+
+A buyer that requires authentication while the company keeps it switched off is an error at every attempt
+(``do_ecf.delivery_needs_authentication``, Decision 19: the client may switch it on and retry), and so is a
+delivery failed for good (``do_ecf.delivery_failed``, its reason a code: Decision 21's alert).
 """
 
 from typing import final, override
 
 from ledger_country_do.channels.ecf_v1.application.advancing import AdvanceReport
+from ledger_country_do.channels.ecf_v1.application.delivering import DeliveryReport
 from ledger_country_do.channels.ecf_v1.application.issuing import SigningReport
 lazy from ledger_country_do.channels.ecf_v1.application.steps import ParkReason
 lazy from ledger_platform.observability.telemetry import Telemetry
@@ -54,3 +59,21 @@ class AdvanceLog(AdvanceReport):
     @override
     def waiting(self, reason: ParkReason) -> None:
         self._telemetry.logger.error("do_ecf.waiting_for_a_person", reason=reason.value)
+
+
+@final
+class DeliveryLog(DeliveryReport):
+    """``DeliveryReport`` on the channel's logger: what the alerts read."""
+
+    __slots__ = ("_telemetry",)
+
+    def __init__(self, telemetry: Telemetry) -> None:
+        self._telemetry = telemetry
+
+    @override
+    def needs_authentication(self) -> None:
+        self._telemetry.logger.error("do_ecf.delivery_needs_authentication")
+
+    @override
+    def failed(self, reason: str) -> None:
+        self._telemetry.logger.error("do_ecf.delivery_failed", reason=reason)

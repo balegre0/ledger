@@ -29,3 +29,8 @@ class Environment(StrEnum):
     def lists_track_ids(self) -> bool:
         """Whether DGII lists an e-NCF's track ids there (``consultatrackids``: not in CerteCF, DT-DGII)."""
         return self is not Environment.CERTECF
+
+    @property
+    def has_directory(self) -> bool:
+        """Whether DGII publishes its receivers' directory there (``consultadirectorio``: not in CerteCF)."""
+        return self is not Environment.CERTECF

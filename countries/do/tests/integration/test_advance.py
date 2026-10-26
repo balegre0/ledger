@@ -25,7 +25,7 @@ from structlog.testing import capture_logs
 
 from ledger_country_do._manifest import MANIFEST
 from ledger_country_do.channels.ecf_v1.adapters.channel import DoEcfChannel
-from ledger_country_do.channels.ecf_v1.adapters.jobs import ADVANCE
+from ledger_country_do.channels.ecf_v1.adapters.jobs import ADVANCE, DELIVER
 from ledger_country_do.channels.ecf_v1.adapters.postgres.tables import (
     DocumentRecord,
     ReleasedNumberRecord,
@@ -88,6 +88,7 @@ BUDGET: Final = timedelta(seconds=1.5)
 EXPIRES: Final = date(2028, 12, 31)
 CHASSIS: Final = chassis_tables("do_ecf")
 PAYLOAD: Final = TypeAdapter(dict[str, JsonValue])
+STATUS: Final = TypeAdapter(str | None)
 JOB_ROW: Final = TypeAdapter(tuple[str, str | None, str | None, datetime, datetime])
 RECEPTION: Final = "recepcion/api/facturaselectronicas"
 SUMMARY: Final = "recepcionfc/api/recepcion/ecf"
@@ -312,6 +313,15 @@ class Worker:
         status, reason, code, run_at, updated_at = JOB_ROW.validate_python(tuple(row))
         return status, reason, code, run_at - updated_at
 
+    async def delivery_job(self, document: UUID) -> str | None:
+        """The status of the document's ``do_ecf.deliver`` job, if one was enqueued (Task 21)."""
+        jobs = CHASSIS.jobs
+        async with self.database.unit(None) as unit:
+            found = await unit.connection.execute(
+                select(jobs.c.status).where(jobs.c.kind == DELIVER, jobs.c.key == str(document))
+            )
+            return STATUS.validate_python(found.scalar_one_or_none())
+
     async def set_job(self, document: UUID, **values: object) -> None:
         jobs = CHASSIS.jobs
         async with self.database.unit(None) as unit:
@@ -363,7 +373,7 @@ class Started:
         )
         channel = parts.channel
         assert isinstance(channel, DoEcfChannel)
-        (spec,) = parts.jobs
+        (spec,) = [each for each in parts.jobs if each.kind == ADVANCE]
         async with AsyncExitStack() as stack:
             for resource in parts.resources:
                 await stack.enter_async_context(resource)
@@ -602,7 +612,8 @@ async def test_a_credit_invoice_is_signed_submitted_once_polled_and_accepted(
         ("accepted", "accepted", 4),
     ]
     assert [details_of(each)["track_id"] for each in updates] == [None, None, row.track_id, row.track_id]
-    assert details_of(updates[-1])["delivery"] == "not_started"  # the delivery job's (Task 21)
+    assert details_of(updates[-1])["delivery"] == "not_started"  # the delivery job's, enqueued with it
+    assert await worker.delivery_job(document) == "ready"
 
 
 async def test_en_proceso_is_polled_on_the_schedule_publishing_once_while_it_lasts(
@@ -639,6 +650,7 @@ async def test_a_conditional_acceptance_is_valid_and_keeps_dgii_s_messages(
     *_, last = await updates_of(module_database, tenant)
     assert (last["status"], last["severity"]) == ("accepted_with_observations", "warning")
     assert last["messages"] == [{"code": "613", "message": "Fuera de tolerancia", "lang": "es"}]
+    assert await worker.delivery_job(document) == "ready"  # valid: delivered like an accepted one
 
 
 @pytest.mark.parametrize(("used", "fate"), [(True, "burned"), (False, "released")])
@@ -666,6 +678,7 @@ async def test_a_rejection_burns_or_releases_the_number_as_secuencia_utilizada_s
     assert released == ([] if used else [(1, document)])
     *_, last = await updates_of(module_database, tenant)
     assert (last["state"], last["status"], last["severity"]) == ("rejected", "rejected", "error")
+    assert await worker.delivery_job(document) is None
 
 
 async def test_a_released_number_is_given_again_only_receipt_tolerance_after_its_release(
@@ -1160,6 +1173,7 @@ async def test_a_consumer_invoice_summary_is_decided_at_once_and_never_delivered
     assert (row.state, row.fate, row.delivery, row.track_id) == ("accepted", "used", "not_applicable", None)
     assert (worker.network.posts(SUMMARY), worker.network.posts(RECEPTION)) == (1, 0)
     assert states_of(await updates_of(module_database, tenant)) == ["numbered", "signed", "accepted"]
+    assert await worker.delivery_job(document) is None
 
 
 async def test_a_summary_whose_answer_was_lost_is_settled_by_consultarfce_never_resent(

@@ -15,6 +15,7 @@ methods are abstract so that they need no body: a ``...`` is a statement no test
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
 from typing import ClassVar, Literal, Protocol, final
+lazy from collections.abc import Mapping
 lazy from contextlib import AbstractAsyncContextManager
 lazy from datetime import datetime
 lazy from uuid import UUID
@@ -27,10 +28,13 @@ from ledger_kernel.ids import new_id
 from ledger_kernel.tenancy import Mode
 lazy from ledger_country_do.channels.ecf_v1.application.documents import (
     Advances,
+    CompanyOptions,
+    Deliveries,
     Documents,
     EcfDocument,
     Submissions,
 )
+lazy from ledger_country_do.channels.ecf_v1.application.received import ReceivedDocument, ReceivedDocuments
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import EcfType, Encf
 lazy from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 lazy from ledger_country_do.channels.ecf_v1.domain.numbering import Allocation, Authorization, RangeState
@@ -124,8 +128,14 @@ class Announcements(Protocol, metaclass=ABCMeta):
     def document_updated(self, document: EcfDocument) -> None:
         """``document`` is new, or changed: its state at its version (``fiscal_channel.document.updated``)."""
 
+    @abstractmethod
+    def received(self, document: ReceivedDocument) -> None:
+        """``document`` was received and recorded (``fiscal_channel.received_document.recorded``)."""
 
-type AuditAction = Literal["numbering_range.register"]
+
+type AuditAction = Literal[
+    "numbering_range.register", "delivery.retry", "delivery_options.set", "do_ecf.buyer_seed.signed"
+]
 """What a use case records it did; the part before the dot names the kind of subject."""
 
 
@@ -133,8 +143,19 @@ class Audit(Protocol, metaclass=ABCMeta):
     """Who changed what, recorded with the change (``audit_events``, §6.4); the actor is the unit's call."""
 
     @abstractmethod
-    def record(self, action: AuditAction, subject: UUID, *, before: object, after: object) -> None:
-        """Record that ``action`` changed ``subject`` from ``before`` to ``after`` (``None``: not there)."""
+    def record(
+        self,
+        action: AuditAction,
+        subject: UUID,
+        *,
+        before: object,
+        after: object,
+        detail: Mapping[str, str] | None = None,
+    ) -> None:
+        """Record that ``action`` changed ``subject`` from ``before`` to ``after`` (``None``: not there).
+
+        ``detail``: what else the row says, never a tax id unmasked, a token or a document.
+        """
 
 
 @final
@@ -146,7 +167,11 @@ class NumberingUnit:
     ranges: Ranges
     documents: Documents
     submissions: Submissions
+    received: ReceivedDocuments
+    """The e-CF other emitters sent the company (the receiver's, Task 22)."""
     advances: Advances
+    deliveries: Deliveries
+    options: CompanyOptions
     announcements: Announcements
     audit: Audit
     now: datetime
