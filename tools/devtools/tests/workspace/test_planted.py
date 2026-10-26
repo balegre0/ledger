@@ -208,11 +208,25 @@ LEAKS: Final = {
 """An app of another role, a test kit and a module importing the custody; its re-export, imported."""
 
 
+SIGNER_CONSUMER: Final = """[[events.consumes]]
+consumer = "fiscal.certificates"
+types = ["signer.certificate.installed"]
+style = "outside"
+"""
+
+
 def without_the_signer(root: Path) -> Path:
     """The copy without the workspace's own isolated module (and its contract): a role isolates one module, so
-    a planted ``vault`` stands in for it."""
+    a planted ``vault`` stands in for it. fiscal's manifest no longer names it (its dependency, its consumer
+    of ``signer.certificate.installed``)."""
     for directory in ("modules/signer", "contracts/proto/ledger/signer"):
         shutil.rmtree(root / directory)
+    fiscal = root / "modules/fiscal/manifest.toml"
+    manifest = fiscal.read_text(encoding="utf-8")
+    assert SIGNER_CONSUMER in manifest
+    assert '"invoicing", "signer"]' in manifest
+    unsigned = manifest.replace(SIGNER_CONSUMER, "").replace('"invoicing", "signer"]', '"invoicing"]')
+    fiscal.write_text(unsigned, encoding="utf-8", newline="\n")
     return root
 
 

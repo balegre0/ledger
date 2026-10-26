@@ -926,6 +926,7 @@ dependencies = [
     { name = "ledger-invoicing" },
     { name = "ledger-kernel" },
     { name = "ledger-platform" },
+    { name = "ledger-signer" },
     { name = "pydantic" },
     { name = "sqlalchemy" },
 ]
@@ -939,6 +940,7 @@ requires-dist = [
     { name = "ledger-invoicing", editable = "modules/invoicing" },
     { name = "ledger-kernel", editable = "packages/kernel" },
     { name = "ledger-platform", editable = "packages/platform" },
+    { name = "ledger-signer", editable = "modules/signer" },
     { name = "pydantic", specifier = ">=2.14.1" },
     { name = "sqlalchemy", specifier = ">=2.1.4" },
 ]

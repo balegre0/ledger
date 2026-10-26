@@ -29,6 +29,7 @@ MANIFEST: Final = PackageManifest.model_validate(
             "modules": [
                 "identity",
                 "invoicing",
+                "signer",
             ],
             "python": [
                 "alembic>=1.20.0",
@@ -95,6 +96,13 @@ MANIFEST: Final = PackageManifest.model_validate(
                     "types": [
                         "fiscal_channel.requirements.changed",
                     ],
+                },
+                {
+                    "consumer": "fiscal.certificates",
+                    "types": [
+                        "signer.certificate.installed",
+                    ],
+                    "style": "outside",
                 },
             ],
         },

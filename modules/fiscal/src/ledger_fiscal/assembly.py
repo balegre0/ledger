@@ -5,8 +5,8 @@ The ``api`` app mounts its routes, ``migrate`` runs its revisions, and every app
 fiscal-kit's ``CompanyDirectory`` to the channels (Decision 4), and implements invoicing's ``IssuePolicy``
 and ``Renderer`` (ADR 0011): enrollments are checked and documents routed to the channels, numbered within
 the request's budget and mirrored in invoicing. The worker runs its consumers (the recovery path, the status
-mirror, the channels' requirements) and its ``fiscal.route`` job. The channels are read at call time
-(``ChannelRegistry`` over the app's assembled channels), never while fiscal assembles.
+mirror, the channels' requirements, the certificates installed) and its ``fiscal.route`` job. The channels
+are read at call time (``ChannelRegistry`` over the app's assembled channels), never while fiscal assembles.
 """
 
 from typing import Final
@@ -16,8 +16,9 @@ from ledger_fiscal.adapters.http import enrollments
 from ledger_fiscal.adapters.http.context import ApiContext
 from ledger_fiscal.adapters.postgres.schema import MIGRATIONS, migrations
 from ledger_fiscal.adapters.postgres.unit import ROUTE, PgUnits
-from ledger_fiscal.adapters.worker import requirements_changed, route_job
+from ledger_fiscal.adapters.worker import certificate_installed, requirements_changed, route_job
 from ledger_fiscal.api import FISCAL_API
+from ledger_fiscal.application.certificates import CERTIFICATES, Certificates
 from ledger_fiscal.application.directory import FiscalDirectory
 from ledger_fiscal.application.enrolling import Enrolling
 from ledger_fiscal.application.facade import FiscalFacade
@@ -60,6 +61,7 @@ def assemble(context: ModuleContext) -> ModuleParts:
         clock=context.clock,
     )
     consumers = Consumers(router=router, invoicing=invoicing, channels=channels)
+    certificates = Certificates(units=units, channels=channels)
     api = ApiContext.build(
         database=context.database,
         authentication=context.auth,
@@ -78,6 +80,7 @@ def assemble(context: ModuleContext) -> ModuleParts:
             ConsumerSpec(name=COMMERCIAL_DOCUMENTS, outside=consumers.on_issued),
             ConsumerSpec(name=CHANNEL_DOCUMENTS, outside=consumers.on_channel_document),
             ConsumerSpec(name=REQUIREMENTS, handler=requirements_changed()),
+            ConsumerSpec(name=CERTIFICATES, outside=certificate_installed(certificates)),
         ),
         jobs=(JobSpec(kind=ROUTE, handler=route_job(router)),),
         migrations=migrations(),
