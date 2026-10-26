@@ -429,12 +429,24 @@ async def test_sign_seed_audits_without_a_reference(
     )
 
 
-async def test_the_api_token_cannot_sign_and_the_worker_token_cannot_import(
+async def test_the_api_token_signs_no_seed_and_the_worker_token_cannot_import(
     api: SignerClient, worker: SignerClient, holder: Issued
 ) -> None:
+    """The api signs documents (the synchronous path of ``POST /v1/invoices``), never an authority's seed."""
     tenant = a_company()
+    seed = SeedToSign(
+        tenant=tenant,
+        profile=PROFILE,
+        seed=b"<SemillaModel><valor>1</valor></SemillaModel>",
+        audience="ecf.dgii.gov.do",
+    )
+    _ = await imported(api, tenant, holder)
+    verified(
+        (await api.sign_xml(call_for(tenant), document(tenant, datetime.now(UTC)))).document,
+        holder.certificate,
+    )
     with pytest.raises(RemoteDefectError) as signing:
-        await api.sign_xml(call_for(tenant), document(tenant, datetime.now(UTC)))
+        await api.sign_seed(call_for(tenant), seed)
     with pytest.raises(RemoteDefectError) as importing:
         await imported(worker, tenant, holder)
     assert signing.value.remote_code == importing.value.remote_code == MethodNotAllowedError.code

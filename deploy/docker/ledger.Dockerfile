@@ -12,7 +12,9 @@
 #   restart it. The worker and the signer serve the same probes and their metrics on their own port; the
 #   signer's gRPC port (LEDGER_SIGNER_GRPC_PORT, 50051) has no health service and is never a probe's.
 # - State: /var/lib/ledger-signer, owned by the image's user (mode 0700), is where a volume holds the local-file
-#   KMS's key (local stack only: the signer refuses that KMS outside the environments local and test).
+#   KMS's key (local stack only: the signer refuses that KMS outside the environments local and test); /archive,
+#   owned by it too, where a volume holds the file archive (local stack and certification runs; production's
+#   archive is S3 with object lock).
 # - Stopping: Granian first drains HTTP, then the app stops within its stop budget (25 s); Granian kills a worker
 #   still running 30 s after it asked it to stop. The platform must wait longer than that before its SIGKILL:
 #   a grace period of at least 40 s (compose `stop_grace_period`, Kubernetes `terminationGracePeriodSeconds`,
@@ -56,7 +58,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     for d in countries/*/; do uv sync --locked --no-dev --no-editable --inexact --package "ledger-country-$(basename "$d")"; done; \
     for d in apps/*/; do uv sync --locked --no-dev --no-editable --inexact --package "ledger-app-$(basename "$d")"; done
 # The signer's state directory, owned by the image's user: a named volume mounted on it starts with that owner.
-RUN mkdir -p -m 0700 /state/ledger-signer
+# So does the file archive's (/archive, LEDGER_ARCHIVE_PATH of the local stack): the root file system is read-only.
+RUN mkdir -p -m 0700 /state/ledger-signer /archive
 
 # Distroless: glibc, CA certificates and time zones, no shell, no package manager; user nonroot (65532).
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:e792ab3d241a468a4fd7519ddbbebe66b49b5f365771716ea688ad40b6c6f1c2
@@ -66,6 +69,7 @@ LABEL org.opencontainers.image.title="ledger" \
 COPY --from=build /python /python
 COPY --from=build /app/.venv /app/.venv
 COPY --from=build --chown=65532:65532 /state/ /var/lib/
+COPY --from=build --chown=65532:65532 /archive /archive
 ENV PATH=/app/.venv/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

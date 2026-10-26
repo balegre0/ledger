@@ -163,6 +163,31 @@ def test_test_sender_stand_ins_are_refused_in_production_without_naming_them(con
     assemble(contexts(settings=standing_in, environment="staging"))  # certification runs there
 
 
+@pytest.mark.parametrize(
+    ("environment", "allowed"), [("local", True), ("test", True), ("staging", False), ("production", False)]
+)
+def test_plain_http_beyond_loopback_is_for_the_local_stack_and_tests_alone(
+    contexts: Contexts, environment: Environment, *, allowed: bool
+) -> None:
+    """``http://fake-dgii:8471`` (compose's fake DGII) assembles in ``local`` and ``test`` only; loopback's
+    fake and https hosts anywhere a fake may stand in."""
+    on_a_service = RECEIVED.model_copy(
+        update={"ecf_host": "http://fake-dgii:8471", "fc_host": "https://fc.fake.test"}
+    )
+    on_loopback = RECEIVED.model_copy(
+        update={"ecf_host": "http://127.0.0.1:8471", "fc_host": "http://localhost:8471"}
+    )
+    if allowed:
+        assert isinstance(
+            assemble(contexts(settings=on_a_service, environment=environment)).channel, DoEcfChannel
+        )
+    else:
+        with pytest.raises(SettingRefusedError, match="LEDGER_DO_ECF_ECF_HOST") as caught:
+            assemble(contexts(settings=on_a_service, environment=environment))
+        assert "fake-dgii" not in str(caught.value)
+    assert isinstance(assemble(contexts(settings=on_loopback, environment=environment)).channel, DoEcfChannel)
+
+
 def test_the_worker_needs_trusted_roots(contexts: Contexts) -> None:
     with pytest.raises(SettingRefusedError, match=r"LEDGER_DO_ECF_TRUSTED_ROOTS .* the worker"):
         assemble(contexts(settings=RECEIVED, role="worker"))

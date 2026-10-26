@@ -63,7 +63,8 @@ ADR 0010; plan `docs/superpowers/plans/2026-10-19-v2-m2b-signer.md`).
   only beside a current one), the local-file KMS (`LEDGER_SIGNER_KMS_KEY_FILE` named, `local`/`test` only) and
   the backends (`remote` needs a certification entity, none exists yet: `entity_not_configured`), then serves
   `SignerService` on `LEDGER_SIGNER_GRPC_PORT` behind the platform's guard (allowlists `CALLER_METHODS`: api
-  imports, describes and retires; worker and receiver sign and describe), binds its facade as `SignerPort` and
+  imports, describes, retires and signs an e-CF or an RFCE alone, `CALLER_DOCUMENTS`, for the synchronous path
+  of spec §8.5; worker and receiver sign anything, seeds too, and describe), binds its facade as `SignerPort` and
   `SignerApi`, consumes `identity.company.deactivated` (`signer.company_deactivations`: every active
   certificate retired `company_deactivated` in the inbox row's unit), runs `signer.expiry_notice` jobs and its
   own purges, and is ready when the service serves (`signer:grpc`) and the KMS answers (`signer:kms`). An

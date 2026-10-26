@@ -27,8 +27,10 @@ authorization to manage signature-creation data on the signer's behalf.
   uploads stream through `api` without being parsed there and carry the client's idempotency key. Rotation by
   compare-and-set is deferred (an import replaces the active certificate).
 - Callers authenticate with **per-caller tokens and method allowlists**: `api` may call `ImportCertificate`,
-  `DescribeCertificates` and `RetireCertificate`; `worker` and `receiver` may call `SignXml`, `SignSeed` and
-  `DescribeCertificates` (a channel reads a certificate's validity through it; no method returns a secret).
+  `DescribeCertificates`, `RetireCertificate` and `SignXml` (amended 2026-10-26, v2-M3b Task 26: the api numbers
+  and signs an invoice's e-CF within the request, spec §8.5; it never signs a seed); `worker` and `receiver` may
+  call `SignXml`, `SignSeed` and `DescribeCertificates` (a channel reads a certificate's validity through it; no
+  method returns a secret).
   mTLS from a service mesh replaces the tokens later.
 - Every signature is audited before it is returned. `api`'s readiness does not depend on the signer.
 - import-linter forbids every other app from importing `ledger_signer.adapters.custody`.
@@ -127,6 +129,11 @@ Recorded at the review of the runtime's signer role (v2-M2b Task 3); each names 
    key. A party on the pod network can read tokens and documents in transit (recorded at the reviews of
    v2-M2b Tasks 2 and 12). Follow-up (before go-live, cheaper than the mesh): TLS on the signer's port with a
    private CA and the clients pinning it; the network policy of item 13.
+   **Amended 2026-10-26 (v2-M3b Task 26):** the api now signs within `POST /v1/invoices` (spec §8.5), so the
+   internet-facing api, its process or its token, also obtains signatures under every company's active
+   certificate: of an e-CF or an RFCE alone (`CALLER_DOCUMENTS`, by the document's root element), never of a
+   seed (`SignSeed` stays the worker's and the receiver's) nor of any other document (an ACECF, an ANECF, an
+   ARECF: refused `grpc_method_not_allowed`). Each is audited with the caller `api`.
 9. **The signer signs whatever document its caller sends for the company it names.** It does not check that
    the document's issuer (`RNCEmisor` for DGII) is the company the certificate serves, nor yet that the
    certificate's subject is that company (deferred to v2-M3b's channel requirements). A caller's defect (a
@@ -134,6 +141,10 @@ Recorded at the review of the runtime's signer role (v2-M2b Task 3); each names 
    or receiver token is a signing oracle for every company (item 8). Follow-up (v2-M3b, with the subject
    binding): a channel-declared check, run in the signer before custody signs, that the document names the
    certificate's company.
+   **Amended 2026-10-26 (v2-M3b Task 26):** the api is a caller of `SignXml` too, bounded to e-CF and RFCE
+   (item 8). That follow-up (the signer final review's F2) would not limit an api compromise: the api forwards
+   the company it names, and an e-CF or RFCE of that company's own RNC passes the check; only the narrowing by
+   document and the audit bound it. Owner item 32 of the M3b plan confirms the change or reverts it.
 10. **The fan-out may write into the signer's inbox.** `ledger_relay` (a member of `ledger_app`, so of the
     `api`, `worker` and `receiver` processes) holds `INSERT` on `signer.inbox`. A compromised `ledger_app`
     process can forge `identity.company.deactivated` into it and have any company's certificates retired

@@ -16,7 +16,7 @@ RETIRE: Final = SERVICE + "RetireCertificate"
 SIGN_XML: Final = SERVICE + "SignXml"
 SIGN_SEED: Final = SERVICE + "SignSeed"
 ALLOWLISTS: Final = {
-    "api": frozenset({IMPORT, DESCRIBE, RETIRE}),
+    "api": frozenset({IMPORT, DESCRIBE, RETIRE, SIGN_XML}),
     "worker": frozenset({SIGN_XML, SIGN_SEED, DESCRIBE}),
     "receiver": frozenset({SIGN_XML, SIGN_SEED, DESCRIBE}),
 }

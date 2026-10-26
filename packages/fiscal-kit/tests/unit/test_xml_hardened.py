@@ -14,6 +14,7 @@ from ledger_fiscal_kit.xml.hardened import (
     parser,
     require_readable,
     require_tree,
+    root_name,
     texts,
 )
 
@@ -176,3 +177,12 @@ def test_a_malformed_document_s_error_carries_none_of_libxml2_s_message() -> Non
         texts(b"<a>SECRET</b>", "b")
     assert caught.value.__cause__ is None
     assert caught.value.__suppress_context__
+
+
+def test_root_name_is_the_root_element_s_tag_read_as_texts_reads() -> None:
+    assert root_name(b"<ECF><Encabezado/></ECF>") == "ECF"
+    assert root_name(b'<RFCE xmlns="urn:x"><a/></RFCE>') == "{urn:x}RFCE"
+    with pytest.raises(MalformedDocumentError):
+        root_name(b"<ECF>")
+    with pytest.raises(XmlDocumentError, match="DOCTYPE"):
+        root_name(b"<!DOCTYPE ECF><ECF/>")

@@ -69,6 +69,17 @@ jobs:
           load: true
           cache-from: type=gha,scope=ledger
           cache-to: type=gha,scope=ledger,mode=max
+      - name: The fake DGII's image
+        # The local stack's dev-only fake DGII (plan Decision 28), loaded under the tag compose runs; never part of
+        # the image above.
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          file: deploy/docker/fake-dgii.Dockerfile
+          tags: ledger:fake-dgii
+          load: true
+          cache-from: type=gha,scope=fake-dgii
+          cache-to: type=gha,scope=fake-dgii,mode=max
       - name: Local stack starts healthy from the image
         # From the image just built: the migrate job runs once, the api, the worker, the receiver and the signer
         # start after it and compose waits for their health checks (/readyz: PostgreSQL, every schema at head, the
@@ -102,3 +113,10 @@ jobs:
           $compose stop signer
           curl --fail --silent --show-error "$api/readyz"
           curl --fail --silent --show-error "$receiver/readyz"
+      - name: The compose smoke test (tests/e2e/test_compose_stack.py)
+        # From the images built above (LEDGER_E2E_COMPOSE=prebuilt: `up --no-build`), in its own compose project,
+        # torn down with its volumes by the test: every app ready, the receiver's 404 for an unknown RNC, the fake
+        # DGII's seed. The gate skips it.
+        env:
+          LEDGER_E2E_COMPOSE: prebuilt
+        run: uv run pytest tests/e2e -k compose -c pyproject.toml -p no:cacheprovider

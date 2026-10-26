@@ -554,3 +554,52 @@ async def test_a_token_is_revoked_alone_or_with_every_other(
     assert (await http.get(RESULT, params={"trackid": "x"}, headers=bearer(second))).status_code == 200
     fake.state.dgii.revoke()
     assert fake.state.dgii.issued() == ()
+
+
+async def test_a_document_taken_whose_answer_is_lost_is_kept_counted_once_and_found_by_its_track_ids(
+    http: httpx.AsyncClient, signer: KeyPairSigner, fake: FakeDgii
+) -> None:
+    fake.script.by_encf["E310000000001"] = Scripted(break_after_send=True)
+    live = bearer(await token(http, signer))
+    lost = await http.post(RECEPTION, files=xml(await signed_credit_invoice(signer)), headers=live)
+    assert (lost.status_code, lost.content) == (500, b"")
+    params = {"rncemisor": "101850043", "encf": "E310000000001"}
+    (found,) = json_list(await http.get(TRACK_IDS, params=params, headers=live))
+    result = json_object(await http.get(RESULT, params={"trackid": str(found["trackId"])}, headers=live))
+    assert (found["estado"], result["codigo"]) == ("Aceptado", 1)
+    answered = await http.post(RECEPTION, files=xml(await signed_credit_invoice(signer, 2)), headers=live)
+    assert answered.status_code == 200
+    assert (fake.state.submissions("E310000000001"), fake.state.submissions("e310000000002")) == (1, 1)
+
+
+async def test_a_summary_taken_whose_answer_is_lost_is_still_found_by_its_query(
+    http: httpx.AsyncClient, signer: KeyPairSigner, fake: FakeDgii
+) -> None:
+    fake.script.by_encf["E320000000001"] = Scripted(break_after_send=True)
+    live = bearer(await token(http, signer))
+    lost = await http.post(
+        RFCE, files=xml(await signed_summary(signer), "101850043E320000000001.xml"), headers=live
+    )
+    assert lost.status_code == 500
+    query = {"RNC_Emisor": "101850043", "ENCF": "E320000000001", "Cod_Seguridad_eCF": "dcp79q"}
+    assert json_object(await http.get(RFCE_QUERY, params=query, headers=live))["codigo"] == "1"
+    assert fake.state.submissions("E320000000001") == 1
+
+
+async def test_submissions_are_counted_per_e_ncf_and_environment_never_the_buyer_s_copies(
+    http: httpx.AsyncClient, signer: KeyPairSigner, fake: FakeDgii
+) -> None:
+    fake.state.receiver_requires_auth = False
+    document = await signed_credit_invoice(signer)
+    live = bearer(await token(http, signer))
+    await http.post(RECEPTION, files=xml(document), headers=live)
+    await http.post(RECEPTION, files=xml(document), headers=live)
+    await http.post("/testecf/emisorreceptor/fe/recepcion/api/ecf", files=xml(document))
+    certecf = bearer(await token(http, signer, "certecf"))
+    await http.post("/certecf/recepcion/api/facturaselectronicas", files=xml(document), headers=certecf)
+    assert [
+        fake.state.submissions("E310000000001"),
+        fake.state.submissions("E310000000001", environment="testecf"),
+        fake.state.submissions("E310000000001", environment="certecf"),
+        fake.state.submissions("E310000000009"),
+    ] == [3, 2, 1, 0]

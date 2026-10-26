@@ -301,7 +301,7 @@ def document(at: datetime) -> XmlToSign:
 
 def test_the_callers_may_call_what_decision_12_says() -> None:
     assert {
-        "api": {codec.IMPORT, codec.DESCRIBE, codec.RETIRE},
+        "api": {codec.IMPORT, codec.DESCRIBE, codec.RETIRE, codec.SIGN_XML},
         "worker": {codec.SIGN_XML, codec.SIGN_SEED, codec.DESCRIBE},
         "receiver": {codec.SIGN_XML, codec.SIGN_SEED, codec.DESCRIBE},
     } == CALLER_METHODS
@@ -507,14 +507,52 @@ async def test_damaged_custody_is_a_defect_the_caller_is_told_nothing_of(
     assert (cause.status, cause.remote_code) == (grpc.StatusCode.INTERNAL, INTERNAL_CODE)
 
 
-async def test_the_api_cannot_sign_and_the_worker_cannot_import(
-    api: SignerClient, worker: SignerClient, clock: Moving
+async def test_the_api_signs_no_seed_and_the_worker_cannot_import(
+    api: SignerClient, worker: SignerClient
 ) -> None:
+    seed = SeedToSign(tenant=IN_TEST, profile=PROFILE, seed=b"<s>1</s>", audience="ecf.dgii.gov.do")
     with pytest.raises(RemoteDefectError) as signing:
-        await api.sign_xml(CALL, document(clock.now))
+        await api.sign_seed(CALL, seed)
     with pytest.raises(RemoteDefectError) as importing:
         await worker.import_remote(CALL, REQUEST, Secret(CREDENTIAL))
     assert signing.value.remote_code == importing.value.remote_code == MethodNotAllowedError.code
+
+
+def of_root(root: str) -> bytes:
+    return f"<{root}><Encabezado><Nombre>DOCUMENT-SENTINEL</Nombre></Encabezado></{root}>".encode()
+
+
+def signing(root: str, at: datetime) -> XmlToSign:
+    return XmlToSign(tenant=IN_TEST, profile=PROFILE, document=of_root(root), signed_at=at, reference="ref-1")
+
+
+async def test_the_api_signs_an_e_cf_and_a_summary_and_nothing_else_which_the_worker_still_signs(
+    api: SignerClient, worker: SignerClient, holder: Issued, clock: Moving
+) -> None:
+    """The api's ``SignXml`` is the synchronous path's alone (ADR 0010): an e-CF or an RFCE, never an
+    approval, a void, a receipt or anything else; the worker and the receiver sign whatever they are asked."""
+    await installed(api, holder)
+    for root in ("ECF", "RFCE"):
+        assert b"SignatureValue" in (await api.sign_xml(CALL, signing(root, clock.now))).document
+    for root in ("ACECF", "ANECF", "ARECF", "SemillaModel", "Otro"):
+        with pytest.raises(RemoteDefectError) as refused:
+            await api.sign_xml(CALL, signing(root, clock.now))
+        assert refused.value.remote_code == MethodNotAllowedError.code
+        assert b"SignatureValue" in (await worker.sign_xml(CALL, signing(root, clock.now))).document
+
+
+async def test_the_api_s_document_that_does_not_read_is_refused_before_anything_is_signed(
+    api: SignerClient, holder: Issued, clock: Moving, units: Store
+) -> None:
+    await installed(api, holder)
+    audited = len(units.audits)
+    unreadable = XmlToSign(
+        tenant=IN_TEST, profile=PROFILE, document=b"<ECF>", signed_at=clock.now, reference="r"
+    )
+    with pytest.raises(RemoteDefectError) as refused:
+        await api.sign_xml(CALL, unreadable)
+    assert refused.value.remote_code == MethodNotAllowedError.code
+    assert len(units.audits) == audited
 
 
 def spoken(span: ReadableSpan) -> str:

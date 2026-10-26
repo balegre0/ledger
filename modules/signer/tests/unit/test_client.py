@@ -584,7 +584,7 @@ async def test_the_guard_s_refusals_are_defects_of_the_deployment(
 ) -> None:
     """Never forbidden (a 403 would blame the route's caller): a token or an allowlist is wrong."""
     with pytest.raises(RemoteDefectError) as refused:
-        await api.sign_xml(CALL, DOCUMENT)
+        await api.sign_seed(CALL, SEED)
     with pytest.raises(RemoteDefectError) as importing:
         await worker.import_remote(CALL, REQUEST, Secret(CREDENTIAL))
     async with SignerClient(

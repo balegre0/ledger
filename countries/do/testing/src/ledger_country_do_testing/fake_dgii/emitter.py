@@ -19,8 +19,12 @@
 * ``POST {env}/aprobacioncomercial/api/aprobacioncomercial`` (bearer): a buyer's signed ACECF, answered
   ``{mensaje: [...], estado}`` (DGII takes approvals only of e-CF it accepted: the fake does not check).
 
-Both are refused at the door (400, DGII's ``{trackId, error, mensaje}``) when they do not read, fail their
-schema or their signature; what is taken is kept (``FakeState.voids``, ``FakeState.dgii_approvals``).
+The two receptions answer a bare 500 once they have kept a document whose script loses its answer
+(``Scripted.break_after_send``): the emitter cannot know it was taken. ``FakeState.submissions`` counts what
+each e-NCF was sent.
+
+The last two are refused at the door (400, DGII's ``{trackId, error, mensaje}``) when they do not read, fail
+their schema or their signature; what is taken is kept (``FakeState.voids``, ``FakeState.dgii_approvals``).
 
 What is uploaded is bounded before it is read into memory: a body declared or streamed beyond ``MAX_UPLOAD``,
 or a file beyond the hardened parser's ``MAX_DOCUMENT``, raises ``UploadTooLargeError`` (the application
@@ -332,6 +336,10 @@ class EmitterServices:
         self._state.received.append(received)
         return received
 
+    def _lost(self, received: Received) -> bool:
+        """Whether the script loses the answer to ``received`` (``Scripted.break_after_send``)."""
+        return self._state.script.by_encf.get(received.encf, self._state.script.default).break_after_send
+
     async def _reception(self, request: Request, environment: str) -> Response:
         sent = await upload(request)
         if sent is None or not readable(sent[0]):
@@ -343,6 +351,8 @@ class EmitterServices:
         if format_ is Format.ECF_32 and _below_threshold(total):
             return bad_request(SUMMARY_ONLY)
         received = self.record(request, environment, kind="ecf", format_=format_, sent=sent)
+        if self._lost(received):
+            return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
         return JSONResponse({"trackId": received.track_id, "error": None, "mensaje": None})
 
     async def _result(self, request: Request, environment: str) -> Response:
@@ -401,6 +411,8 @@ class EmitterServices:
                 (("3", SUMMARY_TOO_LARGE),),
                 True,
             )
+        if self._lost(received):
+            return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
         return JSONResponse(
             {
                 "codigo": int(received.status),

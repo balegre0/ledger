@@ -8,12 +8,15 @@ sends anything (``ServiceNotInEnvironmentError``). The live
 environment is reached on DGII's own hosts only (``LiveHostRefusedError``), compared exactly: a fake can stand
 in for TesteCF and CerteCF, never for production. Every host is an origin and nothing more
 (``HostRefusedError``): no path, user, query or fragment, and ``https``, except a fake on this machine
-(``LOOPBACK``: 127.0.0.1, ::1, localhost), which may be plain ``http`` and, not being DGII's, never serves the
-live environment. The ``ecf`` host is also the audience of DGII's seeds (``DgiiHosts.audience``), so it must
-be one the signer can audit (fiscal-kit's ``is_audience``). DGII's paths ignore case; DT-DGII's lower-case
-spelling is used.
+(``LOOPBACK``: 127.0.0.1, ::1, localhost) or on the local stack's network (a single-label name led by a
+letter, a compose service such as ``fake-dgii``: no public name is one label; the assembly allows it in the
+environments ``local`` and ``test`` alone), which may be plain ``http`` and, not being DGII's, never serves
+the live environment. The ``ecf`` host is also the audience of DGII's seeds
+(``DgiiHosts.audience``), so it must be one the signer can audit (fiscal-kit's ``is_audience``). DGII's paths
+ignore case; DT-DGII's lower-case spelling is used.
 """
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
@@ -84,34 +87,43 @@ class LiveHostRefusedError(EcfError):
 
 
 LOOPBACK: Final = frozenset({"127.0.0.1", "::1", "localhost"})
-"""The hosts a fake on this machine answers on: the only ones plain ``http`` may reach."""
+"""The hosts a fake on this machine answers on: plain ``http`` may reach them."""
+LOCAL_SERVICE: Final = re.compile(r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?")
+"""A single-label host name led by a letter (``134744072`` and ``0x7f000001`` are addresses some resolvers
+read): a service of the local stack's network, which plain ``http`` may reach too, in the environments
+``local`` and ``test`` alone (the assembly refuses it elsewhere: ``DgiiHosts.beyond_loopback``)."""
 
 
 class HostRefusedError(EcfError):
-    """A host that is not an ``https`` origin (or an ``http`` one on loopback): a defect of configuration."""
+    """A host that is not an ``https`` origin (or ``http`` on a fake's host): a configuration defect."""
 
     code: ClassVar[str] = "do_ecf_dgii_host_refused"
 
     def __init__(self) -> None:
         super().__init__(
-            "DGII's hosts are each an https origin (http on loopback only): no path, user, query or fragment"
+            "DGII's hosts are each an https origin (http on a fake's only): no path, user, query, fragment"
         )
 
 
 def _origin(host: str) -> bool:
-    """Whether ``host`` is an origin without user information: ``https``, or ``http`` on loopback."""
+    """Whether ``host`` is an origin without user information: ``https``, or ``http`` on a fake's host."""
     try:
         parts = urlsplit(host)
         hostname = parts.hostname
     except ValueError:
         return False
     return (
-        (parts.scheme == "https" or (parts.scheme == "http" and hostname in LOOPBACK))
+        (parts.scheme == "https" or (parts.scheme == "http" and _is_local(hostname)))
         and bool(hostname)
         and "@" not in parts.netloc
         and (parts.path, parts.query, parts.fragment) == ("", "", "")
         and not host.endswith(("?", "#"))
     )
+
+
+def _is_local(hostname: str | None) -> bool:
+    """Whether ``hostname`` is a fake's: loopback, or a single-label service name of the local stack."""
+    return hostname is not None and (hostname in LOOPBACK or LOCAL_SERVICE.fullmatch(hostname) is not None)
 
 
 def offered(service: Service, environment: Environment) -> bool:
@@ -135,6 +147,14 @@ class DgiiHosts:
     def audience(self) -> str:
         """DGII's seeds' audience: the ``ecf`` host, with its port if it names one (checked when built)."""
         return urlsplit(self.ecf).netloc
+
+    @property
+    def beyond_loopback(self) -> bool:
+        """Whether either host is plain ``http`` to a local service's name, not to this machine."""
+        return any(
+            urlsplit(host).scheme == "http" and urlsplit(host).hostname not in LOOPBACK
+            for host in (self.ecf, self.fc)
+        )
 
     @property
     def official(self) -> bool:

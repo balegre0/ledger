@@ -77,6 +77,12 @@ def test_nothing_but_dgii_s_exact_hosts_counts_as_dgii_s(hosts: DgiiHosts) -> No
         "http://localhost.example.com",
         "http://user@127.0.0.1:8471",
         "http://127.0.0.1:8471/",
+        "http://-fake-dgii:8471",
+        "http://fake-dgii.:8471",
+        "http://134744072:8471",
+        "http://0x7f000001:8471",
+        "http://0xa9fea9fe",
+        "http://1fake-dgii:8471",
         "ftp://127.0.0.1",
         "ecf.dgii.gov.do",
         "https://",
@@ -95,6 +101,12 @@ def test_nothing_but_dgii_s_exact_hosts_counts_as_dgii_s(hosts: DgiiHosts) -> No
         "plain-http-lookalike-localhost",
         "plain-http-loopback-userinfo",
         "plain-http-loopback-path",
+        "plain-http-not-a-label",
+        "plain-http-dotted-name",
+        "plain-http-decimal-address",
+        "plain-http-hexadecimal-loopback",
+        "plain-http-hexadecimal-metadata-address",
+        "plain-http-label-led-by-a-digit",
         "ftp",
         "no-scheme",
         "no-host",
@@ -115,9 +127,20 @@ def test_a_host_is_an_https_origin_and_nothing_more(host: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "host", ["http://127.0.0.1:8471", "http://[::1]:8471", "http://localhost:8471", "http://LOCALHOST"]
+    "host",
+    [
+        "http://127.0.0.1:8471",
+        "http://[::1]:8471",
+        "http://localhost:8471",
+        "http://LOCALHOST",
+        "http://fake-dgii:8471",
+    ],
 )
-def test_plain_http_reaches_a_fake_on_this_machine_for_testecf_and_certecf_only(host: str) -> None:
+def test_plain_http_reaches_a_fake_on_this_machine_or_the_local_stack_for_testecf_and_certecf_only(
+    host: str,
+) -> None:
+    """A single-label name is a service of the local stack's network (compose's ``fake-dgii``): no public
+    name is one label, and DGII's are not reachable on plain http either way."""
     fake = DgiiHosts(ecf=host, fc=host)
     assert fake.url(Service.SEED, Environment.TESTECF) == f"{host}/testecf/{PATHS[Service.SEED]}"
     assert fake.url(Service.RFCE, Environment.CERTECF) == f"{host}/certecf/{PATHS[Service.RFCE]}"

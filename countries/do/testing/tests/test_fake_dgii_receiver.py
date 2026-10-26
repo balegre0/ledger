@@ -13,6 +13,7 @@ from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
 from ledger_country_do.channels.ecf_v1.domain.totals import compute_totals
 from ledger_country_do_testing.answers import json_list, json_object
 from ledger_country_do_testing.fake_dgii.app import DEFAULT_PUBLIC_URL
+from ledger_country_do_testing.fake_dgii.receiver import receiver_of_ours
 from ledger_country_do_testing.fake_dgii.state import DirectoryEntry
 from ledger_country_do_testing.samples import SIGNED_AT, credit_invoice
 from ledger_fiscal_kit.xml.hardened import texts
@@ -223,3 +224,29 @@ async def test_what_an_acknowledgement_cannot_name_is_refused_and_not_recorded(
         assert answer.status_code == 400
         assert json_object(answer)["trackId"] is None
     assert fake.received == []
+
+
+async def test_a_buyer_of_ours_is_listed_in_its_environment_at_our_receiver(
+    http: httpx.AsyncClient, fake: FakeDgii
+) -> None:
+    ours = receiver_of_ours(
+        "131098193",
+        name="CONSTRUCTORA DEL CARIBE SRL",
+        public_url="https://receiver.ledger.test",
+        environment="testecf",
+    )
+    fake.state.register("testecf", ours)
+    by_rnc = "consultadirectorio/api/consultas/obtenerdirectorioporrnc"
+    (entry,) = json_list(await http.get(f"/testecf/{by_rnc}", params={"RNC": "131098193"}))
+    base = "https://receiver.ledger.test/do-ecf-v1/testecf/131098193"
+    assert entry == {
+        "nombre": "CONSTRUCTORA DEL CARIBE SRL",
+        "rnc": "131098193",
+        "urlRecepcion": base,
+        "urlAceptacion": base,
+        "urlOpcional": base,
+    }
+    assert json_list(await http.get(f"/ecf/{by_rnc}", params={"RNC": "131098193"})) == []
+    listed = json_list(await http.get("/testecf/consultadirectorio/api/consultas/listado"))
+    assert [each["urlRecepcion"] for each in listed] == [base]
+    assert json_list(await http.get("/ecf/consultadirectorio/api/consultas/listado")) == []

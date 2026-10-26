@@ -16,11 +16,14 @@ or trickling empty chunks) is ``signer_import_too_slow``. The stream's refusals 
 admitted, sealed or kept until the stream has ended well. The password and the credential go from the
 header to custody as ``Secret`` values, never into a log, a span or an answer.
 
-``CALLER_METHODS`` is the allowlists (plan Decision 12): the api imports, describes and retires; the worker
-and the receiver sign and describe. ``SignerServer`` is the resource the signer's app opens: the service on
-its port (0: any free one, ``port`` says which), traced by the app's tracer, and its readiness while it
-serves. No gRPC health service is registered: the signer's probes are HTTP, and the guard would refuse an
-unauthenticated health call anyway.
+``CALLER_METHODS`` is the allowlists (plan Decision 12): the api imports, describes, retires and signs the
+documents the synchronous path of ``POST /v1/invoices`` signs (spec §8.5), and only those
+(``CALLER_DOCUMENTS``: an e-CF or an RFCE, by its root element; anything else, or a document that does not
+read, is refused as a method outside the allowlist, before anything is read of the company's certificate);
+the worker and the receiver sign anything and describe. ``SignerServer`` is the resource the signer's app
+opens: the service on its port (0: any free one, ``port`` says which), traced by the app's tracer, and its
+readiness while it serves. No gRPC health service is registered: the signer's probes are HTTP, and the guard
+would refuse an unauthenticated health call anyway.
 """
 
 import asyncio
@@ -33,9 +36,10 @@ lazy from types import TracebackType
 import grpc
 lazy from prometheus_client import CollectorRegistry
 
+from ledger_fiscal_kit.xml.hardened import XmlDocumentError, root_name
 from ledger_kernel.errors import InvalidValueError, LedgerError
 from ledger_platform.data.audit import acting_as
-from ledger_platform.grpc import MalformedRequestError, current_caller, serve_grpc
+from ledger_platform.grpc import MalformedRequestError, MethodNotAllowedError, current_caller, serve_grpc
 from ledger_platform.grpc.metadata import call_id_of
 from ledger_signer.adapters.grpc import codec
 from ledger_signer.adapters.grpc._generated.v1 import signer_pb2, signer_pb2_grpc
@@ -59,13 +63,29 @@ type Context[Request, Response] = grpc.aio.ServicerContext[Request, Response]
 
 _SIGNING: Final = frozenset({codec.SIGN_XML, codec.SIGN_SEED, codec.DESCRIBE})
 CALLER_METHODS: Final[Mapping[Caller, frozenset[str]]] = {
-    "api": frozenset({codec.IMPORT, codec.DESCRIBE, codec.RETIRE}),
+    "api": frozenset({codec.IMPORT, codec.DESCRIBE, codec.RETIRE, codec.SIGN_XML}),
     "worker": _SIGNING,
     "receiver": _SIGNING,
 }
-"""What each caller may call, by full name (Decision 12)."""
+"""What each caller may call, by full name (Decision 12). The api signs documents too, never a seed: the
+synchronous numbering-and-signing path of ``POST /v1/invoices`` runs in it (spec §8.5, amended 2026-10-26
+by v2-M3b Task 26, which found the api refused there); ``CALLER_DOCUMENTS`` bounds what it signs."""
+CALLER_DOCUMENTS: Final[Mapping[str, frozenset[str]]] = {"api": frozenset({"ECF", "RFCE"})}
+"""The documents a caller may have signed, by their root element, for a caller bound to some (ADR 0010): the
+api's are DGII's e-CF and RFCE alone, never an approval (ACECF), a void (ANECF) or a receipt (ARECF)."""
 _HEADER: Final = "header"
 _CHUNK: Final = "chunk"
+
+
+def _may_sign(caller: str, document: bytes) -> bool:
+    """Whether ``caller`` may have ``document`` signed (``CALLER_DOCUMENTS``); one that does not read, no."""
+    allowed = CALLER_DOCUMENTS.get(caller)
+    if allowed is None:
+        return True
+    try:
+        return root_name(document) in allowed
+    except XmlDocumentError:
+        return False
 
 
 class SignerNotServingError(LedgerError):
@@ -214,8 +234,11 @@ class SignerServicer(signer_pb2_grpc.SignerServiceServicer):
     ) -> signer_pb2.SignXmlResponse:
         actor = _actor(request.call, context)
         document = _read(partial(codec.xml_to_sign, request))
+        caller = current_caller()
+        if not _may_sign(caller, document.document):
+            raise MethodNotAllowedError
         with acting_as(actor):
-            signed = await self._signing.sign_xml(current_caller(), document)
+            signed = await self._signing.sign_xml(caller, document)
         return signer_pb2.SignXmlResponse(
             signed_document=signed.document, certificate_id=str(signed.certificate)
         )

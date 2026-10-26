@@ -4,7 +4,9 @@
   ``[{nombre, rnc, urlRecepcion, urlAceptacion, urlOpcional}]``. In TesteCF DGII answers its own simulator's
   URLs ("se retornarán las URLs de prueba del servicio de emisor receptor habilitado por DGII"), so any RNC
   not registered with the fake resolves to it; in eCF only registered receivers exist; CerteCF has no
-  directory (DT-DGII lists TesteCF and eCF only). The URLs are bases (F5).
+  directory (DT-DGII lists TesteCF and eCF only). The URLs are bases (F5). A receiver is registered for
+  every environment (``FakeState.directory``) or for one (``FakeState.register``): a buyer that is one of
+  our companies is listed at our receiver (``receiver_of_ours``).
 * The simulator, under ``{env}/emisorreceptor``: ``GET /fe/autenticacion/api/semilla``, ``POST
   /fe/autenticacion/api/validacioncertificado`` (a token of its own, never DGII's), ``POST
   /fe/recepcion/api/ecf`` (bearer when it publishes authentication) answering a **signed ARECF** (*Formato
@@ -26,6 +28,7 @@ from starlette.responses import JSONResponse, Response
 lazy from starlette.requests import Request
 
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
+from ledger_country_do.channels.ecf_v1.domain.channel import KEY
 from ledger_country_do.channels.ecf_v1.domain.exchanges import NotReceivedReason
 from ledger_country_do.channels.ecf_v1.domain.notation import dgii_moment
 from ledger_country_do_testing.fake_dgii.emitter import (
@@ -53,6 +56,15 @@ _ARECF_ENCF: Final = re.compile(r"[a-zA-Z0-9]{13}|[a-zA-Z0-9]{11}|[a-zA-Z0-9]{9}
 """The ARECF's ``RNCType`` and ``eNCFType`` (*Formato Acuse de Recibo v1.0*): what an ARECF can name."""
 NO_ACKNOWLEDGEMENT: Final = "El RNC Emisor, el RNC Comprador o el eNCF no son válidos para un acuse de recibo"
 """The fake's words: DGII documents no answer to an e-CF its acknowledgement could not name."""
+
+
+def receiver_of_ours(rnc: str, *, name: str, public_url: str, environment: str) -> DirectoryEntry:
+    """The directory entry of a company of ours: our receiver's base, ``/do-ecf-v1/{environment}/{rnc}``.
+
+    Its reception, approval and authentication are that base: a receiver that publishes all three.
+    """
+    base = f"{public_url}/{KEY}/{environment}/{rnc}"
+    return DirectoryEntry(name=name, rnc=rnc, reception=base, approval=base, authentication=base)
 
 
 def arecf(issuer_rnc: str, buyer_rnc: str, encf: str, *, reason: int | None, at: datetime) -> bytes:
@@ -127,13 +139,18 @@ class ReceiverServices:
         del request
         if environment == WITHOUT_DIRECTORY:
             return Response(status_code=HTTPStatus.NOT_FOUND)
-        return self._listed(list(self._state.directory.values()))
+        state = self._state
+        listed = {
+            **state.directory,
+            **{rnc: entry for (at, rnc), entry in state.directories.items() if at == environment},
+        }
+        return self._listed(list(listed.values()))
 
     async def _by_rnc(self, request: Request, environment: str) -> Response:
         if environment == WITHOUT_DIRECTORY:
             return Response(status_code=HTTPStatus.NOT_FOUND)
         rnc = request.query_params.get("RNC", "")
-        registered = self._state.directory.get(rnc)
+        registered = self._state.directories.get((environment, rnc), self._state.directory.get(rnc))
         if registered is not None:
             return self._listed([registered])
         return self._listed([self._simulator(environment, rnc)] if environment == "testecf" else [])
