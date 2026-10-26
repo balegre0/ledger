@@ -270,6 +270,7 @@ def retrying(client: httpx.AsyncClient, owner: TestPrincipal, company: str) -> R
         ("delivering", "ready", 409),
         ("not_started", "parked", 409),
         ("delivered", "done", 409),  # the retry raced the run that finished it
+        ("failed", "running", 409),  # a run under way would leave it delivering with no job
         ("not_applicable", None, 409),
     ],
 )

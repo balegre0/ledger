@@ -277,17 +277,18 @@ class Delivering:
     async def retry(self, unit: NumberingUnit, invoice: DocumentRef) -> EcfDocument:
         """``invoice``'s delivery started again in ``unit``: seven days from now, the job enqueued.
 
-        A delivery that failed; or one stuck (``not_started`` or ``delivering``) whose job no longer runs:
-        it died, or is gone. ``DeliveryNotFoundError`` when the invoice has no e-CF;
-        ``DeliveryNotRetryableError`` otherwise (done, not applicable, or a job still waiting or running,
-        which may finish it). The receipt of an earlier attempt is forgotten (the archive keeps it).
+        A delivery that failed, or one stuck (``not_started`` or ``delivering``), whose job no longer runs:
+        done, dead, or gone (a job that may still run is never left behind a retry it would ignore).
+        ``DeliveryNotFoundError`` when the invoice has no e-CF; ``DeliveryNotRetryableError`` otherwise
+        (done, not applicable, or a job still waiting or running, which may finish it). The receipt of an
+        earlier attempt is forgotten (the archive keeps it).
         """
         found = await unit.documents.of_invoice(invoice)
         if found is None:
             raise DeliveryNotFoundError
         current = await _found(unit, found.id, lock=True)
-        stuck = current.delivery in _UNDER_WAY and not await unit.deliveries.pending(current.id)
-        if current.delivery is not DeliveryState.FAILED and not stuck:
+        retryable = current.delivery is DeliveryState.FAILED or current.delivery in _UNDER_WAY
+        if not retryable or await unit.deliveries.pending(current.id):  # a job that may still run: its own
             raise DeliveryNotRetryableError
         started = replace(current, delivery_since=unit.now, delivery_attempts=0, receipt=None)
         moved = await self._move(unit, started, DeliveryState.DELIVERING, None)
