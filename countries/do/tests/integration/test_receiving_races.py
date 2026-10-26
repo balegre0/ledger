@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Final, Protocol, final, override
 lazy from collections.abc import AsyncGenerator
 lazy from datetime import datetime
+lazy from uuid import UUID
 
 import pytest
 
@@ -39,9 +40,11 @@ from ledger_testing.signer import TestSigner
 lazy from ledger_country_do.channels.ecf_v1.application.ranges import NumberingUnit
 lazy from ledger_country_do.channels.ecf_v1.application.received import ReceivedDocument
 lazy from ledger_country_do.channels.ecf_v1.application.receiving import Inspection
+lazy from ledger_country_do.channels.ecf_v1.domain.approval import Decided
 lazy from ledger_country_do.channels.ecf_v1.domain.encf import Encf
 lazy from ledger_country_do.channels.ecf_v1.domain.exchanges import CommercialApproval, Receipt
 lazy from ledger_country_do_testing.local_signer import KeyPairSigner
+lazy from ledger_kernel.pagination import Page, PageRequest
 lazy from ledger_platform.data.bound import BoundDatabase
 lazy from ledger_platform.runtime.archiving import StoreArchive
 lazy from ledger_testing.clock import ManualClock
@@ -67,8 +70,27 @@ class Blind(ReceivedDocuments):
         return None
 
     @override
+    async def get(self, document: UUID, *, lock: bool) -> ReceivedDocument | None:
+        return await self._inner.get(document, lock=lock)
+
+    @override
+    async def page(
+        self,
+        request: PageRequest,
+        *,
+        environment: Environment | None,
+        issuer: str | None,
+        decided: Decided | None,
+    ) -> Page[ReceivedDocument]:
+        return await self._inner.page(request, environment=environment, issuer=issuer, decided=decided)
+
+    @override
     async def add(self, document: ReceivedDocument) -> None:
         await self._inner.add(document)
+
+    @override
+    async def changed(self, document: ReceivedDocument) -> None:
+        await self._inner.changed(document)
 
 
 @final

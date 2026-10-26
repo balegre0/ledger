@@ -18,6 +18,7 @@ lazy import psycopg
 from ledger_country_do.channels.ecf_v1.adapters.postgres.migrations.versions import r0003_do_ecf
 from ledger_country_do.channels.ecf_v1.adapters.postgres.schema import MIGRATIONS
 from ledger_country_do.channels.ecf_v1.adapters.postgres.tables import DoEcfTable
+from ledger_country_do.channels.ecf_v1.domain.approval import Decision, Sending
 from ledger_country_do.channels.ecf_v1.domain.ecf import DeliveryState, EcfDocumentState, EmissionMode
 from ledger_country_do.channels.ecf_v1.domain.encf import EcfType
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
@@ -97,7 +98,7 @@ def test_the_migrate_app_brings_the_channel_s_schema_to_head_from_nothing_and_ag
         *CHASSIS_TABLES,
         "alembic_version",
     }
-    assert version_of(fresh_admin_url) == MIGRATIONS.head == "0005"
+    assert version_of(fresh_admin_url) == MIGRATIONS.head == "0006"
     App("migrate", settings=fresh, discover=module_under_test.discovering()).migrate()
     assert pending_changes(fresh_admin_url, MODELS, schema=S) is None
 
@@ -139,6 +140,9 @@ def test_the_check_constraints_are_the_models_and_allow_exactly_the_domain_s_wor
     assert words(checks, "ck_documents_delivery_state") == set(DeliveryState)
     assert words(checks, "ck_documents_emission_mode") == set(EmissionMode)
     assert words(checks, "ck_documents_number_fate") == set(NumberFate)
+    assert words(checks, "ck_received_documents_approval_decision") == set(Decision)
+    assert words(checks, "ck_received_documents_approval_emitter") == set(Sending)
+    assert words(checks, "ck_received_documents_approval_dgii") == set(Sending)
     assert checks["ck_numbering_ranges_numbers"] == (
         "CHECK (((1 <= first) AND (first <= next) AND (next <= (last + 1))"
         " AND (last <= '9999999999'::bigint)))"

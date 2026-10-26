@@ -69,8 +69,8 @@ services:
     # The tag the platform's tests run on: a service meets locally the PostgreSQL it will be tested against.
     image: postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
     # Room for every app's pool and its overflow (each up to twice LEDGER_DATABASE_POOL_SIZE): api 30, worker
-    # 68, signer 30, receiver 30, and zitadel's (docs/runbooks/platform/database-connections.md).
-    command: ["postgres", "-c", "max_connections=352"]
+    # 76, signer 30, receiver 30, and zitadel's (docs/runbooks/platform/database-connections.md).
+    command: ["postgres", "-c", "max_connections=368"]
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -130,10 +130,11 @@ services:
       LEDGER_SIGNER_ADDRESS: signer:50051
       LEDGER_DO_ECF_TRUSTED_ROOTS: /run/ledger/do-ecf/roots.pem
       # Its jobs' concurrency, their lease renewals, its runners and headroom (PoolTooSmallError names the
-      # need): 68 = 28 for the jobs' concurrency (do_ecf.advance 16, do_ecf.deliver 8, fiscal.route, the
-      # receiver's purge and the maintenance jobs), 30 for lease renewals (those jobs and fiscal's two outside
-      # consumers), 8 for its runners, 2 of headroom. Each job kind or outside consumer added raises it.
-      LEDGER_DATABASE_POOL_SIZE: "68"
+      # need): 76 = 32 for the jobs' concurrency (do_ecf.advance 16, do_ecf.deliver 8, do_ecf.approve 4,
+      # fiscal.route, the receiver's purge and the maintenance jobs), 34 for lease renewals (those jobs and
+      # fiscal's two outside consumers), 8 for its runners, 2 of headroom. Each job kind or outside consumer
+      # added raises it.
+      LEDGER_DATABASE_POOL_SIZE: "76"
     volumes:
       # do-ecf-v1's trusted roots, which the worker requires: do/roots.sh writes a development root (local only;
       # a deployment's roots are the owner's, Owner item 7). Missing, compose refuses the stack.

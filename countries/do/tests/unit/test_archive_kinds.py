@@ -81,7 +81,7 @@ async def test_an_archive_out_of_reach_is_the_channel_s_unavailable() -> None:
 
 async def test_an_app_that_binds_no_archive_keeps_nothing() -> None:
     """``ledger-migrate``'s channel: asked to keep or read a document, a defect."""
-    for keep in (UnboundArchive().ecf, UnboundArchive().rfce):
+    for keep in (UnboundArchive().ecf, UnboundArchive().rfce, UnboundArchive().approval):
         with pytest.raises(ArchiveNotBoundError, match="binds no archive") as caught:
             await keep(TENANT, b"<ECF/>")
         assert caught.value.kind == "internal"

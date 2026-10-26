@@ -5,7 +5,8 @@ A key is fiscal-kit's ``archive_key(...)`` with ``kind`` an ``ArchiveKind``:
 shape; which kinds exist is the channel's.
 
 ``PortArchive`` is the use cases' ``Archive`` (and the receiver's ``ReceptionArchive``: documents received
-as they arrived, ``received`` and ``acecf``, and the receipts answered, ``arecf``) over fiscal-kit's
+as they arrived, ``received`` and ``acecf``, and the receipts answered, ``arecf``; and the ``ApprovalArchive``
+of the ACECF the company signs as a buyer, ``acecf``) over fiscal-kit's
 ``ArchivePort`` (the app's archive): each
 document kept once under its key, until ten years from the day kept (Código Tributario art. 50 h; the app's
 archive keeps none less than its own retention), and read back checked against its SHA-256 (a mismatch or a
@@ -16,6 +17,7 @@ missing object passes as the archive's defect); its unavailability the channel's
 from enum import StrEnum
 from typing import ClassVar, Final, final, override
 
+from ledger_country_do.channels.ecf_v1.application.approving import ApprovalArchive
 from ledger_country_do.channels.ecf_v1.application.ports import Archive, Archived, ArchiveUnavailableError
 from ledger_country_do.channels.ecf_v1.application.receiving import ReceptionArchive
 from ledger_country_do.channels.ecf_v1.domain.channel import KEY
@@ -54,7 +56,7 @@ class ArchiveKind(StrEnum):
 
 
 @final
-class PortArchive(Archive, ReceptionArchive):
+class PortArchive(Archive, ReceptionArchive, ApprovalArchive):
     """``Archive`` over the app's ``ArchivePort`` (see the module)."""
 
     __slots__ = ("_clock", "_port")
@@ -114,7 +116,7 @@ class ArchiveNotBoundError(EcfError):
 
 
 @final
-class UnboundArchive(Archive):
+class UnboundArchive(Archive, ApprovalArchive):
     """The archive of an app that keeps nothing (``ledger-migrate``): every request is a defect."""
 
     __slots__ = ()
@@ -129,6 +131,10 @@ class UnboundArchive(Archive):
 
     @override
     async def buyer_receipt(self, tenant: Tenant, arecf: bytes, *, refused: bool) -> Archived:
+        raise ArchiveNotBoundError
+
+    @override
+    async def approval(self, tenant: Tenant, document: bytes) -> Archived:
         raise ArchiveNotBoundError
 
     @override

@@ -1,4 +1,6 @@
-"""The ``EcfFormat`` port over DGII's formats: written, checked against DGII's schema, signature verified.
+"""The ``EcfFormat`` and ``ApprovalFormat`` ports over DGII's formats: written, checked, signatures verified.
+
+Written, checked against DGII's schema, signature verified (``ApprovalFormat``: the ACECF a buyer signs).
 
 A document is checked unsigned, as it will be once signed, before the signer sees it, and checked again once
 signed, its signature verified by the pack's own verifier (DGII's profile, strict), before it is sent: a
@@ -10,15 +12,18 @@ lazy from datetime import datetime
 
 from ledger_country_do.channels.ecf_v1.adapters.signing.verifier import verify_enveloped
 from ledger_country_do.channels.ecf_v1.adapters.xml import ecf, rfce
+from ledger_country_do.channels.ecf_v1.adapters.xml.acecf import render_acecf
 from ledger_country_do.channels.ecf_v1.adapters.xml.schema_set import DO_SCHEMAS
 from ledger_country_do.channels.ecf_v1.adapters.xsd.published import Format
+from ledger_country_do.channels.ecf_v1.application.approving import ApprovalFormat
 from ledger_country_do.channels.ecf_v1.application.ports import EcfFormat
 lazy from ledger_country_do.channels.ecf_v1.domain.drafts import EcfDraft
+lazy from ledger_country_do.channels.ecf_v1.domain.exchanges import CommercialApproval
 lazy from ledger_country_do.channels.ecf_v1.domain.totals import Totals
 
 
 @final
-class DgiiXml(EcfFormat):
+class DgiiXml(EcfFormat, ApprovalFormat):
     """DGII's formats (see the module)."""
 
     __slots__ = ()
@@ -39,3 +44,12 @@ class DgiiXml(EcfFormat):
     def signed(self, draft: EcfDraft, signed: bytes, *, rfce: bool) -> str:
         DO_SCHEMAS.checked(Format.RFCE if rfce else ecf.FORMAT_OF[draft.ecf_type], signed, unsigned=False)
         return verify_enveloped(signed).signature_value
+
+    @override
+    def acecf(self, approval: CommercialApproval) -> bytes:
+        return render_acecf(approval)
+
+    @override
+    def signed_acecf(self, signed: bytes) -> None:
+        DO_SCHEMAS.checked(Format.ACECF, signed, unsigned=False)
+        _ = verify_enveloped(signed)

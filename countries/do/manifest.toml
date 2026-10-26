@@ -113,6 +113,17 @@ max_attempts = 50                    # failures; RunAgain does not count
 deadline = "8d"
 concurrency = 8
 
+# A received e-CF's commercial approval or rejection, as the company decided it (spec §8.6.5 step 6, Task 23):
+# its ACECF signed once, archived, then sent to the emitter and to DGII; like a delivery, the emitter is tried
+# for seven days from the decision (Decision 21), so its deadline leaves a day's room for the run that records
+# the failure.
+[[channels.jobs]]
+kind = "do_ecf.approve"
+timeout = "3m"                       # one signature and at most one call to each party per run
+max_attempts = 50                    # failures; RunAgain does not count
+deadline = "8d"
+concurrency = 4
+
 [[channels.jobs]]
 kind = "do_ecf.purge_receiver_credentials"   # the receiver's expired seeds and tokens (Task 22)
 concurrency = 1
