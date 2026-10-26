@@ -6,8 +6,8 @@ from datetime import UTC, datetime
 from typing import Final, final
 
 import pytest
-from psycopg.errors import ForeignKeyViolation, InsufficientPrivilege
-from sqlalchemy import func, insert, select, text
+from psycopg.errors import CheckViolation, ForeignKeyViolation, InsufficientPrivilege
+from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 from ledger_identity.adapters.postgres.tables import (
@@ -257,6 +257,26 @@ async def test_an_establishment_cannot_point_at_another_organizations_company(
         async with module_database.unit(across) as unit:
             await unit.connection.execute(insert(EstablishmentRecord).values(establishment_of(across, "999")))
     assert violated_key(caught) == "fk_establishments_company"
+
+
+async def test_a_company_s_subdivision_codes_go_with_an_address_line_only(
+    module_database: BoundDatabase,
+) -> None:
+    """Task 35's ``ck_companies_address``: a municipality or a province without a line is refused."""
+    company = (await seeded(module_database)).tenant
+    statement = (
+        update(CompanyRecord)
+        .where(CompanyRecord.id == company.company)
+        .values(address_line=None, address_province="010000")
+    )
+    with pytest.raises(IntegrityError) as caught:
+        async with module_database.unit(company) as unit:
+            await unit.connection.execute(statement)
+    refusal = caught.value.orig
+    assert isinstance(refusal, CheckViolation)
+    assert refusal.diag.constraint_name == "ck_companies_address"
+    async with module_database.unit(company) as unit:
+        await unit.connection.execute(statement.values(address_line="Calle 1"))
 
 
 @pytest.mark.parametrize(

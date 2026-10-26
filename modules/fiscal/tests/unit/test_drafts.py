@@ -29,6 +29,7 @@ from ledger_invoicing.api import (
     PartyInfo,
     SellerInfo,
 )
+from ledger_kernel.addresses import FiscalAddress
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.money import Currency, Money
@@ -61,6 +62,7 @@ INVOICE: Final = InvoiceId(UUID("0199e3a0-0000-7000-8000-0000000000a3"))
 CORRECTED: Final = InvoiceId(UUID("0199e3a0-0000-7000-8000-0000000000a4"))
 RNC: Final = TaxId(TaxIdScheme("do.rnc"), "101850043")
 BUYER_RNC: Final = TaxId(TaxIdScheme("do.rnc"), "131098193")
+ADDRESS: Final = FiscalAddress(line="AV. DUARTE 10, VILLA CONSUELO", municipality="010100", province="010000")
 
 
 def enrollment(tenant: Tenant = TENANT) -> Enrollment:
@@ -110,7 +112,7 @@ def view(currency: Currency = PESO) -> InvoiceInfo:
         exchange_rate=None,
         issue_date=ISSUED_ON,
         tax_point=ISSUED_ON,
-        seller=SellerInfo(legal_name="FERRETERIA DUARTE SRL", tax_id=RNC),
+        seller=SellerInfo(legal_name="FERRETERIA DUARTE SRL", tax_id=RNC, address=ADDRESS),
         buyer=PartyInfo(
             legal_name="CONSTRUCTORA DEL CARIBE SRL",
             tax_id=BUYER_RNC,
@@ -146,7 +148,13 @@ def test_a_sales_invoice_becomes_the_channel_s_draft_of_its_enrollment() -> None
         DocumentKind.INVOICE,
         Direction.SALES,
     )
-    assert draft.issuer == FiscalParty(tax_id=RNC, legal_name="FERRETERIA DUARTE SRL")
+    assert draft.issuer == FiscalParty(
+        tax_id=RNC,
+        legal_name="FERRETERIA DUARTE SRL",
+        address="AV. DUARTE 10, VILLA CONSUELO",
+        municipality="010100",
+        province="010000",
+    )
     assert draft.counterparty == FiscalParty(
         tax_id=BUYER_RNC,
         legal_name="CONSTRUCTORA DEL CARIBE SRL",
@@ -184,6 +192,20 @@ def test_a_sales_invoice_becomes_the_channel_s_draft_of_its_enrollment() -> None
         ISSUED_ON,
     )
     assert draft.external_reference == "POS-1"
+
+
+def test_the_issuer_is_at_the_address_the_seller_was_issued_with_or_at_none() -> None:
+    """Task 35: the seller's snapshot, its line and codes; a document issued before the company stated one
+    names none (the channel objects to it)."""
+    lined = replace(
+        view(), seller=SellerInfo(legal_name="D", tax_id=RNC, address=FiscalAddress(line="CALLE 1"))
+    )
+    issuer = fiscal_draft(lined, enrollment=enrollment(), regime=REGIME).issuer
+    assert (issuer.address, issuer.municipality, issuer.province) == ("CALLE 1", None, None)
+    bare = replace(view(), seller=SellerInfo(legal_name="D", tax_id=RNC, address=None))
+    assert fiscal_draft(bare, enrollment=enrollment(), regime=REGIME).issuer == FiscalParty(
+        tax_id=RNC, legal_name="D"
+    )
 
 
 def test_a_buyer_without_a_tax_id_is_kept_without_one_and_no_buyer_is_no_counterparty() -> None:

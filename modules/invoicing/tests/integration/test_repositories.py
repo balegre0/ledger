@@ -46,6 +46,7 @@ from ledger_invoicing.domain.parties import Seller, party
 from ledger_invoicing.domain.pricing import Dating, EstablishmentRef, Terms, price
 from ledger_invoicing.domain.text import ExternalReference, parse_external_reference, parse_reason
 from ledger_kernel.access import Principal, PrincipalKind, SubjectId
+from ledger_kernel.addresses import FiscalAddress
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.jurisdiction import parse_jurisdiction
 from ledger_kernel.money import Currency
@@ -71,7 +72,12 @@ DOP: Final = Currency.of("DOP")
 USD: Final = Currency.of("USD")
 MAIN: Final = EstablishmentRef(code="MAIN", time_zone="America/Santo_Domingo")
 RNC: Final = TaxId(TaxIdScheme("do.rnc"), "101850043")
-SELLER: Final = Seller(legal_name="Acme SRL", tax_id=RNC)
+SELLER: Final = Seller(
+    legal_name="Acme SRL",
+    tax_id=RNC,
+    address=FiscalAddress(line="Av. Duarte 10", municipality="010100", province="010000"),
+)
+"""Its address kept as it was issued (Task 35)."""
 WIDGET: Final = LineTerms(
     description="Widget", quantity=Decimal("2.5"), unit_price=Decimal("40.10"), taxes=("do.itbis.standard",)
 )
@@ -550,6 +556,7 @@ class Directory(IdentityLookup):
             functional_currency=DOP,
             tax_ids=(RNC,),
             legal_name="Acme SRL",
+            address=None,
             active=True,
             fiscal_profile_locked=False,
             version=1,

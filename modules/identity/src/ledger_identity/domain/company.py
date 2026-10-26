@@ -3,28 +3,34 @@
 It is in one jurisdiction, keeps its books in one functional currency and holds one or more tax ids, the
 first of which is its primary one: its fiscal profile, which the regime of its jurisdiction must allow
 (``require_fits``). Until the profile is locked (before the company's first numbered document) it may be
-changed; once locked it never changes (§7.1: another taxpayer is another company).
+changed; once locked it never changes (§7.1: another taxpayer is another company). Its fiscal address, as its
+tax authority has it on record, is optional and stays changeable after the lock (an issued document keeps the
+one it was issued with): the regime of its jurisdiction says what it takes (``require_address_fits``).
 Every change makes a new version, which is the company's ``ETag``. A deactivated company changes no more; its
 data stays readable.
 """
 
 from dataclasses import dataclass, replace
-from enum import StrEnum
-from typing import final
+from enum import Enum, StrEnum
+from typing import Final, final
 lazy from datetime import datetime
 
 from ledger_identity.domain.errors import (
+    AddressCodeUnknownError,
     CompanyInactiveError,
     CurrencyUnsupportedError,
     FiscalProfileLockedError,
+    InvalidNameError,
     JurisdictionUnsupportedError,
     TaxIdForeignError,
 )
 from ledger_identity.events import CompanyDeactivated, CompanyRegistered, CompanyUpdated
+from ledger_kernel.addresses import GENERIC_ADDRESS, AddressPart
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.ids import CompanyId, new_id
 from ledger_kernel.tenancy import Tenant
 lazy from ledger_identity.domain.text import LegalName
+lazy from ledger_kernel.addresses import FiscalAddress
 lazy from ledger_kernel.ids import OrganizationId
 lazy from ledger_kernel.jurisdiction import Jurisdiction
 lazy from ledger_kernel.money import Currency
@@ -37,6 +43,15 @@ class CompanyStatus(StrEnum):
 
     ACTIVE = "active"
     INACTIVE = "inactive"
+
+
+_LINE: Final = "address.line"
+
+
+class Keep(Enum):
+    """What a change says of a part it leaves as it is (``None`` would clear an optional one)."""
+
+    KEEP = "keep"
 
 
 @final
@@ -77,6 +92,26 @@ def require_fits(profile: FiscalProfile, regime: RegimeDef | None) -> RegimeDef:
     return regime
 
 
+def require_address_fits(address: FiscalAddress | None, regime: RegimeDef | None) -> None:
+    """Refuse an address the regime of the company's jurisdiction does not take (no address is always taken).
+
+    A line longer than the regime's limit (``InvalidNameError``), a municipality or a province that is no
+    code of its catalogue (``AddressCodeUnknownError``). A regime that declares no address, or none installed,
+    takes the generic one: a line, no code.
+    """
+    if address is None:
+        return
+    rule = GENERIC_ADDRESS if regime is None else regime.address
+    part = rule.violation(address)
+    if part is None:
+        return
+    if part is AddressPart.LINE:
+        problem = f"is longer than {rule.max_line} characters"
+        raise InvalidNameError(_LINE, problem)
+    field = f"address.{part.value}"  # a municipality or a province
+    raise AddressCodeUnknownError(field)
+
+
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Company:
@@ -86,6 +121,8 @@ class Company:
     organization: OrganizationId
     profile: FiscalProfile
     legal_name: LegalName
+    address: FiscalAddress | None
+    """Its fiscal address, as its tax authority has it on record; ``None`` until it states one."""
     status: CompanyStatus
     fiscal_profile_locked_at: datetime | None
     version: int
@@ -103,7 +140,13 @@ class Company:
 
     @classmethod
     def register(
-        cls, *, organization: OrganizationId, profile: FiscalProfile, legal_name: LegalName, now: datetime
+        cls,
+        *,
+        organization: OrganizationId,
+        profile: FiscalProfile,
+        legal_name: LegalName,
+        address: FiscalAddress | None = None,
+        now: datetime,
     ) -> tuple[Company, CompanyRegistered]:
         """A new company of ``organization``, active, at version 1, its profile not yet locked."""
         company = cls(
@@ -111,6 +154,7 @@ class Company:
             organization=organization,
             profile=profile,
             legal_name=legal_name,
+            address=address,
             status=CompanyStatus.ACTIVE,
             fiscal_profile_locked_at=None,
             version=1,
@@ -134,22 +178,31 @@ class Company:
             raise CompanyInactiveError(self.id)
 
     def change(
-        self, *, legal_name: LegalName | None = None, profile: FiscalProfile | None = None, now: datetime
+        self,
+        *,
+        legal_name: LegalName | None = None,
+        profile: FiscalProfile | None = None,
+        address: FiscalAddress | Keep | None = Keep.KEEP,
+        now: datetime,
     ) -> tuple[Company, CompanyUpdated | None]:
-        """The company under ``legal_name`` and with ``profile``, each where given, at its next version.
+        """The company under ``legal_name``, with ``profile`` and at ``address``, each where given, changed.
 
-        Unchanged, and no event, when it is so already. Its profile changes only until it is locked
-        (``FiscalProfileLockedError``); whether its regime allows the new one is the caller's to check first
-        (``require_fits``).
+        At its next version; ``address=None`` clears the address. Unchanged, and no event, when it is so
+        already. Its profile changes only until it is locked (``FiscalProfileLockedError``), its name and
+        address at any time; whether its regime allows the new profile and address is the caller's to check
+        first (``require_fits``, ``require_address_fits``).
         """
         self.require_active()
         name = self.legal_name if legal_name is None else legal_name
         fiscal = self.profile if profile is None else profile
+        located = self.address if isinstance(address, Keep) else address
         if fiscal != self.profile and self.fiscal_profile_locked_at is not None:
             raise FiscalProfileLockedError(self.id)
-        if (name, fiscal) == (self.legal_name, self.profile):
+        if (name, fiscal, located) == (self.legal_name, self.profile, self.address):
             return self, None
-        changed = replace(self, legal_name=name, profile=fiscal, version=self.version + 1, updated_at=now)
+        changed = replace(
+            self, legal_name=name, profile=fiscal, address=located, version=self.version + 1, updated_at=now
+        )
         return changed, changed.updated()
 
     def lock_fiscal_profile(self, *, now: datetime) -> tuple[Company, CompanyUpdated | None]:

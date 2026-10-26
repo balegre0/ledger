@@ -38,6 +38,7 @@ ACME: Final = CompanyInfo(
     functional_currency=Currency.of("DOP"),
     tax_ids=(TaxId(TaxIdScheme("do.rnc"), "101850043"),),
     legal_name="Acme SRL",
+    address=None,
     active=True,
     fiscal_profile_locked=False,
     version=1,

@@ -9,6 +9,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from ledger_kernel.addresses import GENERIC_ADDRESS, AddressDef
 from ledger_kernel.dated import Since, Timeline
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.jurisdiction import CountryCode, Jurisdiction
@@ -126,6 +127,7 @@ class Changes(TypedDict, total=False):
     fields: tuple[FieldDef, ...]
     functional_currencies: tuple[Currency, ...]
     foreign_tax_ids: bool
+    address: AddressDef
 
 
 def regime(**changes: Unpack[Changes]) -> RegimeDef:
@@ -150,6 +152,7 @@ def regime(**changes: Unpack[Changes]) -> RegimeDef:
         sources=changes.get("sources", (SOURCE,)),
         functional_currencies=changes.get("functional_currencies", ()),
         foreign_tax_ids=changes.get("foreign_tax_ids", False),
+        address=changes.get("address", GENERIC_ADDRESS),
     )
 
 
@@ -272,6 +275,12 @@ def test_a_regime_accepts_only_its_country_s_tax_ids_unless_it_says_so() -> None
     assert regime().accepts_tax_id(domestic)
     assert not regime().accepts_tax_id(foreign)
     assert regime(foreign_tax_ids=True).accepts_tax_id(foreign)
+
+
+def test_a_regime_takes_the_generic_address_unless_it_declares_its_own() -> None:
+    assert regime().address == GENERIC_ADDRESS
+    own = AddressDef(max_line=100, provinces=frozenset({"010000"}))
+    assert regime(address=own).address == own
 
 
 def test_a_regime_whose_book_currencies_repeat_or_include_its_own_is_refused() -> None:

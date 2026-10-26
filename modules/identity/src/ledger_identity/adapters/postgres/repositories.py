@@ -48,6 +48,7 @@ from ledger_identity.domain.membership import Membership, MembershipStatus
 from ledger_identity.domain.organization import Organization
 from ledger_identity.domain.text import Code, LegalName, Name, TimeZone
 from ledger_kernel.access import Role, SubjectId
+from ledger_kernel.addresses import FiscalAddress
 from ledger_kernel.errors import LedgerError
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.jurisdiction import CountryCode, Jurisdiction
@@ -109,8 +110,28 @@ _COMPANY = select(
     CompanyRecord.version,
     CompanyRecord.created_at,
     CompanyRecord.updated_at,
+    CompanyRecord.address_line,
+    CompanyRecord.address_municipality,
+    CompanyRecord.address_province,
 )
-type CompanyRow = Row[UUID, UUID, str, str | None, str, str, str, datetime | None, int, datetime, datetime]
+type CompanyColumns = tuple[
+    UUID,
+    UUID,
+    str,
+    str | None,
+    str,
+    str,
+    str,
+    datetime | None,
+    int,
+    datetime,
+    datetime,
+    str | None,
+    str | None,
+    str | None,
+]
+"""What ``_COMPANY`` selects, in its order: the company's columns, its address's last."""
+type CompanyRow = Row[*CompanyColumns]
 _ESTABLISHMENT = select(
     EstablishmentRecord.id,
     EstablishmentRecord.organization_id,
@@ -154,6 +175,9 @@ def _company(row: CompanyRow, tax_ids: tuple[TaxId, ...]) -> Company:
         version,
         created_at,
         updated_at,
+        line,
+        municipality,
+        province,
     ) = row
     return Company(
         id=CompanyId(identifier),
@@ -164,12 +188,26 @@ def _company(row: CompanyRow, tax_ids: tuple[TaxId, ...]) -> Company:
             tax_ids=tax_ids,
         ),
         legal_name=LegalName(legal_name),
+        address=None
+        if line is None
+        else FiscalAddress(line=line, municipality=municipality, province=province),
         status=CompanyStatus(status),
         fiscal_profile_locked_at=locked_at,
         version=version,
         created_at=created_at,
         updated_at=updated_at,
     )
+
+
+def _address_columns(address: FiscalAddress | None) -> dict[str, str | None]:
+    """The ``address_*`` columns of ``address``: all empty for none."""
+    if address is None:
+        return {"address_line": None, "address_municipality": None, "address_province": None}
+    return {
+        "address_line": address.line,
+        "address_municipality": address.municipality,
+        "address_province": address.province,
+    }
 
 
 def _api_client(row: Row[UUID, UUID, str, str, str, date, str, datetime, str, datetime | None]) -> ApiClient:
@@ -274,6 +312,7 @@ class PgCompanies(Companies):
                 subdivision=profile.jurisdiction.subdivision,
                 currency=profile.functional_currency.code,
                 legal_name=company.legal_name,
+                **_address_columns(company.address),
                 status=company.status.value,
                 fiscal_profile_locked_at=company.fiscal_profile_locked_at,
                 version=company.version,
@@ -345,6 +384,7 @@ class PgCompanies(Companies):
                 subdivision=company.profile.jurisdiction.subdivision,
                 currency=company.profile.functional_currency.code,
                 legal_name=company.legal_name,
+                **_address_columns(company.address),
                 status=company.status.value,
                 fiscal_profile_locked_at=company.fiscal_profile_locked_at,
                 version=company.version,
@@ -445,9 +485,7 @@ class PgCompanies(Companies):
             tax_ids.setdefault(company, []).append(TaxId(TaxIdScheme(scheme), value))
         return [_company(row, tuple(tax_ids[row[0]])) for row in rows]
 
-    def _one(
-        self, company: CompanyId
-    ) -> Select[UUID, UUID, str, str | None, str, str, str, datetime | None, int, datetime, datetime]:
+    def _one(self, company: CompanyId) -> Select[*CompanyColumns]:
         return _COMPANY.where(
             CompanyRecord.organization_id == self._organization, CompanyRecord.id == company
         )

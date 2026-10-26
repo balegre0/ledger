@@ -5,6 +5,7 @@ Units are identity's own (``module_database``: ``identity_rw``, its schema); wha
 """
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from functools import partial
 from typing import Final, final
@@ -43,6 +44,7 @@ from ledger_identity.domain.organization import ORGANIZATION_ADMIN, Organization
 from ledger_identity.domain.roles import EVERYTHING, only_reads
 from ledger_identity.domain.text import parse_code, parse_legal_name, parse_name, parse_time_zone
 from ledger_kernel.access import CompanyNotFoundError, Principal, PrincipalKind, Role, SubjectId
+from ledger_kernel.addresses import FiscalAddress
 from ledger_kernel.ids import CompanyId, new_id
 from ledger_kernel.jurisdiction import parse_jurisdiction
 from ledger_kernel.money import Currency
@@ -322,6 +324,33 @@ async def test_a_company_keeps_its_profile_and_every_tax_id_in_order(module_data
         ("do.cedula", "00113918205", company.organization, company.id),
         ("do.rnc", "101850043", company.organization, company.id),
     ]
+
+
+async def test_a_company_keeps_its_fiscal_address_until_it_changes_or_clears_it(
+    module_database: BoundDatabase,
+) -> None:
+    """Task 35: its line and the codes of its municipality and province, each as it was stored, or none."""
+    first = FiscalAddress(line="Calle 1", province="010000")
+    registering = replace(registration(), address=first)
+    company = await in_unit(
+        module_database,
+        OrganizationScope(FOUNDER.organization, None),
+        lambda unit: commands.create_company(unit, FOUNDER, registering),
+    )
+    assert (await read_company(module_database, company)).address == first
+    moved, _ = company.change(
+        address=FiscalAddress(line="Av. Duarte 10, Villa Consuelo", municipality="010100", province="010000"),
+        now=company.updated_at,
+    )
+    cleared, _ = moved.change(address=None, now=company.updated_at)
+    for current, changed in ((company, moved), (moved, cleared)):
+        async with module_database.unit(company.tenant) as unit:
+            assert await bind(unit).companies.update(changed, version=current.version)
+        assert await read_company(module_database, company) == changed
+
+
+async def read_company(module_database: BoundDatabase, company: Company) -> Company:
+    return await in_unit(module_database, company.tenant, lambda unit: queries.company(unit, company.id))
 
 
 async def test_any_one_tax_id_of_a_company_taken_refuses_it_whole(module_database: BoundDatabase) -> None:

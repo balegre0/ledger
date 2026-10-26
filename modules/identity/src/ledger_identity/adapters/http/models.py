@@ -26,6 +26,7 @@ from ledger_identity.domain.api_clients import ApiClientStatus
 from ledger_identity.domain.company import CompanyStatus
 from ledger_identity.domain.text import MAX_LEGAL_NAME, MAX_NAME
 from ledger_kernel.access import MAX_SUBJECT_LENGTH, Role
+from ledger_kernel.addresses import MAX_ADDRESS_LINE
 from ledger_kernel.tax_ids import MAX_TAX_ID_LENGTH
 from ledger_kernel.tenancy import Mode
 lazy from ledger_identity.domain.api_clients import ApiClient
@@ -33,6 +34,7 @@ lazy from ledger_identity.domain.company import Company
 lazy from ledger_identity.domain.establishments import Establishment
 lazy from ledger_identity.domain.membership import Membership
 lazy from ledger_identity.domain.organization import Organization
+lazy from ledger_kernel.addresses import FiscalAddress
 lazy from ledger_kernel.jurisdiction import Jurisdiction
 lazy from ledger_kernel.tax_ids import TaxId
 
@@ -40,7 +42,7 @@ lazy from ledger_kernel.tax_ids import TaxId
 class _NothingToChangeError(ValueError):
     def __init__(self) -> None:
         super().__init__(
-            "a change names at least one of legal_name, jurisdiction, functional_currency, tax_ids"
+            "a change names at least one of legal_name, jurisdiction, functional_currency, tax_ids, address"
         )
 
 
@@ -92,6 +94,43 @@ class JurisdictionBody(_Shape):
         return cls(country=jurisdiction.country, subdivision=jurisdiction.subdivision)
 
 
+class AddressBody(_Shape):
+    """A company's fiscal address, as its tax authority has it on record (§7.1).
+
+    Its regime says what it takes: in the Dominican Republic a line of up to 100 characters (DGII's
+    ``DireccionEmisor``) and, optionally, the codes of its municipality and province in DGII's catalogue
+    (``Municipio``, ``Provincia``: six digits, ``010100``).
+    """
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    line: str = Field(
+        min_length=1,
+        max_length=MAX_ADDRESS_LINE,
+        description="Street, number, sector: what a person reads. Its regime may hold fewer characters.",
+        examples=["Av. Duarte 10, Villa Consuelo"],
+    )
+    municipality: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=16,
+        description="The code of its municipality in its regime's catalogue, if the regime keeps one.",
+        examples=["010100"],
+    )
+    province: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=16,
+        description="The code of its province in its regime's catalogue, if the regime keeps one.",
+        examples=["010000"],
+    )
+
+    @classmethod
+    def of(cls, address: FiscalAddress) -> Self:
+        """The body of ``address``."""
+        return cls(line=address.line, municipality=address.municipality, province=address.province)
+
+
 MAX_TAX_IDS: Final = 5
 """How many tax ids a company lists: a taxpayer has few (an RNC, a cédula, a foreign id)."""
 
@@ -123,13 +162,18 @@ class NewCompany(_Shape):
         ),
         examples=["America/Santo_Domingo"],
     )
+    address: AddressBody | None = Field(
+        default=None,
+        description="Its fiscal address, as its tax authority has it on record (a fiscal channel needs it).",
+    )
 
 
 class CompanyChanges(_Shape):
     """What can change in a company: what the request names changes, the rest stays.
 
     Its fiscal profile (jurisdiction, functional currency, tax ids) changes only until it is locked, before
-    the company's first numbered document (409 ``fiscal_profile_locked`` after).
+    the company's first numbered document (409 ``fiscal_profile_locked`` after). Its name and its fiscal
+    address change at any time (``address: null`` clears it).
     """
 
     legal_name: str | None = Field(default=None, min_length=1, max_length=MAX_LEGAL_NAME)
@@ -157,6 +201,13 @@ class CompanyChanges(_Shape):
         ),
         examples=["America/Santo_Domingo"],
     )
+    address: AddressBody | None = Field(
+        default=None,
+        description=(
+            "Its fiscal address as a whole, at any time: an issued document keeps the one it was issued "
+            "with. null clears it; absent, it stays."
+        ),
+    )
 
     @model_validator(mode="after")
     def changes_something(self) -> Self:
@@ -175,6 +226,7 @@ class CompanyView(_Shape):
     functional_currency: str
     tax_ids: list[TaxIdBody] = Field(description="The first is its primary one.")
     legal_name: str
+    address: AddressBody | None = Field(description="Its fiscal address, if it states one.")
     status: CompanyStatus
     fiscal_profile_locked_at: datetime | None = Field(
         description="When its fiscal profile (jurisdiction, currency, tax ids) became immutable, if it did."
@@ -193,6 +245,7 @@ class CompanyView(_Shape):
             functional_currency=company.profile.functional_currency.code,
             tax_ids=[TaxIdBody.of(tax_id) for tax_id in company.profile.tax_ids],
             legal_name=company.legal_name,
+            address=None if company.address is None else AddressBody.of(company.address),
             status=company.status,
             fiscal_profile_locked_at=company.fiscal_profile_locked_at,
             version=company.version,
@@ -226,6 +279,7 @@ class RegisteredCompany(CompanyView):
             functional_currency=view.functional_currency,
             tax_ids=view.tax_ids,
             legal_name=view.legal_name,
+            address=view.address,
             status=view.status,
             fiscal_profile_locked_at=view.fiscal_profile_locked_at,
             version=view.version,

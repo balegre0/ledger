@@ -45,6 +45,7 @@ from ledger_invoicing.domain.lines import LineTerms
 from ledger_invoicing.domain.parties import Party, Seller
 from ledger_invoicing.domain.pricing import EstablishmentRef, LineTax, PricedLine, Pricing, Terms
 from ledger_invoicing.domain.text import Address, Email, ExternalReference, LegalName, Reason
+from ledger_kernel.addresses import FiscalAddress
 from ledger_kernel.errors import LedgerError
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.money import Currency, Money
@@ -104,6 +105,9 @@ class _InvoiceRow:
     seller_legal_name: str | None
     seller_tax_scheme: str | None
     seller_tax_value: str | None
+    seller_address_line: str | None
+    seller_address_municipality: str | None
+    seller_address_province: str | None
     void_reason: str | None
     version: int
     created_at: datetime
@@ -196,6 +200,8 @@ _NOT_VOIDED: Final = InvoiceRecord.status != InvoiceStatus.VOIDED.value
 
 _SELLER: Final = "seller"
 """The prefix of the seller's columns."""
+_SELLER_ADDRESS: Final = "seller_address"
+"""The prefix of the seller's address's columns."""
 
 
 class IncompleteRowError(LedgerError):
@@ -216,13 +222,26 @@ def tax_id_of(scheme: str | None, value: str | None, *, columns: str) -> TaxId |
     return TaxId(TaxIdScheme(scheme), value)
 
 
-def seller_from_columns(legal_name: str | None, scheme: str | None, value: str | None) -> Seller | None:
-    """The seller of the ``seller_*`` columns: its name and its tax id, or none of them (a draft)."""
-    if legal_name is None and scheme is None and value is None:
+type AddressColumns = tuple[str | None, str | None, str | None]
+"""The ``seller_address_*`` columns: its line, its municipality's code, its province's."""
+
+
+def seller_from_columns(
+    legal_name: str | None, scheme: str | None, value: str | None, address: AddressColumns
+) -> Seller | None:
+    """The seller of the ``seller_*`` columns: its name, tax id and address, or none of them (a draft).
+
+    Its address is its line with its codes, or none: codes without a line are a row not whole.
+    """
+    line, municipality, province = address
+    if legal_name is None and scheme is None and value is None and line is None:
         return None
     if legal_name is None or scheme is None or value is None:
         raise IncompleteRowError(_SELLER)
-    return Seller(legal_name=legal_name, tax_id=TaxId(TaxIdScheme(scheme), value))
+    if line is None and (municipality is not None or province is not None):
+        raise IncompleteRowError(_SELLER_ADDRESS)
+    located = None if line is None else FiscalAddress(line=line, municipality=municipality, province=province)
+    return Seller(legal_name=legal_name, tax_id=TaxId(TaxIdScheme(scheme), value), address=located)
 
 
 def _fields(stored: Mapping[str, Mapping[str, StoredValue]]) -> CountryFields:
@@ -370,7 +389,12 @@ def _invoice(row: _InvoiceRow, parts: _Parts) -> Invoice:
             functional=_functional(row, parts.taxes),
             fiscal=terms.fiscal.get(regime, MappingProxyType({})),
         ),
-        seller=seller_from_columns(row.seller_legal_name, row.seller_tax_scheme, row.seller_tax_value),
+        seller=seller_from_columns(
+            row.seller_legal_name,
+            row.seller_tax_scheme,
+            row.seller_tax_value,
+            (row.seller_address_line, row.seller_address_municipality, row.seller_address_province),
+        ),
         void_reason=None if row.void_reason is None else Reason(row.void_reason),
         version=row.version,
         created_at=row.created_at,
@@ -391,6 +415,7 @@ def _changed(invoice: Invoice) -> dict[str, object]:
     """What a change of ``invoice`` may write of its row: everything but its identity and its tenant."""
     terms, pricing, totals = invoice.terms, invoice.pricing, invoice.pricing.totals
     functional, buyer, seller = pricing.functional, terms.buyer, invoice.seller
+    address = None if seller is None else seller.address
     buyer_tax_id = None if buyer is None else buyer.tax_id
     return {
         "status": invoice.status.value,
@@ -420,6 +445,9 @@ def _changed(invoice: Invoice) -> dict[str, object]:
         "seller_legal_name": None if seller is None else seller.legal_name,
         "seller_tax_scheme": None if seller is None else seller.tax_id.scheme,
         "seller_tax_value": None if seller is None else seller.tax_id.value,
+        "seller_address_line": None if address is None else address.line,
+        "seller_address_municipality": None if address is None else address.municipality,
+        "seller_address_province": None if address is None else address.province,
         "void_reason": invoice.void_reason,
         "version": invoice.version,
         "updated_at": invoice.updated_at,

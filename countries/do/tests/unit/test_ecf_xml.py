@@ -281,6 +281,23 @@ def test_a_payment_due_date_and_a_buyer_s_address_are_written() -> None:
     )
 
 
+def test_the_issuer_s_municipality_and_province_are_written_after_its_address_and_only_when_stated() -> None:
+    """Task 35: ``Municipio`` and ``Provincia`` follow ``DireccionEmisor`` in ``Emisor``, schema-valid."""
+    sample = credit_invoice()
+    located = replace(sample, issuer=replace(sample.issuer, municipality="010100", province="010000"))
+    document = _written(located)
+    assert texts(
+        document,
+        "Encabezado/Emisor/DireccionEmisor",
+        "Encabezado/Emisor/Municipio",
+        "Encabezado/Emisor/Provincia",
+    ) == ("AV. DUARTE 100, SANTO DOMINGO", "010100", "010000")
+    only = replace(sample, issuer=replace(sample.issuer, province="010000"))
+    assert texts(_written(only), "Encabezado/Emisor/Provincia") == ("010000",)
+    assert b"Municipio" not in _written(only)
+    assert b"Provincia" not in _written(sample)
+
+
 def test_a_consumer_s_foreign_identifier_is_written() -> None:
     draft = replace(consumer_invoice(), buyer=Buyer(foreign_id="P1234", name="JOHN DOE"))
     assert texts(

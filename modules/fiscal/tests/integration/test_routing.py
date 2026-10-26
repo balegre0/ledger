@@ -23,7 +23,7 @@ lazy import psycopg
 
 from ledger_fiscal.adapters.postgres.unit import PgUnits
 from ledger_fiscal.application.enrolling import Enrolling
-from ledger_fiscal.application.issuing import FiscalPolicy, Router
+from ledger_fiscal.application.issuing import MIRRORING, FiscalPolicy, Router
 from ledger_fiscal_kit.channels import ChannelRegistry, Representation, Requirements
 from ledger_fiscal_kit.objections import Objection
 from ledger_identity.adapters.postgres.unit import PgUnits as IdentityUnits
@@ -438,6 +438,21 @@ async def test_a_budget_already_spent_asks_the_channel_to_sign_within_nothing(
     issued_invoice = await invoicing.document(call, InvoiceId(draft.document))
     await policy.after_issue(request_of(draft.scope), issued_invoice, budget=timedelta(seconds=1.5))
     assert channel.issued[-1][2] == timedelta(0)
+
+
+async def test_the_channel_signs_within_the_budget_less_what_mirroring_its_answer_takes(
+    api: App, client: httpx.AsyncClient, owner: TestPrincipal, company: str, channel: FakeChannel
+) -> None:
+    """Task 35 (found on the real channel): a signer slower than the budget is cut short in time for the
+    channel's numbered status to reach the mirror, so the answer still carries the e-NCF (§8.5 step 5)."""
+    await enroll(client, owner, company, channel, active=True)
+    _ = await issued(client, owner, company)
+    policy, invoicing = by_hand(api, channel, (0.0, 0.0))
+    (call, draft, _) = channel.issued[0]
+    issued_invoice = await invoicing.document(call, InvoiceId(draft.document))
+    await policy.after_issue(request_of(draft.scope), issued_invoice, budget=timedelta(seconds=1.5))
+    assert channel.issued[-1][2] == timedelta(seconds=1.5) - MIRRORING
+    assert timedelta(milliseconds=250) == MIRRORING
 
 
 async def test_after_issue_routes_through_no_enrollment_made_after_the_invoice_was_issued(

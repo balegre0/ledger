@@ -35,6 +35,7 @@ from ledger_invoicing.domain.lines import LineTerms
 from ledger_invoicing.domain.parties import Seller, party
 from ledger_invoicing.domain.pricing import Dating, EstablishmentRef, Terms, price
 from ledger_invoicing.domain.text import parse_external_reference, parse_reason
+from ledger_kernel.addresses import FiscalAddress
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
 from ledger_kernel.money import Currency, Money
 from ledger_kernel.regimes import Direction, DocumentKind, RegimeKey, TaxCategoryKey, TaxCategoryKind
@@ -51,6 +52,7 @@ TENANT: Final = Tenant(OrganizationId(new_id()), CompanyId(new_id()), Mode.LIVE)
 DOP: Final = Currency.of("DOP")
 USD: Final = Currency.of("USD")
 RNC: Final = TaxId(TaxIdScheme("do.rnc"), "101850043")
+ADDRESS: Final = FiscalAddress(line="Av. Duarte 10", municipality="010100", province="010000")
 BUYER_RNC: Final = TaxId(TaxIdScheme("do.rnc"), "130000012")
 SANTIAGO: Final = EstablishmentRef(code="SUC1", time_zone="America/Santo_Domingo")
 WIDGET: Final = LineTerms(
@@ -99,7 +101,7 @@ def issued(regime: RegimeDef, terms: Terms = TERMS, *, corrects: Invoice | None 
         opening,
         corrects=corrects,
         pricing=pricing,
-        seller=Seller(legal_name="Acme SRL", tax_id=RNC),
+        seller=Seller(legal_name="Acme SRL", tax_id=RNC, address=ADDRESS),
         now=NOW,
     )
     return invoice
@@ -127,7 +129,7 @@ def test_a_document_is_seen_whole_with_its_tenant_parties_lines_and_country_fiel
         exchange_rate=Decimal("60.5"),
         issue_date=date(2026, 10, 10),
         tax_point=date(2026, 10, 1),
-        seller=SellerInfo(legal_name="Acme SRL", tax_id=RNC),
+        seller=SellerInfo(legal_name="Acme SRL", tax_id=RNC, address=ADDRESS),
         buyer=PartyInfo(
             legal_name="Beta SRL",
             tax_id=BUYER_RNC,

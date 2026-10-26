@@ -26,6 +26,7 @@ from ledger_identity.domain.organization import ORGANIZATION_ADMIN
 from ledger_identity.domain.roles import EVERYTHING, only_reads
 from ledger_identity.domain.text import parse_code, parse_legal_name, parse_name, parse_time_zone
 from ledger_kernel.access import CompanyNotFoundError, Principal, PrincipalKind, SubjectId
+from ledger_kernel.addresses import FiscalAddress
 from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.ids import CompanyId, new_id
 from ledger_kernel.jurisdiction import parse_jurisdiction
@@ -100,7 +101,12 @@ def profile(*tax_ids: TaxId) -> FiscalProfile:
     )
 
 
-async def register(module_database: BoundDatabase, founder: Principal = FOUNDER, *tax_ids: TaxId) -> Company:
+async def register(
+    module_database: BoundDatabase,
+    founder: Principal = FOUNDER,
+    *tax_ids: TaxId,
+    address: FiscalAddress | None = None,
+) -> Company:
     return await in_unit(
         module_database,
         founder,
@@ -112,6 +118,7 @@ async def register(module_database: BoundDatabase, founder: Principal = FOUNDER,
                 legal_name=parse_legal_name("Duarte"),
                 time_zone=SANTO_DOMINGO,
                 api_version=date(2026, 10, 13),
+                address=address,
             ),
         ),
     )
@@ -131,6 +138,7 @@ def shown(company: Company) -> CompanyInfo:
         functional_currency=company.profile.functional_currency,
         tax_ids=company.profile.tax_ids,
         legal_name=company.legal_name,
+        address=company.address,
         active=True,
         fiscal_profile_locked=company.fiscal_profile_locked_at is not None,
         version=company.version,
@@ -146,6 +154,16 @@ async def test_a_company_is_read_by_a_caller_of_its_organization(
     company = await register(module_database)
     assert await api.company(called_by(MEMBER), company.id) == shown(company)
     assert await api.company(by_the_platform(), company.id) == shown(company)
+
+
+async def test_a_company_is_read_with_its_fiscal_address(
+    api: IdentityApi, module_database: BoundDatabase
+) -> None:
+    """Task 35: what invoicing snapshots as a document's seller."""
+    address = FiscalAddress(line="Av. Duarte 10", municipality="010100", province="010000")
+    company = await register(module_database, address=address)
+    read = await api.company(by_the_platform(), company.id)
+    assert (read, read.address) == (shown(company), address)
 
 
 async def test_a_company_of_another_organization_is_not_found(

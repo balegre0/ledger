@@ -1,6 +1,61 @@
 {
   "components": {
     "schemas": {
+      "AddressBody": {
+        "additionalProperties": false,
+        "description": "A company's fiscal address, as its tax authority has it on record (§7.1).\n\nIts regime says what it takes: in the Dominican Republic a line of up to 100 characters (DGII's\n``DireccionEmisor``) and, optionally, the codes of its municipality and province in DGII's catalogue\n(``Municipio``, ``Provincia``: six digits, ``010100``).",
+        "properties": {
+          "line": {
+            "description": "Street, number, sector: what a person reads. Its regime may hold fewer characters.",
+            "examples": [
+              "Av. Duarte 10, Villa Consuelo"
+            ],
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Line",
+            "type": "string"
+          },
+          "municipality": {
+            "anyOf": [
+              {
+                "maxLength": 16,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The code of its municipality in its regime's catalogue, if the regime keeps one.",
+            "examples": [
+              "010100"
+            ],
+            "title": "Municipality"
+          },
+          "province": {
+            "anyOf": [
+              {
+                "maxLength": 16,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The code of its province in its regime's catalogue, if the regime keeps one.",
+            "examples": [
+              "010000"
+            ],
+            "title": "Province"
+          }
+        },
+        "required": [
+          "line"
+        ],
+        "title": "AddressBody",
+        "type": "object"
+      },
       "ApiClientRef": {
         "pattern": "^cli_[0-7][0-9a-hjkmnp-tv-z]{25}$",
         "type": "string"
@@ -154,8 +209,19 @@
       },
       "CompanyChanges": {
         "additionalProperties": false,
-        "description": "What can change in a company: what the request names changes, the rest stays.\n\nIts fiscal profile (jurisdiction, functional currency, tax ids) changes only until it is locked, before\nthe company's first numbered document (409 ``fiscal_profile_locked`` after).",
+        "description": "What can change in a company: what the request names changes, the rest stays.\n\nIts fiscal profile (jurisdiction, functional currency, tax ids) changes only until it is locked, before\nthe company's first numbered document (409 ``fiscal_profile_locked`` after). Its name and its fiscal\naddress change at any time (``address: null`` clears it).",
         "properties": {
+          "address": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AddressBody"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Its fiscal address as a whole, at any time: an issued document keeps the one it was issued with. null clears it; absent, it stays."
+          },
           "functional_currency": {
             "anyOf": [
               {
@@ -251,6 +317,17 @@
         "additionalProperties": false,
         "description": "A company, at its current version (its ``ETag``).",
         "properties": {
+          "address": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AddressBody"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Its fiscal address, if it states one."
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -314,6 +391,7 @@
           "functional_currency",
           "tax_ids",
           "legal_name",
+          "address",
           "status",
           "fiscal_profile_locked_at",
           "version",
@@ -749,6 +827,17 @@
         "additionalProperties": false,
         "description": "A company to register, with a fiscal profile the installed regime of its jurisdiction allows.",
         "properties": {
+          "address": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AddressBody"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Its fiscal address, as its tax authority has it on record (a fiscal channel needs it)."
+          },
           "functional_currency": {
             "description": "ISO 4217: the currency its books are kept in.",
             "examples": [
@@ -1171,6 +1260,17 @@
         "additionalProperties": false,
         "description": "A company just registered, and what the registration accepted with a warning.",
         "properties": {
+          "address": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AddressBody"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Its fiscal address, if it states one."
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -1242,6 +1342,7 @@
           "functional_currency",
           "tax_ids",
           "legal_name",
+          "address",
           "status",
           "fiscal_profile_locked_at",
           "version",
@@ -3562,7 +3663,7 @@
         ]
       },
       "post": {
-        "description": "Register a company of the caller's organization; the caller becomes its owner.\n\nThe caller must hold the identity provider's project role ``ledger.organization.admin``. The request\nacts in ``Ledger-Mode``: its ``Idempotency-Key`` is kept per mode. The company is both modes'. Its\nfiscal profile must fit the installed regime of its jurisdiction: one no regime governs is refused\n(``jurisdiction_unsupported``), as are a functional currency the regime does not let it keep its books\nin (``currency_unsupported``) and a tax id of another country's scheme where the regime allows its own\ncountry's only (``tax_id_foreign``).",
+        "description": "Register a company of the caller's organization; the caller becomes its owner.\n\nThe caller must hold the identity provider's project role ``ledger.organization.admin``. The request\nacts in ``Ledger-Mode``: its ``Idempotency-Key`` is kept per mode. The company is both modes'. Its\nfiscal profile must fit the installed regime of its jurisdiction: one no regime governs is refused\n(``jurisdiction_unsupported``), as are a functional currency the regime does not let it keep its books\nin (``currency_unsupported``) and a tax id of another country's scheme where the regime allows its own\ncountry's only (``tax_id_foreign``). A fiscal address is optional: its regime says what it takes (in\nthe Dominican Republic a line of up to 100 characters, ``invalid_name`` beyond, and codes of DGII's\ncatalogue, ``address_code_unknown`` otherwise).",
         "operationId": "create_company_v1_companies_post",
         "parameters": [
           {
@@ -4403,7 +4504,7 @@
         ]
       },
       "patch": {
-        "description": "Change a company, if it is at a version ``If-Match`` names: what the request names changes.\n\nIts fiscal profile (jurisdiction, functional currency, tax ids) changes only until it is locked (409\n``fiscal_profile_locked``), and only to one the installed regime of its jurisdiction allows, as at\nregistration. ``tax_ids`` is the whole list: an id it no longer lists is released, and one it lists\nanew that an active company holds refuses the change (409 ``tax_id_taken``). A new jurisdiction names\nthe zone the MAIN establishment keeps (``time_zone``, 422 ``time_zone_required`` without it), and is\nrefused to a company with other establishments (409 ``establishments_exist``).",
+        "description": "Change a company, if it is at a version ``If-Match`` names: what the request names changes.\n\nIts fiscal profile (jurisdiction, functional currency, tax ids) changes only until it is locked (409\n``fiscal_profile_locked``), and only to one the installed regime of its jurisdiction allows, as at\nregistration. ``tax_ids`` is the whole list: an id it no longer lists is released, and one it lists\nanew that an active company holds refuses the change (409 ``tax_id_taken``). A new jurisdiction names\nthe zone the MAIN establishment keeps (``time_zone``, 422 ``time_zone_required`` without it), and is\nrefused to a company with other establishments (409 ``establishments_exist``). ``address`` is the\nfiscal address as a whole, judged by the regime as at registration, at any time (a locked profile\ndoes not hold it); ``null`` clears it.",
         "operationId": "change_company_v1_companies__company_id__patch",
         "parameters": [
           {

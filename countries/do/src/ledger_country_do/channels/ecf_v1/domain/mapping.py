@@ -52,6 +52,7 @@ from ledger_country_do.channels.ecf_v1.domain.drafts import (
     LinePart,
     Rule,
     WithholdingRole,
+    code_violation,
     exchange_rate_valid,
     line_violations,
     max_lines,
@@ -112,6 +113,11 @@ _DEFAULT_OF_NOTE: Final = {
     DocumentKind.CREDIT_NOTE: EcfType.CREDIT_NOTE,
     DocumentKind.DEBIT_NOTE: EcfType.DEBIT_NOTE,
 }
+_ADDRESS_MISSING: Final = (
+    "is the company's fiscal address as DGII has it on record: state it on the company "
+    "(PATCH /v1/companies/{id}, address)"
+)
+"""``DireccionEmisor`` is required by every e-CF; it is the company's (identity's), not the invoice's."""
 _OWN: Final = "the document's currency"
 _PESOS: Final = "pesos"
 
@@ -248,6 +254,11 @@ class _Checker:
         if violation is not None:
             self.add(violation.rule.value, path, violation.requirement)
 
+    def code(self, path: str, code: str | None) -> None:
+        violation = None if code is None else code_violation(code)
+        if violation is not None:
+            self.add(violation.rule.value, path, violation.requirement)
+
     def read(self) -> _Reading:
         fields, field_objections = read_fields(self.draft.fields, self.regime)
         self.found.extend((0, each) for each in field_objections)
@@ -277,7 +288,11 @@ class _Checker:
         if _rnc(issuer.tax_id) is None:
             self.add("tax_id_invalid", "seller.tax_id", "is the company's RNC or cédula")
         self.text("seller.legal_name", issuer.legal_name, LEGAL_NAME, required=True)
-        self.text("seller.address", issuer.address, ADDRESS, required=True)
+        if issuer.address is None:
+            self.add("company_address_missing", "seller.address", _ADDRESS_MISSING)
+        self.text("seller.address", issuer.address, ADDRESS, required=False)
+        self.code("seller.municipality", issuer.municipality)
+        self.code("seller.province", issuer.province)
         counterparty = self.draft.counterparty
         if counterparty is None:
             return
@@ -569,6 +584,8 @@ def ecf_draft(
             rnc=_present(_rnc(issuer.tax_id)),
             legal_name=_present(issuer.legal_name),
             address=_present(issuer.address),
+            municipality=issuer.municipality,
+            province=issuer.province,
         ),
         lines=lines,
         buyer=_buyer(draft.counterparty, reading.ecf_type),

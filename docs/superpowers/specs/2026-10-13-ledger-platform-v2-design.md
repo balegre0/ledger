@@ -7,6 +7,7 @@
 | Supersedes | [`2026-10-11-ledger-platform-design.md`](2026-10-11-ledger-platform-design.md) (v1). v1 stays in the tree as history; where the two disagree, this document wins. The milestone plans 3, 4 and 5 written against v1 are superseded (§16.3) |
 | Binding inputs | `.superpowers/research/00-controller-rulings.md` (R1-R6); evidence in `01-localization`, `02-modularity`, `03-layout-tooling`, `04-saas-platforms`, `05-audit`, `06-dgii-facts` (cited as **[01]**...**[06]**, rulings as **R1**...**R6**) |
 | Decisions recorded as | `docs/adr/0001`...`0010` (§17) |
+| Amended 2026-10-26 (v2-M3b Task 35) | The company's fiscal address (DGII's `DireccionEmisor`): identity keeps it on the company, judged by its regime (§3.2, §7.1); invoicing snapshots it into an issued document's seller (§7.5); fiscal maps it into the draft's issuer (§8.4) and keeps a margin of the request's budget to mirror the channel's answer (§8.5); regime `do` declares DGII's catalogue and do-ecf-v1 objects to a company without one (§8.6.2); per-establishment addresses stay on the cut list (§16.4). Owner item 30 of the M3b plan may revisit the company-level choice |
 | As built (v2-M1) | Reconciled with the code at the end of v2-M1: the manifest model is `ledger_platform.config.manifest`; the root's package lists are a block `sync` generates; settings sections per package (§3.10); the pool sized by settings and checked (§6.7); `serve(role)`; four RLS scopes and the purge role (§6.3); the route guards (§5.2); devtools `gate` deferred (§4.7) |
 
 > **Supersedes v1.** v1 chose seven microservices on NATS JetStream and Temporal with one database per service.
@@ -176,7 +177,7 @@ apps compose them (R1, ADR 0001).
 
 | Module | Owns (schema) | Public API (`api.py` Protocol) | Publishes | Consumes | Built in |
 |---|---|---|---|---|---|
-| `identity` | organizations, companies (jurisdiction, functional currency, qualified tax ids), the global tax-id registry, establishments (minimal: code, name, time zone), memberships, API clients (mode-bound, pinned API version) | `IdentityApi`: company by id, company by tax id, an establishment of a company by code (`MAIN` by default; code, name, time zone), permissions of a principal in a company, lock fiscal profile | `identity.company.registered/updated/deactivated`, `identity.membership.granted/revoked` | — | v2-M2 |
+| `identity` | organizations, companies (jurisdiction, functional currency, qualified tax ids; fiscal address, amended 2026-10-26), the global tax-id registry, establishments (minimal: code, name, time zone), memberships, API clients (mode-bound, pinned API version) | `IdentityApi`: company by id (with its fiscal address), company by tax id, an establishment of a company by code (`MAIN` by default; code, name, time zone), permissions of a principal in a company, lock fiscal profile | `identity.company.registered/updated/deactivated`, `identity.membership.granted/revoked` | — | v2-M2 |
 | `signer` | certificates (local: sealed keys; remote: entity credential references), signing audit | `SignerApi`: describe certificates, sign XML, sign authority seed (a gRPC client in every app but `signer`) | `signer.certificate.installed/retired/expiring` | `identity.company.deactivated` (runner in the signer app) | v2-M2 |
 | `invoicing` | commercial documents (invoice, credit note, debit note; sales or self-billed purchase), lines, totals, `external_reference`, the per-channel fiscal status mirror | `InvoicingApi`: get document, `apply_fiscal_status`; extension point `IssuePolicy` (implemented by `fiscal`) | `invoicing.invoice.issued/voided/fiscal_updated` | — (nothing: its fiscal mirror is written by `fiscal` through `apply_fiscal_status`) | v2-M3 (thin) |
 | `fiscal` | enrollments (company × mode × channel, environment, requirements), routings (invoice → channel documents, 1:N keyed by channel) | `FiscalApi`: enrollments of a company; implements `invoicing.IssuePolicy`; provides `CompanyDirectory` to channels | `fiscal.enrollment.changed` | `invoicing.invoice.issued` (recovery path, §8.5), `fiscal_channel.document.*`, `signer.certificate.installed` | v2-M3 (thin) |
@@ -1206,7 +1207,8 @@ Organization (Zitadel organization; shard key; pinned API version)
   `jurisdiction` (country + optional ISO 3166-2 subdivision), `functional_currency`, `tax_ids: tuple[TaxId,
   ...]` (at least one; the primary one is the registry key), `status`, `fiscal_profile_locked_at` (set through
   `IdentityApi.lock_fiscal_profile` by `fiscal` before a company's first numbered document; afterwards
-  its whole fiscal profile, jurisdiction, functional currency and tax ids, is immutable; R4), `version` (ETag).
+  its whole fiscal profile, jurisdiction, functional currency and tax ids, is immutable; R4), `address` (its
+  fiscal address, optional: amended 2026-10-26, below), `version` (ETag).
 - **The fiscal profile** (jurisdiction, functional currency, tax ids) is judged by the installed regimes, at
   registration and at every change: the jurisdiction must have a regime (its subdivision's, else its country's;
   422 `jurisdiction_unsupported`), the functional currency must be one the regime lets a company keep its books
@@ -1217,6 +1219,21 @@ Organization (Zitadel organization; shard key; pinned API version)
   an added one is registered, 409 `tax_id_taken` if an active company holds it); once locked the whole profile is
   refused (409 `fiscal_profile_locked`), the legal name still changes. A jurisdiction no installed regime governs
   cannot be registered, so a company's time zone defaults to its regime's.
+- **The fiscal address** (amended 2026-10-26, v2-M3b Task 35): the address the company's tax authority has
+  on record, at **company** level (the domicile DGII keeps for the taxpayer; per-establishment addresses stay
+  on the cut list, §16.4). `FiscalAddress(line, municipality?, province?)` (kernel `ledger_kernel.addresses`):
+  the line a person reads and, where the regime keeps a catalogue of its subdivisions, their codes. The regime declares what it
+  takes (`RegimeDef.address: AddressDef(max_line, municipalities, provinces)`); one that declares none takes
+  a line of the generic limit (300) and no code. A line beyond the regime's limit is 422 `invalid_name`, a code
+  outside its catalogue 422 `address_code_unknown` (the code never repeated). Optional at registration
+  (`POST /v1/companies`, `address`) and changeable at any time with `PATCH /v1/companies/{id}` and `If-Match`
+  (`address` as a whole; `null` clears it; absent, it stays), the profile's lock notwithstanding: an issued
+  document keeps the address it was issued with (§7.5). A change is audited `company.change_address` (beside
+  the `company.rename` or `company.change_profile` made with it) and announced as `identity.company.updated` v1, whose payload carries no address (a
+  consumer reads the company). A kept address is judged again by the regime of a new jurisdiction. Stored in
+  `identity.companies` (`address_line`, `address_municipality`, `address_province`; a code goes with a line),
+  revision 0004, expand-only; RLS and the tenant-carrying keys unchanged. A channel that needs it says so
+  when a document is checked (do-ecf-v1: `do_ecf_company_address_missing`, §8.6.2).
 - **Establishment**: `code`, `name`, `time_zone` (IANA; defaults to the regime's). A document names an
   establishment (default "main"); its time zone fixes the document's tax point date (I11). v1's *emission
   points* are deleted from identity; a channel that needs issuing points models them itself ([05] §4.2).
@@ -1273,6 +1290,11 @@ channel document      channel-specific state machine (do-ecf-v1: §8.6.4), one p
   the regime at the tax point (rule 12); the category and `since` name the rate in the regime's timeline.
 - **Business key**: `external_reference` unique per `(company, mode, type)` forever; a duplicate answers 409
   `external_reference_taken` with `existing_id`.
+- **Seller snapshot** (amended 2026-10-26, Task 35): an issued document names its seller as identity has the
+  company when it is issued (a draft names none): legal name, primary tax id and fiscal address (§7.1; `None`
+  when the company stated none). `InvoiceInfo.seller` is `SellerInfo(legal_name, tax_id, address)`; the wire's
+  `seller.address` (`{line, municipality, province}` or `null`) is read-only. A later change of the company
+  changes no document issued before it; a document issued before revision 0003 of `invoicing` keeps none.
 
 ### 7.6 Enrollments and routing
 
@@ -1410,7 +1432,7 @@ needs them, and then move here with both channels as tests.
 | Module | Public surface |
 |---|---|
 | `channels` | `Channel`, `ChannelDef`, `ChannelRegistry`, `Requirements`, `Objection`, `Issued`, `Representation`, `ResumeReason`, `EnrollmentState` |
-| `drafts` | `FiscalDraft` (seller snapshot, establishment and its time zone, buyer snapshot, lines with resolved tax, totals, currency + rate, references, `fields` under the regime namespace, issue date, tax point, mode, environment) |
+| `drafts` | `FiscalDraft` (seller snapshot: as amended 2026-10-26, its fiscal address too, the line in `FiscalParty.address` and the codes in `municipality` and `province`; establishment and its time zone, buyer snapshot, lines with resolved tax, totals, currency + rate, references, `fields` under the regime namespace, issue date, tax point, mode, environment) |
 | `status` | `FiscalStatus` (`pending`, `accepted`, `accepted_with_observations`, `rejected`, `voided`), `Severity`, `StatusMap[Code]` (with an exhaustiveness check) |
 | `numbering` | **`NumberingPolicy` port** only: `allocate(uow, draft) -> FiscalNumber`; two documented shapes — *authorized ranges* (authority-granted ranges with expiry and an optional opaque artifact, e.g. Chile's signed folio-authorization file kept as bytes) and *free series* (series per establishment or issuing point, e.g. Mexico's folios) |
 | `ports` | `SignerPort` (sign XML, sign seed; implemented by the signer module's client), `CompanyDirectory` (company by tax id; implemented by `fiscal` over `IdentityApi`), `ArchivePort` (implemented over `platform.blobs`) |
@@ -1435,7 +1457,7 @@ POST /v1/invoices (api)
      objections → 422 invalid_document, nothing stored
  3 UoW(invoicing): store issued + publish invoicing.invoice.issued; commit
  4 IssuePolicy.after_issue(document, budget=1.5 s)                                          (no unit open)
-     fiscal: route (fiscal.routings) → channel.issue(draft, sign_within=remaining budget)
+     fiscal: route (fiscal.routings) → channel.issue(draft, sign_within=remaining budget - 250 ms)
        channel UoW: allocate the number under lock, store, enqueue <channel>.advance, publish
                     fiscal_channel.document.updated (numbered)                    → commit
        sign via SignerPort, archive, record (signed) in a second unit             → commit, if within budget
@@ -1455,6 +1477,11 @@ worker: webhooks.public_events consumer → delivery jobs → client endpoint
 
 The synchronous path (I10) lets a POS print the document with its e-NCF, security code and QR the moment the
 `POST` returns; the consumer of `invoicing.invoice.issued` makes the outcome independent of that path.
+**Amended 2026-10-26 (Task 35):** fiscal asks the channel to sign within what is left of the budget less
+250 ms (`MIRRORING`), the time it keeps to mirror the channel's answer: a signer slower than the budget is cut
+short in time for the numbered status (the e-NCF, no security code) to reach the answer. Without it the
+signature took the whole budget, invoicing's timeout cancelled the policy, and the answer carried no e-NCF
+(found on the real channel once an invoice could reach it).
 
 ### 8.6 The Dominican pack: regime `do` and channel `do-ecf-v1`
 
@@ -1511,6 +1538,7 @@ countries/do/testing/                      ledger-country-do-testing (dev-only d
 | Document types | 31 crédito fiscal, 32 consumo, 33 nota de débito, 34 nota de crédito, 41 compras, 43 gastos menores, 44 regímenes especiales, 45 gubernamental, 46 exportaciones, 47 pagos al exterior; kind, direction, buyer-tax-id rule, corrections |
 | Rounding | half up, two places at DGII's three points; unit prices to four places; tolerance ±1 per line and globally as many units as lines (IT §12; beyond it DGII answers *Aceptado Condicional*) |
 | Parameters (dated) | `rfce_threshold` DOP 250,000 (type 32 below it goes as RFCE; from it, in full); `contingency_connectivity_window` 72 h; `contingency_paper_max` 15 calendar days; `contingency_replacement_window` 30 calendar days; `legal_name_max` 150; type-32-RFCE line limit 10,000, others 1,000 |
+| Fiscal address (amended 2026-10-26) | `AddressDef`: a line of 1 to 100 characters (`DireccionEmisor`, `AlfNum100Type`), and optionally the codes of a municipality and a province, each one of the 582 of DGII's `ProvinciaMunicipioType` (one catalogue for both elements, as every e-CF schema declares it; `regime/subdivisions.py`, held equal to the ten schemas by a contract test). `DireccionEmisor` is required by every e-CF type (the RFCE has none, but a type 32 is always built in full): do-ecf-v1's `check` objects `do_ecf_company_address_missing` at `seller.address` to a company that states none, and `do_ecf_code_unknown` to a code outside the catalogue; the e-CF writes `Municipio` and `Provincia` after `DireccionEmisor` when the company states them |
 | Default document type | invoice → 31 if the buyer has a tax id, else 32; credit note → 34; debit note → 33; purchase → `fiscal.do.ecf_type` required (41, 43 or 47); 44/45/46 by explicit `fiscal.do.ecf_type` |
 
 #### 8.6.3 Channel `do-ecf-v1`: DGII endpoints and client rules ([06] quick reference)
@@ -2127,7 +2155,7 @@ items in the header note are **not** on this list.
 | 20× load test | before the first large client | 5× smoke |
 | Data-quality checks other than numbering accounting | after go-live | the daily numbering-accounting check |
 | `RotateCertificate` (compare-and-set) | after go-live | import replaces the active certificate |
-| Establishments beyond minimal CRUD (addresses, per-establishment settings) | a country needing them | code, name, time zone |
+| Establishments beyond minimal CRUD (per-establishment addresses, per-establishment settings; amended 2026-10-26) | a country needing an address per establishment | code, name, time zone; the company's fiscal address (§7.1, Task 35: the DR needed one, at company level) |
 | Service mesh (mTLS), Argo CD | after go-live | per-caller signer tokens, `helm upgrade` from CI |
 | Certificate-expiry email (webhook only now) | after go-live | `certificate.expiring` webhook and alert |
 | Zitadel user sync (Actions v2) and subject verification | after go-live | v1's accepted limitation and runbook |

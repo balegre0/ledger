@@ -1,8 +1,9 @@
 """The parties of a document, as snapshots it keeps for ever (§7.2, Decision 7).
 
-The seller is the company as identity knew it when the document was issued: its legal name and primary tax
-id. The buyer is what the client sent: ``{tax_id?, legal_name, address?, email?}``, with the tax id read by
-the installed regimes' schemes before it gets here. A party is personal data: its ``repr`` shows its tax id
+The seller is the company as identity knew it when the document was issued: its legal name, primary tax
+id and fiscal address (none when it stated none then; Task 35). The buyer is what the client sent:
+``{tax_id?, legal_name, address?, email?}``, with the tax id read by the installed regimes' schemes before it
+gets here. A party is personal data: its ``repr`` shows its tax id
 masked and nothing else.
 """
 
@@ -11,6 +12,7 @@ from typing import final, override
 
 from ledger_invoicing.domain.text import parse_address, parse_email, parse_legal_name
 lazy from ledger_invoicing.domain.text import Address, Email, LegalName
+lazy from ledger_kernel.addresses import FiscalAddress
 lazy from ledger_kernel.tax_ids import TaxId
 
 
@@ -22,6 +24,8 @@ class Seller:
     legal_name: str
     tax_id: TaxId
     """Its primary tax id."""
+    address: FiscalAddress | None
+    """Its fiscal address as identity had it then; ``None`` when it stated none."""
 
     @override
     def __repr__(self) -> str:

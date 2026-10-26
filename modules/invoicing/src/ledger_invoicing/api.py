@@ -60,6 +60,7 @@ from ledger_kernel.errors import InvalidValueError
 from ledger_kernel.tenancy import Mode
 from ledger_platform.runtime.keys import Key
 lazy from ledger_invoicing.domain.pricing import CountryFields, FieldValue
+lazy from ledger_kernel.addresses import FiscalAddress
 lazy from ledger_kernel.money import Currency, Money
 lazy from ledger_kernel.regimes import (
     Direction,
@@ -126,10 +127,12 @@ class EstablishmentOfIssue:
 @final
 @dataclass(frozen=True, slots=True, kw_only=True, repr=False)
 class SellerInfo:
-    """The company that issued the document, as it was then: its legal name and primary tax id."""
+    """The company that issued the document, as it was then: its legal name, primary tax id and address."""
 
     legal_name: str
     tax_id: TaxId
+    address: FiscalAddress | None
+    """Its fiscal address as identity had it when the document was issued; ``None`` if it stated none."""
 
     @override
     def __repr__(self) -> str:

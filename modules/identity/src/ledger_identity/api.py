@@ -16,6 +16,7 @@ from ledger_identity.domain.errors import CompanyInactiveError
 from ledger_kernel.access import CompanyNotFoundError
 from ledger_platform.runtime.keys import Key
 lazy from ledger_kernel.access import Permission, Principal
+lazy from ledger_kernel.addresses import FiscalAddress
 lazy from ledger_kernel.ids import CompanyId, OrganizationId
 lazy from ledger_kernel.jurisdiction import Jurisdiction
 lazy from ledger_kernel.money import Currency
@@ -44,6 +45,8 @@ class CompanyInfo:
     tax_ids: Sequence[TaxId]
     """The first is its primary one."""
     legal_name: str
+    address: FiscalAddress | None
+    """Its fiscal address, as its tax authority has it on record, if it states one (§7.1)."""
     active: bool
     fiscal_profile_locked: bool
     """Whether its fiscal profile (jurisdiction, functional currency, tax ids) can no longer change (§7.1)."""

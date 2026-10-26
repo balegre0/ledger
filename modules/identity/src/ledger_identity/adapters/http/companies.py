@@ -20,11 +20,11 @@ from ledger_identity.adapters.http.models import CompanyView, RegisteredCompany,
 from ledger_identity.adapters.http.public import company_ref
 from ledger_identity.adapters.postgres.unit import bind
 from ledger_identity.application import commands, queries
-from ledger_identity.domain.company import FiscalProfile, require_fits
+from ledger_identity.domain.company import FiscalProfile, Keep, require_address_fits, require_fits
 from ledger_identity.domain.errors import DuplicateTaxIdError, StaleVersionError
 from ledger_identity.domain.organization import ORGANIZATION_ADMIN
 from ledger_identity.domain.roles import COMPANIES_MANAGE, COMPANIES_READ
-from ledger_identity.domain.text import TimeZone, parse_legal_name, parse_time_zone
+from ledger_identity.domain.text import TimeZone, parse_address, parse_legal_name, parse_time_zone
 from ledger_kernel.jurisdiction import parse_jurisdiction
 from ledger_kernel.money import Currency
 from ledger_kernel.tax_ids import TaxIdCheck
@@ -50,9 +50,10 @@ from ledger_platform.http import (
     success,
 )
 lazy from ledger_identity.adapters.http.context import ApiContext
-lazy from ledger_identity.adapters.http.models import CompanyChanges, NewCompany, TaxIdBody
+lazy from ledger_identity.adapters.http.models import AddressBody, CompanyChanges, NewCompany, TaxIdBody
 lazy from ledger_identity.domain.company import Company
 lazy from ledger_kernel.access import Principal
+lazy from ledger_kernel.addresses import FiscalAddress
 lazy from ledger_kernel.pagination import PageRequest
 lazy from ledger_kernel.regimes import ParsedTaxId
 lazy from ledger_kernel.tenancy import Mode
@@ -80,6 +81,13 @@ def tax_ids_of(context: ApiContext, sent: Sequence[TaxIdBody]) -> list[ParsedTax
     if len({item.tax_id for item in read}) != len(read):
         raise DuplicateTaxIdError
     return read
+
+
+def address_of(sent: AddressBody | None) -> FiscalAddress | None:
+    """The fiscal address a request states, its line cleaned and its codes shaped; ``None`` for none."""
+    if sent is None:
+        return None
+    return parse_address(sent.line, municipality=sent.municipality, province=sent.province)
 
 
 def router(context: ApiContext) -> APIRouter:
@@ -114,7 +122,9 @@ def router(context: ApiContext) -> APIRouter:
         fiscal profile must fit the installed regime of its jurisdiction: one no regime governs is refused
         (``jurisdiction_unsupported``), as are a functional currency the regime does not let it keep its books
         in (``currency_unsupported``) and a tax id of another country's scheme where the regime allows its own
-        country's only (``tax_id_foreign``).
+        country's only (``tax_id_foreign``). A fiscal address is optional: its regime says what it takes (in
+        the Dominican Republic a line of up to 100 characters, ``invalid_name`` beyond, and codes of DGII's
+        catalogue, ``address_code_unknown`` otherwise).
         """
         read = tax_ids_of(context, body.tax_ids)
         jurisdiction = parse_jurisdiction(body.jurisdiction.country, body.jurisdiction.subdivision)
@@ -124,6 +134,8 @@ def router(context: ApiContext) -> APIRouter:
             tax_ids=tuple(item.tax_id for item in read),
         )
         regime = require_fits(profile, context.regime_of(jurisdiction))
+        address = address_of(body.address)
+        require_address_fits(address, regime)
         time_zone = TimeZone(regime.time_zone) if body.time_zone is None else parse_time_zone(body.time_zone)
         warnings = [
             RegistrationWarning(code="tax_id_checksum_mismatch", field=f"tax_ids.{position}")
@@ -143,6 +155,7 @@ def router(context: ApiContext) -> APIRouter:
                         legal_name=legal_name,
                         time_zone=time_zone,
                         api_version=CURRENT_VERSION,
+                        address=address,
                     ),
                 )
                 return stored(HTTPStatus.CREATED, created, warnings)
@@ -193,7 +206,9 @@ def router(context: ApiContext) -> APIRouter:
         registration. ``tax_ids`` is the whole list: an id it no longer lists is released, and one it lists
         anew that an active company holds refuses the change (409 ``tax_id_taken``). A new jurisdiction names
         the zone the MAIN establishment keeps (``time_zone``, 422 ``time_zone_required`` without it), and is
-        refused to a company with other establishments (409 ``establishments_exist``).
+        refused to a company with other establishments (409 ``establishments_exist``). ``address`` is the
+        fiscal address as a whole, judged by the regime as at registration, at any time (a locked profile
+        does not hold it); ``null`` clears it.
         """
         jurisdiction = body.jurisdiction
         changes = commands.Changes(
@@ -211,6 +226,7 @@ def router(context: ApiContext) -> APIRouter:
             else tuple(item.tax_id for item in tax_ids_of(context, body.tax_ids)),
             regime_of=context.regime_of,
             time_zone=None if body.time_zone is None else parse_time_zone(body.time_zone),
+            address=address_of(body.address) if "address" in body.model_fields_set else Keep.KEEP,
         )
         with precondition_checked(StaleVersionError):
             async with database.unit(access.tenant) as unit:

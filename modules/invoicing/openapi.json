@@ -894,10 +894,60 @@
         "pattern": "^[0-9]{1,18}(\\.[0-9]{1,12})?$",
         "type": "string"
       },
+      "SellerAddressView": {
+        "additionalProperties": false,
+        "description": "The seller's fiscal address as it was when the document was issued.\n\nIts line and, where its regime keeps a catalogue (the Dominican Republic: DGII's), the codes of its\nmunicipality and province.",
+        "properties": {
+          "line": {
+            "title": "Line",
+            "type": "string"
+          },
+          "municipality": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Municipality"
+          },
+          "province": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Province"
+          }
+        },
+        "required": [
+          "line",
+          "municipality",
+          "province"
+        ],
+        "title": "SellerAddressView",
+        "type": "object"
+      },
       "SellerView": {
         "additionalProperties": false,
-        "description": "The company that issued the document, as it was then.",
+        "description": "The company that issued the document, as it was then.\n\nRead-only: identity's company, snapshotted at issue; a later change of the company changes no document\nissued before it.",
         "properties": {
+          "address": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SellerAddressView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Its fiscal address when the document was issued; null if the company stated none."
+          },
           "legal_name": {
             "title": "Legal Name",
             "type": "string"
@@ -908,7 +958,8 @@
         },
         "required": [
           "legal_name",
-          "tax_id"
+          "tax_id",
+          "address"
         ],
         "title": "SellerView",
         "type": "object"

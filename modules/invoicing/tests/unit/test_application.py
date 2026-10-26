@@ -94,6 +94,7 @@ ACME: Final = CompanyInfo(
     functional_currency=DOP,
     tax_ids=(RNC, TaxId(TaxIdScheme("do.cedula"), "00113918205")),
     legal_name="Acme SRL",
+    address=None,
     active=True,
     fiscal_profile_locked=False,
     version=3,
@@ -473,7 +474,7 @@ async def test_an_invoice_is_issued_at_once_sold_by_the_company_as_identity_know
         InvoiceStatus.ISSUED,
         1,
     )
-    assert invoice.seller == Seller(legal_name="Acme SRL", tax_id=RNC)
+    assert invoice.seller == Seller(legal_name="Acme SRL", tax_id=RNC, address=None)
     assert (invoice.created_at, invoice.issued_at) == (NOON, NOON)
     assert invoice.terms.currency == DOP
     assert invoice.pricing.totals.gross == Money.of("118.00", DOP)
@@ -702,7 +703,7 @@ async def test_issuing_a_draft_prices_it_on_the_day_it_is_issued(world: World) -
     assert (issued.status, issued.version, issued.seller, issued.issued_at) == (
         InvoiceStatus.ISSUED,
         2,
-        Seller(legal_name="Acme SRL", tax_id=RNC),
+        Seller(legal_name="Acme SRL", tax_id=RNC, address=None),
         NOON + timedelta(days=3),
     )
     assert (draft.pricing.issue_date, issued.pricing.issue_date) == (date(2026, 10, 12), date(2026, 10, 15))
@@ -774,7 +775,7 @@ async def test_a_note_whose_invoice_was_voided_while_it_was_priced_is_not_issued
 
 async def test_a_draft_issued_by_someone_else_meanwhile_is_not_issued_twice(world: World) -> None:
     draft = await world.create(CALL, DRAFT)
-    seller = Seller(legal_name="Acme SRL", tax_id=RNC)
+    seller = Seller(legal_name="Acme SRL", tax_id=RNC, address=None)
     elsewhere, _ = draft.issue(seller=seller, pricing=draft.pricing, corrected=None, now=NOON)
 
     def issued_meanwhile() -> None:

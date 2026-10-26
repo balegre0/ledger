@@ -116,6 +116,8 @@ def _issuer(header: Node, draft: EcfDraft) -> None:
     issuing.text("rncemisor", draft.issuer.rnc)
     issuing.text("razonsocialemisor", draft.issuer.legal_name)
     issuing.text("direccionemisor", draft.issuer.address)
+    issuing.text("municipio", draft.issuer.municipality)
+    issuing.text("provincia", draft.issuer.province)
     issuing.text("fechaemision", dgii_date(draft.issued_on))
 
 
