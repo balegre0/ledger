@@ -17,17 +17,34 @@ party's outcome is `pending`, `sent`, `refused`, `not_applicable`, `outcome_unkn
 
 ## Find them
 
-As the `do_ecf` schema's owner, read-only:
+Every statement here runs as [sql-by-hand.md](../platform/sql-by-hand.md) says: `ledger_migrator` with
+`SET ROLE do_ecf_owner`, never a superuser. `do_ecf.received_documents` is under row-level security (the
+owner included); the job queue is not, and names each approval job's tenant and received document (its
+`key`):
 
 ```sql
-SELECT r.company_id, r.id, r.environment, r.ecf_type, r.sequence, r.approval_decision,
-       r.approval_requested_at, r.approval_emitter, r.approval_emitter_reason,
-       r.approval_dgii, r.approval_dgii_reason, r.approval_dgii_started_at, j.status, j.last_error_code
-  FROM do_ecf.received_documents r
-  LEFT JOIN do_ecf.jobs j ON j.kind = 'do_ecf.approve' AND j.key = r.id::text
- WHERE r.approval_decision IS NOT NULL
-   AND (r.approval_emitter IN ('pending', 'failed', 'outcome_unknown', 'refused')
-        OR r.approval_dgii IN ('pending', 'failed', 'outcome_unknown', 'refused'));
+-- Approval jobs that died, and those that ended lately (a party refused, failed or unknown among them).
+SELECT organization_id, company_id, mode, key AS received_document_id, status, last_error_code, attempts,
+       deadline_at
+  FROM do_ecf.jobs
+ WHERE kind = 'do_ecf.approve'
+   AND (status = 'dead' OR (status = 'done' AND updated_at > now() - interval '8 days'));
+```
+
+Then, per tenant, its approvals a party has not taken:
+
+```sql
+BEGIN READ ONLY;
+SELECT set_config('ledger.organization_id', '<organization uuid>', true),
+       set_config('ledger.company_id', '<company uuid>', true),
+       set_config('ledger.mode', '<mode>', true);
+SELECT id, environment, ecf_type, sequence, approval_decision, approval_requested_at, approval_emitter,
+       approval_emitter_reason, approval_dgii, approval_dgii_reason, approval_dgii_started_at
+  FROM do_ecf.received_documents
+ WHERE company_id = '<company uuid>' AND approval_decision IS NOT NULL
+   AND (approval_emitter IN ('pending', 'failed', 'outcome_unknown', 'refused')
+        OR approval_dgii IN ('pending', 'failed', 'outcome_unknown', 'refused'));
+COMMIT;
 ```
 
 A party `pending` whose job is `dead` (or gone) is stuck; one whose job is `ready`, `running` or `parked` is
@@ -36,8 +53,8 @@ still being tried.
 ## Settling it by hand (until Task 31's commands)
 
 No route retries an approval and no operator command exists yet (plan Owner items 24, 25 and 27): a person with
-database access settles each case, with a ticket and a second person reviewing the statement, as the schema's
-owner, in one transaction, checking the row count before `COMMIT`.
+database access settles each case as [sql-by-hand.md](../platform/sql-by-hand.md) says (a ticket, a second
+person reviewing, one transaction per tenant, the row count checked before `COMMIT`).
 
 - **DGII `outcome_unknown`** (`approval_dgii_started_at` set, no answer): the ACECF may be at DGII. **Never send
   it again.** Ask DGII (OFV, or DGII's support, naming the e-NCF and the buyer's RNC); record its answer in the
@@ -46,24 +63,31 @@ owner, in one transaction, checking the row count before `COMMIT`.
 
   ```sql
   BEGIN;
+  SELECT set_config('ledger.organization_id', '<organization uuid>', true),
+         set_config('ledger.company_id', '<company uuid>', true),
+         set_config('ledger.mode', '<mode>', true);
   UPDATE do_ecf.received_documents
      SET approval_dgii = 'sent', approval_dgii_reason = 'settled_by_hand',
          approval_sent_to_dgii_at = '<when DGII says it took it>', version = version + 1
-   WHERE id = '<received document uuid>' AND approval_dgii = 'outcome_unknown';
+   WHERE company_id = '<company uuid>' AND id = '<received document uuid>'
+     AND approval_dgii = 'outcome_unknown';
   -- UPDATE 1, else ROLLBACK.
   COMMIT;
   ```
 
 - **A party `pending` with its job dead**: the job's `last_error_code` says why it died; mend that first. Then
-  re-arm it (attempts 0, a new deadline): the job resumes from what is recorded (the signed ACECF read back from
-  the archive, a party already settled left alone, a DGII mark found never resent).
+  re-arm it (attempts 0, a new deadline, no lease, as `enqueue` restarts a dead job): the job resumes from what
+  is recorded (the signed ACECF read back from the archive, a party already settled left alone, a DGII mark
+  found never resent).
 
   ```sql
   BEGIN;
   UPDATE do_ecf.jobs
      SET status = 'ready', run_at = now(), attempts = 0, deadline_at = now() + interval '8 days',
-         last_error_code = NULL, parked_reason = NULL, updated_at = now()
-   WHERE kind = 'do_ecf.approve' AND key = '<received document uuid>' AND status = 'dead';
+         last_error_code = NULL, parked_reason = NULL, lease_until = NULL, lease_token = NULL,
+         woken_at = NULL, updated_at = now()
+   WHERE kind = 'do_ecf.approve' AND key = '<received document uuid>' AND status = 'dead'
+     AND organization_id = '<organization uuid>' AND company_id = '<company uuid>' AND mode = '<mode>';
   -- UPDATE 1, else ROLLBACK.
   COMMIT;
   ```

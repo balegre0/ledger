@@ -16,25 +16,35 @@ document, a buyer DGII's directory does not list, or CerteCF, which publishes no
 
 ## Find them
 
-As the `do_ecf` schema's owner, read-only:
+Every statement here runs as [sql-by-hand.md](../platform/sql-by-hand.md) says: `ledger_migrator` with
+`SET ROLE do_ecf_owner`, never a superuser. `do_ecf.documents` is under row-level security (the owner
+included); the job queue is not, and names each job's tenant and document (its `key`):
 
 ```sql
--- Failed deliveries, and why.
-SELECT company_id, invoice_id, id, environment, ecf_type, sequence, delivery_reason, delivery_since,
-       delivery_attempts
-  FROM do_ecf.documents
- WHERE delivery_state = 'failed';
-
--- Deliveries whose job died: stuck where nothing moves them.
-SELECT d.company_id, d.invoice_id, d.delivery_state, d.delivery_reason, j.last_error_code, j.attempts,
-       j.deadline_at
-  FROM do_ecf.jobs j
-  JOIN do_ecf.documents d ON d.id::text = j.key
- WHERE j.kind = 'do_ecf.deliver' AND j.status = 'dead'
-   AND d.delivery_state IN ('not_started', 'delivering');
+-- Delivery jobs that died (stuck deliveries), and the companies whose deliveries ended lately (failed ones
+-- among them): the tenant and the document of each.
+SELECT organization_id, company_id, mode, key AS document_id, status, last_error_code, attempts, deadline_at
+  FROM do_ecf.jobs
+ WHERE kind = 'do_ecf.deliver'
+   AND (status = 'dead' OR (status = 'done' AND updated_at > now() - interval '8 days'));
 ```
 
-The job's `key` is the document's id. `GET /v1/do/delivery_options` (as the company) says whether buyer
+Then, per tenant, its deliveries that failed or are stuck:
+
+```sql
+BEGIN READ ONLY;
+SELECT set_config('ledger.organization_id', '<organization uuid>', true),
+       set_config('ledger.company_id', '<company uuid>', true),
+       set_config('ledger.mode', '<mode>', true);
+SELECT id, invoice_id, environment, ecf_type, sequence, delivery_state, delivery_reason, delivery_since,
+       delivery_attempts
+  FROM do_ecf.documents
+ WHERE company_id = '<company uuid>' AND delivery_state IN ('failed', 'not_started', 'delivering');
+COMMIT;
+```
+
+A `not_started` or `delivering` row whose job is `dead` (the first query) is stuck; one whose job is `ready`,
+`running` or `parked` is still being tried. `GET /v1/do/delivery_options` (as the company) says whether buyer
 authentication is on.
 
 ## The cure: the retry

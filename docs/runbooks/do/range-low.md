@@ -18,18 +18,38 @@ shows is:
 | An enrollment `pending`, requiring `numbering_range` (`GET /v1/fiscal/enrollments/{id}`) | The environment has no usable range at all. |
 | A `fiscal.route` job `parked` with reason `range_missing` | The last number went between the request's check and its numbering: the invoice is issued, its `fiscal[]` `pending`, and the job routes it again once a range is registered ([`../fiscal/invoice-pending-unnumbered.md`](../fiscal/invoice-pending-unnumbered.md)). |
 
-Until Task 29, check by hand (weekly, and before a company's month end):
+Until Task 29, check by hand (weekly, and before a company's month end), as
+[sql-by-hand.md](../platform/sql-by-hand.md) says (`ledger_migrator` with `SET ROLE do_ecf_owner`, never a
+superuser). `do_ecf.numbering_ranges` is under row-level security, the owner included, so one transaction sees
+one company's ranges: no single query sweeps every company (a read role for that, or Task 29's watch, is plan
+Owner item 34). The companies that issue are those with advance jobs:
 
 ```sql
--- Active ranges with less than 20 % left, or expiring within 7 days (as the do_ecf schema's owner).
-SELECT company_id, mode, environment, ecf_type, first, last, next, expires_on,
-       (last - next + 1) AS remaining,
+-- The tenants that issued e-CF in the last 35 days.
+SELECT DISTINCT organization_id, company_id, mode
+  FROM do_ecf.jobs
+ WHERE kind = 'do_ecf.advance' AND created_at > now() - interval '35 days';
+```
+
+Then, for each tenant:
+
+```sql
+BEGIN READ ONLY;
+SELECT set_config('ledger.organization_id', '<organization uuid>', true),
+       set_config('ledger.company_id', '<company uuid>', true),
+       set_config('ledger.mode', '<mode>', true);
+-- Its active ranges with less than 20 % left, or expiring within 7 days.
+SELECT id, environment, ecf_type, first, last, next, expires_on, (last - next + 1) AS remaining,
        round(100.0 * (last - next + 1) / (last - first + 1), 1) AS percent_left
   FROM do_ecf.numbering_ranges
- WHERE status = 'active'
+ WHERE company_id = '<company uuid>' AND status = 'active'
    AND ((last - next + 1) < 0.2 * (last - first + 1)
         OR (expires_on IS NOT NULL AND expires_on < current_date + 7));
+COMMIT;
 ```
+
+A type with no active range left at all shows no row here: the company's `422 do_ecf_range_missing` and its
+enrollment's `numbering_range` requirement say so.
 
 A company sees its own: `GET /v1/do/numbering_ranges` (`remaining`, `expires_on`).
 

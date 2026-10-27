@@ -98,12 +98,20 @@ with `curl --data-binary @.dgii/certificate.p12` and the password from a prompt,
 history. **Ranges (Decision 29):** find the highest sequence per type the spike signed, read-only:
 
 ```powershell
-Get-Content .dgii/out/used-encf.txt |
-  Where-Object { $_ -match '^E(\d{2})(\d{10})$' } |
+$journal = Get-Content .dgii/out/used-encf.txt
+$unread = @($journal | Where-Object { $_ -cnotmatch '^E\d{2}\d{10}$' }).Count
+"lines that are no e-NCF: $unread"   # must be 0
+$journal |
+  Where-Object { $_ -cmatch '^E(\d{2})(\d{10})$' } |
   ForEach-Object { [pscustomobject]@{ Type = $Matches[1]; Sequence = [long]$Matches[2] } } |
   Group-Object Type |
   ForEach-Object { "{0}: highest {1}" -f $_.Name, ($_.Group | Measure-Object Sequence -Maximum).Maximum }
 ```
+
+**The first line printed must say 0.** Any other count means a line the scan skips (a blank line, a lower-case
+`e`, a stray character), whose sequence would be missed: stop, read those lines (`$journal | Where-Object {
+$_ -cnotmatch '^E\d{2}\d{10}$' }`), and decide by hand what each held before registering any range. Never edit
+the journal to make the count 0.
 
 Then register, for each type to emit (31, 32, and 33/34 for notes), a range whose `first` is above that
 highest (a type the spike never used starts anywhere), inside what TesteCF accepts (sequences 1 to 10,000,000,
@@ -148,7 +156,7 @@ gets a `track_id` and `accepted` (or `accepted_conditionally`: copy its `fiscal[
   a renewed token leaves the summary `signed`, the worker retrying it (`job_failed`,
   `do_ecf_dgii_unavailable`): record it, it means it does not.
 - **F2**: the code the RFCE reception returned (`fiscal[0].messages`, and `outcome_code` in
-  `do_ecf.documents`). A code outside 1, 2, 4 is `do_ecf.submission_unknown` (`undocumented`): record it.
+  `do_ecf.documents`, read as [sql-by-hand.md](../platform/sql-by-hand.md) says). A code outside 1, 2, 4 is `do_ecf.submission_unknown` (`undocumented`): record it.
 - **F12**: the RD$1,180.00 invoice went as an RFCE and the RD$295,000.00 one (step 9) in full.
 - **F13**: if any submission is refused at the door (DGII's `error`/`mensaje`, `rejected` with its message),
   record DGII's words; never provoke one, and ask DGII in writing whether such a number is burned.
@@ -167,7 +175,7 @@ TesteCF's directory names DGII's emisor-receptor simulator for buyers. The accep
 by the `do_ecf.deliver` job; follow `fiscal[0].do.delivery` and `delivery_reason`:
 
 - `delivered`: the directory's URLs are bases (**F5**) and the simulator's receipt held our checks. The ARECF
-  is in the archive (`do_ecf.documents.receipt_key`).
+  is in the archive (`do_ecf.documents.receipt_key`, read the same way).
 - `failed`, `do_ecf_buyer_unavailable` after a 404: the URLs are full endpoints (**F5**).
 - `not_applicable`, `entry_names_another_rnc`: the directory answered with an entry naming **another** RNC (**F16**): record
   which RNC it named by asking `consultadirectorio` by hand; widening the match is a decision, never a quiet

@@ -32,26 +32,52 @@ channel document behind it:
 
 ## What to look at
 
-As the `fiscal` schema's owner (row-level security applies to the apps' roles), read-only:
+Every statement here runs as [sql-by-hand.md](../platform/sql-by-hand.md) says: `ledger_migrator` with
+`SET ROLE fiscal_owner` (and `do_ecf_owner` for the channel's side), never a superuser. `fiscal.routings` is
+under row-level security, the owner included; the inbox and the job queue are not, and each of their rows
+names its tenant:
 
 ```sql
--- The dead recovery events: each names its invoice (subject) and the error's code.
-SELECT company_id, mode, event_id, subject AS invoice_id, attempts, last_error_code
+-- The dead recovery events: the tenant, the invoice (the event's subject) and the error's code of each.
+SELECT organization_id, company_id, mode, event_id, subject AS invoice_id, attempts, last_error_code
   FROM fiscal.inbox
  WHERE consumer = 'fiscal.commercial_documents' AND status = 'dead';
 
--- The routings fiscal kept for an invoice (one per channel), and the enrollment each went through.
-SELECT invoice_id, channel, enrollment_id, routed_at
-  FROM fiscal.routings WHERE invoice_id = '<invoice uuid>';
-
--- The routing jobs parked or dead.
-SELECT key, status, parked_reason, attempts, last_error_code, updated_at
-  FROM fiscal.jobs WHERE kind = 'fiscal.route' AND status IN ('parked', 'dead');
+-- The routing jobs parked or dead: the tenant and the key (<invoice uuid>:<channel>) of each.
+SELECT organization_id, company_id, mode, key, status, parked_reason, attempts, last_error_code, updated_at
+  FROM fiscal.jobs
+ WHERE kind = 'fiscal.route' AND status IN ('parked', 'dead');
 ```
 
-Then the channel's side: for do-ecf-v1, `SELECT state FROM do_ecf.documents WHERE invoice_id = '<invoice uuid>'`
-returns **no row** (that is this case: a row means the channel numbered it, and the invoice follows the
-channel's runbooks instead). `GET /v1/invoices/{id}` (as the company) shows `fiscal[]` `pending`, version 1.
+Then, per tenant, the routings fiscal kept for the invoice (one per channel) and the enrollment each went
+through:
+
+```sql
+BEGIN READ ONLY;
+SELECT set_config('ledger.organization_id', '<organization uuid>', true),
+       set_config('ledger.company_id', '<company uuid>', true),
+       set_config('ledger.mode', '<mode>', true);
+SELECT invoice_id, channel, enrollment_id, routed_at
+  FROM fiscal.routings
+ WHERE company_id = '<company uuid>' AND invoice_id = '<invoice uuid>';
+COMMIT;
+```
+
+And the channel's side, as `do_ecf_owner`, in a transaction scoped the same way (the same three
+`set_config` first):
+
+```sql
+BEGIN READ ONLY;
+SELECT set_config('ledger.organization_id', '<organization uuid>', true),
+       set_config('ledger.company_id', '<company uuid>', true),
+       set_config('ledger.mode', '<mode>', true);
+SELECT id, state FROM do_ecf.documents
+ WHERE company_id = '<company uuid>' AND invoice_id = '<invoice uuid>';
+COMMIT;
+```
+
+**No row** is this case (a row means the channel numbered it, and the invoice follows the channel's runbooks
+instead). `GET /v1/invoices/{id}` (as the company) shows `fiscal[]` `pending`, version 1.
 
 ## What to do
 
@@ -60,21 +86,33 @@ channel's runbooks instead). `GET /v1/invoices/{id}` (as the company) shows `fis
 2. **The dead inbox row** (`DraftObjectedError`, `InvalidValueError`): fix the defect first: the error's code
    and the invoice's draft (`GET /v1/invoices/{id}`) say which rule refused it; a release with the fix ships
    before anything is retried, or it dies again. Then make the row ready again (the consumer is idempotent per
-   invoice and channel: a redelivery adds nothing that exists), with a ticket and a second person reviewing,
-   as the schema's owner, in one transaction:
+   invoice and channel: a redelivery adds nothing that exists), with a ticket and a second person reviewing:
 
    ```sql
    BEGIN;
    UPDATE fiscal.inbox
       SET status = 'ready', attempts = 0, next_attempt_at = now(), last_error_code = NULL,
           lease_until = NULL, lease_token = NULL
-    WHERE consumer = 'fiscal.commercial_documents' AND event_id = '<event uuid>' AND status = 'dead';
+    WHERE consumer = 'fiscal.commercial_documents' AND event_id = '<event uuid>' AND status = 'dead'
+      AND organization_id = '<organization uuid>' AND company_id = '<company uuid>' AND mode = '<mode>';
    -- UPDATE 1, else ROLLBACK.
    COMMIT;
    ```
 
-3. **A dead `fiscal.route` job**: its `last_error_code` says why; once mended, re-arm it the same way
-   (`fiscal.jobs`, `kind = 'fiscal.route'`, its `key`, `status = 'ready'`, `run_at = now()`, `attempts = 0`).
+3. **A dead `fiscal.route` job**: its `last_error_code` says why; once mended, re-arm it as `enqueue` restarts
+   a dead job (attempts 0, no lease; the kind has no deadline):
+
+   ```sql
+   BEGIN;
+   UPDATE fiscal.jobs
+      SET status = 'ready', run_at = now(), attempts = 0, last_error_code = NULL, parked_reason = NULL,
+          lease_until = NULL, lease_token = NULL, woken_at = NULL, updated_at = now()
+    WHERE kind = 'fiscal.route' AND key = '<invoice uuid>:<channel>' AND status = 'dead'
+      AND organization_id = '<organization uuid>' AND company_id = '<company uuid>' AND mode = '<mode>';
+   -- UPDATE 1, else ROLLBACK.
+   COMMIT;
+   ```
+
 4. **If the channel will never number it** (the invoice should never have gone to that channel): there is no
    supported way yet to release it. LIVE Task 31 adds an operator command that releases such an invoice
    (mirrors `voided` for that channel, audited, so invoicing may void or credit it) or routes it again; plan

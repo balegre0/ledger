@@ -19,21 +19,35 @@ them ([`../signer/certificate-expiring.md`](../signer/certificate-expiring.md); 
 
 ## Find them
 
-```sql
--- Blocked documents: they need a person.
-SELECT company_id, invoice_id, id, environment, ecf_type, sequence, range_id, updated_at
-  FROM do_ecf.documents WHERE state = 'blocked';
+Every statement here runs as [sql-by-hand.md](../platform/sql-by-hand.md) says: `ledger_migrator` with
+`SET ROLE do_ecf_owner`, never a superuser. A blocked document's advance job is parked `blocked`, so the job
+queue (not under row-level security) names each one's tenant and document:
 
--- Waiting for a certificate, by company.
-SELECT company_id, count(*) FROM do_ecf.jobs
- WHERE kind = 'do_ecf.advance' AND status = 'parked' AND parked_reason = 'certificate'
- GROUP BY company_id;
+```sql
+-- Blocked documents (they need a person), and companies waiting for a certificate.
+SELECT organization_id, company_id, mode, key AS document_id, parked_reason, updated_at
+  FROM do_ecf.jobs
+ WHERE kind = 'do_ecf.advance' AND status = 'parked' AND parked_reason IN ('blocked', 'certificate');
+```
+
+Then the document, in a transaction scoped to its tenant (`do_ecf.documents` is under row-level security,
+the owner included):
+
+```sql
+BEGIN READ ONLY;
+SELECT set_config('ledger.organization_id', '<organization uuid>', true),
+       set_config('ledger.company_id', '<company uuid>', true),
+       set_config('ledger.mode', '<mode>', true);
+SELECT id, invoice_id, environment, ecf_type, sequence, range_id, state, updated_at
+  FROM do_ecf.documents
+ WHERE company_id = '<company uuid>' AND id = '<document uuid>';
+COMMIT;
 ```
 
 ## What to do
 
-- **`timed_out` climbing**: the signer's latency (`ledger_grpc_request_duration_seconds` on the signer, and its backend), then the archive's.
-  Nothing is lost; the job signs within seconds once the signer answers.
+- **`timed_out` climbing**: the signer's latency (`ledger_grpc_request_duration_seconds` on the signer, and
+  its backend), then the archive's. Nothing is lost; the job signs within seconds once the signer answers.
 - **`blocked` after a range that ended before the moment of signing** (the range's `expires_on`): the number
   cannot be used. The document stays blocked; unblocking it (a new number, the invoice routed again) is an
   operator command of the LIVE milestone (plan Task 31). Meanwhile register the company's next range

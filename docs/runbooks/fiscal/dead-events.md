@@ -21,21 +21,28 @@ Each is `ledger_inbox_handled_total{consumer=...,outcome="dead"}` rising on the 
 
 ## What to do
 
-1. Read the row (as the `fiscal` schema's owner): `SELECT consumer, event_id, type, subject, company_id, mode,
-   attempts, last_error_code FROM fiscal.inbox WHERE status = 'dead'`. Never copy its `payload` into a
-   ticket.
+1. Read the rows, as [sql-by-hand.md](../platform/sql-by-hand.md) says (`ledger_migrator` with
+   `SET ROLE fiscal_owner`, never a superuser; the inbox is not under row-level security). Never copy a row's
+   `payload` into a ticket.
+
+   ```sql
+   SELECT organization_id, company_id, mode, consumer, event_id, type, subject, attempts, last_error_code
+     FROM fiscal.inbox
+    WHERE status = 'dead';
+   ```
+
 2. The `last_error_code` names the cause. A defect is fixed and released first; an outage (the database, the
    channel's schema) is waited out.
 3. Then make the row ready again: every fiscal consumer is idempotent (by event id, or by version for the
-   mirror), so a redelivery adds nothing already done. With a ticket and a second person reviewing, in one
-   transaction:
+   mirror), so a redelivery adds nothing already done. With a ticket and a second person reviewing:
 
    ```sql
    BEGIN;
    UPDATE fiscal.inbox
       SET status = 'ready', attempts = 0, next_attempt_at = now(), last_error_code = NULL,
           lease_until = NULL, lease_token = NULL
-    WHERE consumer = '<consumer>' AND event_id = '<event uuid>' AND status = 'dead';
+    WHERE consumer = '<consumer>' AND event_id = '<event uuid>' AND status = 'dead'
+      AND organization_id = '<organization uuid>' AND company_id = '<company uuid>' AND mode = '<mode>';
    -- UPDATE 1, else ROLLBACK.
    COMMIT;
    ```

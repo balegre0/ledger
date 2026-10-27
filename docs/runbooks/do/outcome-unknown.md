@@ -24,42 +24,64 @@ attempts. Harmless unless it repeats on every deploy for the same document.
 
 ## Find the documents
 
-Run as the `do_ecf` schema's owner (row-level security applies to the apps' roles), read-only:
+Every statement here runs as [sql-by-hand.md](../platform/sql-by-hand.md) says: `ledger_migrator` with
+`SET ROLE do_ecf_owner`, never a superuser. `do_ecf.documents` is under row-level security (the owner
+included), so first the candidates from the job queue, which is not, and names each job's tenant:
 
 ```sql
--- Parked for a person, by company.
-SELECT j.company_id, j.key, j.parked_reason, j.updated_at
-  FROM do_ecf.jobs j
- WHERE j.kind = 'do_ecf.advance' AND j.status = 'parked'
-   AND j.parked_reason IN ('outcome_unknown', 'answer_mismatch');
-
--- Dead advance jobs and the documents they leave undecided.
-SELECT j.company_id, j.key, j.last_error_code, j.attempts, j.deadline_at,
-       d.id, d.environment, d.ecf_type, d.sequence, d.state, d.route,
-       d.submission_started_at, d.track_id, d.track_id_since
-  FROM do_ecf.jobs j
-  JOIN do_ecf.documents d ON d.id::text = j.key
- WHERE j.kind = 'do_ecf.advance' AND j.status = 'dead'
-   AND d.state NOT IN ('accepted', 'accepted_conditionally', 'rejected', 'voided');
+-- Advance jobs that died, or wait for a person: the tenant and the document (the job's key) of each.
+SELECT organization_id, company_id, mode, key AS document_id, status, parked_reason, last_error_code,
+       attempts, deadline_at
+  FROM do_ecf.jobs
+ WHERE kind = 'do_ecf.advance'
+   AND (status = 'dead' OR (status = 'parked' AND parked_reason IN ('outcome_unknown', 'answer_mismatch')));
 ```
 
-The job's `key` is the document's id (`do_ecf.documents.id` as text). The company's invoice is `d.invoice_id`;
-its `fiscal[]` entry shows the same state.
+Then, for each row, the document, in a transaction scoped to its tenant:
+
+```sql
+BEGIN READ ONLY;
+SELECT set_config('ledger.organization_id', '<organization uuid>', true),
+       set_config('ledger.company_id', '<company uuid>', true),
+       set_config('ledger.mode', '<mode>', true);
+SELECT id, invoice_id, environment, ecf_type, sequence, state, route, submission_started_at, track_id,
+       track_id_since
+  FROM do_ecf.documents
+ WHERE company_id = '<company uuid>' AND id = '<document uuid>';
+COMMIT;
+```
+
+A dead job whose document is `accepted`, `accepted_conditionally`, `rejected` or `voided` needs nothing. The
+company's invoice is `invoice_id`; its `fiscal[]` entry shows the same state.
 
 ## Re-arm a dead advance job (until Task 31)
 
-A fresh job is what the platform's `enqueue` makes of a dead one (attempts 0, a new deadline): it continues
-where the document is, and a marked `signed` document is never sent by it (it finds the mark and asks DGII's
-track ids). Fix the cause of the failures first (`last_error_code`), or it dies again. Open a ticket, have a
-second person review the statement, run it as the schema's owner in one transaction, check the row count:
+A fresh job is what the platform's `enqueue` makes of a dead one (attempts 0, a new deadline, no lease): it
+continues where the document is, and a marked `signed` document is never sent by it (it finds the mark and
+asks DGII's track ids). Fix the cause of the failures first (`last_error_code`), or it dies again. With a
+ticket and a second person reviewing:
 
 ```sql
 BEGIN;
 UPDATE do_ecf.jobs
    SET status = 'ready', run_at = now(), attempts = 0, deadline_at = now() + interval '15 days',
-       last_error_code = NULL, parked_reason = NULL, updated_at = now()
- WHERE kind = 'do_ecf.advance' AND key = '<document uuid>' AND status = 'dead';
+       last_error_code = NULL, parked_reason = NULL, lease_until = NULL, lease_token = NULL,
+       woken_at = NULL, updated_at = now()
+ WHERE kind = 'do_ecf.advance' AND key = '<document uuid>' AND status = 'dead'
+   AND organization_id = '<organization uuid>' AND company_id = '<company uuid>' AND mode = '<mode>';
 -- It must say UPDATE 1; anything else is a ROLLBACK.
+COMMIT;
+```
+
+A job parked for a person is made ready the way a wake makes it (its deadline kept: a wake never moves it):
+
+```sql
+BEGIN;
+UPDATE do_ecf.jobs
+   SET status = 'ready', run_at = now(), parked_reason = NULL, woken_at = NULL, updated_at = now()
+ WHERE kind = 'do_ecf.advance' AND key = '<document uuid>' AND status = 'parked'
+   AND organization_id = '<organization uuid>' AND company_id = '<company uuid>' AND mode = '<mode>';
+-- UPDATE 1, else ROLLBACK.
 COMMIT;
 ```
 
@@ -75,8 +97,7 @@ COMMIT;
    - DGII lists a track id received after the document was signed: the job adopts one only while its 24-hour
      window is open. Adopting a named track id, or reopening the window, is an operator command of the LIVE
      milestone (plan Task 31, `ledger-worker do-ecf adopt-track-id`); until it exists, making the parked job
-     `ready` (the statement above with `status = 'parked'` in its `WHERE`) buys one lookup and one poll, no
-     more (the window stays closed).
+     `ready` (the second statement above) buys one lookup and one poll, no more (the window stays closed).
    - DGII has nothing: the number may still be burned at DGII. Abandoning it (burn it, route the invoice again
      with a new e-NCF) is the owner's decision (plan Owner item 3); never resend the same document.
 4. **`answer_mismatch`**: DGII answered about another document than ours. Stop and compare the track id, the
@@ -85,8 +106,7 @@ COMMIT;
 5. **A document parked `certificate` or `outcome_unknown` woken more than 15 days after its job was enqueued**
    dies at once (`deadline_passed`): a wake does not move the deadline (plan Owner item 13). Treat it as 1 or 2.
 
-Task 31's operator commands (`ledger-worker do-ecf stuck|wake|adopt-track-id`) replace the SQL and the replay
-above; they enqueue a fresh `do_ecf.advance` (or re-arm the deadline) for what they touch.
+Task 31's operator commands (`ledger-worker do-ecf stuck|wake|adopt-track-id`) replace the SQL above; they enqueue a fresh `do_ecf.advance` (or re-arm the deadline) for what they touch.
 
 ## The one physical resend there is (a 401)
 
