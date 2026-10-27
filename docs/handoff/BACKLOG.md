@@ -92,7 +92,7 @@ Plan: `docs/superpowers/plans/2026-10-19-v2-m3b-fiscal.md`. Each task has files,
 
 ## 2. Then: the real DGII (owner-side prerequisites first)
 
-- First real TesteCF run with the owner's own RNC and certificate (runbook `docs/runbooks/do/testecf-spike.md`).
+- First real TesteCF run with the owner's own RNC and certificate (runbook `docs/runbooks/do/testecf.md`).
 - Settle spike findings F1-F16 against the real DGII.
 - The 14 CerteCF certification steps for the owner's own RNC as emitter.
 - Then the PSFE application: DGII answers in about 10 business days, then tests, a sworn statement, and INDOTEL-compliant custody.

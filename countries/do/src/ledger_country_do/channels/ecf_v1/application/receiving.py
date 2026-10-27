@@ -21,12 +21,19 @@ never gets a receipt about another issuer's document). The answer is an ARECF th
 The same bytes again are answered with the receipt they were given (read back from the archive). A receipt
 names the receiving company as its buyer, always: it never signs a statement about another taxpayer.
 Nothing but the raw copy is kept of a document before its signature is trusted.
+
+A reception answers its receipt with how it went (``Answered.outcome``), which the receiver's route reports
+(``ReceptionReport``) with the receiving company and the environment, never the document, its parties or its
+sender; so does a reception refused without a receipt (``NoReceiptError``, ``NotTheSenderError``). A
+reception that fails (the archive or the signer out of reach) reports nothing: its error does.
 """
 
 import asyncio
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
-from typing import ClassVar, Protocol, assert_type, final
+from enum import StrEnum
+from types import MappingProxyType
+from typing import ClassVar, Final, Protocol, assert_type, final
 lazy from collections.abc import Callable
 lazy from datetime import datetime
 
@@ -66,6 +73,49 @@ class Receiver:
     rnc: str
     """The tax id the receiver's path names, whose company ``who`` is: what its receipts name as the buyer."""
     environment: Environment
+
+
+class ReceptionOutcome(StrEnum):
+    """How a reception was answered: received, the same bytes again, a reason not to, or no receipt at all."""
+
+    RECEIVED = "received"
+    AGAIN = "again"
+    """The same bytes again: answered with the receipt they were given."""
+    SPECIFICATION = "specification"
+    SIGNATURE = "signature"
+    DUPLICATE = "duplicate"
+    NOT_THIS_RECEIVER = "not_this_receiver"
+    NO_RECEIPT = "no_receipt"
+    """Nothing a receipt can name (``NoReceiptError``, a 400)."""
+    NOT_THE_SENDER = "not_the_sender"
+    """A document of another issuer than the token's sender (``NotTheSenderError``, a 401)."""
+
+
+_NOT_RECEIVED: Final = MappingProxyType(
+    {
+        NotReceivedReason.SPECIFICATION: ReceptionOutcome.SPECIFICATION,
+        NotReceivedReason.SIGNATURE: ReceptionOutcome.SIGNATURE,
+        NotReceivedReason.DUPLICATE: ReceptionOutcome.DUPLICATE,
+        NotReceivedReason.NOT_THIS_RECEIVER: ReceptionOutcome.NOT_THIS_RECEIVER,
+    }
+)
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class Answered:
+    """A reception's signed receipt, and how it answered the document."""
+
+    receipt: bytes
+    outcome: ReceptionOutcome
+
+
+class ReceptionReport(Protocol, metaclass=ABCMeta):
+    """What a reception tells operations (see the module): never a tax id, an e-NCF or a document."""
+
+    @abstractmethod
+    def answered(self, receiver: Receiver, outcome: ReceptionOutcome) -> None:
+        """A reception at ``receiver`` was answered ``outcome``."""
 
 
 @final
@@ -179,8 +229,8 @@ class Receiving:
         self._signatures = signatures
         self._clock = clock
 
-    async def receive(self, receiver: Receiver, sender: Sender, document: bytes) -> bytes:
-        """The signed receipt of ``document``, sent to ``receiver`` by ``sender`` (see the module)."""
+    async def receive(self, receiver: Receiver, sender: Sender, document: bytes) -> Answered:
+        """The signed receipt of ``document``, sent to ``receiver`` by ``sender``, and how it answered it."""
         tenant = receiver.who.tenant
         kept = await self._archive.received(tenant, document)
         now = self._clock()
@@ -202,11 +252,11 @@ class Receiving:
                 assert_type(inspection, Trusted)
                 return await self._trusted(receiver, sender, inspection.ecf, kept)
 
-    async def _trusted(self, receiver: Receiver, sender: Sender, ecf: InboundEcf, kept: Archived) -> bytes:
+    async def _trusted(self, receiver: Receiver, sender: Sender, ecf: InboundEcf, kept: Archived) -> Answered:
         if not sender.sends_for(ecf.issuer_rnc):
             raise NotTheSenderError
         if ecf.buyer_rnc != receiver.rnc:  # another buyer's, or a document naming none (a 32, 43, 47)
-            return await self._answered(
+            return await self._not_received(
                 receiver, ecf.issuer_rnc, ecf.encf, NotReceivedReason.NOT_THIS_RECEIVER
             )
         earlier = await self._earlier(receiver, ecf)
@@ -229,7 +279,7 @@ class Receiving:
                 unit.announcements.received(record)
         except ReceivedExistsError:  # recorded by a reception that raced this one: answered as again
             return await self._again(receiver, ecf, kept, await self._earlier(receiver, ecf))
-        return receipt
+        return Answered(receipt, ReceptionOutcome.RECEIVED)
 
     async def _earlier(self, receiver: Receiver, ecf: InboundEcf) -> ReceivedDocument | None:
         async with self._units.unit(receiver.who.tenant) as unit:
@@ -237,18 +287,23 @@ class Receiving:
 
     async def _again(
         self, receiver: Receiver, ecf: InboundEcf, kept: Archived, earlier: ReceivedDocument | None
-    ) -> bytes:
+    ) -> Answered:
         """The receipt of the same bytes again, or a duplicate's of other bytes (Decision 16)."""
         if earlier is not None and earlier.document.sha256 == kept.sha256:
-            return await self._archive.read(earlier.receipt)
-        return await self._answered(receiver, ecf.issuer_rnc, ecf.encf, NotReceivedReason.DUPLICATE)
+            return Answered(await self._archive.read(earlier.receipt), ReceptionOutcome.AGAIN)
+        return await self._not_received(receiver, ecf.issuer_rnc, ecf.encf, NotReceivedReason.DUPLICATE)
 
     async def _refused(
         self, receiver: Receiver, sender: Sender, issuer: str, encf: Encf, reason: NotReceivedReason
-    ) -> bytes:
+    ) -> Answered:
         if not sender.sends_for(issuer):
             raise NotTheSenderError
-        return await self._answered(receiver, issuer, encf, reason)
+        return await self._not_received(receiver, issuer, encf, reason)
+
+    async def _not_received(
+        self, receiver: Receiver, issuer: str, encf: Encf, reason: NotReceivedReason
+    ) -> Answered:
+        return Answered(await self._answered(receiver, issuer, encf, reason), _NOT_RECEIVED[reason])
 
     async def _answered(
         self, receiver: Receiver, issuer: str, encf: Encf, reason: NotReceivedReason | None

@@ -17,7 +17,11 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The gate (every package's tests, then the end-to-end suite, about a minute on its own), two image builds
+    # (the apps' and the fake DGII's) and the compose smoke test run in this one job: 30 minutes left no room for
+    # a cold build cache (spec §12 asks the gate alone for under 10 minutes; the builds and the stack take the
+    # rest). A run that needs longer is a regression to look at, not a limit to raise again.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:

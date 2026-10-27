@@ -7,7 +7,9 @@ received (``Estado`` 0) once the document is recorded with ``fiscal_channel.rece
 one unit, else not received (``Estado`` 1) for DGII's reason: 1 specification (the receipt naming what the
 document names, read leniently: ``name_inbound``), 2 signature, 3 the same e-NCF sent again with other bytes,
 4 a buyer that is not this company. The same bytes again are answered with the receipt they were given.
-Nothing but the raw copy is kept of a document that cannot be named (a 400, no receipt).
+Nothing but the raw copy is kept of a document that cannot be named (a 400, no receipt). Each reception logs
+one line (``do_ecf.reception``): the company, the environment and how it was answered, nothing of the
+document, its parties or its sender.
 """
 
 import hashlib
@@ -19,6 +21,7 @@ from typing import Final, Protocol
 
 import pytest
 from pydantic import TypeAdapter
+from structlog.testing import capture_logs
 lazy import httpx
 lazy import psycopg
 
@@ -329,3 +332,49 @@ async def test_a_refused_document_of_another_issuer_than_the_token_s_gets_no_rec
     response = await send(document)
     assert response.status_code == HTTPStatus.UNAUTHORIZED, response.text
     assert archived(archived_at) == {"received": 1}
+
+
+async def test_each_reception_logs_its_company_environment_and_outcome_and_nothing_of_the_document(
+    receiving: Tenant, send: Send, sender: KeyPairSigner, authority: Authority
+) -> None:
+    """Operations see how a company's receptions are answered; no tax id, e-NCF or byte of a document."""
+    signed = sender.sign(golden())
+    other_buyer = golden().replace(
+        f"<RNCComprador>{RECEIVING_RNC}".encode(), f"<RNCComprador>{OTHER_RNC}".encode()
+    )
+    other_issuer = golden().replace(f"<RNCEmisor>{SENDER_RNC}".encode(), f"<RNCEmisor>{OTHER_RNC}".encode())
+    with capture_logs() as logs:
+        for document in (
+            signed,
+            signed,
+            sender.sign(golden().replace(NAME, b"<RazonSocialEmisor>OTRA SRL</RazonSocialEmisor>")),
+            sender.sign(other_buyer),
+            signed.replace(b"CEMENTO GRIS", b"CEMENTO AZUL", 1),
+            sender.sign(golden().replace(NAME, b"")),
+            b"<ECF><Encabezado>",
+            signer_of(authority, OTHER_RNC).sign(other_issuer),
+        ):
+            _ = await send(document)
+    receptions = [entry for entry in logs if entry["event"] == "do_ecf.reception"]
+    assert receptions == [
+        {
+            "event": "do_ecf.reception",
+            "log_level": "info",
+            "package": "do-ecf-v1",
+            "company_id": str(receiving.company),
+            "environment": "testecf",
+            "outcome": outcome,
+        }
+        for outcome in (
+            "received",
+            "again",
+            "duplicate",
+            "not_this_receiver",
+            "signature",
+            "specification",
+            "no_receipt",
+            "not_the_sender",
+        )
+    ]
+    said = repr(logs)
+    assert not any(secret in said for secret in (SENDER_RNC, RECEIVING_RNC, OTHER_RNC, str(ENCF), "CEMENTO"))

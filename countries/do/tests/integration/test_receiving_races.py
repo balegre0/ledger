@@ -30,7 +30,13 @@ from ledger_country_do.channels.ecf_v1.adapters.xml.inbound import read_inbound_
 from ledger_country_do.channels.ecf_v1.application.ports import SigningAs
 from ledger_country_do.channels.ecf_v1.application.ranges import NumberingUnits
 from ledger_country_do.channels.ecf_v1.application.received import ReceivedDocuments
-from ledger_country_do.channels.ecf_v1.application.receiving import InboundFormat, Receiver, Receiving, Sender
+from ledger_country_do.channels.ecf_v1.application.receiving import (
+    InboundFormat,
+    Receiver,
+    Receiving,
+    ReceptionOutcome,
+    Sender,
+)
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
 from ledger_country_do.channels.ecf_v1.domain.exchanges import NotReceivedReason
 from ledger_kernel.ids import CompanyId, OrganizationId, new_id
@@ -176,11 +182,14 @@ async def test_a_reception_that_raced_another_answers_as_a_reception_again(
     golden = (GOLDEN / "ecf-31.xml").read_bytes()
     signed = sender.sign(golden)
     other = sender.sign(golden.replace(NAME, NAME.replace(b"SRL", b"S.R.L.")))
-    answered = await receivings(PgUnits(module_database)).receive(receiver, SENDER, signed)
+    answered = (await receivings(PgUnits(module_database)).receive(receiver, SENDER, signed)).receipt
     same = receivings(RacedUnits(PgUnits(module_database)))
-    assert await same.receive(receiver, SENDER, signed) == answered
+    again = await same.receive(receiver, SENDER, signed)
+    assert (again.receipt, again.outcome) == (answered, ReceptionOutcome.AGAIN)
     duplicate = receivings(RacedUnits(PgUnits(module_database)))
-    receipt = read_inbound_arecf(await duplicate.receive(receiver, SENDER, other))
+    raced = await duplicate.receive(receiver, SENDER, other)
+    assert raced.outcome is ReceptionOutcome.DUPLICATE
+    receipt = read_inbound_arecf(raced.receipt)
     assert (receipt.received, receipt.reason) == (False, NotReceivedReason.DUPLICATE)
     async with PgUnits(module_database).unit(tenant) as unit:
         found = await unit.received.find(Environment.TESTECF, "101850043", receipt.encf)
@@ -211,5 +220,5 @@ async def test_a_slow_inspection_holds_no_other_request(
     started = time.monotonic()
     answered = await slow.receive(receiver, SENDER, sender.sign((GOLDEN / "ecf-31.xml").read_bytes()))
     probing.cancel()
-    assert read_inbound_arecf(answered).received
+    assert read_inbound_arecf(answered.receipt).received
     assert len([tick for tick in ticks if started <= tick <= started + SLOW]) >= 5

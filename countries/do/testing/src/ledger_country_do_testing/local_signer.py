@@ -1,4 +1,4 @@
-"""A signer that holds a key in this process: for tests, the fake DGII and the spike CLI, never production.
+"""A signer that holds a key in this process: for tests and the fake DGII, never production.
 
 In production keys stay in the signer process (spec rule 7) and the channel signs through ``SignerPort``
 (``adapters.signing.port.DocumentSigner``); this distribution is dev-only and never installed in an image.
@@ -7,10 +7,10 @@ pair is refused when it is built (as the signer refuses it at import), and a doc
 ``SignatureRefusedError`` with the profile's code as its reason. It checks no validity, no seed's shape (the
 channel's ``DocumentSigner`` does, before the port) and no clock: those rules are the signer's.
 ``sign`` signs bytes directly, for a test that needs a signed document without a port. A PKCS#12 bundle is
-read from bytes the caller loaded (the CLI reads it from the git-ignored ``.dgii/`` directory); its password
+read from bytes the caller loaded; its password
 is never echoed, and the key is never written, logged or shown in a ``repr``.
 
-``SIGNING_AS`` is whom the tests and the spike sign and call DGII as: a company of ``TENANT``, in test mode.
+``SIGNING_AS`` is whom the tests sign and call DGII as: a company of ``TENANT``, in test mode.
 """
 
 import asyncio
@@ -36,7 +36,7 @@ lazy from ledger_platform.runtime.calls import SystemCall
 lazy from ledger_testing.pki import Issued
 
 TENANT: Final = Tenant(OrganizationId(UUID(int=1)), CompanyId(UUID(int=2)), Mode.TEST)
-"""The company in test mode the tests and the spike sign as."""
+"""The company in test mode the tests sign as."""
 SIGNING_AS: Final = SigningAs(
     organization=TENANT.organization, company=TENANT.company, mode=Mode.TEST, reason="do-ecf-v1.local"
 )

@@ -1,4 +1,4 @@
-"""JSON answers read typed, for tests and the spike CLI (``response.json()`` is ``Any``)."""
+"""JSON answers read typed, for tests (``response.json()`` is ``Any``)."""
 
 from typing import Final
 

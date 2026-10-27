@@ -17,7 +17,7 @@ parameter arrives in lower case.
 - ``POST /fe/recepcion/api/ecf``: a token (``Authorization: Bearer``, else 401), then an e-CF (multipart
   ``xml``, at most ``MAX_INBOUND``: the app refuses a larger body with 413 before it is read), answered with
   the signed receipt (``application.receiving``); 400 when no receipt can name it, 401 when it is not the
-  token's sender's.
+  token's sender's. Each is reported (``ReceptionReport``: the company, the environment, the outcome).
 - ``POST /fe/aprobacioncomercial/api/ecf``: a token, then an ACECF (``application.approvals_in``, at most
   ``MAX_SMALL_BODY``): 200, or a bare 400 (401 when it is not the token's sender's).
 
@@ -50,6 +50,7 @@ from ledger_country_do.channels.ecf_v1.application.receiving import (
     NoReceiptError,
     NotTheSenderError,
     Receiver,
+    ReceptionOutcome,
 )
 from ledger_country_do.channels.ecf_v1.domain.channel import KEY
 from ledger_country_do.channels.ecf_v1.domain.environments import Environment
@@ -62,7 +63,7 @@ from ledger_platform.runtime.calls import SystemCall
 lazy from ledger_country_do.channels.ecf_v1.adapters.inbound import Inbound
 lazy from ledger_country_do.channels.ecf_v1.adapters.receiver.tokens import ReceiverCredentials
 lazy from ledger_country_do.channels.ecf_v1.application.approvals_in import Approving
-lazy from ledger_country_do.channels.ecf_v1.application.receiving import Receiving, Sender
+lazy from ledger_country_do.channels.ecf_v1.application.receiving import Receiving, ReceptionReport, Sender
 lazy from ledger_fiscal_kit.channels import ChannelDef
 lazy from ledger_fiscal_kit.ports import CompanyDirectory
 lazy from ledger_kernel.clock import Clock
@@ -98,6 +99,8 @@ class ReceiverApi:
     receiving: Receiving
     approving: Approving
     clock: Clock
+    report: ReceptionReport
+    """Where each reception's outcome is told (the channel's logger)."""
 
 
 def _unauthenticated() -> HTTPException:
@@ -183,13 +186,17 @@ class _Endpoints:
         at = await self._receiver(environment, rnc)
         sender = await self._sender(request, at)
         document = await uploaded(request)
+        report = self._api.report
         try:
-            signed = await self._api.receiving.receive(at, sender, document)
+            answered = await self._api.receiving.receive(at, sender, document)
         except NoReceiptError:
+            report.answered(at, ReceptionOutcome.NO_RECEIPT)
             raise HTTPException(HTTPStatus.BAD_REQUEST) from None
         except NotTheSenderError:
+            report.answered(at, ReceptionOutcome.NOT_THE_SENDER)
             raise _unauthenticated() from None
-        return receipt_answer(signed)
+        report.answered(at, answered.outcome)
+        return receipt_answer(answered.receipt)
 
     async def approve(self, request: Request, environment: str, rnc: str) -> Response:
         """A buyer's commercial approval (or rejection) of one of the company's accepted e-CF."""

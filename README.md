@@ -10,10 +10,10 @@ Python 3.15 · uv workspace · strictly typed in two checkers · zero suppressio
 
 | Path | What |
 |---|---|
-| `packages/` | `kernel` (the shared vocabulary, standard library only), `platform` (the chassis), `testing` (test tooling, dev-only) |
-| `modules/` | Business modules, each in its own PostgreSQL schema and role: `identity` |
-| `countries/` | Country packs: `do` (regime `do`, the e-CF channel) and its dev-only `do/testing` |
-| `apps/` | The deployables: `api`, `worker`, `receiver`, `signer`, `migrate`; they compose the installed modules and hold no business code |
+| `packages/` | `kernel` (the shared vocabulary, standard library only), `platform` (the chassis), `fiscal-kit` (the contract between fiscal and its channels: drafts, statuses, the signer port, hardened XML), `testing` (test tooling, dev-only) |
+| `modules/` | Business modules, each in its own PostgreSQL schema and role: `identity`, `invoicing`, `fiscal` (enrollments, routing documents to fiscal channels, their status mirror), `signer` |
+| `countries/` | Country packs: `do` (regime `do`, the e-CF channel `do-ecf-v1`) and its dev-only `do/testing` (a fake DGII) |
+| `apps/` | The deployables: `api`, `worker`, `receiver` (the tax authority's and other emitters' calls), `signer`, `migrate`; they compose the installed modules and hold no business code |
 | `contracts/` | Wire contracts (buf); protos arrive with the signer |
 | `tools/devtools` | `ledger-devtools`: checks the manifests and generates what follows from them |
 | `deploy/` | The image (`docker/ledger.Dockerfile`) and the local stack (`local/`) |
@@ -56,7 +56,7 @@ the local stack from it.
 ```bash
 sh deploy/local/signer/tokens.sh                                    # once: the signer's callers' tokens (git ignores them)
 sh deploy/local/do/roots.sh                                         # once: do-ecf-v1's development root (worker, receiver)
-docker compose -f deploy/local/compose.yaml up -d --build --wait   # postgres, migrate, api, worker, receiver, signer
+docker compose -f deploy/local/compose.yaml up -d --build --wait   # postgres, migrate, api, worker, receiver, signer, fake DGII
 docker compose -f deploy/local/compose.yaml down -v                 # stop and delete the data (and the signer's KMS key)
 ```
 
@@ -66,6 +66,7 @@ docker compose -f deploy/local/compose.yaml down -v                 # stop and d
 | worker (probes, metrics) | `http://127.0.0.1:8101` (`LEDGER_WORKER_PORT`) |
 | signer (probes, metrics) | `http://127.0.0.1:8102` (`LEDGER_SIGNER_PORT`) |
 | receiver (the tax authority's and other emitters' calls) | `http://127.0.0.1:8103` (`LEDGER_RECEIVER_PORT`) |
+| fake DGII (dev only: DGII's services and a buyer's receiver) | `http://127.0.0.1:8471` (`LEDGER_FAKE_DGII_PORT`) |
 | PostgreSQL 18.6 | `127.0.0.1:5432` (`LEDGER_POSTGRES_PORT`), database `ledger`, login `ledger_app` |
 
 Port 8000 is never used on the host. `/livez` and `/readyz` answer on every app. To call the api with real
@@ -100,9 +101,15 @@ channel's own seeds, tokens and signatures). It holds each client address to `LE
 `LEDGER_RECEIVER_FORWARDED_HOPS` names the proxies that append to `X-Forwarded-For` (default 0: never read).
 Paths under a channel's key are case-insensitive, as DGII calls them.
 
+do-ecf-v1 talks to the stack's fake DGII (`deploy/local/do-ecf.env`; `ledger-fake-dgii` from
+`countries/do/testing`, never in the image), so the local stack issues, delivers and receives e-CF end to end
+without DGII. Against DGII's own TesteCF and CerteCF: [docs/runbooks/do/testecf.md](docs/runbooks/do/testecf.md)
+and [certecf.md](docs/runbooks/do/certecf.md).
+
 ## Decisions and operations
 
 - Architecture decisions: [docs/adr/](docs/adr/).
 - Runbooks: [docs/runbooks/](docs/runbooks/), e.g.
-  [a company whose only owner does not exist](docs/runbooks/identity/orphaned-company.md).
+  [a company whose only owner does not exist](docs/runbooks/identity/orphaned-company.md); the e-CF channel's
+  alerts in [docs/runbooks/do/](docs/runbooks/do/) and fiscal's in [docs/runbooks/fiscal/](docs/runbooks/fiscal/).
 - How to work in this repository (for people and agents): [AGENTS.md](AGENTS.md).

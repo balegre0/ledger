@@ -1346,8 +1346,8 @@ async def test_an_answer_about_another_e_ncf_waits_for_a_person_changing_nothing
 async def test_a_summary_answer_about_another_e_ncf_waits_for_a_person_then_is_asked_about(
     worker: Worker, module_database: BoundDatabase
 ) -> None:
-    """Never taken as ours (``AnswerMismatchError``): the state unchanged, its mark kept; once an operator
-    wakes it, the mark makes its outcome unknown and ``consultarfce`` settles it, never a resend."""
+    """Never taken as ours (``ParkReason.ANSWER_MISMATCH``): the state unchanged, its mark kept; once an
+    operator wakes it, the mark makes its outcome unknown and ``consultarfce`` settles it, never a resend."""
     tenant = a_tenant()
     await with_range(module_database, tenant, CONSUMER)
     document = await worker.issued(consumer(tenant))

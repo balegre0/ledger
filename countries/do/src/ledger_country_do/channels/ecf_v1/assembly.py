@@ -33,7 +33,13 @@ from ledger_country_do.channels.ecf_v1.adapters.enrollments import DirectoryEnro
 from ledger_country_do.channels.ecf_v1.adapters.http import DgiiTimeouts
 from ledger_country_do.channels.ecf_v1.adapters.inbound import Inbound
 from ledger_country_do.channels.ecf_v1.adapters.jobs import advance_job, approve_job, deliver_job, purge_job
-from ledger_country_do.channels.ecf_v1.adapters.logs import AdvanceLog, ApprovalLog, DeliveryLog, SigningLog
+from ledger_country_do.channels.ecf_v1.adapters.logs import (
+    AdvanceLog,
+    ApprovalLog,
+    DeliveryLog,
+    ReceptionLog,
+    SigningLog,
+)
 from ledger_country_do.channels.ecf_v1.adapters.outbound import (
     DgiiAccess,
     Outbound,
@@ -218,8 +224,13 @@ def _receiving(
         credentials=ReceiverCredentials(context.database, clock=context.clock),
         inbound=inbound,
         receiving=Receiving(
-            units, inbound, archive, DocumentSigner(context.ports.get(SIGNER_PORT)), clock=context.clock
+            units,
+            inbound,
+            archive,
+            DocumentSigner(context.ports.get(SIGNER_PORT)),
+            clock=context.clock,
         ),
+        report=ReceptionLog(context.telemetry),
         approving=Approving(units, inbound, archive, issuing, clock=context.clock),
         clock=context.clock,
     )
