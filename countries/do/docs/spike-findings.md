@@ -1,8 +1,14 @@
 # DGII spike: findings
 
+**The spike's command line (`ledger-dgii-spike`) is retired (v2-M3b Task 27, Decision 29):** the stack itself
+runs against TesteCF ([`docs/runbooks/do/testecf.md`](../../../docs/runbooks/do/testecf.md)) and settles the
+rows below, unchanged in number. Where a row or a note names the CLI, `Emitter.send` or the spike's journal, it
+records how the spike worked; the journal (`.dgii/out/used-encf.txt`) is kept, read-only, because the stack's
+TesteCF ranges start above it.
+
 What DGII's documentation left open (plan `docs/superpowers/plans/2026-10-13-v2-dgii-spike.md`, "DGII facts
 this plan could not pin down", and the reviews of Tasks 11-13), what the code assumes, and what TesteCF
-answered. The runbook ([`docs/runbooks/do/testecf-spike.md`](../../../docs/runbooks/do/testecf-spike.md),
+answered. The runbook ([`docs/runbooks/do/testecf.md`](../../../docs/runbooks/do/testecf.md),
 "Open questions") says how each row is settled. Fill the last two columns from a TesteCF run; never paste a
 token, a password, a certificate, a cédula or a whole document (DGII's codes and messages are fine).
 

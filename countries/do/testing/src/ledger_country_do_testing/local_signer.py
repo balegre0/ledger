@@ -1,4 +1,4 @@
-"""A signer that holds a key in this process: for tests, the fake DGII and the spike CLI, never production.
+"""A signer that holds a key in this process: for tests and the fake DGII, never production.
 
 In production keys stay in the signer process (spec rule 7) and the channel signs through ``SignerPort``
 (``adapters.signing.port.DocumentSigner``); this distribution is dev-only and never installed in an image.
@@ -6,21 +6,19 @@ In production keys stay in the signer process (spec rule 7) and the channel sign
 pair is refused when it is built (as the signer refuses it at import), and a document the profile refuses is
 ``SignatureRefusedError`` with the profile's code as its reason. It checks no validity, no seed's shape (the
 channel's ``DocumentSigner`` does, before the port) and no clock: those rules are the signer's.
-``sign`` signs bytes directly, for a test that needs a signed document without a port. A PKCS#12 bundle is
-read from bytes the caller loaded (the CLI reads it from the git-ignored ``.dgii/`` directory); its password
-is never echoed, and the key is never written, logged or shown in a ``repr``.
+``sign`` signs bytes directly, for a test that needs a signed document without a port. The key is never
+written, logged or shown in a ``repr``.
 
-``SIGNING_AS`` is whom the tests and the spike sign and call DGII as: a company of ``TENANT``, in test mode.
+``SIGNING_AS`` is whom the tests sign and call DGII as: a company of ``TENANT``, in test mode.
 """
 
 import asyncio
 import hashlib
 from datetime import UTC
-from typing import ClassVar, Final, final, override
+from typing import Final, final, override
 from uuid import UUID
 
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
-from cryptography.hazmat.primitives.serialization import pkcs12
 lazy from cryptography import x509
 lazy from cryptography.hazmat.primitives.asymmetric.types import PrivateKeyTypes
 
@@ -28,7 +26,6 @@ from ledger_country_do.channels.ecf_v1.application.ports import SigningAs
 from ledger_fiscal_kit.ports import CertificateValidity, SignatureRefusedError, Signed, SignerPort
 from ledger_fiscal_kit.xml.dsig import NotAnRsaKeyError, require_signing_pair, sign_enveloped
 from ledger_fiscal_kit.xml.hardened import XmlDocumentError
-from ledger_kernel.errors import InvalidInputError
 from ledger_kernel.ids import CompanyId, OrganizationId
 from ledger_kernel.tenancy import Mode, Tenant
 lazy from ledger_fiscal_kit.ports import SeedToSign, XmlToSign
@@ -36,20 +33,11 @@ lazy from ledger_platform.runtime.calls import SystemCall
 lazy from ledger_testing.pki import Issued
 
 TENANT: Final = Tenant(OrganizationId(UUID(int=1)), CompanyId(UUID(int=2)), Mode.TEST)
-"""The company in test mode the tests and the spike sign as."""
+"""The company in test mode the tests sign as."""
 SIGNING_AS: Final = SigningAs(
     organization=TENANT.organization, company=TENANT.company, mode=Mode.TEST, reason="do-ecf-v1.local"
 )
 """``TENANT``'s company, as the channel names whom it signs and calls DGII for."""
-
-
-class BundleIncompleteError(InvalidInputError):
-    """A PKCS#12 bundle without a private key and its certificate."""
-
-    code: ClassVar[str] = "do_bundle_incomplete"
-
-    def __init__(self) -> None:
-        super().__init__("the PKCS#12 bundle holds no private key and certificate pair")
 
 
 @final
@@ -73,14 +61,6 @@ class KeyPairSigner(SignerPort):
     def from_issued(cls, issued: Issued) -> KeyPairSigner:
         """A signer of a test certificate."""
         return cls(issued.key, issued.certificate)
-
-    @classmethod
-    def from_pkcs12(cls, data: bytes, password: bytes) -> KeyPairSigner:
-        """A signer of the key and certificate in a PKCS#12 bundle; ``ValueError`` on a wrong password."""
-        loaded = pkcs12.load_pkcs12(data, password)
-        if loaded.key is None or loaded.cert is None:
-            raise BundleIncompleteError
-        return cls(loaded.key, loaded.cert.certificate)
 
     @property
     def certificate(self) -> x509.Certificate:

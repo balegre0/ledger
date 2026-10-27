@@ -3,7 +3,7 @@
 [project]
 name = "ledger-country-do-testing"
 version = "0.1.0"
-description = "Dev-only tools of the DO pack: a fake DGII from DGII's documentation, DO test subjects, samples, the spike CLI."
+description = "Dev-only tools of the DO pack: a fake DGII from DGII's documentation, DO test subjects, samples."
 requires-python = ">=3.15"
 dependencies = [
     "ledger-kernel",
@@ -24,7 +24,6 @@ dependencies = [
 ]
 
 [project.scripts]
-ledger-dgii-spike = "ledger_country_do_testing.spike:main"
 ledger-fake-dgii = "ledger_country_do_testing.fake_dgii.serve:main"
 
 [build-system]

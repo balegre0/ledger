@@ -53,9 +53,10 @@ allocated by). A summary (RFCE) and a rejected document are never delivered (``n
 accepted e-CF's delivery is the ``do_ecf.deliver`` job's, enqueued in the unit that records the decision
 (``delivering``).
 
-An answer about another issuer or e-NCF is never taken as the document's (``AnswerMismatchError``): it waits
-for a person, its state as it was. Every state change is published (``fiscal_channel.document.updated``,
-version + 1) in the unit that records it; an answer that changes no state publishes nothing.
+An answer about another issuer or e-NCF is never taken as the document's: it waits for a person
+(``ParkReason.ANSWER_MISMATCH``), its state as it was. Every state change is published
+(``fiscal_channel.document.updated``, version + 1) in the unit that records it; an answer that changes no
+state publishes nothing.
 """
 
 from abc import ABCMeta, abstractmethod
@@ -83,7 +84,7 @@ from ledger_country_do.channels.ecf_v1.domain.ecf import (
     answered,
     transition,
 )
-from ledger_country_do.channels.ecf_v1.domain.errors import EcfError, EcfUnavailableError
+from ledger_country_do.channels.ecf_v1.domain.errors import EcfError
 from ledger_country_do.channels.ecf_v1.domain.mapping import issuer_rnc
 from ledger_country_do.channels.ecf_v1.domain.numbering import release_at
 from ledger_country_do.channels.ecf_v1.domain.polling import (
@@ -141,15 +142,6 @@ class SettleTooShortError(EcfError):
 
     def __init__(self) -> None:
         super().__init__("the settle delay is shorter than the longest attempt at sending a document")
-
-
-class AnswerMismatchError(EcfUnavailableError):
-    """DGII answered about another issuer or e-NCF than the document asked about."""
-
-    code: ClassVar[str] = "do_ecf_dgii_answer_mismatch"
-
-    def __init__(self) -> None:
-        super().__init__("DGII's answer names another issuer or e-NCF than the document sent")
 
 
 class AdvanceReport(Protocol, metaclass=ABCMeta):

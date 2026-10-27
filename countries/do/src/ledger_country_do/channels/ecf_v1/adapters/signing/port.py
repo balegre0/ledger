@@ -19,8 +19,8 @@ A port client that cannot reach the signer may surface its transport's failure i
 ``RemoteUnavailableError`` (down, too slow, failing; the gRPC client's mapping) or a ``TimeoutError``. Both
 are the signer being unavailable (``SignerUnavailableError``), so a document parks rather than fails. Any
 other error (a ``RemoteDefectError`` or ``RemoteForbiddenError``: a request or a token of ours the signer
-refuses) is a defect and passes unchanged; whoever sends a document treats such an error escaping
-``Emitter.send`` as an unknown outcome and never sends the document again (the emission module's rule).
+refuses) is a defect and passes unchanged; a run that escapes with one after marking its submission
+leaves the outcome unknown, and the document is never sent again (``application.advancing``).
 
 A document comes back with the certificate that signed it (``SignedDocument.certificate``, the signer's own
 id), for the archive: never recovered from the signature. Each call carries the current span's

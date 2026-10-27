@@ -19,6 +19,11 @@ A commercial approval the company sent that will not reach a party (``do_ecf.app
 ``emitter`` or ``dgii``, and the outcome: ``refused``, ``failed`` or ``outcome_unknown``) is an error, and so
 is an emitter that requires authentication while it is switched off
 (``do_ecf.approval_needs_authentication``): a person looks.
+
+Each e-CF reception the receiver answers is an info line (``do_ecf.reception``): the receiving company's id,
+the environment and the outcome (``ReceptionOutcome``), nothing of the document, its parties or its sender.
+
+The runbooks of ``docs/runbooks/do/`` name each of these events and what a person does about it.
 """
 
 from typing import final, override
@@ -27,7 +32,9 @@ from ledger_country_do.channels.ecf_v1.application.advancing import AdvanceRepor
 from ledger_country_do.channels.ecf_v1.application.approving import ApprovalReport
 from ledger_country_do.channels.ecf_v1.application.delivering import DeliveryReport
 from ledger_country_do.channels.ecf_v1.application.issuing import SigningReport
+from ledger_country_do.channels.ecf_v1.application.receiving import ReceptionReport
 lazy from ledger_country_do.channels.ecf_v1.application.approving import Party
+lazy from ledger_country_do.channels.ecf_v1.application.receiving import Receiver, ReceptionOutcome
 lazy from ledger_country_do.channels.ecf_v1.application.steps import ParkReason
 lazy from ledger_country_do.channels.ecf_v1.domain.approval import Sending
 lazy from ledger_platform.observability.telemetry import Telemetry
@@ -103,3 +110,22 @@ class ApprovalLog(ApprovalReport):
     @override
     def unsent(self, party: Party, outcome: Sending) -> None:
         self._telemetry.logger.error("do_ecf.approval_unsent", party=party, outcome=outcome.value)
+
+
+@final
+class ReceptionLog(ReceptionReport):
+    """``ReceptionReport`` on the channel's logger: the company, the environment and the outcome alone."""
+
+    __slots__ = ("_telemetry",)
+
+    def __init__(self, telemetry: Telemetry) -> None:
+        self._telemetry = telemetry
+
+    @override
+    def answered(self, receiver: Receiver, outcome: ReceptionOutcome) -> None:
+        self._telemetry.logger.info(
+            "do_ecf.reception",
+            company_id=str(receiver.who.tenant.company),
+            environment=receiver.environment.value,
+            outcome=outcome.value,
+        )

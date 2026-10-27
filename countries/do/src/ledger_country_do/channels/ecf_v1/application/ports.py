@@ -3,7 +3,7 @@
 ``Signatures`` is the channel's narrow view of fiscal-kit's ``SignerPort`` (spec §8.4): DGII's documents and
 seeds signed as an issuing company, named on every call (``SigningAs``).
 ``adapters.signing.port.DocumentSigner`` implements it over the port (the signer module's gRPC client in
-every app but the signer; in tests, the fake DGII and the spike CLI a key held in that process). Whoever
+every app but the signer; in tests and the fake DGII a key held in that process). Whoever
 holds the key decides whether its certificate may sign at the moment a document states, never the channel.
 ``Authority`` is DGII's web services for an emitter (spec §8.6.3), each call made for an issuing company (its
 token is that company's), implemented by ``adapters.dgii.client``. ``Buyers`` is the buyers' receivers
@@ -400,10 +400,11 @@ class Archive(Protocol, metaclass=ABCMeta):
 class EcfFormat(Protocol, metaclass=ABCMeta):
     """DGII's XML formats: documents written and checked against DGII's schemas.
 
-    A schema check raises fiscal-kit's errors, not the pack's (``EcfError``), so ``Emitter.sign`` lets them
-    pass as they are: ``SchemaViolationError`` (invalid: DGII's schema refuses the document),
-    ``SchemaDriftError`` (internal: a vendored schema is not as pinned) and ``XmlDocumentError`` (invalid: the
-    bytes are not a document read hardened). ``signed`` also raises the verifier's signature errors.
+    A schema check raises fiscal-kit's errors, not the pack's (``EcfError``), so the signing step
+    (``signing.Signing``) lets them pass as they are: ``SchemaViolationError`` (invalid: DGII's schema
+    refuses the document), ``SchemaDriftError`` (internal: a vendored schema is not as pinned) and
+    ``XmlDocumentError`` (invalid: the bytes are not a document read hardened). ``signed`` also raises the
+    verifier's signature errors.
     """
 
     @abstractmethod

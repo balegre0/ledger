@@ -39,7 +39,7 @@ Plan: `docs/superpowers/plans/2026-10-19-v2-m3b-fiscal.md`. Each task has files,
    - track-id lookup before any resubmit; `outcome_unknown` parking;
    - `consultarfce` code 0 means not found, so it leaves the document in `outcome_unknown`;
    - released numbers when `secuenciaUtilizada=false`;
-   - `AnswerMismatchError` parks the job with the state unchanged;
+   - an answer about another issuer or e-NCF parks the job (`ParkReason.ANSWER_MISMATCH`) with the state unchanged;
    - fencing for concurrent advance; one test per sentence of the never-resend rules.
 2. **Task 13** (`receiver` role, `apps/receiver`, port 8103): in `main`; reviewed on 2026-10-25 (CHANGES REQUIRED,
    no Critical) and fixed on the branch `feat/m3b-receiver-fix` (worktree `ledger-r13`): the receiver serves no
@@ -92,7 +92,7 @@ Plan: `docs/superpowers/plans/2026-10-19-v2-m3b-fiscal.md`. Each task has files,
 
 ## 2. Then: the real DGII (owner-side prerequisites first)
 
-- First real TesteCF run with the owner's own RNC and certificate (runbook `docs/runbooks/do/testecf-spike.md`).
+- First real TesteCF run with the owner's own RNC and certificate (runbook `docs/runbooks/do/testecf.md`).
 - Settle spike findings F1-F16 against the real DGII.
 - The 14 CerteCF certification steps for the owner's own RNC as emitter.
 - Then the PSFE application: DGII answers in about 10 business days, then tests, a sworn statement, and INDOTEL-compliant custody.

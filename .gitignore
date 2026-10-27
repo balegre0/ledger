@@ -17,7 +17,7 @@ deploy/local/zitadel/.local/
 deploy/local/signer/.local/
 deploy/local/do/.local/
 
-# DGII spike: the owner's certificate and password file, spike outputs (docs/runbooks/do/testecf-spike.md)
+# DGII: the owner's certificate, its roots and the spike's journal (docs/runbooks/do/testecf.md)
 /.dgii/
 *.p12
 *.pfx

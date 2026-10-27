@@ -1,4 +1,4 @@
-"""Sample drafts for tests, the fake DGII's dry runs and the spike CLI.
+"""Sample drafts for tests and the fake DGII's dry runs.
 
 The credit invoice's numbers are worked out in ``test_totals``: lines of 3,000.00 at 18 %, 850.50 at 16 % and
 361.00 exempt, ITBIS 676.08, total 4,887.58. A small consumer invoice (1,180.00) goes as an RFCE; a large one
