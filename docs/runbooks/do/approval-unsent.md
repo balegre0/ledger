@@ -23,12 +23,13 @@ owner included); the job queue is not, and names each approval job's tenant and 
 `key`):
 
 ```sql
--- Approval jobs that died, and those that ended lately (a party refused, failed or unknown among them).
+-- Approval jobs that died, and those that ended in the last 7 days (finished jobs are purged after them;
+-- a party refused, failed or unknown among them).
 SELECT organization_id, company_id, mode, key AS received_document_id, status, last_error_code, attempts,
        deadline_at
   FROM do_ecf.jobs
  WHERE kind = 'do_ecf.approve'
-   AND (status = 'dead' OR (status = 'done' AND updated_at > now() - interval '8 days'));
+   AND status IN ('dead', 'done');
 ```
 
 Then, per tenant, its approvals a party has not taken:

@@ -21,12 +21,12 @@ Every statement here runs as [sql-by-hand.md](../platform/sql-by-hand.md) says: 
 included); the job queue is not, and names each job's tenant and document (its `key`):
 
 ```sql
--- Delivery jobs that died (stuck deliveries), and the companies whose deliveries ended lately (failed ones
--- among them): the tenant and the document of each.
+-- Delivery jobs that died (stuck deliveries), and those that ended in the last 7 days (finished jobs are
+-- purged after them; failed deliveries among them): the tenant and the document of each.
 SELECT organization_id, company_id, mode, key AS document_id, status, last_error_code, attempts, deadline_at
   FROM do_ecf.jobs
  WHERE kind = 'do_ecf.deliver'
-   AND (status = 'dead' OR (status = 'done' AND updated_at > now() - interval '8 days'));
+   AND status IN ('dead', 'done');
 ```
 
 Then, per tenant, its deliveries that failed or are stuck:

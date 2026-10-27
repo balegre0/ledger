@@ -22,13 +22,17 @@ Until Task 29, check by hand (weekly, and before a company's month end), as
 [sql-by-hand.md](../platform/sql-by-hand.md) says (`ledger_migrator` with `SET ROLE do_ecf_owner`, never a
 superuser). `do_ecf.numbering_ranges` is under row-level security, the owner included, so one transaction sees
 one company's ranges: no single query sweeps every company (a read role for that, or Task 29's watch, is plan
-Owner item 34). The companies that issue are those with advance jobs:
+Owner item 34). The tenants come from the job queue, with a limit: the platform deletes finished jobs 7
+days after they end (`DONE_JOBS_KEPT`), so this lists only the companies with an e-CF decided in about the
+last 7 days, or one still in flight. A quieter company is **not** listed: it sees its own ranges
+(`GET /v1/do/numbering_ranges`) and the `422 do_ecf_range_missing` when one runs out, until Task 29's watch
+or a read role (Owner item 34) covers every company.
 
 ```sql
--- The tenants that issued e-CF in the last 35 days.
+-- The tenants with an advance job the queue still keeps (finished ones are purged after 7 days).
 SELECT DISTINCT organization_id, company_id, mode
   FROM do_ecf.jobs
- WHERE kind = 'do_ecf.advance' AND created_at > now() - interval '35 days';
+ WHERE kind = 'do_ecf.advance';
 ```
 
 Then, for each tenant:

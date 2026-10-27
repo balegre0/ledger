@@ -73,11 +73,17 @@ SELECT set_config('ledger.organization_id', '<organization uuid>', true),
        set_config('ledger.mode', '<mode>', true);
 SELECT id, state FROM do_ecf.documents
  WHERE company_id = '<company uuid>' AND invoice_id = '<invoice uuid>';
+-- The control: the same scope sees the company's other documents (none only if it never issued one).
+SELECT id, invoice_id, state FROM do_ecf.documents
+ WHERE company_id = '<company uuid>'
+ ORDER BY created_at DESC LIMIT 3;
 COMMIT;
 ```
 
-**No row** is this case (a row means the channel numbered it, and the invoice follows the channel's runbooks
-instead). `GET /v1/invoices/{id}` (as the company) shows `fiscal[]` `pending`, version 1.
+**No row** from the first query is this case (a row means the channel numbered it, and the invoice follows the
+channel's runbooks instead), **provided the control returns rows**: an empty control means the scope is wrong
+(a setting misspelt, the wrong mode or role), not that the invoice has no document; fix the scope and ask
+again. `GET /v1/invoices/{id}` (as the company) shows `fiscal[]` `pending`, version 1.
 
 ## What to do
 
