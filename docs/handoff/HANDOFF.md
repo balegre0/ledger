@@ -85,7 +85,15 @@ It contains local `main` (v2-M1, DGII spike, GitHub cloud work + 23-commit fix w
     then Task 23 follow, each through the SDD loop (implementer, independent review, fix round, gate twice, merge).
     Run `uv sync --locked --all-packages` in any fresh tree: without it the receiver app is missing from the venv and
     basedpyright fails on `apps/receiver/tests/unit/test_main.py`.
-  - **UPDATE 2026-10-26 (latest): Tasks 20, 21, 22, 23, 24, 25 and the new Task 35 (the issuer's fiscal
+  - **UPDATE 2026-10-26 (final): v2-M3b's CERT tasks are done.** Task 27 (spike CLI retired; runbooks per alert,
+    their SQL run per tenant under row-level security, verified against a seeded two-tenant database) merged
+    (0a7c685), and Task 34's final verification passed: clean `main`, task worktrees removed, full gate green in
+    930 s with every package at 100 %, the compose stack healthy with `/readyz` 200 and the compose smoke test
+    passing. The milestone review is `docs/reviews/2026-10-26-m3b-review.md`: **READY FOR CERTIFICATION WORK**, no
+    Critical; I1 (the live-mode evidence gate untested, bound to Task 31) and I2 (a wake after the 15-day deadline,
+    Owner item 13). What is left is owner-side (TesteCF with the owner's RNC and certificate, CerteCF, PSFE, the
+    signer backend, counsel) and the LIVE tasks 28-31 and 33. The owner reviews the milestone (spec §16.3).
+  - **UPDATE 2026-10-26: Tasks 20, 21, 22, 23, 24, 25 and the new Task 35 (the issuer's fiscal
     address, DireccionEmisor, with a dated spec amendment; the address is company-level, owner item 30) are merged
     into local `main` (5b3b4b8). Each was reviewed until APPROVED and its gate was green twice on the exact tree
     merged (every merge commit's tree equals its verified branch tree). do_ecf revisions run r0004 (receiver), r0005
